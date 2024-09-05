@@ -151,6 +151,7 @@ fn make_network(cli: Cli) {
                             committed_tx.clone(),
                             &collator_round,
                             InputBuffer::new_stub(cli.points_in_step, cli.steps_until_full),
+                            None,
                         );
                         engine.init_with_genesis(&all_peers);
                         tracing::info!("created engine {}", dht_client.network().peer_id());

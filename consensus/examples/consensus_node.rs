@@ -151,6 +151,7 @@ impl CmdRun {
                 NonZeroUsize::new(100).unwrap(),
                 NonZeroUsize::new(5).unwrap(),
             ),
+            None,
         );
 
         tokio::spawn(anchor_consumer.drain());

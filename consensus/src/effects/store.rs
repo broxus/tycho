@@ -101,7 +101,7 @@ impl MempoolStore {
                 .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
                 .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
             Round(
-                (MempoolConfig::GENESIS_ROUND.0)
+                (MempoolConfig::genesis_round().0)
                     .max(behind_consensus)
                     .max(behind_committed.min(behind_collated))
                     .saturating_div(MempoolConfig::CLEAN_ROCKS_PERIOD as u32)

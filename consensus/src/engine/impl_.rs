@@ -16,7 +16,7 @@ use crate::engine::outer_round::{Collator, Commit, Consensus, OuterRound};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
-use crate::models::{Point, PointInfo, UnixTime};
+use crate::models::{Point, PointInfo, Round, UnixTime};
 
 pub struct Engine {
     dag: Dag,
@@ -30,6 +30,7 @@ pub struct Engine {
 }
 
 impl Engine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
         dht_client: &DhtClient,
@@ -38,7 +39,10 @@ impl Engine {
         committed: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
         collator_round: &OuterRound<Collator>,
         input_buffer: InputBuffer,
+        genesis_round: Option<u32>,
     ) -> Self {
+        MempoolConfig::set_genesis_round(Round(genesis_round.unwrap_or_default()));
+
         let consensus_round = OuterRound::default();
         let commit_round = OuterRound::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
@@ -95,7 +99,7 @@ impl Engine {
             let peer_schedule = self.peer_schedule.clone();
 
             // finished epoch
-            guard.set_next_start(MempoolConfig::GENESIS_ROUND, &peer_schedule);
+            guard.set_next_start(MempoolConfig::genesis_round(), &peer_schedule);
             guard.set_next_peers(
                 &[crate::test_utils::genesis_point_id().author],
                 &peer_schedule,
@@ -104,7 +108,7 @@ impl Engine {
             guard.rotate(&peer_schedule);
 
             // current epoch
-            guard.set_next_start(MempoolConfig::GENESIS_ROUND.next(), &peer_schedule);
+            guard.set_next_start(MempoolConfig::genesis_round().next(), &peer_schedule);
             // start updater only after peers are populated into schedule
             guard.set_next_peers(current_peers, &peer_schedule, true);
             guard.rotate(&peer_schedule);

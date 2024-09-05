@@ -50,7 +50,7 @@ impl AnchorConsumer {
     }
 
     pub async fn check(mut self) {
-        let mut next_expected_history_round = MempoolConfig::GENESIS_ROUND;
+        let mut next_expected_history_round = None;
         loop {
             let (peer_id, (anchor, history)) = self
                 .streams
@@ -58,6 +58,10 @@ impl AnchorConsumer {
                 .await
                 .expect("committed anchor reader must be alive");
             let anchor_id = anchor.id();
+
+            if next_expected_history_round.is_none() {
+                next_expected_history_round = Some(MempoolConfig::genesis_round());
+            }
 
             let anchor_round = anchor.round();
 
@@ -152,11 +156,11 @@ impl AnchorConsumer {
 
             if let Some((min, max)) = minmax_history_round {
                 assert!(
-                    next_expected_history_round >= min,
+                    next_expected_history_round.unwrap() >= min,
                     "anchor history must be contiguous; has a gap between \
                      expected {next_expected_history_round:?} and new oldest {min:?}",
                 );
-                next_expected_history_round = max.next();
+                next_expected_history_round = Some(max.next());
             }
 
             common_anchors.sort_unstable();

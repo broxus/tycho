@@ -1,49 +1,30 @@
-use std::collections::VecDeque;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
-use crate::collator::types::{AnchorInfo, BlockCollationDataBuilder, CachedMempoolAnchor};
-use crate::collator::CollatorStdImpl;
-use crate::mempool::make_stub_anchor;
+use crate::collator::types::BlockCollationDataBuilder;
+use crate::collator::{AnchorsCache, CollatorStdImpl};
+use crate::mempool::{
+    make_stub_anchor, MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener,
+};
 use crate::test_utils::try_init_test_tracing;
-
-fn get_test_block_limits() -> BlockLimits {
-    BlockLimits {
-        bytes: everscale_types::models::BlockParamLimits {
-            underload: 1_000_000,
-            soft_limit: 2_000_000,
-            hard_limit: 3_000_000,
-        },
-        gas: everscale_types::models::BlockParamLimits {
-            underload: 1_000_000,
-            soft_limit: 2_000_000,
-            hard_limit: 3_000_000,
-        },
-        lt_delta: everscale_types::models::BlockParamLimits {
-            underload: 1_000_000,
-            soft_limit: 2_000_000,
-            hard_limit: 3_000_000,
-        },
-    }
-}
 
 #[test]
 fn test_read_next_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
-    let mut anchors_cache = VecDeque::new();
+    let mut anchors_cache = AnchorsCache::default();
 
     let shard_id = ShardIdent::new_full(0);
 
-    let mut last_imported_anchor = None;
     for anchor_id in 1..=40 {
         if anchor_id % 4 != 0 {
             continue;
         }
         let anchor = make_stub_anchor(anchor_id);
         let our_exts_count = anchor.count_externals_for(&shard_id, 0);
-        last_imported_anchor = Some(AnchorInfo::from_anchor(anchor.clone(), our_exts_count));
         let has_externals = our_exts_count > 0;
         if has_externals {
             tracing::trace!(
@@ -59,11 +40,8 @@ fn test_read_next_externals() {
                     .collect::<Vec<_>>()
                     .as_slice(),
             );
-            anchors_cache.push_back((anchor_id, CachedMempoolAnchor {
-                anchor,
-                has_externals,
-            }));
         }
+        anchors_cache.insert(anchor, our_exts_count);
     }
 
     let mut collation_data = BlockCollationDataBuilder::new(
@@ -73,19 +51,17 @@ fn test_read_next_externals() {
         },
         HashBytes::ZERO,
         1,
-        last_imported_anchor
-            .as_ref()
-            .map(|a| a.ct)
+        anchors_cache
+            .get_last_imported_anchor_ct()
             .unwrap_or_default(),
         Default::default(),
         HashBytes::ZERO,
     )
     .build(0, DEFAULT_BLOCK_LIMITS);
 
-    let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+    let externals = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
-        last_imported_anchor.as_ref(),
         3,
         &mut collation_data,
         false,
@@ -93,11 +69,11 @@ fn test_read_next_externals() {
     .unwrap();
 
     assert_eq!(externals.len(), 3);
-    assert!(has_pending_externals);
+    assert!(anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (4, 0));
     assert_eq!(ext_processed_upto.read_to, (8, 3));
-    let kv = anchors_cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 8);
 
     collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
@@ -105,10 +81,9 @@ fn test_read_next_externals() {
         read_to: (12, 1),
     });
 
-    let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+    let externals = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
-        last_imported_anchor.as_ref(),
         3,
         &mut collation_data,
         false,
@@ -116,17 +91,16 @@ fn test_read_next_externals() {
     .unwrap();
 
     assert_eq!(externals.len(), 3);
-    assert!(has_pending_externals);
+    assert!(anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (8, 8));
-    let kv = anchors_cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 8);
 
-    let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+    let externals = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
-        last_imported_anchor.as_ref(),
         10,
         &mut collation_data,
         true,
@@ -134,17 +108,16 @@ fn test_read_next_externals() {
     .unwrap();
 
     assert_eq!(externals.len(), 10);
-    assert!(has_pending_externals);
+    assert!(anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (24, 3));
-    let kv = anchors_cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 12);
 
-    let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+    let externals = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
-        last_imported_anchor.as_ref(),
         20,
         &mut collation_data,
         true,
@@ -152,17 +125,16 @@ fn test_read_next_externals() {
     .unwrap();
 
     assert_eq!(externals.len(), 13);
-    assert!(!has_pending_externals);
+    assert!(!anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
-    let kv = anchors_cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 24);
 
-    let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+    let externals = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
-        last_imported_anchor.as_ref(),
         3,
         &mut collation_data,
         true,
@@ -170,18 +142,17 @@ fn test_read_next_externals() {
     .unwrap();
 
     assert_eq!(externals.len(), 0);
-    assert!(!has_pending_externals);
+    assert!(!anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
-    let kv = anchors_cache.front();
+    let kv = anchors_cache.get(0);
     assert!(kv.is_none());
 
     // all anchors removed from cache, should not fail on empty cache
-    let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+    let externals = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
-        last_imported_anchor.as_ref(),
         3,
         &mut collation_data,
         true,
@@ -189,11 +160,11 @@ fn test_read_next_externals() {
     .unwrap();
 
     assert_eq!(externals.len(), 0);
-    assert!(!has_pending_externals);
+    assert!(!anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
-    let kv = anchors_cache.front();
+    let kv = anchors_cache.get(0);
     assert!(kv.is_none());
 }
 
@@ -214,3 +185,56 @@ const DEFAULT_BLOCK_LIMITS: BlockLimits = BlockLimits {
         hard_limit: 10000,
     },
 };
+
+struct MempoolEventStubListener;
+#[async_trait]
+impl MempoolEventListener for MempoolEventStubListener {
+    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> anyhow::Result<()> {
+        tracing::trace!(
+            "MempoolEventStubListener: on_new_anchor event emitted for anchor \
+            (id: {}, chain_time: {}, externals: {})",
+            anchor.id,
+            anchor.chain_time,
+            anchor.externals.len(),
+        );
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_import_anchor_on_init() {
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    let processed_to_anchor_id = 1;
+    let processed_to_msgs_offset = 0;
+    let last_block_chain_time = 0;
+    let shard_id = ShardIdent::default();
+    let mut anchors_cache = AnchorsCache::default();
+
+    let adapter = MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener));
+    let mpool_adapter = adapter;
+
+    // =========================================================================
+    // Get first anchor from mempool
+    // =========================================================================
+    let anchors_info = CollatorStdImpl::import_anchors_on_init(
+        processed_to_anchor_id,
+        processed_to_msgs_offset as _,
+        last_block_chain_time,
+        shard_id,
+        &mut anchors_cache,
+        mpool_adapter.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(anchors_info.len(), 1);
+    assert!(anchors_cache.get(0).is_some());
+    assert!(anchors_cache.get_last_imported_anchor_ct().is_some());
+    assert!(anchors_cache.has_pending_externals());
+
+    // =========================================================================
+
+    // =========================================================================
+    // Get first anchor from cache
+    // =========================================================================
+}

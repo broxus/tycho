@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap, VecDeque};
+use std::collections::hash_map;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,17 +18,17 @@ use tycho_util::FastHashMap;
 
 use super::execution_manager::{ExecutionManager, MessagesExecutor};
 use super::types::{
-    AnchorInfo, BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin,
-    WorkingState,
+    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, SpecialOrigin, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
-use crate::types::{BlockCollationResult, McData, TopBlockDescription};
+use crate::types::{
+    BlockCollationResult, BlockIdExt, DisplayBlockIdsList, McData, TopBlockDescription,
+};
 
 #[cfg(test)]
 #[path = "tests/do_collate_tests.rs"]
@@ -39,8 +39,8 @@ impl CollatorStdImpl {
         parent =  None,
         skip_all,
         fields(
-            block_id = %self.next_block_id_short,
-            ct = self.last_imported_anchor.as_ref().map(|a| a.ct).unwrap_or_default()
+            block_id = %self.next_block_info,
+            ct = self.anchors_cache.get_last_imported_anchor_ct().unwrap_or_default()
         )
     )]
     pub(super) async fn do_collate(
@@ -62,30 +62,25 @@ impl CollatorStdImpl {
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: top_shard_blocks_ids: {:?}",
-            top_shard_blocks_info.as_ref().map(|v| {
-                v.iter()
-                    .map(|TopBlockDescription { block_id, .. }| block_id.as_short_id().to_string())
-                    .collect::<Vec<_>>()
-            }),
+            top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsList(
+                v.iter().map(|i| i.block_id).collect::<Vec<_>>()
+            )),
         );
 
-        let last_imported_anchor = self.last_imported_anchor.as_ref().unwrap();
-        let next_chain_time = last_imported_anchor.ct;
-        let created_by = HashBytes(last_imported_anchor.author.0);
+        let (next_chain_time, created_by) = self
+            .anchors_cache
+            .get_last_imported_anchor_ct_and_author()
+            .unwrap();
 
+        // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor
         let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
         let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
         let is_masterchain = self.shard_id.is_masterchain();
+
         // prepare block collation data
-        // STUB: consider split/merge in future for taking prev_block_id
-        let prev_block_id = prev_shard_data.blocks_ids()[0];
-        let block_id_short = BlockIdShort {
-            shard: prev_block_id.shard,
-            seqno: prev_block_id.seqno + 1,
-        };
         let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
@@ -93,7 +88,7 @@ impl CollatorStdImpl {
         );
 
         let mut collation_data_builder = BlockCollationDataBuilder::new(
-            block_id_short,
+            working_state.next_block_id_short,
             rand_seed,
             mc_data.block_id.seqno,
             next_chain_time,
@@ -116,7 +111,7 @@ impl CollatorStdImpl {
             collation_data_builder.set_shards(shards);
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
-                self.import_new_shard_top_blocks_for_masterchain(
+                Self::import_new_shard_top_blocks_for_masterchain(
                     &mc_data.config,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
@@ -180,18 +175,15 @@ impl CollatorStdImpl {
         let mut mq_iterator_adapter = exec_manager.create_iterator_adapter();
 
         // refill messages buffer and skip groups upto offset (on node restart)
-        if !exec_manager.has_pending_messages_in_buffer()
-            && collation_data.processed_upto.processed_offset > 0
-        {
+        let prev_processed_offset = collation_data.processed_upto.processed_offset;
+        if !exec_manager.has_pending_messages_in_buffer() && prev_processed_offset > 0 {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset = collation_data.processed_upto.processed_offset,
+                prev_processed_offset,
                 "refill messages buffer and skip groups upto",
             );
 
-            while exec_manager.message_groups_offset()
-                < collation_data.processed_upto.processed_offset
-            {
-                exec_manager
+            while exec_manager.message_groups_offset() < prev_processed_offset {
+                let msg_group = exec_manager
                     .get_next_message_group(
                         self,
                         &mut collation_data,
@@ -200,6 +192,11 @@ impl CollatorStdImpl {
                         &working_state,
                     )
                     .await?;
+                if msg_group.is_none() {
+                    // on recovery we will be unable to refill buffer with externals
+                    // so we stop refilling when there is no more groups in buffer
+                    break;
+                }
             }
         }
 
@@ -395,7 +392,7 @@ impl CollatorStdImpl {
 
         let queue_diff = QueueDiffStuff::builder(
             self.shard_id,
-            self.next_block_id_short.seqno,
+            collation_data.block_id_short.seqno,
             &working_state
                 .prev_shard_data
                 .prev_queue_diff_hash()
@@ -415,10 +412,12 @@ impl CollatorStdImpl {
         .serialize();
 
         let queue_diff_hash = *queue_diff.hash();
+        tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
 
         // start async update queue task
         let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
             JoinTask::<Result<_>>::new({
+                let block_id_short = collation_data.block_id_short;
                 let mq_adapter = self.mq_adapter.clone();
                 let labels = labels.clone();
                 async move {
@@ -449,7 +448,7 @@ impl CollatorStdImpl {
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
-            .set(self.next_block_id_short.seqno);
+            .set(collation_data.block_id_short.seqno);
 
         let block_id = *finalized.block_candidate.block.id();
         let new_state_stuff = JoinTask::new({
@@ -485,25 +484,33 @@ impl CollatorStdImpl {
                 &labels,
             );
 
-            let prev_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
+            let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
                     candidate: finalized.block_candidate,
+                    prev_mc_block_id: working_state.mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
                     has_pending_internals,
                 })
                 .await?;
 
-            // update PrevData in working state
-            self.update_working_state(
-                &block_id,
+            // spawn update PrevData and working state
+            Self::prepare_working_state_update(
+                &mut self.working_state,
                 new_state_stuff,
+                new_queue_diff_hash,
                 finalized.mc_data.clone(),
                 has_pending_internals,
                 working_state,
-                prev_queue_diff_hash,
             )?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "working state updated prepare spawned",
+            );
+
+            // update next block info
+            self.next_block_info = block_id.get_next_id_short();
 
             handle_block_candidate_elapsed = histogram.finish();
         }
@@ -638,32 +645,30 @@ impl CollatorStdImpl {
 
     /// Read specified number of externals from imported anchors
     /// using actual `processed_upto` info
+    #[allow(clippy::vec_box)]
     pub(super) fn read_next_externals(
         &mut self,
         count: usize,
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
     ) -> Result<Vec<Box<ParsedMessage>>> {
-        let (res, has_pending_externals) = Self::read_next_externals_impl(
+        Self::read_next_externals_impl(
             &self.shard_id,
             &mut self.anchors_cache,
-            self.last_imported_anchor.as_ref(),
             count,
             collation_data,
             continue_from_read_to,
-        )?;
-        self.has_pending_externals = has_pending_externals;
-        Ok(res)
+        )
     }
 
+    #[allow(clippy::vec_box)]
     fn read_next_externals_impl(
         shard_id: &ShardIdent,
-        anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
-        last_imported_anchor_opt: Option<&AnchorInfo>,
+        anchors_cache: &mut AnchorsCache,
         count: usize,
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
-    ) -> Result<(Vec<Box<ParsedMessage>>, bool)> {
+    ) -> Result<Vec<Box<ParsedMessage>>> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -721,7 +726,8 @@ impl CollatorStdImpl {
             let key = entry.0;
             if key < was_read_to.0 {
                 // skip and remove already processed anchor from cache
-                let _ = anchors_cache.remove(next_idx);
+                assert_eq!(next_idx, 0);
+                anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "anchor with key {} already processed, removed from anchors cache", key,
                 );
@@ -739,10 +745,9 @@ impl CollatorStdImpl {
                     "last_read_anchor: {}", key,
                 );
 
-                let anchor = &entry.1.anchor;
+                let anchor = &entry.1;
                 let expire_timeout = 60 * 1000; // 1 minute
-                let next_chain_time =
-                    collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
+                let next_chain_time = collation_data.get_gen_chain_time();
                 if next_chain_time - anchor.chain_time > expire_timeout {
                     let iter_from = if key == was_read_to.0 {
                         was_read_to.1 as usize
@@ -766,7 +771,8 @@ impl CollatorStdImpl {
                         .decrement(expired_msgs_count as f64);
 
                     // skip and remove expired anchor
-                    let _ = anchors_cache.remove(next_idx);
+                    assert_eq!(next_idx, 0);
+                    anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
                     );
@@ -777,7 +783,8 @@ impl CollatorStdImpl {
 
                 if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
                     // skip and remove fully processed anchor
-                    let _ = anchors_cache.remove(next_idx);
+                    assert_eq!(next_idx, 0);
+                    anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully processed, removed from anchors cache", key,
                     );
@@ -859,11 +866,13 @@ impl CollatorStdImpl {
 
         // update read up to info
         if last_read_anchor_opt.is_none() || anchors_cache_fully_read {
-            if let Some(last_imported_anchor) = last_imported_anchor_opt {
-                last_read_anchor_opt = Some(last_imported_anchor.id);
-                msgs_read_offset_in_last_anchor = last_imported_anchor.all_exts_count as u64;
+            if let Some((id, all_exts_count)) =
+                anchors_cache.get_last_imported_anchor_id_and_all_exts_counts()
+            {
+                last_read_anchor_opt = Some(id);
+                msgs_read_offset_in_last_anchor = all_exts_count;
                 if read_from_anchor_opt.is_none() {
-                    read_from_anchor_opt = Some(last_imported_anchor.id);
+                    read_from_anchor_opt = Some(id);
                 }
             }
         }
@@ -882,13 +891,12 @@ impl CollatorStdImpl {
         let has_pending_externals = if has_pending_externals_in_last_read_anchor {
             true
         } else {
-            let has_pending_externals = anchors_cache.iter().any(|(id, cached_anchor)| {
-                if let Some(ref last_read_anchor) = last_read_anchor_opt {
-                    id > last_read_anchor && cached_anchor.has_externals
-                } else {
-                    cached_anchor.has_externals
-                }
-            });
+            let has_pending_externals = if let Some(last_read_anchor) = last_read_anchor_opt {
+                anchors_cache.any_after_id(last_read_anchor)
+            } else {
+                anchors_cache.has_pending_externals()
+            };
+
             tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 "remaning anchors in cache has pending externals: {}", has_pending_externals,
             );
@@ -901,7 +909,9 @@ impl CollatorStdImpl {
             );
         }
 
-        Ok((ext_messages, has_pending_externals))
+        anchors_cache.set_has_pending_externals(has_pending_externals);
+
+        Ok(ext_messages)
     }
 
     /// Get max LT from masterchain (and shardchain) then calc start LT
@@ -972,7 +982,7 @@ impl CollatorStdImpl {
                 }
             };
 
-            collation_data.value_flow.minted = self.compute_minted_amount(mc_data)?;
+            collation_data.value_flow.minted = Self::compute_minted_amount(mc_data)?;
 
             if collation_data.value_flow.minted != CurrencyCollection::ZERO
                 && mc_data.config.get_minter_address().is_err()
@@ -999,8 +1009,7 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    fn compute_minted_amount(&self, mc_data: &McData) -> Result<CurrencyCollection> {
-        // TODO: just copied from old node, needs to review
+    fn compute_minted_amount(mc_data: &McData) -> Result<CurrencyCollection> {
         tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount");
 
         let mut to_mint = CurrencyCollection::default();
@@ -1213,7 +1222,6 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        &self,
         config: &BlockchainConfig,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
@@ -1228,7 +1236,7 @@ impl CollatorStdImpl {
         let top_shard_blocks_info_map = top_shard_blocks_info
             .into_iter()
             .map(|info| (info.block_id.shard, info))
-            .collect::<HashMap<_, _>>();
+            .collect::<FastHashMap<_, _>>();
 
         // update existing shard descriptions for which top blocks were not changed
         for (shard_id, prev_shard_descr) in collation_data_builder.shards_mut()? {
@@ -1242,16 +1250,17 @@ impl CollatorStdImpl {
             let TopBlockDescription {
                 block_id,
                 block_info,
-                ext_processed_to_anchor_id,
+                processed_to_anchor_id,
                 value_flow,
                 proof_funds,
+                #[cfg(feature = "block-creator-stats")]
                 creators,
             } = top_block_descr;
 
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
                 block_id,
                 &block_info,
-                ext_processed_to_anchor_id,
+                processed_to_anchor_id,
                 &value_flow,
             ));
             new_shard_descr.reg_mc_seqno = collation_data_builder.block_id_short.seqno;
@@ -1296,6 +1305,7 @@ impl CollatorStdImpl {
 
             collation_data_builder.top_shard_blocks_ids.push(block_id);
             collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
+            #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }
 
@@ -1346,6 +1356,7 @@ impl CollatorStdImpl {
 }
 
 /// add in and out messages from to block
+#[allow(clippy::vec_box)]
 fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,

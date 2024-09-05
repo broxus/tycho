@@ -92,7 +92,6 @@ async fn test_collation_process_on_stubs() {
             buffer_limit: 9,
             group_limit: 4,
             group_vert_size: 2,
-            ..Default::default()
         },
         ..Default::default()
     };
@@ -122,6 +121,8 @@ async fn test_collation_process_on_stubs() {
             Default::default(),
         ),
         CollatorStdImplFactory,
+        None,
+        None,
         #[cfg(feature = "test")]
         vec![
             node_1_keypair,

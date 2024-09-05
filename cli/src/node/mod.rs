@@ -17,7 +17,7 @@ use tycho_collator::internal_queue::state::persistent_state::PersistentStateImpl
 use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
-use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
+use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
@@ -102,6 +102,16 @@ pub struct CmdRun {
     /// list of zerostate files to import
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
+
+    /// Round of a new consensus genesis
+    #[allow(clippy::option_option)]
+    #[clap(long)]
+    pub mempool_start_round: Option<Option<u32>>,
+
+    /// Last know applied master block seqno to recover from
+    #[allow(clippy::option_option)]
+    #[clap(long)]
+    pub from_mc_block_seqno: Option<Option<u32>>,
 }
 
 impl CmdRun {
@@ -164,7 +174,11 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        node.run(&init_block_id).await?;
+        let mempool_start_round = self.mempool_start_round.unwrap_or_default();
+        let from_mc_block_seqno = self.from_mc_block_seqno.unwrap_or_default();
+
+        node.run(&init_block_id, mempool_start_round, from_mc_block_seqno)
+            .await?;
 
         Ok(())
     }
@@ -479,7 +493,12 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    async fn run(self, last_block_id: &BlockId) -> Result<()> {
+    async fn run(
+        self,
+        last_block_id: &BlockId,
+        mempool_start_round: Option<u32>,
+        last_mc_block_seqno: Option<u32>,
+    ) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage
@@ -508,6 +527,7 @@ impl Node {
             self.storage.mempool_storage(),
             get_validator_peer_ids(&mc_state)?,
             last_block_id.seqno == 0,
+            mempool_start_round,
         );
 
         // Create RPC
@@ -553,6 +573,11 @@ impl Node {
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
+        // drop uncommitted queue state on recovery reset
+        if matches!(mempool_start_round, Some(round_id) if round_id > 0) {
+            message_queue_adapter.clear_session_state()?;
+        }
+
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
                 network: self.dht_client.network().clone(),
@@ -572,6 +597,8 @@ impl Node {
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
+            mempool_start_round,
+            last_mc_block_seqno,
             #[cfg(test)]
             vec![],
         );

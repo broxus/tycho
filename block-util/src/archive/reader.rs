@@ -171,7 +171,7 @@ fn read_archive_prefix(buf: &[u8], offset: &mut usize) -> Result<(), ArchiveRead
 
     // NOTE: `end > end + 4` is needed here because it eliminates useless
     // bounds check with panic. It is not even included into result assembly
-    if buf.len() < end + 4 || end > end + 4 {
+    if buf.len() < end + 4 || end > end.wrapping_add(4) {
         return Err(ArchiveReaderError::UnexpectedArchiveEof);
     }
 

@@ -75,6 +75,7 @@ pub trait LocalSessionState<V: InternalMessageValue> {
     ) -> Box<dyn StateIterator<V>>;
 
     fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, QueueKey>) -> Result<()>;
+    fn truncate(&self) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -143,5 +144,9 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
             .map(|(shard, key)| (*shard, *key))
             .collect::<FastHashMap<_, _>>();
         self.storage.internal_queue_storage().commit(ranges)
+    }
+
+    fn truncate(&self) -> Result<()> {
+        self.storage.internal_queue_storage().clear_session_queue()
     }
 }

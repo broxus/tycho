@@ -52,6 +52,7 @@ impl MempoolAdapterStdImpl {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         self: &Arc<Self>,
         key_pair: Arc<KeyPair>,
@@ -59,7 +60,8 @@ impl MempoolAdapterStdImpl {
         overlay_service: &OverlayService,
         mempool_storage: &MempoolStorage,
         peers: Vec<PeerId>,
-        use_genesis: bool,
+        _use_genesis: bool,
+        mempool_start_round: Option<u32>,
     ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
@@ -73,11 +75,12 @@ impl MempoolAdapterStdImpl {
             sender,
             &self.top_known_block_round,
             self.externals_rx.clone(),
+            mempool_start_round,
         );
 
-        if use_genesis {
-            engine.init_with_genesis(&peers);
-        }
+        // if use_genesis {
+        engine.init_with_genesis(&peers);
+        // }
         tokio::spawn(async move {
             engine.run().await;
         });

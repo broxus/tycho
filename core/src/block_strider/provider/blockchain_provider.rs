@@ -71,6 +71,7 @@ impl BlockchainBlockProvider {
         let mut interval = tokio::time::interval(self.config.get_next_block_polling_interval);
 
         loop {
+            tracing::debug!(%prev_block_id, "get_next_block_full requested");
             match self.client.get_next_block_full(prev_block_id).await {
                 Ok(response) => {
                     let parsed = self.process_received_block(response).await;
@@ -90,6 +91,7 @@ impl BlockchainBlockProvider {
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
 
         loop {
+            tracing::debug!(%block_id, "get_block_full requested");
             match self.client.get_block_full(block_id).await {
                 Ok(response) => {
                     let parsed = self.process_received_block(response).await;

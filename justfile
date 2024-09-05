@@ -93,6 +93,8 @@ init_zerostate_config *flags:
 gen_network *flags:
     ./scripts/gen-network.sh --dir {{local_network_dir}} {{flags}}
 
-# Runs the Nth node.
-node n:
-    ./scripts/run-node.sh --dir {{local_network_dir}} {{n}}
+# Runs the node `N``.
+# Use `--mempool-start-round {round_id} --from-mc-block-seqno {seqno}`
+# to define last applied mc block and processed to anchor id.
+node *flags:
+    ./scripts/run-node.sh --dir {{local_network_dir}} {{flags}}

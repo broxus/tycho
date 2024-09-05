@@ -19,11 +19,11 @@ use tycho_util::FastHashMap;
 
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
-    AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, MessageGroup, MessageGroups,
-    ParsedMessage, ShardAccountStuff, WorkingState,
+    AccountId, BlockCollationData, Dequeued, MessageGroup, MessageGroups, ParsedMessage,
+    ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
+use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
@@ -35,12 +35,12 @@ pub(super) struct ExecutionManager {
     message_groups: MessageGroups,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
-    /// flag indicates that should process ext messages
-    process_ext_messages: bool,
-    /// we started ext messages reading before and can continue reading from read_to
+    /// flag indicates that should read ext messages
+    read_ext_messages: bool,
+    /// we started ext messages reading before and can continue reading from `read_to`
     ext_messages_reader_started: bool,
-    /// flag indicates that should process new messages
-    process_new_messages: bool,
+    /// flag indicates that should read new messages
+    read_new_messages: bool,
     /// internal mq adapter
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     /// current read positions of internals mq iterator
@@ -88,9 +88,9 @@ impl ExecutionManager {
             shard_id,
             messages_buffer_limit,
             message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
-            process_ext_messages: false,
+            read_ext_messages: false,
             ext_messages_reader_started: false,
-            process_new_messages: false,
+            read_new_messages: false,
             mq_adapter,
             current_iterator_positions: Default::default(),
             read_existing_messages_total_elapsed: Duration::ZERO,
@@ -117,8 +117,8 @@ impl ExecutionManager {
     }
 
     pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter<EnqueuedMessage> {
-        self.process_ext_messages = false;
-        self.process_new_messages = false;
+        self.read_ext_messages = false;
+        self.read_new_messages = false;
 
         self.read_existing_messages_total_elapsed = Duration::ZERO;
         self.read_new_messages_total_elapsed = Duration::ZERO;
@@ -131,20 +131,6 @@ impl ExecutionManager {
             self.mq_adapter.clone(),
             Some(current_iterator_positions),
         )
-    }
-
-    pub fn _release_iterator_adapter(
-        &mut self,
-        mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
-    ) -> Result<(bool, QueueDiffWithMessages<EnqueuedMessage>)> {
-        let has_pending_messages_in_buffer = self.has_pending_messages_in_buffer();
-        let (current_positions, has_pending_internals, diff) =
-            mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;
-        self.current_iterator_positions = current_positions;
-
-        let has_pending_messages = has_pending_messages_in_buffer || has_pending_internals;
-
-        Ok((has_pending_messages, diff))
     }
 
     pub fn read_existing_messages_total_elapsed(&self) -> Duration {
@@ -176,20 +162,45 @@ impl ExecutionManager {
 
         let mut group_opt = None;
 
-        if !self.process_ext_messages && !self.process_new_messages {
-            // for existing messages we use ranged iterator and process maximum possible groups in parallel
+        // here iterator may not exist (on the first method call during collation)
+        // so init iterator for current not fully processed ranges or next available
+        if mq_iterator_adapter.iterator_is_none() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "current iterator not exist, \
+                will init iterator for current not fully processed ranges or next available"
+            );
+            mq_iterator_adapter
+                .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
+                .await?;
+        }
 
-            // here iterator may not exist (on the first method call during collation)
-            // so init iterator for current not fully processed ranges or next available
-            if mq_iterator_adapter.iterator_is_none() {
+        // when buffer contains externals from prev collation
+        // we should process them all before reading existing internals
+        if self.message_groups.ext_messages_count() > 0 && !self.read_ext_messages {
+            // just extract message group with externals from buffer
+            group_opt = self.message_groups.extract_first_group();
+
+            if self.message_groups.is_empty() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "current iterator not exist, \
-                    will init iterator for current not fully processed ranges or next available"
+                    "all externals from message_groups buffer where processed, will read existing internals"
                 );
-                mq_iterator_adapter
-                    .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
-                    .await?;
+
+                // set all read externals as processed
+                if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+                    if externals.processed_to != externals.read_to {
+                        externals.processed_to = externals.read_to;
+                        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
+                            collation_data.processed_upto.externals,
+                        );
+                    }
+                }
+                self.message_groups.reset();
             }
+        }
+
+        // when all externals from prev collation were processed should read existing internals
+        if group_opt.is_none() && !self.read_ext_messages && !self.read_new_messages {
+            // for existing messages we use ranged iterator and process maximum possible groups in parallel
 
             let timer = std::time::Instant::now();
             let mut add_to_groups_elapsed = Duration::ZERO;
@@ -239,13 +250,6 @@ impl ExecutionManager {
             );
 
             group_opt = self.message_groups.extract_first_group();
-            if let Some(first_group) = group_opt.as_ref() {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
-                    DisplayMessageGroup(first_group),
-                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
-                );
-            }
 
             self.read_existing_messages_total_elapsed += timer.elapsed();
             self.read_existing_messages_total_elapsed -= add_to_groups_elapsed;
@@ -265,22 +269,12 @@ impl ExecutionManager {
                 let updated_processed_to =
                     set_int_upto_all_processed(&mut collation_data.processed_upto);
 
-                // commit processed message to iterator
+                // commit processed messages to iterator
                 mq_iterator_adapter
                     .iterator()
                     .commit(updated_processed_to)?;
 
                 self.message_groups.reset();
-
-                // set all read externals as processed
-                if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
-                    if externals.processed_to != externals.read_to {
-                        externals.processed_to = externals.read_to;
-                        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                            collation_data.processed_upto.externals,
-                        );
-                    }
-                }
 
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
@@ -288,14 +282,15 @@ impl ExecutionManager {
                 if !next_range_iterator_initialized {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "there are no next available ranges for existing internals iterator, \
-                        will process externals"
+                        will read externals"
                     );
-                    self.process_ext_messages = true;
+                    self.read_ext_messages = true;
                 }
             }
         }
 
-        if group_opt.is_none() && self.process_ext_messages && !self.process_new_messages {
+        // when all available existing internals were processed should externals
+        if group_opt.is_none() && self.read_ext_messages && !self.read_new_messages {
             let timer = std::time::Instant::now();
             let mut add_to_groups_elapsed = Duration::ZERO;
 
@@ -331,7 +326,7 @@ impl ExecutionManager {
                     break;
                 }
 
-                if !collator.has_pending_externals {
+                if !collator.anchors_cache.has_pending_externals() {
                     break;
                 }
             }
@@ -344,21 +339,14 @@ impl ExecutionManager {
             );
 
             group_opt = self.message_groups.extract_first_group();
-            if let Some(first_group) = group_opt.as_ref() {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
-                    DisplayMessageGroup(first_group),
-                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
-                );
-            }
 
             self.read_ext_messages_total_elapsed += timer.elapsed();
             self.read_ext_messages_total_elapsed -= add_to_groups_elapsed;
             self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
-            if self.message_groups.is_empty() && !collator.has_pending_externals {
+            if self.message_groups.is_empty() && !collator.anchors_cache.has_pending_externals() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "message_groups buffer is empty and there are no pending externals, will process new internals"
+                    "message_groups buffer is empty and there are no pending externals, will read new internals"
                 );
 
                 // set all read externals as processed
@@ -370,13 +358,15 @@ impl ExecutionManager {
                         );
                     }
                 }
+
                 self.message_groups.reset();
 
-                self.process_new_messages = true;
+                self.read_new_messages = true;
             }
         }
 
-        if group_opt.is_none() && self.process_new_messages {
+        // when all existing internals and externals were processed should read new internals
+        if group_opt.is_none() && self.read_new_messages {
             // when processing new messages we return group immediately when the next message does not fit it
 
             // first new messages epoch is from existing internals and externals
@@ -430,13 +420,6 @@ impl ExecutionManager {
             // that does not fit first group,
             // so append this one message to first group (merge)
             group_opt = self.message_groups.extract_merged_group();
-            if let Some(merged_group) = group_opt.as_ref() {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted merged message group of new messages from message_groups buffer: group {}, buffer int={}, ext={}",
-                    DisplayMessageGroup(merged_group),
-                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
-                );
-            }
 
             self.read_new_messages_total_elapsed += timer.elapsed();
             self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
@@ -623,6 +606,7 @@ impl MessagesExecutor {
         })
     }
 
+    #[allow(clippy::vec_box)]
     fn execute_messages(
         &self,
         mut account_state: Box<ShardAccountStuff>,
@@ -864,6 +848,7 @@ fn execute_ticktock_transaction(
 #[derive(Clone)]
 pub(super) enum ProcessedUptoUpdate {
     Force(QueueKey),
+    #[allow(dead_code)]
     IfHigher(QueueKey),
 }
 

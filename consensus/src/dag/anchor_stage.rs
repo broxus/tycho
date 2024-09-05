@@ -3,10 +3,9 @@ use std::sync::atomic::AtomicBool;
 use rand::{Rng, SeedableRng};
 use tycho_network::PeerId;
 
+use crate::dag::WAVE_ROUNDS;
 use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Round};
-
-pub const WAVE_ROUNDS: u32 = 4;
 
 #[derive(Debug)]
 pub struct AnchorStage {

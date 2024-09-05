@@ -89,6 +89,7 @@ impl Default for MsgsExecutionParams {
 
 pub struct BlockCollationResult {
     pub candidate: Box<BlockCandidate>,
+    pub prev_mc_block_id: BlockId,
     pub mc_data: Option<Arc<McData>>,
     /// There are unprocessed internals in shard queue after block collation
     pub has_pending_internals: bool,
@@ -176,6 +177,7 @@ pub struct McData {
 
     pub prev_key_block_seqno: u32,
     pub gen_lt: u64,
+    pub gen_chain_time: u64,
     pub libraries: Dict<HashBytes, LibDescr>,
 
     pub total_validator_fees: CurrencyCollection,
@@ -189,10 +191,10 @@ pub struct McData {
 }
 
 impl McData {
-    pub fn load_from_state(state: &ShardStateStuff) -> Result<Arc<Self>> {
-        let block_id = *state.block_id();
-        let extra = state.state_extra()?;
-        let state = state.as_ref();
+    pub fn load_from_state(state_stuff: &ShardStateStuff) -> Result<Arc<Self>> {
+        let block_id = *state_stuff.block_id();
+        let extra = state_stuff.state_extra()?;
+        let state = state_stuff.as_ref();
 
         let prev_key_block_seqno = if extra.after_key_block {
             block_id.seqno
@@ -208,6 +210,7 @@ impl McData {
 
             prev_key_block_seqno,
             gen_lt: state.gen_lt,
+            gen_chain_time: state_stuff.get_gen_chain_time(),
             libraries: state.libraries.clone(),
             total_validator_fees: state.total_validator_fees.clone(),
 
@@ -242,7 +245,7 @@ pub struct BlockCandidate {
     pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
-    pub ext_processed_upto_anchor_id: u32,
+    pub processed_to_anchor_id: u32,
     pub fees_collected: CurrencyCollection,
     pub funds_created: CurrencyCollection,
     pub created_by: HashBytes,
@@ -357,9 +360,10 @@ pub struct ProofFunds {
 pub struct TopBlockDescription {
     pub block_id: BlockId,
     pub block_info: BlockInfo,
-    pub ext_processed_to_anchor_id: u32,
+    pub processed_to_anchor_id: u32,
     pub value_flow: ValueFlow,
     pub proof_funds: ProofFunds,
+    #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
 }
 
@@ -382,5 +386,142 @@ impl Addr for ShortAddr {
 
     fn prefix(&self) -> u64 {
         self.prefix
+    }
+}
+
+pub trait BlockIdExt {
+    fn get_next_id_short(&self) -> BlockIdShort;
+}
+impl BlockIdExt for BlockId {
+    fn get_next_id_short(&self) -> BlockIdShort {
+        BlockIdShort {
+            shard: self.shard,
+            seqno: self.seqno + 1,
+        }
+    }
+}
+impl BlockIdExt for BlockIdShort {
+    fn get_next_id_short(&self) -> BlockIdShort {
+        BlockIdShort {
+            shard: self.shard,
+            seqno: self.seqno + 1,
+        }
+    }
+}
+
+pub trait ShardDescriptionExt {
+    fn get_block_id(&self, shard_id: ShardIdent) -> BlockId;
+}
+impl ShardDescriptionExt for ShardDescription {
+    fn get_block_id(&self, shard_id: ShardIdent) -> BlockId {
+        BlockId {
+            shard: shard_id,
+            seqno: self.seqno,
+            root_hash: self.root_hash,
+            file_hash: self.file_hash,
+        }
+    }
+}
+
+struct DebugDisplay<'a, T>(pub &'a T);
+impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplay<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0, f)
+    }
+}
+
+pub(super) struct DisplaySlice<'a, T>(pub &'a [T]);
+impl<T: std::fmt::Display> std::fmt::Debug for DisplaySlice<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl<T: std::fmt::Display> std::fmt::Display for DisplaySlice<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for block_id in self.0 {
+            l.entry(&DebugDisplay(block_id));
+        }
+        l.finish()
+    }
+}
+
+pub(super) struct DebugIter<I>(pub I);
+
+impl<I> std::fmt::Debug for DebugIter<I>
+where
+    I: IntoIterator<Item: std::fmt::Debug> + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.clone()).finish()
+    }
+}
+
+pub(super) struct DisplayAsShortId<'a>(pub &'a BlockId);
+impl std::fmt::Debug for DisplayAsShortId<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for DisplayAsShortId<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.as_short_id())
+    }
+}
+
+pub(super) struct DisplayBlockIdsSlice<'a>(pub &'a [BlockId]);
+impl std::fmt::Debug for DisplayBlockIdsSlice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for DisplayBlockIdsSlice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for block_id in self.0 {
+            l.entry(&DisplayAsShortId(block_id));
+        }
+        l.finish()
+    }
+}
+
+pub(super) struct DisplayBlockIdsList(pub Vec<BlockId>);
+impl std::fmt::Debug for DisplayBlockIdsList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for DisplayBlockIdsList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let slice = self.0.as_slice();
+        std::fmt::Display::fmt(&DisplayBlockIdsSlice(slice), f)
+    }
+}
+
+pub(super) struct DisplayTuple2<'a, T1, T2>(pub (&'a T1, &'a T2));
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTuple2<'_, T1, T2> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple2<'_, T1, T2> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.0 .0, self.0 .1)
+    }
+}
+
+pub(super) struct DisplayBTreeMap<'a, K, V>(pub &'a BTreeMap<K, V>);
+impl<K: std::fmt::Display, V: std::fmt::Display> std::fmt::Debug for DisplayBTreeMap<'_, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl<K: std::fmt::Display, V: std::fmt::Display> std::fmt::Display for DisplayBTreeMap<'_, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for kv in self.0.iter() {
+            l.entry(&DisplayTuple2(kv));
+        }
+        l.finish()
     }
 }

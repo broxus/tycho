@@ -56,7 +56,7 @@ pub fn make_dag<const PEER_COUNT: usize>(
     {
         let mut guard = peer_schedule.write();
         let peer_schedule = peer_schedule.clone();
-        guard.set_next_start(MempoolConfig::GENESIS_ROUND, &peer_schedule);
+        guard.set_next_start(MempoolConfig::genesis_round(), &peer_schedule);
         guard.set_next_peers(
             &[test_utils::genesis_point_id().author],
             &peer_schedule,

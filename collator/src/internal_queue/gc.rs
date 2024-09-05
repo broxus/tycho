@@ -65,7 +65,7 @@ impl Drop for GcManager {
 
 fn gc_task<V: InternalMessageValue>(
     gc_state: Arc<Mutex<GcRange>>,
-    persistent_state: Arc<dyn PersistentState<V> + Send + Sync>,
+    persistent_state: Arc<dyn PersistentState<V>>,
     delete_until: HashMap<ShardIdent, QueueKey>,
 ) {
     let _histogram = HistogramGuard::begin("tycho_internal_queue_gc_execute_task_time");

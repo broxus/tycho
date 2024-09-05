@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
@@ -18,82 +18,11 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
+use crate::tracing_targets;
 use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 
-// В текущем коллаторе перед коллацией блока импортируется:
-// - предыдущий мастер стейт
-// - предыдущие стейты шарды (их может быть 2, если мерж)
-// ImportedData {
-// mc_state: Arc<ShardStateStuff>,
-// prev_states: Vec<Arc<ShardStateStuff>>,
-// prev_ext_blocks_refs: Vec<ExtBlkRef>,
-// top_shard_blocks_descr: Vec<Arc<TopBlockDescrStuff>>,
-// }
-// top_shard_blocks_descr - список верхних новых шардблоков с последнего мастера, если будем коллировать мастер
-// берутся из prev_states
-// prev_ext_blocks_refs - ссылки на предыдущие шард блоки, на момент которых загружаются стейты шарды,
-// они берутся на основании prev_blocks_ids коллатора, загружаются вместе с prev_states
-// для мастерчейна выполняется проверка на номер блока (надо в ней разобраться)
-//
-// Что входит в стейт шарды
-// ShardStateStuff {
-// block_id: BlockId,
-// shard_state: Option<ShardStateUnsplit>,
-// out_msg_queue: Option<ShardStateUnsplit>,
-// out_msg_queue_for: i32,
-// shard_state_extra: Option<McStateExtra>,
-// root: Cell
-// }
-//
-// Затем из этих данных методом prepare_data() готовится: McData, PrevData и CollatorData
-// pub struct McData {
-// mc_state_extra: McStateExtra,
-// prev_key_block_seqno: u32,
-// prev_key_block: Option<BlockId>,
-// state: Arc<ShardStateStuff>
-// }
-// pub struct PrevData {
-// states: Vec<Arc<ShardStateStuff>>, // предыдущие стейты с отслеживанием изменений через UsageTree
-// pure_states: Vec<Arc<ShardStateStuff>>, // исходные предыдущие стейты шарды без отслеживания посещений
-// state_root: Cell,   // рутовая ячейка предыдущего стейта шарды (при мерже там будет объединенная ячейка из двух шард)
-// без отслеживания изменений
-// accounts: ShardAccounts,    // предыдущие аккаунты шарды с отслеживанием (получены с учетом сплита/мержа)
-// gen_utime: u32,
-// gen_lt: u64,
-// total_validator_fees: CurrencyCollection,
-// overload_history: u64,
-// underload_history: u64,
-// state_copyleft_rewards: CopyleftRewards,
-// }
-// pub struct CollatorData {
-// usage_tree: UsageTree, // дерево посещенный ячеек стейта для вычисления меркл пруфа
-// }
-//
-// Далее при коллации
-// При инициализации ExecutionManager стейты, ячейки и аккаунты не используются
-// При создании tick-tock транзакций McData используется для получения ИД контракта с конфигом и чтения конфига консенсуса
-// В коллацию интерналов McData не передается, передается PrevData и CollatorData
-//
-// PrevData и CollatorData передаются в execute. Там берется аккаунт из PrevData и передается в таску выполнения сообщения.
-// Там из аккаунта берется рутовая ячейка и передается в метод выполнения сообщения, где она изменяется.
-// Затем подменяется рут в аккаунте, а предыдущее состояние аккаунта сохраняется в prev_account_stuff,
-// то есть изменяемый аккаунт накапливает историю изменений
-// При завершении таски она возвращает актуальный обновленный аккаунт - это происходит при финализации блока
-//
-// В методе финализации блока
-// - запоминаем аккаунты из предыдущего стейта в new_accounts
-// - берем все измененные аккаунты shard_acc и перименяем их изменения в стейт аккаунтов new_accounts
-// - из измененного аккаунта делаем AccountBlock и сохраняем в accounts, если в нем есть транзакции
-// - так же кладем измененный аккаунт shard_acc в список changed_accounts
-// - создаем новый стейт шарды new_state с использованием обновленных аккаунтов new_accounts
-// - из нового стейта делаем новую рут ячейку new_ss_root
-// - вычисляем меркл апдейты
-// - завершаем создание блока с использованием accounts с транзакциями
-//
-// Метод коллации блока возвращает новый стейт шарды типа ShardStateUnsplit
-// из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
-
 pub(super) struct WorkingState {
+    pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
     pub prev_shard_data: Box<PrevData>,
     pub usage_tree: UsageTree,
@@ -142,8 +71,7 @@ impl PrevData {
             prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
-        let gen_utime = observable_states[0].state().gen_utime;
-        let gen_utime_ms = observable_states[0].state().gen_utime_ms;
+        let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
@@ -160,7 +88,7 @@ impl PrevData {
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root.clone(),
 
-            gen_chain_time: gen_utime as u64 * 1000 + gen_utime_ms as u64,
+            gen_chain_time,
             gen_lt,
             total_validator_fees,
             gas_used_from_last_anchor,
@@ -259,6 +187,7 @@ pub(super) struct BlockCollationDataBuilder {
     pub value_flow: ValueFlow,
     pub min_ref_mc_seqno: u32,
     pub rand_seed: HashBytes,
+    #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
     pub top_shard_blocks_ids: Vec<BlockId>,
@@ -285,6 +214,7 @@ impl BlockCollationDataBuilder {
             value_flow: Default::default(),
             min_ref_mc_seqno,
             rand_seed,
+            #[cfg(feature = "block-creator-stats")]
             block_create_count: Default::default(),
             created_by,
             shards: None,
@@ -324,6 +254,7 @@ impl BlockCollationDataBuilder {
         Ok(())
     }
 
+    #[cfg(feature = "block-creator-stats")]
     pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
         for creator in creators {
             self.block_create_count
@@ -369,6 +300,8 @@ impl BlockCollationDataBuilder {
             out_msgs: Default::default(),
             mint_msg: None,
             recover_create_msg: None,
+            #[cfg(feature = "block-creator-stats")]
+            block_create_count: self.block_create_count,
         }
     }
 }
@@ -429,8 +362,16 @@ pub(super) struct BlockCollationData {
 
     pub rand_seed: HashBytes,
 
-    // TODO: set from anchor
     pub created_by: HashBytes,
+
+    #[cfg(feature = "block-creator-stats")]
+    pub block_create_count: FastHashMap<HashBytes, u64>,
+}
+
+impl BlockCollationData {
+    pub fn get_gen_chain_time(&self) -> u64 {
+        self.gen_utime as u64 * 1000 + self.gen_utime_ms as u64
+    }
 }
 
 #[derive(Debug)]
@@ -438,7 +379,6 @@ pub struct BlockLimitStats {
     pub gas_used: u32,
     pub lt_current: u64,
     pub lt_start: u64,
-    pub cells_seen: HashSet<HashBytes>,
     pub cells_bits: u32,
     pub block_limits: BlockLimits,
 }
@@ -449,7 +389,6 @@ impl BlockLimitStats {
             gas_used: 0,
             lt_current: lt_start,
             lt_start,
-            cells_seen: Default::default(),
             cells_bits: 0,
             block_limits,
         }
@@ -544,8 +483,6 @@ impl BlockCollationData {
     }
 }
 
-pub(super) type InternalMessagesQueueStats = FastHashMap<AccountId, u32>;
-
 #[derive(Debug, Default)]
 pub(super) struct CollatorStats {
     pub total_execute_msgs_time_mc: u128,
@@ -563,17 +500,12 @@ pub(super) struct CollatorStats {
     pub tps: u128,
 }
 
-pub(super) struct CachedMempoolAnchor {
-    pub anchor: Arc<MempoolAnchor>,
-    /// Has externals for current shard of collator
-    pub has_externals: bool,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct AnchorInfo {
     pub id: MempoolAnchorId,
     pub ct: u64,
     pub all_exts_count: usize,
+    #[allow(dead_code)]
     pub our_exts_count: usize,
     pub author: PeerId,
 }
@@ -845,8 +777,6 @@ impl ShardDescriptionExt for ShardDescription {
             funds_created: value_flow.created.clone(),
             copyleft_rewards: Default::default(),
             proof_chain: None,
-            #[cfg(feature = "venom")]
-            collators: None,
         }
     }
 }
@@ -1055,6 +985,13 @@ impl MessageGroups {
         if first_group_opt.is_some() {
             self.offset += 1;
         }
+        if let Some(first_group) = first_group_opt.as_ref() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "extracted first message group from message_groups buffer: offset={}, buffer int={}, ext={}, group {}",
+                self.offset(), self.int_messages_count(), self.ext_messages_count(),
+                DisplayMessageGroup(first_group),
+            );
+        }
         first_group_opt
     }
 
@@ -1085,6 +1022,13 @@ impl MessageGroups {
                 merged_group_opt = Some(next_group);
             }
         }
+        if let Some(merged_group) = merged_group_opt.as_ref() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "extracted merged message group of new messages from message_groups buffer: buffer int={}, ext={}, group {}",
+                self.int_messages_count(), self.ext_messages_count(),
+                DisplayMessageGroup(merged_group),
+            );
+        }
         merged_group_opt
     }
 }
@@ -1092,6 +1036,7 @@ impl MessageGroups {
 // pub(super) type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
 #[derive(Default)]
 pub(super) struct MessageGroup {
+    #[allow(clippy::vec_box)]
     inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
     int_messages_count: usize,
     ext_messages_count: usize,
@@ -1148,6 +1093,7 @@ impl std::fmt::Display for DisplayMessageGroup<'_> {
     }
 }
 
+#[allow(dead_code)]
 pub(super) struct DisplayMessageGroups<'a>(pub &'a MessageGroups);
 
 impl std::fmt::Debug for DisplayMessageGroups<'_> {
@@ -1163,5 +1109,117 @@ impl std::fmt::Display for DisplayMessageGroups<'_> {
             m.entry(k, &DisplayMessageGroup(v));
         }
         m.finish()
+    }
+}
+
+#[derive(Default)]
+pub struct AnchorsCache {
+    /// The cache of imported from mempool anchors that were not processed yet.
+    /// Anchor is removed from the cache when all its externals are processed.
+    cache: VecDeque<(MempoolAnchorId, Arc<MempoolAnchor>)>,
+
+    last_imported_anchor: Option<AnchorInfo>,
+
+    has_pending_externals: bool,
+}
+
+impl AnchorsCache {
+    pub fn set_last_imported_anchor_info(
+        &mut self,
+        anchor_id: MempoolAnchorId,
+        anchor_ct: u64,
+        created_by: HashBytes,
+    ) {
+        let anchor_info = AnchorInfo {
+            id: anchor_id,
+            ct: anchor_ct,
+            all_exts_count: 0,
+            our_exts_count: 0,
+            author: PeerId(created_by.0),
+        };
+        self.last_imported_anchor = Some(anchor_info);
+    }
+
+    pub fn get_last_imported_anchor_ct(&self) -> Option<u64> {
+        self.last_imported_anchor.as_ref().map(|anchor| anchor.ct)
+    }
+
+    pub fn get_last_imported_anchor_ct_and_author(&self) -> Option<(u64, HashBytes)> {
+        self.last_imported_anchor
+            .as_ref()
+            .map(|anchor| (anchor.ct, anchor.author.0.into()))
+    }
+
+    pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
+        self.last_imported_anchor
+            .as_ref()
+            .map(|anchor| (anchor.id, anchor.ct))
+    }
+
+    pub fn get_last_imported_anchor_id_and_all_exts_counts(&self) -> Option<(u32, u64)> {
+        self.last_imported_anchor
+            .as_ref()
+            .map(|anchor| (anchor.id, anchor.all_exts_count as _))
+    }
+
+    pub fn insert(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
+        if our_exts_count > 0 {
+            self.has_pending_externals = true;
+            self.cache.push_back((anchor.id, anchor.clone()));
+        }
+        self.last_imported_anchor = Some(AnchorInfo::from_anchor(anchor, our_exts_count));
+    }
+
+    pub fn remove(&mut self, _index: usize) {
+        self.cache.pop_front();
+    }
+
+    pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
+        self.cache.get(index).cloned()
+    }
+
+    pub fn has_pending_externals(&self) -> bool {
+        self.has_pending_externals
+    }
+
+    pub fn set_has_pending_externals(&mut self, has_pending_externals: bool) {
+        self.has_pending_externals = has_pending_externals;
+    }
+
+    fn find_index(&self, processed_to_anchor_id: MempoolAnchorId) -> Option<usize> {
+        self.cache.iter().enumerate().find_map(|(index, (id, _))| {
+            if *id == processed_to_anchor_id {
+                Some(index)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn take_after_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
+        self.cache
+            .iter()
+            .skip(index)
+            .map(|(_, anchor)| anchor.clone())
+    }
+
+    pub fn take_from_id(
+        &self,
+        processed_to_anchor_id: MempoolAnchorId,
+    ) -> Box<dyn Iterator<Item = Arc<MempoolAnchor>> + '_> {
+        if let Some(mut anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
+            anchor_index_in_cache = anchor_index_in_cache.saturating_sub(1);
+            Box::new(self.take_after_index(anchor_index_in_cache))
+        } else {
+            Box::new(std::iter::empty::<Arc<MempoolAnchor>>())
+        }
+    }
+
+    pub fn any_after_id(&self, processed_to_anchor_id: MempoolAnchorId) -> bool {
+        if let Some(anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
+            self.cache.len() > anchor_index_in_cache + 1
+        } else {
+            false
+        }
     }
 }

@@ -35,9 +35,8 @@ impl<E: ExchangeSignatures> ValidatorService<E> {
                 {
                     Ok(res) => Some(Response::from_tl(res)),
                     Err(e) => {
-                        // TODO: Is it ok to WARN here? Since we can be ddosed with invalid signatures
                         // and the log will be full of these warnings.
-                        tracing::warn!(
+                        tracing::debug!(
                             target: tracing_targets::VALIDATOR,
                             %peer_id,
                             block_seqno,

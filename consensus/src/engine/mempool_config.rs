@@ -1,5 +1,7 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::dag::WAVE_ROUNDS;
 use crate::models::{Round, UnixTime};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -10,6 +12,8 @@ pub enum LogFlavor {
 }
 
 pub struct MempoolConfig;
+
+static GENESIS_ROUND: OnceLock<Round> = OnceLock::new();
 
 impl MempoolConfig {
     /// how far a signed point (by the time in its body)
@@ -22,7 +26,18 @@ impl MempoolConfig {
     /// includes anchor candidate round, though it is committed at the next attempt
     pub const COMMIT_DEPTH: u8 = 21;
 
-    pub const GENESIS_ROUND: Round = Round(1);
+    pub fn set_genesis_round(round: Round) {
+        let aligned = ((round.0 + 2) / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
+        assert!(
+            aligned > Round::BOTTOM.0,
+            "invalid config: genesis round is too low and will make code panic"
+        );
+        GENESIS_ROUND.set(Round(aligned)).ok();
+    }
+
+    pub fn genesis_round() -> Round {
+        *GENESIS_ROUND.get().expect("GENESIS_ROUND")
+    }
 
     /// hard limit on point payload (excessive will be postponed)
     pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
@@ -45,7 +60,7 @@ impl MempoolConfig {
 
     /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
     /// to extend [`Dag`](crate::dag::Dag) without downloading points for locally skipped rounds
-    pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 21;
+    pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 105;
 
     /// see [`LogFlavor`]
     pub const LOG_FLAVOR: LogFlavor = LogFlavor::Truncated;
@@ -87,11 +102,6 @@ impl MempoolConfig {
     /// Also affects WAL file size (more often flushes create more small files).
     pub const CLEAN_ROCKS_PERIOD: u16 = if cfg!(feature = "test") { 10 } else { 105 };
 }
-
-const _: () = assert!(
-    MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
-    "invalid config: genesis round is too low and will make code panic"
-);
 
 const _: () = assert!(
     MempoolConfig::MAX_ANCHOR_DISTANCE >= MempoolConfig::COMMIT_DEPTH as u16,
