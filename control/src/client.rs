@@ -182,8 +182,12 @@ impl ControlClient {
 
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk??;
-            chunks_tx.send(chunk).await.ok();
+            if chunks_tx.send(chunk).await.is_err() {
+                break;
+            }
         }
+
+        drop(chunks_tx);
 
         processing_task
             .await

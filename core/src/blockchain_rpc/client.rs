@@ -508,8 +508,12 @@ impl BlockchainRpcClient {
 
         let mut stream = std::pin::pin!(stream);
         while let Some(chunk) = stream.next().await.transpose()? {
-            chunks_tx.send(chunk).await.ok();
+            if chunks_tx.send(chunk).await.is_err() {
+                break;
+            }
         }
+
+        drop(chunks_tx);
 
         let output = processing_task
             .await
