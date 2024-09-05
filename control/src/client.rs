@@ -82,7 +82,7 @@ impl ControlClient {
     }
 
     pub async fn get_block_proof(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
-        let req = BlockProofRequest {
+        let req = BlockRequest {
             block_id: *block_id,
         };
 
@@ -91,8 +91,19 @@ impl ControlClient {
             .get_block_proof(context::current(), req)
             .await??
         {
-            BlockProofResponse::Found { data } => Ok(Some(data)),
-            BlockProofResponse::NotFound => Ok(None),
+            BlockResponse::Found { data } => Ok(Some(data)),
+            BlockResponse::NotFound => Ok(None),
+        }
+    }
+
+    pub async fn get_queue_diff(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
+        let req = BlockRequest {
+            block_id: *block_id,
+        };
+
+        match self.inner.get_queue_diff(context::current(), req).await?? {
+            BlockResponse::Found { data } => Ok(Some(data)),
+            BlockResponse::NotFound => Ok(None),
         }
     }
 

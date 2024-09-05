@@ -29,8 +29,11 @@ pub trait ControlServer {
     /// Get block bytes
     async fn get_block(req: BlockRequest) -> ServerResult<BlockResponse>;
 
-    /// Get proof bytes
-    async fn get_block_proof(req: BlockProofRequest) -> ServerResult<BlockProofResponse>;
+    /// Get proof bytes.
+    async fn get_block_proof(req: BlockRequest) -> ServerResult<BlockResponse>;
+
+    /// Get queue bytes.
+    async fn get_queue_diff(req: BlockRequest) -> ServerResult<BlockResponse>;
 
     /// Get archive id
     async fn get_archive_info(req: ArchiveInfoRequest) -> ServerResult<ArchiveInfoResponse>;
@@ -46,17 +49,6 @@ pub struct BlockRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BlockResponse {
-    Found { data: Vec<u8> },
-    NotFound,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockProofRequest {
-    pub block_id: BlockId,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum BlockProofResponse {
     Found { data: Vec<u8> },
     NotFound,
 }

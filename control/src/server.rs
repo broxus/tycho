@@ -184,17 +184,33 @@ impl proto::ControlServer for ControlServer {
     async fn get_block_proof(
         self,
         _: Context,
-        req: proto::BlockProofRequest,
-    ) -> ServerResult<proto::BlockProofResponse> {
+        req: proto::BlockRequest,
+    ) -> ServerResult<proto::BlockResponse> {
         let blocks = self.inner.storage.block_storage();
         let handles = self.inner.storage.block_handle_storage();
 
         let Some(handle) = handles.load_handle(&req.block_id) else {
-            return Ok(proto::BlockProofResponse::NotFound);
+            return Ok(proto::BlockResponse::NotFound);
         };
 
         let data = blocks.load_block_proof_raw(&handle).await?;
-        Ok(proto::BlockProofResponse::Found { data })
+        Ok(proto::BlockResponse::Found { data })
+    }
+
+    async fn get_queue_diff(
+        self,
+        _: Context,
+        req: proto::BlockRequest,
+    ) -> ServerResult<proto::BlockResponse> {
+        let blocks = self.inner.storage.block_storage();
+        let handles = self.inner.storage.block_handle_storage();
+
+        let Some(handle) = handles.load_handle(&req.block_id) else {
+            return Ok(proto::BlockResponse::NotFound);
+        };
+
+        let data = blocks.load_queue_diff_raw(&handle).await?;
+        Ok(proto::BlockResponse::Found { data })
     }
 
     async fn get_archive_info(

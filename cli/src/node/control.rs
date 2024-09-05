@@ -19,6 +19,7 @@ pub enum CmdControl {
     DumpArchive(CmdDumpArchive),
     DumpBlock(CmdDumpBlock),
     DumpProof(CmdDumpProof),
+    DumpQueueDiff(CmdDumpQueueDiff),
     GcArchives(CmdGcArchives),
     GcBlocks(CmdGcBlocks),
     GcStates(CmdGcStates),
@@ -34,6 +35,7 @@ impl CmdControl {
             Self::DumpArchive(cmd) => cmd.run(),
             Self::DumpBlock(cmd) => cmd.run(),
             Self::DumpProof(cmd) => cmd.run(),
+            Self::DumpQueueDiff(cmd) => cmd.run(),
             Self::GcArchives(cmd) => cmd.run(),
             Self::GcBlocks(cmd) => cmd.run(),
             Self::GcStates(cmd) => cmd.run(),
@@ -341,6 +343,41 @@ impl CmdDumpProof {
             print_json(serde_json::json!({
                 "size": size,
                 "is_link": !self.block_id.is_masterchain(),
+            }))
+        })
+    }
+}
+
+/// Dump a queue diff from the node.
+#[derive(Parser)]
+pub struct CmdDumpQueueDiff {
+    /// Unix socket path to connect to.
+    #[clap(short, long)]
+    sock: Option<PathBuf>,
+
+    /// full block ID.
+    #[clap(short, long, allow_hyphen_values(true))]
+    block_id: BlockId,
+
+    /// path to the output file
+    #[clap()]
+    output: PathBuf,
+}
+
+impl CmdDumpQueueDiff {
+    pub fn run(self) -> Result<()> {
+        control_rt(self.sock, move |client| async move {
+            let Some(data) = client.get_queue_diff(&self.block_id).await? else {
+                anyhow::bail!("queue diff not found");
+            };
+
+            let size = data.len();
+            tokio::fs::write(self.output, data)
+                .await
+                .context("failed to save queue diff")?;
+
+            print_json(serde_json::json!({
+                "size": size,
             }))
         })
     }
