@@ -19,6 +19,7 @@ pub(super) type BlockSeqno = u32;
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum CollatorState {
     Active,
+    Waiting,
     Cancelled,
 }
 

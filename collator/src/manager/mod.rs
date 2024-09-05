@@ -481,18 +481,18 @@ where
             CollationCancelReason::AnchorNotFound(_)
             | CollationCancelReason::NextAnchorNotFound(_) => {
                 // mark collator as cancelled
-                self.mark_collator_cancelled(&next_block_id_short.shard);
+                self.set_collator_state(&next_block_id_short.shard, CollatorState::Cancelled);
 
-                // run sync if all collators cancelled
+                // run sync if all collators cancelled or waiting
                 self.ready_to_sync.notified().await;
 
-                let all_cancelled = self
+                let all_not_active = self
                     .active_collators
                     .iter()
-                    .all(|ac| ac.state == CollatorState::Cancelled);
-                if all_cancelled {
+                    .all(|ac| ac.state != CollatorState::Active);
+                if all_not_active {
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        "collator cancelled in every shard and masterchain, \
+                        "collator cancelled or waiting in every shard and masterchain, \
                         will run sync to last applied mc block",
                     );
 
@@ -554,12 +554,21 @@ where
             // and if chain time elapsed master block interval in every shard
             // then run master block collation
             if let Some(next_mc_block_chain_time) = next_mc_block_chain_time_opt {
+                if !shard_id.is_masterchain() {
+                    // shard collator will wait and master collator will work
+                    self.set_collator_state(&ShardIdent::MASTERCHAIN, CollatorState::Active);
+                    self.set_collator_state(&shard_id, CollatorState::Waiting);
+                }
+
                 self.enqueue_mc_block_collation(
                     prev_mc_block_id.get_next_id_short(),
                     next_mc_block_chain_time,
                     trigger_shard_block_id_opt,
                 )
                 .await?;
+            } else {
+                // current collator will wait
+                self.set_collator_state(&shard_id, CollatorState::Waiting);
             }
         } else {
             // if should not collate master block
@@ -725,17 +734,18 @@ where
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     "sync_to_applied_mc_block: mark collator cancelled for shard",
                 );
-                // mark collator cancelled
-                self.mark_collator_cancelled(&block_id.shard);
 
-                // run sync if all shard collators cancelled and we have applied mc blocks
-                let all_shard_cancelled = self
+                // mark collator waiting
+                self.set_collator_state(&block_id.shard, CollatorState::Waiting);
+
+                // run sync if all collators cancelled or waiting and we have applied mc blocks
+                let all_not_active = self
                     .active_collators
                     .iter()
-                    .all(|ac| ac.key().is_masterchain() || ac.state == CollatorState::Cancelled);
-                if all_shard_cancelled {
+                    .all(|ac| ac.state != CollatorState::Active);
+                if all_not_active {
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        "sync_to_applied_mc_block: collator cancelled in every shard, \
+                        "sync_to_applied_mc_block: collator cancelled or waiting in every shard, \
                         will run sync to last applied mc block",
                     );
 
@@ -851,17 +861,17 @@ where
                     || last_processed_mc_block_id_opt.is_some()
                 {
                     // should wait for next collated mc block when collators are active
-                    // but when all were cancelled we can process last received mc block
-                    let all_cancelled = self
+                    // but when all were cancelled or waiting, we can process last received mc block
+                    let all_not_active = self
                         .active_collators
                         .iter()
-                        .all(|ac| ac.state == CollatorState::Cancelled);
-                    if all_cancelled {
+                        .all(|ac| ac.state != CollatorState::Active);
+                    if all_not_active {
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                             last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                             last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
                             "check_should_sync: should sync to last applied mc block \
-                            when all collators were cancelled",
+                            when all collators were cancelled or waiting",
                         );
                         true
                     } else {
@@ -1600,9 +1610,9 @@ where
         Ok(())
     }
 
-    fn mark_collator_cancelled(&self, shard_id: &ShardIdent) {
+    fn set_collator_state(&self, shard_id: &ShardIdent, state: CollatorState) {
         if let Some(mut active_collator) = self.active_collators.get_mut(shard_id) {
-            active_collator.state = CollatorState::Cancelled;
+            active_collator.state = state;
         }
     }
 
