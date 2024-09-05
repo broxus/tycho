@@ -424,6 +424,8 @@ where
     F: FnOnce(ControlClient) -> FT + Send + 'static,
     FT: Future<Output = Result<()>> + Send,
 {
+    tracing_subscriber::fmt::init();
+
     let sock = match sock {
         Some(sock) => sock.as_ref().to_owned(),
         None => match std::env::var("TYCHO_CONTROL_SOCK") {
