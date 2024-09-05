@@ -202,7 +202,7 @@ impl MempoolEventListener for MempoolEventStubListener {
 }
 
 #[tokio::test]
-async fn test_import_anchor_on_init() {
+async fn test_import_init_anchors() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
 
     let processed_to_anchor_id = 1;
@@ -217,7 +217,7 @@ async fn test_import_anchor_on_init() {
     // =========================================================================
     // Get first anchor from mempool
     // =========================================================================
-    let anchors_info = CollatorStdImpl::import_anchors_on_init(
+    let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset as _,
         last_block_chain_time,

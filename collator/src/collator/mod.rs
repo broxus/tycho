@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use error::CollatorError;
 use everscale_types::cell::HashBytes;
@@ -322,20 +322,19 @@ impl CollatorStdImpl {
             prev_block_id,
         )) = processed_to_anchor_info_opt
         {
-            let import_anchors_on_init = match self.mempool_start_round {
-                // TODO: this may not work with shard blocks when we do not specify `from_mc_block_seqno` on recovery
-                //      because there may be cases when processed to anchor in shard is before anchor in master
-                //      and we may cancel shard collation init incorrectly.
-                //      We can produce incorrect shard block and then ignore it.
-                //      Or we can try to specify last imported anchor id as a start round.
-                //      Currently we do not cancel shard collator init because from block should be correct.
-                Some(mempool_start_round)
-                    if processed_to_anchor_id < mempool_start_round
-                        && self.shard_id.is_masterchain() =>
-                {
-                    // if last processed_to anchor is before the start round,
-                    // then cancel init because we need to receive more blocks from bc
-                    let reason = CollationCancelReason::AnchorNotFound(processed_to_anchor_id);
+            let timer = std::time::Instant::now();
+            let anchors_info = match self
+                .check_and_import_init_anchors(
+                    false,
+                    &working_state,
+                    processed_to_anchor_id,
+                    processed_to_msgs_offset as _,
+                    prev_chain_time,
+                    prev_block_id,
+                )
+                .await
+            {
+                Err(CollatorError::Cancelled(reason)) => {
                     self.listener
                         .on_cancelled(
                             working_state.mc_data.block_id,
@@ -345,58 +344,9 @@ impl CollatorStdImpl {
                         .await?;
                     return Ok(());
                 }
-                Some(mempool_start_round) => {
-                    // do not try to import anchor on init on recovery because anchor will not exist in mempool
-
-                    // but needs to generate last imported anchor info
-                    let block_stuff = self
-                        .state_node_adapter
-                        .load_block(&prev_block_id)
-                        .await?
-                        .unwrap();
-                    let created_by = block_stuff.block().extra.load()?.created_by;
-                    self.anchors_cache.set_last_imported_anchor_info(
-                        mempool_start_round,
-                        prev_chain_time,
-                        created_by,
-                    );
-
-                    false
-                }
-                _ => true,
+                res => res?,
             };
-            if import_anchors_on_init {
-                let timer = std::time::Instant::now();
-
-                tracing::info!(target: tracing_targets::COLLATOR,
-                    "import anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
-                    processed_to_anchor_id, processed_to_msgs_offset,
-                    working_state.prev_shard_data.gen_chain_time(),
-                );
-
-                let anchors_info = match Self::import_anchors_on_init(
-                    processed_to_anchor_id,
-                    processed_to_msgs_offset as _,
-                    working_state.prev_shard_data.gen_chain_time(),
-                    self.shard_id,
-                    &mut self.anchors_cache,
-                    self.mpool_adapter.clone(),
-                )
-                .await
-                {
-                    Err(CollatorError::Cancelled(reason)) => {
-                        self.listener
-                            .on_cancelled(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                reason,
-                            )
-                            .await?;
-                        return Ok(());
-                    }
-                    res => res?,
-                };
-
+            if !anchors_info.is_empty() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     elapsed = timer.elapsed().as_millis(),
                     "imported anchors on init: {:?}",
@@ -419,6 +369,90 @@ impl CollatorStdImpl {
         self.wait_state_and_try_collate().await?;
 
         Ok(())
+    }
+
+    async fn check_and_import_init_anchors(
+        &mut self,
+        is_resume: bool,
+        working_state: &WorkingState,
+        processed_to_anchor_id: MempoolAnchorId,
+        processed_to_msgs_offset: usize,
+        prev_chain_time: u64,
+        prev_block_id: BlockId,
+    ) -> Result<Vec<AnchorInfo>, CollatorError> {
+        let import_init_anchors = match self.mempool_start_round {
+            // TODO: This may not work with shard blocks when we do not specify `from_mc_block_seqno` on recovery
+            //      because there may be cases when processed to anchor in shard is before anchor in master
+            //      and we may cancel shard collation init incorrectly.
+            //      We can produce incorrect shard block and then ignore it.
+            //      Or we can try to specify last imported anchor id as a start round.
+            //      Currently we do not cancel shard collator init because from block should be correct.
+            Some(mempool_start_round) => {
+                let import_init_anchors = if processed_to_anchor_id <= mempool_start_round {
+                    if processed_to_anchor_id < mempool_start_round
+                        && self.shard_id.is_masterchain()
+                    {
+                        // if last processed_to anchor is before the start round for master,
+                        // then cancel collation because we need to receive more blocks from bc
+                        return Err(CollatorError::Cancelled(
+                            CollationCancelReason::AnchorNotFound(processed_to_anchor_id),
+                        ));
+                    } else {
+                        // otherwise will not import init anchors
+                        false
+                    }
+                } else if is_resume {
+                    // on resume when last processed anchor is after start round then will import init anchors
+                    true
+                } else {
+                    // and on init will not import init anchors
+                    false
+                };
+
+                if !import_init_anchors {
+                    // needs to generate last imported anchor info
+                    let block_stuff = self
+                        .state_node_adapter
+                        .load_block(&prev_block_id)
+                        .await?
+                        .unwrap();
+                    let created_by = block_stuff
+                        .block()
+                        .extra
+                        .load()
+                        .map_err(|e| anyhow!(e))?
+                        .created_by;
+                    self.anchors_cache.set_last_imported_anchor_info(
+                        mempool_start_round,
+                        prev_chain_time,
+                        created_by,
+                    );
+                }
+
+                import_init_anchors
+            }
+            _ => true,
+        };
+
+        if import_init_anchors {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "import anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
+                processed_to_anchor_id, processed_to_msgs_offset,
+                working_state.prev_shard_data.gen_chain_time(),
+            );
+
+            Self::import_init_anchors(
+                processed_to_anchor_id,
+                processed_to_msgs_offset,
+                working_state.prev_shard_data.gen_chain_time(),
+                self.shard_id,
+                &mut self.anchors_cache,
+                self.mpool_adapter.clone(),
+            )
+            .await
+        } else {
+            Ok(vec![])
+        }
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %self.next_block_info))]
@@ -468,26 +502,23 @@ impl CollatorStdImpl {
                 Self::try_calc_last_processed_to_anchor_info(&working_state)?;
 
             // import anchors
-            if let Some(((processed_to_anchor_id, processed_to_msgs_offset), _, _)) =
-                processed_to_anchor_info_opt
+            if let Some((
+                (processed_to_anchor_id, processed_to_msgs_offset),
+                prev_chain_time,
+                prev_block_id,
+            )) = processed_to_anchor_info_opt
             {
                 let timer = std::time::Instant::now();
-
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "import anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
-                    processed_to_anchor_id, processed_to_msgs_offset,
-                    working_state.prev_shard_data.gen_chain_time(),
-                );
-
-                let anchors_info = match Self::import_anchors_on_init(
-                    processed_to_anchor_id,
-                    processed_to_msgs_offset as _,
-                    working_state.prev_shard_data.gen_chain_time(),
-                    self.shard_id,
-                    &mut self.anchors_cache,
-                    self.mpool_adapter.clone(),
-                )
-                .await
+                let anchors_info = match self
+                    .check_and_import_init_anchors(
+                        true,
+                        &working_state,
+                        processed_to_anchor_id,
+                        processed_to_msgs_offset as _,
+                        prev_chain_time,
+                        prev_block_id,
+                    )
+                    .await
                 {
                     Err(CollatorError::Cancelled(reason)) => {
                         self.listener
@@ -501,12 +532,13 @@ impl CollatorStdImpl {
                     }
                     res => res?,
                 };
-
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    elapsed = timer.elapsed().as_millis(),
-                    "imported anchors on resume: {:?}",
-                    anchors_info.as_slice(),
-                );
+                if !anchors_info.is_empty() {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        elapsed = timer.elapsed().as_millis(),
+                        "imported anchors on resume: {:?}",
+                        anchors_info.as_slice(),
+                    );
+                }
             }
 
             // reset exec manager with msgs buffer
@@ -789,7 +821,7 @@ impl CollatorStdImpl {
     /// 1. Get `processed_to` anchor from
     /// 2. Get next anchors until `last_block_chain_time`
     /// 3. Store anchors in cache
-    pub(self) async fn import_anchors_on_init(
+    pub(self) async fn import_init_anchors(
         processed_to_anchor_id: MempoolAnchorId,
         processed_to_msgs_offset: usize,
         last_block_chain_time: u64,
