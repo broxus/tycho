@@ -68,7 +68,7 @@ impl BlockProvider for ArchiveProvider {
 }
 
 async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> Result<Storage> {
-    let storage = Storage::builder().with_config(config).build()?;
+    let storage = Storage::builder().with_config(config).build().await?;
 
     let (handle, _) =
         storage

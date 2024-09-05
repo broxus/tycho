@@ -64,9 +64,8 @@ impl BlockStorage {
         NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
     }
 
-    // TODO: Make this method `async` and verify all archives on startup.
     /// Iterates over all archives and preloads their ids into memory.
-    pub fn preload_archive_ids(&self) -> Result<()> {
+    pub async fn preload_archive_ids(&self) -> Result<()> {
         let started_at = Instant::now();
 
         tracing::info!("started preloading archive ids");
@@ -74,8 +73,8 @@ impl BlockStorage {
         let mut iter = self.db.archives.raw_iterator();
         iter.seek_to_first();
 
-        let mut new_archive_ids = BTreeSet::new();
-
+        let mut archive_ids = BTreeSet::new();
+        let mut archives_to_commit = Vec::new();
         loop {
             let Some(key) = iter.key() else {
                 if let Err(e) = iter.status() {
@@ -87,19 +86,57 @@ impl BlockStorage {
             let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
             let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
 
-            if chunk_index == ARCHIVE_SIZE_MAGIC {
-                new_archive_ids.insert(archive_id);
+            const _: () = const {
+                // Rely on the specific order of these constants
+                assert!(
+                    ARCHIVE_STARTED_MAGIC < ARCHIVE_TO_COMMIT_MAGIC
+                        && ARCHIVE_TO_COMMIT_MAGIC < ARCHIVE_SIZE_MAGIC
+                );
+            };
+
+            // Chunk keys are sorted by offset.
+            match chunk_index {
+                // "Started" magic comes first, and indicates that the archive exists.
+                ARCHIVE_STARTED_MAGIC => {
+                    archive_ids.insert(archive_id);
+                }
+                // "To commit" magic comes next, commit should have been started.
+                ARCHIVE_TO_COMMIT_MAGIC => {
+                    anyhow::ensure!(
+                        archive_ids.contains(&archive_id),
+                        "invalid archive TO_COMMIT entry"
+                    );
+                    archives_to_commit.push(archive_id);
+                }
+                // "Size" magic comes last, and indicates that the archive is fully committed.
+                ARCHIVE_SIZE_MAGIC => {
+                    // Last archive is already committed
+                    let last = archives_to_commit.pop();
+                    anyhow::ensure!(last == Some(archive_id), "invalid archive SIZE entry");
+
+                    // Require only contiguous uncommited archives list
+                    anyhow::ensure!(archives_to_commit.is_empty(), "skipped archive commit");
+                }
+                _ => {}
             }
 
             iter.next();
         }
 
-        self.archive_ids.write().extend(new_archive_ids);
+        drop(iter);
+
+        self.archive_ids.write().extend(archive_ids);
 
         tracing::info!(
             elapsed = %humantime::format_duration(started_at.elapsed()),
             "finished preloading archive ids"
         );
+
+        for archive_id in archives_to_commit {
+            tracing::info!(archive_id, "found partially committed archive");
+            let mut task = self.spawn_commit_archive(archive_id);
+            task.finish().await?;
+        }
 
         Ok(())
     }
@@ -389,9 +426,10 @@ impl BlockStorage {
         // Prepare cf
         let storage_cf = self.db.archive_block_ids.cf();
         let handle_cf = self.db.block_handles.cf();
+        let chunks_cf = self.db.archives.cf();
 
         // Prepare archive
-        let archive_id = self.compute_archive_id(handle);
+        let archive_id = self.prepare_archive_id(handle);
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
         // 0. Create transaction
@@ -406,13 +444,27 @@ impl BlockStorage {
                 handle.meta().to_vec(),
             );
         }
-        // 3. Execute transaction
+        // 3.1. Store info that new archive was started
+        if archive_id.is_new {
+            let mut key = [0u8; tables::Archives::KEY_LEN];
+            key[..4].copy_from_slice(&archive_id_bytes);
+            key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
+            batch.put_cf(&chunks_cf, key, []);
+        }
+        // 3.2. Store info that archive commit is in progress
+        if let Some(to_commit) = archive_id.to_commit {
+            let mut key = [0u8; tables::Archives::KEY_LEN];
+            key[..4].copy_from_slice(&to_commit.to_be_bytes());
+            key[4..].copy_from_slice(&ARCHIVE_TO_COMMIT_MAGIC.to_be_bytes());
+            batch.put_cf(&chunks_cf, key, []);
+        }
+        // 4. Execute transaction
         self.db.rocksdb().write(batch)?;
 
         tracing::trace!(block_id = %handle.id(), "saved block id into archive");
         // Block will be removed after blocks gc
 
-        if let (Some(prev_id), true) = (archive_id.prev_id, archive_id.is_new) {
+        if let Some(to_commit) = archive_id.to_commit {
             // Commit previous archive
             let mut prev_archive_commit = self.prev_archive_commit.lock().await;
 
@@ -420,7 +472,7 @@ impl BlockStorage {
             if let Some(task) = &mut *prev_archive_commit {
                 task.finish().await?;
             }
-            *prev_archive_commit = Some(self.spawn_commit_archive(prev_id).await);
+            *prev_archive_commit = Some(self.spawn_commit_archive(to_commit));
         }
 
         // Done
@@ -634,36 +686,35 @@ impl BlockStorage {
         }
     }
 
-    fn compute_archive_id(&self, handle: &BlockHandle) -> ArchiveId {
+    fn prepare_archive_id(&self, handle: &BlockHandle) -> PreparedArchiveId {
         let mc_seqno = handle.mc_ref_seqno();
 
+        let mut archive_ids = self.archive_ids.write();
+
         // Get the closest archive id
-        let prev_id = {
-            let latest_archives = self.archive_ids.read();
-            latest_archives.range(..=mc_seqno).next_back().cloned()
-        };
+        let prev_id = archive_ids.range(..=mc_seqno).next_back().cloned();
 
         if handle.is_key_block() {
-            self.archive_ids.write().insert(mc_seqno);
-            return ArchiveId {
+            let is_new = archive_ids.insert(mc_seqno);
+            return PreparedArchiveId {
                 id: mc_seqno,
-                is_new: true,
-                prev_id,
+                is_new,
+                to_commit: if is_new { prev_id } else { None },
             };
         }
 
-        let mut archive_id = ArchiveId {
+        let mut archive_id = PreparedArchiveId {
             id: prev_id.unwrap_or_default(),
             ..Default::default()
         };
 
         let is_first_archive = prev_id.is_none();
         if is_first_archive || mc_seqno.saturating_sub(archive_id.id) >= ARCHIVE_PACKAGE_SIZE {
-            self.archive_ids.write().insert(mc_seqno);
-            archive_id = ArchiveId {
+            let is_new = archive_ids.insert(mc_seqno);
+            archive_id = PreparedArchiveId {
                 id: mc_seqno,
-                is_new: true,
-                prev_id,
+                is_new,
+                to_commit: if is_new { prev_id } else { None },
             };
         }
 
@@ -673,15 +724,21 @@ impl BlockStorage {
         archive_id
     }
 
-    async fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
+    #[tracing::instrument(skip_all, fields(archive_id))]
+    fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
 
+        let span = tracing::Span::current();
         let is_running = Arc::new(AtomicBool::new(true));
         let handle = tokio::task::spawn_blocking({
             let is_running = is_running.clone();
             move || {
-                let _histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
+                let _span = span.enter();
+
+                let histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
+
+                tracing::info!("started");
 
                 let raw_block_ids = db
                     .archive_block_ids
@@ -739,7 +796,15 @@ impl BlockStorage {
                 drop(raw_block_ids);
 
                 // Finalize the archive
-                writer.finalize()
+                writer.finalize()?;
+
+                // Done
+                tracing::info!(
+                    elapsed = %humantime::format_duration(histogram.finish()),
+                    "finished"
+                );
+
+                Ok(())
             }
         });
 
@@ -1082,14 +1147,20 @@ fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
 }
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
 const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
 
+// Reserved key in which the archive size is stored
+const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
+// Reserved key in which we store the fact that the archive must be committed
+const ARCHIVE_TO_COMMIT_MAGIC: u64 = u64::MAX - 1;
+// Reserved key in which we store the fact that archive was started
+const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 2;
+
 #[derive(Default)]
-struct ArchiveId {
+struct PreparedArchiveId {
     id: u32,
     is_new: bool,
-    prev_id: Option<u32>,
+    to_commit: Option<u32>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1119,8 +1190,8 @@ mod tests {
     use super::*;
     use crate::{BlockConnection, Storage};
 
-    #[test]
-    fn blocks_gc() -> Result<()> {
+    #[tokio::test]
+    async fn blocks_gc() -> Result<()> {
         const GARBAGE: &[u8] = b"garbage";
         const ENTRY_TYPES: [ArchiveEntryType; 3] = [
             ArchiveEntryType::Block,
@@ -1130,7 +1201,7 @@ mod tests {
         const CONNECTION_TYPES: [BlockConnection; 2] =
             [BlockConnection::Prev1, BlockConnection::Next1];
 
-        let (storage, _tmp_dir) = Storage::new_temp()?;
+        let (storage, _tmp_dir) = Storage::new_temp().await?;
 
         let blocks = storage.block_storage();
         let block_handles = storage.block_handle_storage();

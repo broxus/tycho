@@ -162,7 +162,7 @@ impl CmdRun {
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
-            Node::new(socket_addr, keys, node_config, global_config)?
+            Node::new(socket_addr, keys, node_config, global_config).await?
         };
 
         node.wait_for_neighbours().await;
@@ -333,7 +333,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(
+    pub async fn new(
         public_addr: SocketAddr,
         keys: NodeKeys,
         node_config: NodeConfig,
@@ -395,6 +395,7 @@ impl Node {
             .with_config(node_config.storage)
             .with_rpc_storage(node_config.rpc.is_some())
             .build()
+            .await
             .wrap_err("failed to create storage")?;
         tracing::info!(
             root_dir = %storage.root().path().display(),

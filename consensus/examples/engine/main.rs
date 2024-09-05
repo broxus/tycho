@@ -142,7 +142,8 @@ fn make_network(cli: Cli) {
                                     .expect("add peer to dht client");
                             }
                         }
-                        let (mock_storage, _tmp_dir) = Storage::new_temp().expect("new storage");
+                        let (mock_storage, _tmp_dir) =
+                            Storage::new_temp().await.expect("new storage");
                         let mut engine = Engine::new(
                             key_pair,
                             &dht_client,

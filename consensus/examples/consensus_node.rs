@@ -135,7 +135,7 @@ impl CmdRun {
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let (mock_storage, _tmp_dir) = Storage::new_temp()?;
+        let (mock_storage, _tmp_dir) = Storage::new_temp().await?;
 
         let mut anchor_consumer = AnchorConsumer::default();
         anchor_consumer.add(local_id, committed_rx);
