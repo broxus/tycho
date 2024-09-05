@@ -61,9 +61,7 @@ impl BlockProvider for ArchiveProvider {
             Some(id) => id,
             None => return Box::pin(futures_util::future::ready(None)),
         };
-        let id = *id;
-        let value = id.relative_to_self();
-        self.get_block(&value)
+        Box::pin(async move { self.get_block(&id.relative_to_self()).await })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
