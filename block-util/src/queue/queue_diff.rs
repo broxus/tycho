@@ -91,7 +91,6 @@ pub struct QueueDiffStuff {
 }
 
 impl QueueDiffStuff {
-    #[cfg(any(test, feature = "test"))]
     pub fn new_empty(block_id: &BlockId) -> Self {
         use std::collections::BTreeMap;
 

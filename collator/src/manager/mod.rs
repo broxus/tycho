@@ -1,4 +1,4 @@
-use std::collections::{hash_map, BTreeMap, HashMap, VecDeque};
+use std::collections::{hash_map, BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -31,8 +31,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationConfig, CollationSessionId, CollationSessionInfo,
-    DisplayAsShortId, DisplayBTreeMap, DisplayBlockIdsSlice, McData, ShardDescriptionExt,
-    TopBlockDescription,
+    DebugIter, DisplayAsShortId, DisplayBTreeMap, DisplayBlockIdsSlice, McData,
+    ShardDescriptionExt, TopBlockDescription,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::schedule_async_action;
@@ -829,7 +829,7 @@ where
 
         let Some(store_res) = self
             .blocks_cache
-            .store_block_from_bc(self.state_node_adapter.clone(), &state)
+            .store_block_from_bc(self.state_node_adapter.clone(), state)
             .await?
         else {
             self.ready_to_sync.notify_one();
@@ -1137,16 +1137,13 @@ where
                 Some(processed_to) => processed_to,
                 None => {
                     // try get from storage
-                    let (_, queue_diff_and_msgs) = utils::load_block_queue_diff_stuff(
-                        self.state_node_adapter.clone(),
+                    let loaded = utils::load_only_queue_diff_stuff(
+                        self.state_node_adapter.as_ref(),
                         &top_block_id,
                     )
                     .await?;
-                    if let Some((queue_diff_stuff, _)) = queue_diff_and_msgs {
-                        queue_diff_stuff.as_ref().processed_upto.clone()
-                    } else {
-                        bail!("Block not found in cache and storage! ({})", top_block_id)
-                    }
+
+                    loaded.as_ref().processed_upto.clone()
                 }
             };
 
@@ -1303,7 +1300,7 @@ where
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "mc_data: {:?}", mc_data);
 
         // get new shards info from updated master state
-        let mut new_shards_info = HashMap::new();
+        let mut new_shards_info = FastHashMap::default();
         new_shards_info.insert(ShardIdent::MASTERCHAIN, vec![mc_data.block_id]);
         for shard in mc_data.shards.iter() {
             let (shard_id, descr) = shard?;
@@ -1345,29 +1342,35 @@ where
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "full_validators_set {:?}", full_validators_set);
 
         // compare with active sessions and detect new sessions to start and outdated sessions to finish
-        let mut sessions_to_keep = HashMap::new();
-        let mut sessions_to_start = vec![];
-        let mut to_finish_sessions = HashMap::new();
-        let mut to_stop_collators = HashMap::new();
+        let mut sessions_to_keep = Vec::new();
+        let mut sessions_to_start = Vec::new();
+        let mut to_finish_sessions = Vec::new();
+        let mut to_stop_collators = Vec::new();
         {
             let mut active_collation_sessions_guard = self.active_collation_sessions.write();
             let mut missed_shards_ids: FastHashSet<_> = active_shards_ids.into_iter().collect();
-            for shard_info in new_shards_info {
-                missed_shards_ids.remove(&shard_info.0);
-                match active_collation_sessions_guard.entry(shard_info.0) {
+            for (shard_ident, block_ids) in new_shards_info {
+                missed_shards_ids.remove(&shard_ident);
+                match active_collation_sessions_guard.entry(shard_ident) {
                     hash_map::Entry::Occupied(entry) => {
-                        let existing_session = entry.get().clone();
+                        let existing_session = entry.get();
                         if existing_session.seqno() >= new_session_seqno {
-                            sessions_to_keep.insert(shard_info.0, (existing_session, shard_info.1));
+                            sessions_to_keep.push((
+                                shard_ident,
+                                existing_session.clone(),
+                                block_ids,
+                            ));
                         } else {
-                            to_finish_sessions
-                                .insert((shard_info.0, new_session_seqno), existing_session);
-                            sessions_to_start.push(shard_info);
-                            entry.remove();
+                            to_finish_sessions.push((
+                                shard_ident,
+                                new_session_seqno,
+                                entry.remove(),
+                            ));
+                            sessions_to_start.push((shard_ident, block_ids));
                         }
                     }
                     hash_map::Entry::Vacant(_) => {
-                        sessions_to_start.push(shard_info);
+                        sessions_to_start.push((shard_ident, block_ids));
                     }
                 }
             }
@@ -1380,10 +1383,9 @@ where
                 if let Some(current_active_session) =
                     active_collation_sessions_guard.remove(&shard_id)
                 {
-                    to_finish_sessions
-                        .insert((shard_id, new_session_seqno), current_active_session);
-                    if let Some(collator) = self.active_collators.remove(&shard_id) {
-                        to_stop_collators.insert((shard_id, new_session_seqno), collator.1);
+                    to_finish_sessions.push((shard_id, new_session_seqno, current_active_session));
+                    if let Some((_, collator)) = self.active_collators.remove(&shard_id) {
+                        to_stop_collators.push((shard_id, new_session_seqno, collator));
                     }
                 }
             }
@@ -1392,20 +1394,20 @@ where
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Will keep existing collation sessions: {:?}",
-            sessions_to_keep.keys(),
+            DebugIter(sessions_to_keep.iter().map(|(shard_ident, _, _)| *shard_ident)),
         );
         if !sessions_to_start.is_empty() {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will start new collation sessions: {:?}",
-                sessions_to_start.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+                DebugIter(sessions_to_start.iter().map(|(k, _)| k)),
             );
         }
 
         let cc_config = mc_data.config.get_catchain_config()?;
 
         // update master state in existing collators and resume collation
-        for (shard_id, (_, prev_blocks_ids)) in sessions_to_keep {
+        for (shard_id, _, prev_blocks_ids) in sessions_to_keep {
             // if there is no active collator then current node does not collate this shard
             // so we do not need to do anything
             let collator = {
@@ -1528,7 +1530,7 @@ where
                     shard_id,
                 );
                 if let Some((_, active_collator)) = self.active_collators.remove(&shard_id) {
-                    to_stop_collators.insert((shard_id, new_session_seqno), active_collator);
+                    to_stop_collators.push((shard_id, new_session_seqno, active_collator));
                 }
             }
 
@@ -1542,12 +1544,13 @@ where
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will finish outdated collation sessions: {:?}",
-                to_finish_sessions.keys(),
+                DebugIter(to_finish_sessions.iter().map(|(s, seq, _)| (s, seq))),
             );
         }
 
         // enqueue outdated sessions finish tasks
-        for (finish_key, session_info) in to_finish_sessions {
+        for (shard_ident, session_seqno, session_info) in to_finish_sessions {
+            let finish_key = (shard_ident, session_seqno);
             self.collation_sessions_to_finish
                 .insert(finish_key, session_info.clone());
             self.finish_collation_session(session_info, finish_key)
@@ -1558,12 +1561,13 @@ where
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will stop collators for sessions that we do not serve: {:?}",
-                to_stop_collators.keys(),
+                DebugIter(to_stop_collators.iter().map(|(s, seq, _)| (s, seq))),
             );
         }
 
         // enqueue dangling collators stop tasks
-        for (stop_key, active_collator) in to_stop_collators {
+        for (shard_ident, session_seqno, active_collator) in to_stop_collators {
+            let stop_key = (shard_ident, session_seqno);
             active_collator.collator.enqueue_stop(stop_key).await?;
             self.collators_to_stop.insert(stop_key, active_collator);
         }

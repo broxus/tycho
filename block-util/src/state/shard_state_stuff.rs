@@ -123,7 +123,9 @@ impl ShardStateStuff {
     }
 
     pub fn get_gen_chain_time(&self) -> u64 {
-        self.state().gen_utime as u64 * 1000 + self.state().gen_utime_ms as u64
+        let state = self.state();
+        debug_assert!(state.gen_utime_ms < 1000);
+        state.gen_utime as u64 * 1000 + state.gen_utime_ms as u64
     }
 }
 

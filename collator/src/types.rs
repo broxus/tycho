@@ -446,6 +446,17 @@ impl<T: std::fmt::Display> std::fmt::Display for DisplaySlice<'_, T> {
     }
 }
 
+pub(super) struct DebugIter<I>(pub I);
+
+impl<I> std::fmt::Debug for DebugIter<I>
+where
+    I: IntoIterator<Item: std::fmt::Debug> + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.clone()).finish()
+    }
+}
+
 pub(super) struct DisplayAsShortId<'a>(pub &'a BlockId);
 impl std::fmt::Debug for DisplayAsShortId<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

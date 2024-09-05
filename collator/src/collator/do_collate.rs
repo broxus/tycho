@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap};
+use std::collections::hash_map;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1236,7 +1236,7 @@ impl CollatorStdImpl {
         let top_shard_blocks_info_map = top_shard_blocks_info
             .into_iter()
             .map(|info| (info.block_id.shard, info))
-            .collect::<HashMap<_, _>>();
+            .collect::<FastHashMap<_, _>>();
 
         // update existing shard descriptions for which top blocks were not changed
         for (shard_id, prev_shard_descr) in collation_data_builder.shards_mut()? {

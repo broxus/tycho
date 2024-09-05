@@ -374,21 +374,22 @@ impl BlocksCache {
     pub(super) async fn store_block_from_bc(
         &self,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
-        state: &ShardStateStuff,
+        state: ShardStateStuff,
     ) -> Result<Option<BlockCacheStoreResult>> {
         let block_id = *state.block_id();
 
         // TODO: should build entry only on insert
 
         // load queue diff
-        let (prev_block_ids, queue_diff_and_msgs) =
-            utils::load_block_queue_diff_stuff(state_node_adapter.clone(), &block_id).await?;
+        let loaded =
+            utils::load_block_queue_diff_stuff(state_node_adapter.as_ref(), &block_id).await?;
 
         // build entry
         let entry = BlockCacheEntry::from_block_from_bc(
             state,
-            prev_block_ids.clone(),
-            queue_diff_and_msgs,
+            loaded.prev_ids,
+            loaded.queue_diff,
+            loaded.out_msgs,
         )?;
 
         let result = if block_id.shard.is_masterchain() {
@@ -406,7 +407,11 @@ impl BlocksCache {
                 return Ok(None);
             }
 
-            let stored = match guard.blocks.entry(block_id.seqno) {
+            let kind;
+            let send_sync_status;
+            let prev_shard_blocks_ids;
+            let prev_ids;
+            match guard.blocks.entry(block_id.seqno) {
                 btree_map::Entry::Occupied(mut occupied) => {
                     let existing = occupied.get_mut();
 
@@ -439,31 +444,23 @@ impl BlocksCache {
                         }
                     }
 
-                    (
-                        existing.kind,
-                        existing.send_sync_status,
-                        VecDeque::new(),
-                        vec![],
-                    )
+                    kind = existing.kind;
+                    send_sync_status = existing.send_sync_status;
+                    prev_shard_blocks_ids = VecDeque::new();
+                    prev_ids = Vec::new();
                 }
                 btree_map::Entry::Vacant(vacant) => {
-                    let prev_shard_blocks_ids = entry
-                        .top_shard_blocks_ids_iter()
-                        .cloned()
-                        .collect::<VecDeque<_>>();
-
                     let inserted = vacant.insert(entry);
-                    (
-                        inserted.kind,
-                        inserted.send_sync_status,
-                        prev_shard_blocks_ids,
-                        prev_block_ids,
-                    )
+
+                    kind = inserted.kind;
+                    send_sync_status = inserted.send_sync_status;
+                    prev_shard_blocks_ids = inserted.top_shard_blocks_ids_iter().cloned().collect();
+                    prev_ids = inserted.prev_blocks_ids.clone();
                 }
             };
 
             // remove state from prev mc block because we need only last one
-            for prev_block_id in stored.3 {
+            for prev_block_id in prev_ids {
                 if let Some(entry) = guard.blocks.get_mut(&prev_block_id.seqno) {
                     if let Some(applied_block_stuff) = entry.applied_block_stuff.as_mut() {
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -484,8 +481,8 @@ impl BlocksCache {
 
             let result = BlockCacheStoreResult {
                 block_id,
-                kind: stored.0,
-                send_sync_status: stored.1,
+                kind,
+                send_sync_status,
                 last_collated_mc_block_id: guard.last_collated_mc_block_id,
                 applied_mc_queue_range: guard.applied_mc_queue_range,
             };
@@ -493,7 +490,7 @@ impl BlocksCache {
 
             if result.kind == BlockCacheEntryKind::Received {
                 // traverse through including shard blocks and update their link to the containing master block
-                self.set_containing_mc_block(block_id.as_short_id(), stored.2);
+                self.set_containing_mc_block(block_id.as_short_id(), prev_shard_blocks_ids);
             }
 
             result
@@ -513,7 +510,7 @@ impl BlocksCache {
                 return Ok(None);
             }
 
-            let stored = match shard_cache.blocks.entry(block_id.seqno) {
+            let (kind, send_sync_status) = match shard_cache.blocks.entry(block_id.seqno) {
                 btree_map::Entry::Occupied(mut occupied) => {
                     let existing = occupied.get_mut();
 
@@ -561,8 +558,8 @@ impl BlocksCache {
             let mc_guard = self.masters.lock();
             BlockCacheStoreResult {
                 block_id,
-                kind: stored.0,
-                send_sync_status: stored.1,
+                kind,
+                send_sync_status,
                 last_collated_mc_block_id: mc_guard.last_collated_mc_block_id,
                 applied_mc_queue_range: mc_guard.applied_mc_queue_range,
             }

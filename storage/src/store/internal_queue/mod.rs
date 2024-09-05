@@ -41,8 +41,8 @@ impl InternalQueueStorage {
     }
 
     pub fn clear_session_queue(&self) -> Result<()> {
-        let start_key = vec![0x00; ShardsInternalMessagesKey::SIZE_HINT];
-        let end_key = vec![0xFF; ShardsInternalMessagesKey::SIZE_HINT];
+        let start_key = [0x00; ShardsInternalMessagesKey::SIZE_HINT];
+        let end_key = [0xFF; ShardsInternalMessagesKey::SIZE_HINT];
         let shards_internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
         self.db.rocksdb().delete_range_cf(
             &shards_internal_messages_session_cf,

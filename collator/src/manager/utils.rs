@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::models::{BlockId, Lazy, OutMsgDescr, ValidatorDescription};
 use tycho_block_util::queue::QueueDiffStuff;
 
+use super::types::LoadedQueueDiffContext;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::DisplaySlice;
@@ -24,28 +25,56 @@ pub fn find_us_in_collators_set(
 }
 
 pub async fn load_block_queue_diff_stuff(
-    state_node_adapter: Arc<dyn StateNodeAdapter>,
+    state_node_adapter: &dyn StateNodeAdapter,
     block_id: &BlockId,
-) -> Result<(Vec<BlockId>, Option<(QueueDiffStuff, Lazy<OutMsgDescr>)>)> {
-    let mut prev_block_ids = vec![];
+) -> Result<LoadedQueueDiffContext> {
+    static EMPTY_OUT_MSGS: OnceLock<Lazy<OutMsgDescr>> = OnceLock::new();
 
-    let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
-        return Ok((prev_block_ids, None));
-    };
-
-    let lazy_out_msgs = block_stuff.block().load_extra()?.out_msg_description;
-    let queue_diff_stuff = state_node_adapter.load_diff(block_id).await?.unwrap();
-
-    let prev_ids_info = block_stuff.construct_prev_id()?;
-    prev_block_ids.push(prev_ids_info.0);
-    if let Some(id) = prev_ids_info.1 {
-        prev_block_ids.push(id);
+    if block_id.seqno == 0 {
+        return Ok(LoadedQueueDiffContext {
+            prev_ids: Vec::new(),
+            queue_diff: QueueDiffStuff::new_empty(block_id),
+            out_msgs: EMPTY_OUT_MSGS
+                .get_or_init(|| Lazy::new(&OutMsgDescr::new()).unwrap())
+                .clone(),
+        });
     }
 
+    let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
+        anyhow::bail!("block not found: {block_id}");
+    };
+
+    let out_msgs = block_stuff.block().load_extra()?.out_msg_description;
+    let queue_diff = state_node_adapter.load_diff(block_id).await?.unwrap();
+
+    let (prev1, prev2) = block_stuff.construct_prev_id()?;
+
+    let mut prev_ids = Vec::new();
+    prev_ids.push(prev1);
+    prev_ids.extend(prev2);
+
     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-        prev_block_ids = %DisplaySlice(&prev_block_ids),
+        prev_block_ids = %DisplaySlice(&prev_ids),
         "loaded block and queue diff stuff",
     );
 
-    Ok((prev_block_ids, Some((queue_diff_stuff, lazy_out_msgs))))
+    Ok(LoadedQueueDiffContext {
+        prev_ids,
+        queue_diff,
+        out_msgs,
+    })
+}
+
+pub async fn load_only_queue_diff_stuff(
+    state_node_adapter: &dyn StateNodeAdapter,
+    block_id: &BlockId,
+) -> Result<QueueDiffStuff> {
+    if block_id.seqno == 0 {
+        return Ok(QueueDiffStuff::new_empty(block_id));
+    }
+
+    state_node_adapter
+        .load_diff(block_id)
+        .await?
+        .with_context(|| format!("block not found: {block_id}"))
 }

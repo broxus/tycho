@@ -254,6 +254,7 @@ impl CmdDumpArchive {
                 anyhow::bail!("archive not found");
             };
 
+            #[allow(clippy::disallowed_types)]
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .truncate(true)

@@ -232,9 +232,10 @@ impl BlockCacheEntry {
     }
 
     pub fn from_block_from_bc(
-        state: &ShardStateStuff,
+        state: ShardStateStuff,
         prev_blocks_ids: Vec<BlockId>,
-        queue_diff_and_msgs: Option<(QueueDiffStuff, Lazy<OutMsgDescr>)>,
+        queue_diff: QueueDiffStuff,
+        out_msgs: Lazy<OutMsgDescr>,
     ) -> Result<Self> {
         let block_id = *state.block_id();
         let key = block_id.as_short_id();
@@ -251,8 +252,8 @@ impl BlockCacheEntry {
         }
 
         let applied_block_stuff = AppliedBlockStuff {
-            state: Some(state.clone()),
-            queue_diff_and_msgs,
+            state: Some(state),
+            queue_diff_and_msgs: Some((queue_diff, out_msgs)),
         };
 
         Ok(Self {
@@ -376,4 +377,10 @@ impl std::fmt::Display for McBlockSubgraphExtract {
             Self::AlreadyExtracted => write!(f, "AlreadyExtracted"),
         }
     }
+}
+
+pub struct LoadedQueueDiffContext {
+    pub prev_ids: Vec<BlockId>,
+    pub queue_diff: QueueDiffStuff,
+    pub out_msgs: Lazy<OutMsgDescr>,
 }
