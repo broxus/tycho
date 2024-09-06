@@ -8,7 +8,7 @@ use everscale_types::models::BlockId;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
+use tycho_storage::{BlockConnection, BlockStorage, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
@@ -472,7 +472,7 @@ impl<B> Inner<B> {
                     (Some(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
                         id: id as u64,
                         size: NonZeroU64::new(size as _).unwrap(),
-                        chunk_size: block_storage.archive_chunk_size(),
+                        chunk_size: BlockStorage::archive_chunk_size(),
                     },
                     _ => ArchiveInfo::NotFound,
                 })

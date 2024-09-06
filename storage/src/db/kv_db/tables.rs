@@ -6,6 +6,7 @@ use weedb::rocksdb::{
 use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
 use super::refcount;
+use crate::PackageEntryKey;
 
 // took from
 // https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
@@ -123,12 +124,12 @@ impl ColumnFamily for KeyBlocks {
 impl ColumnFamilyOptions<Caches> for KeyBlocks {}
 
 /// Maps package entry id to entry data
-/// - Key: `BlockIdShort (16 bytes), [u8; 32], package type (1 byte)`
-/// - Value: `Vec<u8>`
+/// - Key: `PackageEntryKey`
+/// - Value: `Vec<u8>` (block/proof/queue diff data)
 pub struct PackageEntries;
 
 impl PackageEntries {
-    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 1;
+    pub const KEY_LEN: usize = PackageEntryKey::KEY_LEN;
 }
 
 impl ColumnFamily for PackageEntries {

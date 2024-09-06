@@ -1,6 +1,7 @@
+use everscale_types::models::BlockId;
 use tl_proto::TlRead;
 
-use super::ArchiveEntryId;
+use super::ArchiveEntryType;
 use crate::archive::proto::{ArchiveEntryHeader, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX};
 
 /// Stateful archive package reader.
@@ -63,10 +64,8 @@ fn read_next_entry<'a>(
 
         // Done
         Ok(ArchiveEntry {
-            id: ArchiveEntryId {
-                block_id: header.block_id,
-                ty: header.ty,
-            },
+            block_id: header.block_id,
+            ty: header.ty,
             data,
         })
     })
@@ -74,7 +73,8 @@ fn read_next_entry<'a>(
 
 /// Parsed archive entry
 pub struct ArchiveEntry<'a> {
-    pub id: ArchiveEntryId,
+    pub block_id: BlockId,
+    pub ty: ArchiveEntryType,
     pub data: &'a [u8],
 }
 

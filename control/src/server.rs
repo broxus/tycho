@@ -7,7 +7,7 @@ use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
 use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
-use tycho_storage::Storage;
+use tycho_storage::{BlockStorage, Storage};
 
 use crate::error::ServerResult;
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
@@ -253,7 +253,7 @@ impl proto::ControlServer for ControlServer {
         Ok(proto::ArchiveInfoResponse::Found(proto::ArchiveInfo {
             id,
             size: NonZeroU64::new(size as _).unwrap(),
-            chunk_size: blocks.archive_chunk_size(),
+            chunk_size: BlockStorage::archive_chunk_size(),
         }))
     }
 
