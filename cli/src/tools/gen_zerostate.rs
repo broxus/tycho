@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -10,8 +9,8 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_util::FastHashMap;
 
-use crate::util::compute_storage_used;
 use crate::util::error::ResultExt;
+use crate::util::{compute_storage_used, print_json};
 
 /// Generate a zero state for a network.
 #[derive(clap::Parser)]
@@ -105,13 +104,7 @@ fn generate_zerostate(
         "file_hash": file_hash,
     });
 
-    let output = if std::io::stdin().is_terminal() {
-        serde_json::to_string_pretty(&hashes)
-    } else {
-        serde_json::to_string(&hashes)
-    }?;
-    println!("{output}");
-    Ok(())
+    print_json(hashes)
 }
 
 #[derive(Serialize, Deserialize)]

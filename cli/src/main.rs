@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod tools {
+    pub mod bc;
     pub mod gen_account;
     pub mod gen_dht;
     pub mod gen_key;
@@ -95,6 +96,7 @@ enum ToolCmd {
     GenKey(tools::gen_key::Cmd),
     GenZerostate(tools::gen_zerostate::Cmd),
     GenAccount(tools::gen_account::Cmd),
+    Bc(tools::bc::Cmd),
 }
 
 impl ToolCmd {
@@ -104,6 +106,7 @@ impl ToolCmd {
             ToolCmd::GenKey(cmd) => cmd.run(),
             ToolCmd::GenZerostate(cmd) => cmd.run(),
             ToolCmd::GenAccount(cmd) => cmd.run(),
+            ToolCmd::Bc(cmd) => cmd.run(),
         }
     }
 }

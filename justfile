@@ -59,6 +59,9 @@ gen_dashboard:
     fi
     /usr/bin/env python ./scripts/gen-dashboard.py
 
+update_rpc_proto:
+    cargo run -p tycho-gen-protos
+
 # === Integration tests stuff ===
 
 # Runs all tests including ignored. Will take a lot of time to run.

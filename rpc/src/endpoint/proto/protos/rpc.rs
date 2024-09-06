@@ -119,10 +119,10 @@ pub mod response {
     pub struct GetBlockchainConfig {
         #[prost(int32, tag = "1")]
         pub global_id: i32,
-        #[prost(uint32, tag = "2")]
-        pub seqno: u32,
-        #[prost(bytes = "bytes", tag = "3")]
+        #[prost(bytes = "bytes", tag = "2")]
         pub config: ::prost::bytes::Bytes,
+        #[prost(uint32, tag = "3")]
+        pub seqno: u32,
     }
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct GetAccountsByCodeHash {
