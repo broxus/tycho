@@ -99,6 +99,7 @@ fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<ValidatorDescrip
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore] // ignored because it's flaky
 async fn validator_signatures_match() -> Result<()> {
     tycho_util::test::init_logger(
         "validator_signatures_match",

@@ -41,7 +41,7 @@ jobs:
           RUST_LOG: warn
         with:
           command: nextest
-          args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util
+          args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -119,10 +119,13 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -- -D warnings # change to --workspace later
+          args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -- -D warnings # change to --workspace later
 
   check-protos:
     name: Check protos
+    if: |
+      contains(github.event.pull_request.files.*.path, '.proto') ||
+      (github.event_name == 'push' && contains(join(github.event.commits.*.added, github.event.commits.*.modified), '.proto'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
