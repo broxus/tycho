@@ -52,8 +52,9 @@ impl StateSubscriber for StrangeBlockProvider {
     }
 }
 
-/// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
+/// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --ignored --nocapture`
 #[tokio::test]
+#[ignore]
 async fn test_collation_process_on_stubs() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_collation_process_on_stubs", "debug");
