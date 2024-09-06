@@ -1,11 +1,11 @@
-use std::io::{IsTerminal, Read};
+use std::io::Read;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
 use tycho_network::{Address, PeerId, PeerInfo};
 use tycho_util::time::now_sec;
 
-use crate::util::parse_secret_key;
+use crate::util::{parse_secret_key, print_json};
 
 /// Generate a DHT entry for a node.
 #[derive(clap::Parser)]
@@ -41,13 +41,7 @@ impl Cmd {
         let key = parse_secret_key(&key, self.raw_key)?;
         let entry = make_peer_info(&key, self.addr, self.ttl);
 
-        let output = if std::io::stdin().is_terminal() {
-            serde_json::to_string_pretty(&entry)
-        } else {
-            serde_json::to_string(&entry)
-        }?;
-        println!("{output}");
-        Ok(())
+        print_json(entry)
     }
 }
 

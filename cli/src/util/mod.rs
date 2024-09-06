@@ -1,14 +1,28 @@
+use std::io::IsTerminal;
+
 use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_crypto::ed25519;
 use everscale_types::models::{Account, StorageUsed};
 use everscale_types::num::VarUint56;
 use everscale_types::prelude::*;
+use serde::Serialize;
 
 #[cfg(feature = "jemalloc")]
 pub mod alloc;
 pub mod error;
 pub mod signal;
+
+pub fn print_json<T: Serialize>(output: T) -> Result<()> {
+    let output = if std::io::stdin().is_terminal() {
+        serde_json::to_string_pretty(&output)
+    } else {
+        serde_json::to_string(&output)
+    }?;
+
+    println!("{output}");
+    Ok(())
+}
 
 // TODO: move into types
 pub fn compute_storage_used(account: &Account) -> Result<StorageUsed> {

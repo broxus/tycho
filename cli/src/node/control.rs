@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,7 +9,7 @@ use tycho_control::ControlClient;
 use tycho_core::block_strider::ManualGcTrigger;
 use tycho_util::futures::JoinTask;
 
-use crate::util::signal;
+use crate::util::{print_json, signal};
 
 #[derive(Subcommand)]
 pub enum CmdControl {
@@ -406,17 +405,6 @@ impl From<TriggerBy> for ManualGcTrigger {
 
 #[derive(Serialize)]
 struct Empty {}
-
-fn print_json<T: Serialize>(output: T) -> Result<()> {
-    let output = if std::io::stdin().is_terminal() {
-        serde_json::to_string_pretty(&output)
-    } else {
-        serde_json::to_string(&output)
-    }?;
-
-    println!("{output}");
-    Ok(())
-}
 
 fn control_rt<P, F, FT>(sock: Option<P>, f: F) -> Result<()>
 where

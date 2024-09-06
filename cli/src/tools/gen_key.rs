@@ -1,9 +1,9 @@
-use std::io::{IsTerminal, Read};
+use std::io::Read;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
 
-use crate::util::parse_secret_key;
+use crate::util::{parse_secret_key, print_json};
 
 /// Generate a new key pair
 #[derive(clap::Parser)]
@@ -42,12 +42,6 @@ impl Cmd {
             "secret": hex::encode(secret.as_bytes()),
         });
 
-        let output = if std::io::stdin().is_terminal() {
-            serde_json::to_string_pretty(&keypair)
-        } else {
-            serde_json::to_string(&keypair)
-        }?;
-        println!("{output}");
-        Ok(())
+        print_json(keypair)
     }
 }
