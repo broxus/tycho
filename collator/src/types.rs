@@ -240,6 +240,7 @@ impl McData {
 #[derive(Clone)]
 pub struct BlockCandidate {
     pub block: BlockStuffAug,
+    pub is_key_block: bool,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
     pub collated_data: Vec<u8>,

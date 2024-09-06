@@ -236,7 +236,12 @@ impl ProofChecker {
             let block_handles = self.storage.block_handle_storage();
             let handle = block_handles
                 .load_key_block_handle(virt_block_info.prev_key_block_seqno)
-                .context("failed to load prev key block handle")?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to load prev key block handle by prev_key_block_seqno {}",
+                        virt_block_info.prev_key_block_seqno
+                    )
+                })?;
 
             if handle.id().seqno == 0 {
                 let zerostate = 'zerostate: {
