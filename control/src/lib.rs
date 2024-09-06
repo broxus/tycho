@@ -6,7 +6,7 @@ pub use self::server::{ControlEndpoint, ControlServer, ControlServerBuilder, Con
 mod client;
 mod error;
 mod profiler;
-mod proto;
+pub mod proto;
 mod server;
 
 // TODO: Change the path to a more general setup.

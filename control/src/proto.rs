@@ -40,6 +40,12 @@ pub trait ControlServer {
 
     /// Download archive slice.
     async fn get_archive_chunk(req: ArchiveSliceRequest) -> ServerResult<ArchiveSliceResponse>;
+
+    /// Returns list of all archive ids.
+    async fn get_archive_ids() -> ServerResult<Vec<ArchiveInfo>>;
+
+    /// Returns list of all block ids.
+    async fn get_block_ids(req: BlockListRequest) -> ServerResult<Vec<BlockId>>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,4 +86,10 @@ pub struct ArchiveSliceRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveSliceResponse {
     pub data: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockListRequest {
+    pub limit: u32,
+    pub offset: u32,
 }

@@ -16,7 +16,9 @@ use crate::util::print_json;
 pub enum CmdControl {
     Ping(CmdPing),
     FindArchive(CmdFindArchive),
+    ListArchives(CmdListArchives),
     DumpArchive(CmdDumpArchive),
+    ListBlocks(CmdListBlocks),
     DumpBlock(CmdDumpBlock),
     DumpProof(CmdDumpProof),
     DumpQueueDiff(CmdDumpQueueDiff),
@@ -32,7 +34,9 @@ impl CmdControl {
         match self {
             Self::Ping(cmd) => cmd.run(),
             Self::FindArchive(cmd) => cmd.run(),
+            Self::ListArchives(cmd) => cmd.run(),
             Self::DumpArchive(cmd) => cmd.run(),
+            Self::ListBlocks(cmd) => cmd.run(),
             Self::DumpBlock(cmd) => cmd.run(),
             Self::DumpProof(cmd) => cmd.run(),
             Self::DumpQueueDiff(cmd) => cmd.run(),
@@ -229,6 +233,70 @@ impl CmdFindArchive {
     }
 }
 
+#[derive(Parser)]
+pub struct CmdListArchives {
+    /// Unix socket path to connect to.
+    #[clap(short, long)]
+    sock: Option<PathBuf>,
+    #[clap(long)]
+    human_readable: bool,
+}
+
+impl CmdListArchives {
+    pub fn run(self) -> Result<()> {
+        fn print_human_readable(archives: &[tycho_control::proto::ArchiveInfo]) {
+            use bytesize::ByteSize;
+
+            let chunk_size = match archives.first() {
+                Some(info) => info.chunk_size.get(),
+                None => {
+                    println!("No archives found");
+                    return;
+                }
+            };
+
+            // Collect formatted strings
+            let formatted = archives
+                .iter()
+                .map(|arch| (arch.id.to_string(), ByteSize(arch.size.get()).to_string()))
+                .collect::<Vec<_>>();
+
+            // Calculate max widths
+            let max_id_width = formatted.iter().map(|(id, _)| id.len()).max().unwrap_or(0);
+            let max_size_width = formatted
+                .iter()
+                .map(|(_, size)| size.len())
+                .max()
+                .unwrap_or(0);
+
+            println!("Archives:");
+            println!("Chunks size: {}", ByteSize(chunk_size as _));
+
+            // Print with calculated padding
+            for (id, size) in formatted {
+                println!(
+                    "ID: {:<id_width$}, Size: {:>size_width$}",
+                    id,
+                    size,
+                    id_width = max_id_width,
+                    size_width = max_size_width
+                );
+            }
+        }
+
+        control_rt(self.sock, move |client| async move {
+            let archives = client.list_archives().await?;
+            if self.human_readable {
+                print_human_readable(&archives);
+            } else {
+                print_json(archives)?;
+            }
+
+            Ok(())
+        })
+    }
+}
+
 /// Dump the archive from the node.
 #[derive(Parser)]
 pub struct CmdDumpArchive {
@@ -273,6 +341,41 @@ impl CmdDumpArchive {
                 "compressed": !self.decompress,
                 "size": info.size,
             }))
+        })
+    }
+}
+
+#[derive(Parser)]
+pub struct CmdListBlocks {
+    /// Unix socket path to connect to.
+    #[clap(short, long)]
+    sock: Option<PathBuf>,
+    #[clap(long)]
+    human_readable: bool,
+    #[clap(short, long, default_value = "1000")]
+    limit: u32,
+    #[clap(short, long, default_value = "0")]
+    offset: u32,
+}
+
+impl CmdListBlocks {
+    pub fn run(self) -> Result<()> {
+        control_rt(self.sock, move |client| async move {
+            let blocks = client.list_blocks(self.limit, self.offset).await?;
+            if self.human_readable {
+                if blocks.is_empty() {
+                    println!("No blocks found");
+                } else {
+                    println!("Blocks:");
+                    for block in blocks {
+                        println!("{}", block);
+                    }
+                }
+            } else {
+                print_json(blocks)?;
+            }
+
+            Ok(())
         })
     }
 }

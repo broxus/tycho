@@ -11,7 +11,7 @@ use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
     ProofChecker, ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
-use tycho_storage::{ArchivesGcConfig, BlockStorage, NewBlockMeta, Storage, StorageConfig};
+use tycho_storage::{ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
 use tycho_util::compression::zstd_decompress;
 use tycho_util::project_root;
 
@@ -214,7 +214,7 @@ async fn archives() -> Result<()> {
     assert_eq!(archive_size, archive_data.len());
 
     // Check archive data
-    let archive_chunk_size = BlockStorage::archive_chunk_size().get() as usize;
+    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
 
     let mut expected_archive_data = vec![];
     for offset in (0..archive_size).step_by(archive_chunk_size) {
@@ -312,7 +312,7 @@ async fn heavy_archives() -> Result<()> {
     storage.block_storage().wait_for_archive_commit().await?;
 
     // Check archive data
-    let archive_chunk_size = BlockStorage::archive_chunk_size().get() as usize;
+    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
 
     check_archive(&storage, &archive_data, archive_chunk_size, 1).await?;
     check_archive(&storage, &next_archive_data, archive_chunk_size, 101).await?;

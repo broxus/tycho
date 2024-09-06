@@ -25,12 +25,15 @@ use tycho_util::FastHashSet;
 use weedb::rocksdb;
 use weedb::rocksdb::IteratorMode;
 
+pub use self::package_entry::PackageEntryKey;
 use crate::db::*;
 use crate::util::*;
 use crate::{
     BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
-    HandleCreationStatus, NewBlockMeta, PackageEntryKey,
+    HandleCreationStatus, NewBlockMeta,
 };
+
+mod package_entry;
 
 pub struct BlockStorage {
     db: BaseDb,
@@ -61,7 +64,9 @@ impl BlockStorage {
         }
     }
 
-    pub fn archive_chunk_size() -> NonZeroU32 {
+    // NOTE: This is intentionally a method, not a constant because
+    // it might be useful to allow configure it during the first run.
+    pub fn archive_chunk_size(&self) -> NonZeroU32 {
         NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
     }
 
@@ -244,16 +249,14 @@ impl BlockStorage {
             .iterator(IteratorMode::Start)
             .filter_map(|item| {
                 let (key, _) = item.ok()?;
-                let id = PackageEntryKey::from_bytes(&key).expect(
-                    "Key was written with `PackageEntryKey::as_bytes` so it should be valid",
-                );
+                let id = PackageEntryKey::from_slice(&key);
                 if id.ty != ArchiveEntryType::Block {
                     return None;
                 }
                 let block_data = self.db.package_entries.get(key).expect("db is dead")?;
-                let file_hash = Boc::file_hash(block_data);
+                let file_hash = Boc::file_hash_blake(block_data);
 
-                Some(id.short_block_id.as_block_id(file_hash))
+                Some(id.block_id.make_full(file_hash))
             })
             .skip(offset as usize)
             .take(limit as usize)
@@ -290,9 +293,9 @@ impl BlockStorage {
         let mut bound = PackageEntryKey::block(&bound);
 
         let mut readopts = package_entries.new_read_config();
-        readopts.set_iterate_lower_bound(bound.as_bytes());
-        bound.short_block_id.seqno += 1;
-        readopts.set_iterate_upper_bound(bound.as_bytes());
+        readopts.set_iterate_lower_bound(bound.to_vec().into_vec());
+        bound.block_id.seqno += 1;
+        readopts.set_iterate_upper_bound(bound.to_vec().into_vec());
 
         let mut iter = self
             .db
@@ -672,7 +675,7 @@ impl BlockStorage {
     // === Internal ===
 
     fn add_data(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
-        self.db.package_entries.insert(id.as_bytes(), data)
+        self.db.package_entries.insert(id.to_vec(), data)
     }
 
     async fn get_data(&self, handle: &BlockHandle, id: &PackageEntryKey) -> Result<Vec<u8>> {
@@ -684,8 +687,7 @@ impl BlockStorage {
         .read()
         .await;
 
-        let key = id.as_bytes();
-        match self.db.package_entries.get(key)? {
+        match self.db.package_entries.get(id.to_vec())? {
             Some(a) => Ok(a.to_vec()),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
@@ -704,8 +706,7 @@ impl BlockStorage {
         .read()
         .await;
 
-        let key = id.as_bytes();
-        match self.db.package_entries.get(key)? {
+        match self.db.package_entries.get(id.to_vec())? {
             Some(data) => Ok(FullBlockDataGuard { _lock: lock, data }),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
@@ -805,12 +806,13 @@ impl BlockStorage {
                         flags.contains(BlockFlags::HAS_QUEUE_DIFF)
                     );
 
-                    for id in [
-                        PackageEntryKey::block(&block_id),
-                        PackageEntryKey::proof(&block_id),
-                        PackageEntryKey::queue_diff(&block_id),
+                    for ty in [
+                        ArchiveEntryType::Block,
+                        ArchiveEntryType::Proof,
+                        ArchiveEntryType::QueueDiff,
                     ] {
-                        let Some(data) = db.package_entries.get(id.as_bytes()).unwrap() else {
+                        let key = PackageEntryKey::from((block_id, ty));
+                        let Some(data) = db.package_entries.get(key.to_vec()).unwrap() else {
                             return Err(BlockStorageError::BlockDataNotFound.into());
                         };
 
@@ -818,7 +820,7 @@ impl BlockStorage {
                         header_buffer.clear();
                         ArchiveEntryHeader {
                             block_id,
-                            ty: id.ty,
+                            ty,
                             data_len: data.len() as u32,
                         }
                         .write_to(&mut header_buffer);
@@ -1370,13 +1372,7 @@ mod tests {
                 });
 
                 for ty in ENTRY_TYPES {
-                    blocks.add_data(
-                        &PackageEntryKey {
-                            short_block_id: block_id.into(),
-                            ty,
-                        },
-                        GARBAGE,
-                    )?;
+                    blocks.add_data(&(block_id, ty).into(), GARBAGE)?;
                 }
                 for direction in CONNECTION_TYPES {
                     block_connections.store_connection(&handle, direction, &block_id);
@@ -1419,11 +1415,9 @@ mod tests {
                 let handle = block_handles.load_handle(&block_id);
                 assert_eq!(handle.is_none(), must_be_removed);
 
-                for key in ENTRY_TYPES.map(|ty| PackageEntryKey {
-                    short_block_id: block_id.into(),
-                    ty,
-                }) {
-                    let stored = blocks.db.package_entries.get(key.as_bytes())?;
+                for ty in ENTRY_TYPES {
+                    let key = PackageEntryKey::from((block_id, ty));
+                    let stored = blocks.db.package_entries.get(key.to_vec())?;
                     assert_eq!(stored.is_none(), must_be_removed);
                 }
 

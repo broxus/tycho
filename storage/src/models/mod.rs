@@ -1,5 +1,4 @@
-pub use package_entry::*;
 pub use point_flags::*;
 
-mod package_entry;
+// TODO: Move into a mempool storage module
 mod point_flags;
