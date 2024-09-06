@@ -196,4 +196,18 @@ impl ControlClient {
             })?
             .map_err(ClientError::ClientFailed)
     }
+
+    pub async fn list_archives(&self) -> ClientResult<Vec<ArchiveInfo>> {
+        self.inner
+            .get_archive_ids(context::current())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn list_blocks(&self, limit: u32, offset: u32) -> ClientResult<Vec<BlockId>> {
+        self.inner
+            .get_block_ids(context::current(), BlockListRequest { limit, offset })
+            .await?
+            .map_err(Into::into)
+    }
 }

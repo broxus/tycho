@@ -2,16 +2,17 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
 use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
-use tycho_storage::{BlockStorage, Storage};
+use tycho_storage::Storage;
 
 use crate::error::ServerResult;
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
-use crate::proto::{self, ControlServer as _};
+use crate::proto::{self, ArchiveInfo, ControlServer as _};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -253,7 +254,7 @@ impl proto::ControlServer for ControlServer {
         Ok(proto::ArchiveInfoResponse::Found(proto::ArchiveInfo {
             id,
             size: NonZeroU64::new(size as _).unwrap(),
-            chunk_size: BlockStorage::archive_chunk_size(),
+            chunk_size: blocks.archive_chunk_size(),
         }))
     }
 
@@ -267,6 +268,33 @@ impl proto::ControlServer for ControlServer {
         let data = blocks.get_archive_chunk(req.archive_id, req.offset).await?;
 
         Ok(proto::ArchiveSliceResponse { data })
+    }
+
+    async fn get_archive_ids(self, _: tarpc::context::Context) -> ServerResult<Vec<ArchiveInfo>> {
+        let storage = self.inner.storage.block_storage();
+        let ids = storage
+            .list_archive_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let size = storage.get_archive_size(id).unwrap()?;
+                Some(ArchiveInfo {
+                    id,
+                    size: NonZeroU64::new(size as _).unwrap(),
+                    chunk_size: storage.archive_chunk_size(),
+                })
+            })
+            .collect();
+        Ok(ids)
+    }
+
+    async fn get_block_ids(
+        self,
+        _: tarpc::context::Context,
+        req: proto::BlockListRequest,
+    ) -> ServerResult<Vec<BlockId>> {
+        let storage = self.inner.storage.block_storage();
+        let res = storage.list_blocks(req.limit, req.offset).await?;
+        Ok(res)
     }
 }
 

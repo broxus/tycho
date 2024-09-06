@@ -19,7 +19,6 @@ pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveV
 use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 use crate::queue::{QueueDiffStuff, QueueDiffStuffAug};
 
-mod entry_id;
 mod proto;
 mod reader;
 
