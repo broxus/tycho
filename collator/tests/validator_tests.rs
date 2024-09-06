@@ -99,7 +99,6 @@ fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<ValidatorDescrip
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore] // ignored because it's flaky
 async fn validator_signatures_match() -> Result<()> {
     tycho_util::test::init_logger(
         "validator_signatures_match",
@@ -152,7 +151,10 @@ async fn validator_signatures_match() -> Result<()> {
                     format!("failed to validate block {block_id} for {peer_id}")
                 })?;
                 let status = BriefStatus::from(&status);
-                assert_eq!(status, BriefStatus::Complete((NODE_COUNT * 2) / 3 + 1));
+                let BriefStatus::Complete(signature_count) = status else {
+                    panic!("must not be skipped");
+                };
+                assert!(signature_count > (NODE_COUNT * 2) / 3);
 
                 tracing::info!(%peer_id, ?status, "validation completed");
             }
