@@ -451,9 +451,10 @@ impl CollatorStdImpl {
             .set(collation_data.block_id_short.seqno);
 
         let block_id = *finalized.block_candidate.block.id();
+        let is_key_block = finalized.block_candidate.is_key_block;
         let new_state_stuff = JoinTask::new({
             let meta = NewBlockMeta {
-                is_key_block: false, // TODO: set from collation data
+                is_key_block,
                 gen_utime: collation_data.gen_utime,
                 mc_ref_seqno: None,
             };

@@ -354,6 +354,7 @@ impl CollatorStdImpl {
         let new_block_id = *new_block.id();
         let block_candidate = Box::new(BlockCandidate {
             block: new_block,
+            is_key_block: new_block_info.key_block,
             prev_blocks_ids: prev_shard_data.blocks_ids().clone(),
             top_shard_blocks_ids: collation_data.top_shard_blocks_ids.clone(),
             collated_data,
