@@ -1,21 +1,18 @@
-use std::borrow::Borrow;
 use std::collections::BTreeSet;
-use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use everscale_types::boc::BocRepr;
+use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use parking_lot::RwLock;
 use tl_proto::TlWrite;
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
-    ArchiveData, ArchiveEntryHeader, ArchiveEntryId, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN,
-    ARCHIVE_PREFIX,
+    ArchiveData, ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
@@ -26,12 +23,13 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::FastHashSet;
 use weedb::rocksdb;
+use weedb::rocksdb::IteratorMode;
 
 use crate::db::*;
 use crate::util::*;
 use crate::{
     BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
-    HandleCreationStatus, NewBlockMeta,
+    HandleCreationStatus, NewBlockMeta, PackageEntryKey,
 };
 
 pub struct BlockStorage {
@@ -63,7 +61,7 @@ impl BlockStorage {
         }
     }
 
-    pub fn archive_chunk_size(&self) -> NonZeroU32 {
+    pub fn archive_chunk_size() -> NonZeroU32 {
         NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
     }
 
@@ -198,7 +196,7 @@ impl BlockStorage {
             .block_handle_storage
             .create_or_load_handle(block_id, meta_data);
 
-        let archive_id = ArchiveEntryId::block(block_id);
+        let archive_id = PackageEntryKey::block(block_id);
         let mut updated = false;
         if !handle.has_data() {
             let data = archive_data.as_new_archive_data()?;
@@ -235,8 +233,37 @@ impl BlockStorage {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
-        self.get_data(handle, &ArchiveEntryId::block(handle.id()))
+        self.get_data(handle, &PackageEntryKey::block(handle.id()))
             .await
+    }
+
+    pub async fn list_blocks(&self, limit: u32, offset: u32) -> Result<Vec<BlockId>> {
+        let package_entries = &self.db.package_entries;
+
+        let blocks = package_entries
+            .iterator(IteratorMode::Start)
+            .filter_map(|item| {
+                let (key, _) = item.ok()?;
+                let id = PackageEntryKey::from_bytes(&key).expect(
+                    "Key was written with `PackageEntryKey::as_bytes` so it should be valid",
+                );
+                if id.ty != ArchiveEntryType::Block {
+                    return None;
+                }
+                let block_data = self.db.package_entries.get(key).expect("db is dead")?;
+                let file_hash = Boc::file_hash(block_data);
+
+                Some(id.short_block_id.as_block_id(file_hash))
+            })
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+
+        Ok(blocks)
+    }
+
+    pub fn list_archive_ids(&self) -> Vec<u32> {
+        self.archive_ids.read().iter().cloned().collect()
     }
 
     pub async fn load_block_data_raw_ref<'a>(
@@ -246,24 +273,26 @@ impl BlockStorage {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
-        self.get_data_ref(handle, &ArchiveEntryId::block(handle.id()))
+        self.get_data_ref(handle, &PackageEntryKey::block(handle.id()))
             .await
     }
 
     pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
         let package_entries = &self.db.package_entries;
 
-        let mut bound = BlockId {
+        let bound = BlockId {
             shard: ShardIdent::MASTERCHAIN,
             seqno: mc_seqno,
             root_hash: HashBytes::ZERO,
             file_hash: HashBytes::ZERO,
         };
 
+        let mut bound = PackageEntryKey::block(&bound);
+
         let mut readopts = package_entries.new_read_config();
-        readopts.set_iterate_lower_bound(entry_key(&bound, ArchiveEntryType::Block));
-        bound.seqno += 1;
-        readopts.set_iterate_upper_bound(entry_key(&bound, ArchiveEntryType::Block));
+        readopts.set_iterate_lower_bound(bound.as_bytes());
+        bound.short_block_id.seqno += 1;
+        readopts.set_iterate_upper_bound(bound.as_bytes());
 
         let mut iter = self
             .db
@@ -305,7 +334,7 @@ impl BlockStorage {
         };
 
         let mut updated = false;
-        let archive_id = ArchiveEntryId::proof(block_id);
+        let archive_id = PackageEntryKey::proof(block_id);
         if !handle.has_proof() {
             let data = proof.as_new_archive_data()?;
 
@@ -336,7 +365,7 @@ impl BlockStorage {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
 
-        self.get_data(handle, &ArchiveEntryId::proof(handle.id()))
+        self.get_data(handle, &PackageEntryKey::proof(handle.id()))
             .await
     }
 
@@ -348,7 +377,7 @@ impl BlockStorage {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
 
-        self.get_data_ref(handle, &ArchiveEntryId::proof(handle.id()))
+        self.get_data_ref(handle, &PackageEntryKey::proof(handle.id()))
             .await
     }
 
@@ -372,7 +401,7 @@ impl BlockStorage {
         };
 
         let mut updated = false;
-        let archive_id = ArchiveEntryId::queue_diff(block_id);
+        let archive_id = PackageEntryKey::queue_diff(block_id);
         if !handle.has_queue_diff() {
             let data = queue_diff.as_new_archive_data()?;
 
@@ -403,7 +432,7 @@ impl BlockStorage {
             return Err(BlockStorageError::QueueDiffNotFound.into());
         }
 
-        self.get_data(handle, &ArchiveEntryId::queue_diff(handle.id()))
+        self.get_data(handle, &PackageEntryKey::queue_diff(handle.id()))
             .await
     }
 
@@ -414,7 +443,7 @@ impl BlockStorage {
         if !handle.has_queue_diff() {
             return Err(BlockStorageError::QueueDiffNotFound.into());
         }
-        self.get_data_ref(handle, &ArchiveEntryId::queue_diff(handle.id()))
+        self.get_data_ref(handle, &PackageEntryKey::queue_diff(handle.id()))
             .await
     }
 
@@ -642,18 +671,11 @@ impl BlockStorage {
 
     // === Internal ===
 
-    fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
-    where
-        I: Borrow<BlockId>,
-    {
-        let key = entry_key(id.block_id.borrow(), id.ty);
-        self.db.package_entries.insert(key, data)
+    fn add_data(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
+        self.db.package_entries.insert(id.as_bytes(), data)
     }
 
-    async fn get_data<I>(&self, handle: &BlockHandle, id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
-    where
-        I: Borrow<BlockId>,
-    {
+    async fn get_data(&self, handle: &BlockHandle, id: &PackageEntryKey) -> Result<Vec<u8>> {
         let _lock = match id.ty {
             ArchiveEntryType::Block => handle.block_data_lock(),
             ArchiveEntryType::Proof => handle.proof_data_lock(),
@@ -662,21 +684,18 @@ impl BlockStorage {
         .read()
         .await;
 
-        let key = entry_key(id.block_id.borrow(), id.ty);
+        let key = id.as_bytes();
         match self.db.package_entries.get(key)? {
             Some(a) => Ok(a.to_vec()),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
     }
 
-    async fn get_data_ref<'a, I>(
+    async fn get_data_ref<'a>(
         &'a self,
         handle: &'a BlockHandle,
-        id: &ArchiveEntryId<I>,
-    ) -> Result<impl AsRef<[u8]> + 'a>
-    where
-        I: Borrow<BlockId> + Hash,
-    {
+        id: &PackageEntryKey,
+    ) -> Result<impl AsRef<[u8]> + 'a> {
         let lock = match id.ty {
             ArchiveEntryType::Block => handle.block_data_lock(),
             ArchiveEntryType::Proof => handle.proof_data_lock(),
@@ -685,7 +704,7 @@ impl BlockStorage {
         .read()
         .await;
 
-        let key = entry_key(id.block_id.borrow(), id.ty);
+        let key = id.as_bytes();
         match self.db.package_entries.get(key)? {
             Some(data) => Ok(FullBlockDataGuard { _lock: lock, data }),
             None => Err(BlockStorageError::InvalidBlockData.into()),
@@ -786,13 +805,12 @@ impl BlockStorage {
                         flags.contains(BlockFlags::HAS_QUEUE_DIFF)
                     );
 
-                    for ty in [
-                        ArchiveEntryType::Block,
-                        ArchiveEntryType::Proof,
-                        ArchiveEntryType::QueueDiff,
+                    for id in [
+                        PackageEntryKey::block(&block_id),
+                        PackageEntryKey::proof(&block_id),
+                        PackageEntryKey::queue_diff(&block_id),
                     ] {
-                        let key = entry_key(&block_id, ty);
-                        let Some(data) = db.package_entries.get(key).unwrap() else {
+                        let Some(data) = db.package_entries.get(id.as_bytes()).unwrap() else {
                             return Err(BlockStorageError::BlockDataNotFound.into());
                         };
 
@@ -800,7 +818,7 @@ impl BlockStorage {
                         header_buffer.clear();
                         ArchiveEntryHeader {
                             block_id,
-                            ty,
+                            ty: id.ty,
                             data_len: data.len() as u32,
                         }
                         .write_to(&mut header_buffer);
@@ -1161,16 +1179,6 @@ impl<'a> AsRef<[u8]> for FullBlockDataGuard<'a> {
     }
 }
 
-fn entry_key(block_id: &BlockId, ty: ArchiveEntryType) -> [u8; tables::PackageEntries::KEY_LEN] {
-    let mut result = [0; tables::PackageEntries::KEY_LEN];
-    result[..4].copy_from_slice(&block_id.shard.workchain().to_be_bytes());
-    result[4..12].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
-    result[12..16].copy_from_slice(&block_id.seqno.to_be_bytes());
-    result[16..48].copy_from_slice(block_id.root_hash.as_slice());
-    result[48] = ty as u8;
-    result
-}
-
 fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
     key.get(48).copied().and_then(ArchiveEntryType::from_byte)
 }
@@ -1362,7 +1370,13 @@ mod tests {
                 });
 
                 for ty in ENTRY_TYPES {
-                    blocks.add_data(&ArchiveEntryId { block_id, ty }, GARBAGE)?;
+                    blocks.add_data(
+                        &PackageEntryKey {
+                            short_block_id: block_id.into(),
+                            ty,
+                        },
+                        GARBAGE,
+                    )?;
                 }
                 for direction in CONNECTION_TYPES {
                     block_connections.store_connection(&handle, direction, &block_id);
@@ -1405,9 +1419,11 @@ mod tests {
                 let handle = block_handles.load_handle(&block_id);
                 assert_eq!(handle.is_none(), must_be_removed);
 
-                for ty in ENTRY_TYPES {
-                    let key = entry_key(block_id.borrow(), ty);
-                    let stored = blocks.db.package_entries.get(key)?;
+                for key in ENTRY_TYPES.map(|ty| PackageEntryKey {
+                    short_block_id: block_id.into(),
+                    ty,
+                }) {
+                    let stored = blocks.db.package_entries.get(key.as_bytes())?;
                     assert_eq!(stored.is_none(), must_be_removed);
                 }
 

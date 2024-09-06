@@ -12,7 +12,6 @@ use bytes::Bytes;
 use everscale_types::models::BlockId;
 use tycho_util::FastHashMap;
 
-pub use self::entry_id::ArchiveEntryId;
 pub use self::proto::{
     ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
 };
@@ -45,14 +44,14 @@ impl Archive {
         for entry_data in reader {
             let entry = entry_data?;
 
-            let id = &entry.id.block_id;
+            let id = entry.block_id;
             if id.is_masterchain() {
-                res.mc_block_ids.insert(id.seqno, *id);
+                res.mc_block_ids.insert(id.seqno, id);
             }
 
-            let parsed = res.blocks.entry(*id).or_default();
+            let parsed = res.blocks.entry(id).or_default();
 
-            match entry.id.ty {
+            match entry.ty {
                 ArchiveEntryType::Block => {
                     anyhow::ensure!(parsed.block.is_none(), "duplicate block data for: {id}");
                     parsed.block = Some(data.slice_ref(entry.data));
