@@ -10,8 +10,8 @@ pub trait BlockIdExt {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BlockIdRelation {
-    mc_block_id: BlockId,
-    block_id: BlockId,
+    pub mc_block_id: BlockId,
+    pub block_id: BlockId,
 }
 
 impl BlockIdRelation {
