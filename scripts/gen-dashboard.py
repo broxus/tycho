@@ -7,13 +7,16 @@ from dashboard_builder import (
     target,
     template,
     Expr,
+    Stat,
     expr_sum_rate,
     expr_sum_increase,
     expr_aggr_func,
+    expr_avg,
     heatmap_panel,
     yaxis,
     expr_operator,
-    expr_sum,
+    expr_max,
+    DATASOURCE,
 )
 from grafanalib import formatunits as UNITS, _gen
 from grafanalib.core import (
@@ -26,6 +29,7 @@ from grafanalib.core import (
     HeatmapColor,
     Tooltip,
     GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,
+    Target,
 )
 
 
@@ -72,6 +76,8 @@ def create_gauge_panel(
             Expr(metric=e, label_selectors=labels) if isinstance(e, str) else e
             for e in expr
         ]
+    elif isinstance(expr, Expr):
+        expr = [expr]
     else:
         raise TypeError(
             "expr must be a string, a list of strings, or a list of Expr objects."
@@ -222,6 +228,136 @@ def create_row(
     for i in range(0, len(metrics), 2):
         chunk = metrics[i : i + 2]
         layout.row(chunk)
+    return layout.row_panel
+
+
+def blockchain_stats() -> RowPanel:
+    def expr_aggr_avg_rate(metric: str) -> Expr:
+        rate = expr_sum_rate(metric)
+        return expr_aggr_func(f"{rate}", "avg", "avg_over_time", by_labels=[]).extra(
+            default_label_selectors=[]
+        )
+
+    first_row = [
+        timeseries_panel(
+            targets=[
+                target(expr_aggr_avg_rate("tycho_bc_txs_total"), legend_format="avg")
+            ],
+            title="Transactions Rate",
+            unit="tx/s",
+            legend_display_mode="hidden",
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    expr_aggr_avg_rate("tycho_bc_ext_msgs_total"),
+                    legend_format="received",
+                ),
+                target(
+                    expr_aggr_avg_rate("tycho_do_collate_msgs_error_count_ext"),
+                    legend_format="failed",
+                ),
+                target(
+                    expr_aggr_avg_rate("tycho_do_collate_ext_msgs_expired_count"),
+                    legend_format="expired",
+                ),
+            ],
+            title="External Messages Rate",
+            unit="msg/s",
+            legend_display_mode="hidden",
+        ),
+        Stat(
+            targets=[
+                Target(
+                    expr=f"{expr_max(
+                        'tycho_last_applied_block_seqno',
+                        label_selectors=['workchain="-1"'],
+                        by_labels=[]
+                    )}",
+                    legendFormat="Last Applied MC Block",
+                    instant=True,
+                    datasource=DATASOURCE,
+                ),
+                Target(
+                    expr=f"{expr_max(
+                        'tycho_last_processed_to_anchor_id',
+                        label_selectors=['workchain="-1"'],
+                        by_labels=[]
+                    )}",
+                    legendFormat="Last Used Anchor",
+                    instant=True,
+                    datasource=DATASOURCE,
+                ),
+            ],
+            graphMode="area",
+            textMode="value_and_name",
+            reduceCalc="lastNotNull",
+            format=UNITS.NONE_FORMAT,
+        ),
+    ]
+
+    second_row = [
+        timeseries_panel(
+            targets=[
+                target(
+                    expr_avg(
+                        "tycho_storage_store_block_data_size",
+                        label_selectors=['quantile="0.5"'],
+                        by_labels=[],
+                    ),
+                    legend_format="P50",
+                ),
+                target(
+                    expr_avg(
+                        "tycho_storage_store_block_data_size",
+                        label_selectors=['quantile="0.999"'],
+                        by_labels=[],
+                    ),
+                    legend_format="P99",
+                ),
+            ],
+            title="Block Data Size",
+            unit=UNITS.BYTES,
+            legend_display_mode="hidden",
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    expr_aggr_func(
+                        "tycho_do_collate_blocks_count",
+                        "avg",
+                        "rate",
+                        label_selectors=['workchain=~"$workchain"'],
+                        by_labels=["workchain"],
+                    ),
+                    legend_format="{{workchain}}",
+                )
+            ],
+            title="Blocks Rate",
+            unit="blocks/s",
+            legend_display_mode="hidden",
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    expr_aggr_func(
+                        "tycho_mempool_engine_current_round",
+                        "avg",
+                        "rate",
+                        by_labels=[],
+                    ),
+                    legend_format="rate",
+                )
+            ],
+            title="Mempool Rounds Rate",
+            unit="rounds/s",
+            legend_display_mode="hidden",
+        ),
+    ]
+
+    layout = Layout("Stats", repeat=None, collapsed=True)
+    layout.row(first_row)
+    layout.row(second_row)
     return layout.row_panel
 
 
@@ -656,7 +792,7 @@ def jrpc_timings() -> RowPanel:
         [
             create_heatmap_panel(
                 "tycho_jrpc_request_time",
-                f"JRPC $method time",
+                "JRPC $method time",
                 labels=['method=~"$method"'],
             )
         ],
@@ -1592,6 +1728,7 @@ dashboard = Dashboard(
     templating=templates(),
     refresh="5s",
     panels=[
+        blockchain_stats(),
         core_bc(),
         core_block_strider(),
         core_blockchain_rpc(),
