@@ -24,6 +24,7 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
+use tycho_util::FastHashSet;
 use weedb::rocksdb;
 
 use crate::db::*;
@@ -424,7 +425,7 @@ impl BlockStorage {
         let block_id_bytes = handle.id().to_vec();
 
         // Prepare cf
-        let storage_cf = self.db.archive_block_ids.cf();
+        let archive_block_ids_cf = self.db.archive_block_ids.cf();
         let handle_cf = self.db.block_handles.cf();
         let chunks_cf = self.db.archives.cf();
 
@@ -435,7 +436,7 @@ impl BlockStorage {
         // 0. Create transaction
         let mut batch = rocksdb::WriteBatch::default();
         // 1. Append archive block id
-        batch.merge_cf(&storage_cf, archive_id_bytes, &block_id_bytes);
+        batch.merge_cf(&archive_block_ids_cf, archive_id_bytes, &block_id_bytes);
         // 2. Update block handle meta
         if handle.meta().add_flags(BlockFlags::IS_ARCHIVED) {
             batch.put_cf(
@@ -765,10 +766,16 @@ impl BlockStorage {
                 writer.write(&ARCHIVE_PREFIX)?;
 
                 // Write all entries
+                let mut unique_ids = FastHashSet::default();
                 for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
                     anyhow::ensure!(is_running.load(Ordering::Relaxed), "task aborted");
 
                     let block_id = BlockId::from_slice(raw_block_id);
+                    if !unique_ids.insert(block_id) {
+                        tracing::warn!(%block_id, "skipped duplicate block id");
+                        continue;
+                    }
+
                     let handle = block_handle_storage
                         .load_handle(&block_id)
                         .ok_or(BlockStorageError::BlockHandleNotFound)?;
@@ -776,7 +783,11 @@ impl BlockStorage {
                     let flags = handle.meta().flags();
                     anyhow::ensure!(
                         flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
-                        "block does not have all parts"
+                        "block does not have all parts: {block_id}, \
+                        has_data={}, has_proof={}, queue_diff={}",
+                        flags.contains(BlockFlags::HAS_DATA),
+                        flags.contains(BlockFlags::HAS_PROOF),
+                        flags.contains(BlockFlags::HAS_QUEUE_DIFF)
                     );
 
                     for ty in [
@@ -811,7 +822,7 @@ impl BlockStorage {
                 writer.finalize()?;
 
                 // Done
-                _ = scopeguard::ScopeGuard::into_inner(guard);
+                scopeguard::ScopeGuard::into_inner(guard);
                 tracing::info!(
                     elapsed = %humantime::format_duration(histogram.finish()),
                     "finished"
@@ -841,7 +852,12 @@ impl CommitArchiveTask {
         if let Some(handle) = &mut self.handle {
             if let Err(e) = handle
                 .await
-                .map_err(anyhow::Error::from)
+                .map_err(|e| {
+                    if e.is_panic() {
+                        std::panic::resume_unwind(e.into_panic());
+                    }
+                    anyhow::Error::from(e)
+                })
                 .and_then(std::convert::identity)
             {
                 tracing::error!(
