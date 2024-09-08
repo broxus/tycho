@@ -539,7 +539,7 @@ impl BlockStorage {
 
     // === GC stuff ===
 
-    #[tracing::instrument(skip_all, fields(mc_seqno))]
+    #[tracing::instrument(skip(self, max_blocks_per_batch))]
     pub async fn remove_outdated_blocks(
         &self,
         mc_seqno: u32,
@@ -591,7 +591,7 @@ impl BlockStorage {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(until_id))]
+    #[tracing::instrument(skip(self))]
     pub async fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
         tracing::info!("started archives GC");
 
@@ -733,7 +733,7 @@ impl BlockStorage {
         archive_id
     }
 
-    #[tracing::instrument(skip_all, fields(archive_id))]
+    #[tracing::instrument(skip(self))]
     fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
@@ -748,6 +748,9 @@ impl BlockStorage {
                 let histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
 
                 tracing::info!("started");
+                let guard = scopeguard::guard((), |_| {
+                    tracing::warn!("cancelled");
+                });
 
                 let raw_block_ids = db
                     .archive_block_ids
@@ -808,6 +811,7 @@ impl BlockStorage {
                 writer.finalize()?;
 
                 // Done
+                _ = scopeguard::ScopeGuard::into_inner(guard);
                 tracing::info!(
                     elapsed = %humantime::format_duration(histogram.finish()),
                     "finished"
@@ -835,7 +839,11 @@ impl CommitArchiveTask {
     async fn finish(&mut self) -> Result<()> {
         // NOTE: Await on reference to make sure that the task is cancel safe
         if let Some(handle) = &mut self.handle {
-            if let Err(e) = handle.await {
+            if let Err(e) = handle
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(std::convert::identity)
+            {
                 tracing::error!(
                     archive_id = self.archive_id,
                     "failed to commit archive: {e:?}"

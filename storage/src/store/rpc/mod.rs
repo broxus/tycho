@@ -302,12 +302,7 @@ impl RpcStorage {
         .await?
     }
 
-    #[tracing::instrument(
-        level = "info",
-        name = "remove_old_transactions",
-        skip_all,
-        fields(min_lt)
-    )]
+    #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]
     pub async fn remove_old_transactions(&self, min_lt: u64) -> Result<()> {
         const ITEMS_PER_BATCH: usize = 100000;
 
