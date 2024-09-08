@@ -114,12 +114,12 @@ async fn test_queue() -> anyhow::Result<()> {
     let stored_objects = vec![
         create_stored_object(
             1,
-            "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
         )
         .await?,
         create_stored_object(
             2,
-            "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
         )
         .await?,
         create_stored_object(
@@ -129,12 +129,12 @@ async fn test_queue() -> anyhow::Result<()> {
         .await?,
         create_stored_object(
             4,
-            "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
         )
         .await?,
         create_stored_object(
             5,
-            "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
         )
         .await?,
     ];
@@ -214,7 +214,7 @@ async fn test_queue() -> anyhow::Result<()> {
         ),
     );
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1)).await;
+    let iterators = queue.iterator(&ranges, ShardIdent::new_full(-1)).await;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     iterator_manager.next().ok();

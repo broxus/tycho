@@ -80,13 +80,13 @@ impl ShardIterator {
             }
 
             let value = self.iterator.value().context("Failed to get value")?;
-            let dest_workchain = value[0] as i32;
+            let dest_workchain = value[0] as i8;
             let dest_prefix = u64::from_be_bytes(
                 value[1..9]
                     .try_into()
                     .context("Failed to deserialize destination prefix")?,
             );
-            let short_addr = ShortAddr::new(dest_workchain, dest_prefix);
+            let short_addr = ShortAddr::new(dest_workchain as i32, dest_prefix);
 
             return if self.receiver.contains_address(&short_addr) {
                 Ok(Some(IterResult::Value(&value[9..])))
