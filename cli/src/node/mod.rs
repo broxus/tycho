@@ -674,14 +674,14 @@ impl Node {
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
         // TODO: add to block_strider later
-        let _archive_block_provider = ArchiveBlockProvider::new(
+        let archive_block_provider = ArchiveBlockProvider::new(
             self.blockchain_rpc_client.clone(),
             self.storage.clone(),
             self.archive_block_provider_config.clone(),
         );
 
         let block_strider = BlockStrider::builder()
-            .with_provider(activate_collator.chain((
+            .with_provider(archive_block_provider.chain(activate_collator).chain((
                 blockchain_block_provider,
                 storage_block_provider,
                 collator_block_provider,
