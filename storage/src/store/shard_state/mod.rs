@@ -13,9 +13,8 @@ use weedb::rocksdb;
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateRaw;
 use crate::db::*;
-use crate::models::BlockHandle;
+use crate::store::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage};
 use crate::util::*;
-use crate::{BlockFlags, BlockHandleStorage, BlockStorage};
 
 mod cell_storage;
 mod entries_buffer;

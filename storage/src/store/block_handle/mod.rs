@@ -3,10 +3,18 @@ use std::sync::Arc;
 use everscale_types::models::BlockId;
 use tycho_block_util::block::ShardHeights;
 use tycho_block_util::state::is_persistent_state;
+use tycho_util::FastDashMap;
 
+pub(crate) use self::handle::BlockDataGuard;
+pub use self::handle::{BlockHandle, WeakBlockHandle};
+pub use self::meta::{BlockFlags, BlockMeta, LoadedBlockMeta, NewBlockMeta};
 use crate::db::*;
-use crate::models::*;
 use crate::util::*;
+
+mod handle;
+mod meta;
+
+type BlockHandleCache = FastDashMap<BlockId, WeakBlockHandle>;
 
 pub struct BlockHandleStorage {
     db: BaseDb,
@@ -124,10 +132,15 @@ impl BlockHandleStorage {
     pub fn store_handle(&self, handle: &BlockHandle) {
         let id = handle.id();
 
-        self.db
-            .block_handles
-            .insert(id.root_hash.as_slice(), handle.meta().to_vec())
-            .unwrap();
+        {
+            // NOTE: Acquire a lock to sync handle meta update.
+            let _handle_guard = handle.storage_mutex().lock();
+
+            self.db
+                .block_handles
+                .insert(id.root_hash.as_slice(), handle.meta().to_vec())
+                .unwrap();
+        }
 
         if handle.is_key_block() {
             self.db

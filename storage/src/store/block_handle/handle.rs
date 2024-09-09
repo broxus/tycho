@@ -1,12 +1,9 @@
 use std::sync::{Arc, Weak};
 
 use everscale_types::models::*;
-use tokio::sync::RwLock;
-use tycho_util::FastDashMap;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
-use super::{BlockFlags, BlockMeta};
-
-pub type BlockHandleCache = FastDashMap<BlockId, WeakBlockHandle>;
+use super::{BlockFlags, BlockHandleCache, BlockMeta};
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -31,16 +28,23 @@ pub struct BlockHandle {
 }
 
 impl BlockHandle {
-    pub fn new(id: &BlockId, meta: BlockMeta, cache: Arc<BlockHandleCache>) -> Self {
+    pub(crate) fn new(id: &BlockId, meta: BlockMeta, cache: Arc<BlockHandleCache>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 id: *id,
                 meta,
+                storage_mutex: Default::default(),
                 block_data_lock: Default::default(),
                 proof_data_block: Default::default(),
                 queue_diff_data_lock: Default::default(),
                 cache,
             }),
+        }
+    }
+
+    pub fn downgrade(&self) -> WeakBlockHandle {
+        WeakBlockHandle {
+            inner: Arc::downgrade(&self.inner),
         }
     }
 
@@ -59,18 +63,6 @@ impl BlockHandle {
 
     pub fn is_applied(&self) -> bool {
         self.inner.meta.flags().contains(BlockFlags::IS_APPLIED)
-    }
-
-    pub fn block_data_lock(&self) -> &RwLock<()> {
-        &self.inner.block_data_lock
-    }
-
-    pub fn proof_data_lock(&self) -> &RwLock<()> {
-        &self.inner.proof_data_block
-    }
-
-    pub fn queue_diff_data_lock(&self) -> &RwLock<()> {
-        &self.inner.queue_diff_data_lock
     }
 
     pub fn has_data(&self) -> bool {
@@ -115,17 +107,27 @@ impl BlockHandle {
         }
     }
 
-    pub fn set_mc_ref_seqno(&self, mc_seqno: u32) -> bool {
+    pub(crate) fn storage_mutex(&self) -> &parking_lot::Mutex<()> {
+        &self.inner.storage_mutex
+    }
+
+    pub(crate) fn block_data_lock(&self) -> &BlockDataLock {
+        &self.inner.block_data_lock
+    }
+
+    pub(crate) fn proof_data_lock(&self) -> &BlockDataLock {
+        &self.inner.proof_data_block
+    }
+
+    pub(crate) fn queue_diff_data_lock(&self) -> &BlockDataLock {
+        &self.inner.queue_diff_data_lock
+    }
+
+    pub(crate) fn set_mc_ref_seqno(&self, mc_seqno: u32) -> bool {
         match self.meta().set_mc_ref_seqno(mc_seqno) {
             0 => true,
             prev_seqno if prev_seqno == mc_seqno => false,
             _ => panic!("mc ref seqno already set"),
-        }
-    }
-
-    pub fn downgrade(&self) -> WeakBlockHandle {
-        WeakBlockHandle {
-            inner: Arc::downgrade(&self.inner),
         }
     }
 }
@@ -152,9 +154,10 @@ unsafe impl arc_swap::RefCnt for BlockHandle {
 pub struct Inner {
     id: BlockId,
     meta: BlockMeta,
-    block_data_lock: RwLock<()>,
-    proof_data_block: RwLock<()>,
-    queue_diff_data_lock: RwLock<()>,
+    storage_mutex: parking_lot::Mutex<()>,
+    block_data_lock: BlockDataLock,
+    proof_data_block: BlockDataLock,
+    queue_diff_data_lock: BlockDataLock,
     cache: Arc<BlockHandleCache>,
 }
 
@@ -164,3 +167,44 @@ impl Drop for Inner {
             .remove_if(&self.id, |_, weak| weak.strong_count() == 0);
     }
 }
+
+pub(crate) struct BlockDataLock {
+    semaphore: Semaphore,
+}
+
+impl BlockDataLock {
+    const fn new() -> Self {
+        Self {
+            semaphore: Semaphore::const_new(MAX_READS as usize),
+        }
+    }
+
+    pub async fn read(&self) -> BlockDataGuard<'_> {
+        BlockDataGuard(self.semaphore.acquire().await.unwrap_or_else(|_| {
+            // The semaphore was closed. but, we never explicitly close it.
+            unreachable!()
+        }))
+    }
+
+    pub async fn write(&self) -> BlockDataGuard<'_> {
+        BlockDataGuard(
+            self.semaphore
+                .acquire_many(MAX_READS)
+                .await
+                .unwrap_or_else(|_| {
+                    // The semaphore was closed. but, we never explicitly close it.
+                    unreachable!()
+                }),
+        )
+    }
+}
+
+impl Default for BlockDataLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct BlockDataGuard<'a>(#[allow(unused)] SemaphorePermit<'a>);
+
+const MAX_READS: u32 = u32::MAX >> 3;

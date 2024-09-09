@@ -28,9 +28,11 @@ use tycho_util::FastHashSet;
 use weedb::rocksdb;
 
 use crate::db::*;
-use crate::models::*;
 use crate::util::*;
-use crate::{BlockConnectionStorage, BlockHandleStorage, HandleCreationStatus};
+use crate::{
+    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
+    HandleCreationStatus, NewBlockMeta,
+};
 
 pub struct BlockStorage {
     db: BaseDb,
@@ -433,34 +435,40 @@ impl BlockStorage {
         let archive_id = self.prepare_archive_id(handle);
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
-        // 0. Create transaction
-        let mut batch = rocksdb::WriteBatch::default();
-        // 1. Append archive block id
-        batch.merge_cf(&archive_block_ids_cf, archive_id_bytes, &block_id_bytes);
-        // 2. Update block handle meta
-        if handle.meta().add_flags(BlockFlags::IS_ARCHIVED) {
-            batch.put_cf(
-                &handle_cf,
-                block_id.root_hash.as_slice(),
-                handle.meta().to_vec(),
-            );
+        {
+            // 0. Create transaction
+            let mut batch = rocksdb::WriteBatch::default();
+
+            // NOTE: Acquire a lock to sync handle meta update.
+            let _handle_guard = handle.storage_mutex().lock();
+
+            // 1. Append archive block id
+            batch.merge_cf(&archive_block_ids_cf, archive_id_bytes, &block_id_bytes);
+            // 2. Update block handle meta
+            if handle.meta().add_flags(BlockFlags::IS_ARCHIVED) {
+                batch.put_cf(
+                    &handle_cf,
+                    block_id.root_hash.as_slice(),
+                    handle.meta().to_vec(),
+                );
+            }
+            // 3.1. Store info that new archive was started
+            if archive_id.is_new {
+                let mut key = [0u8; tables::Archives::KEY_LEN];
+                key[..4].copy_from_slice(&archive_id_bytes);
+                key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
+                batch.put_cf(&chunks_cf, key, []);
+            }
+            // 3.2. Store info that archive commit is in progress
+            if let Some(to_commit) = archive_id.to_commit {
+                let mut key = [0u8; tables::Archives::KEY_LEN];
+                key[..4].copy_from_slice(&to_commit.to_be_bytes());
+                key[4..].copy_from_slice(&ARCHIVE_TO_COMMIT_MAGIC.to_be_bytes());
+                batch.put_cf(&chunks_cf, key, []);
+            }
+            // 4. Execute transaction
+            self.db.rocksdb().write(batch)?;
         }
-        // 3.1. Store info that new archive was started
-        if archive_id.is_new {
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&archive_id_bytes);
-            key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
-            batch.put_cf(&chunks_cf, key, []);
-        }
-        // 3.2. Store info that archive commit is in progress
-        if let Some(to_commit) = archive_id.to_commit {
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&to_commit.to_be_bytes());
-            key[4..].copy_from_slice(&ARCHIVE_TO_COMMIT_MAGIC.to_be_bytes());
-            batch.put_cf(&chunks_cf, key, []);
-        }
-        // 4. Execute transaction
-        self.db.rocksdb().write(batch)?;
 
         tracing::debug!(block_id = %handle.id(), "saved block id into archive");
         // Block will be removed after blocks gc
@@ -691,7 +699,7 @@ impl BlockStorage {
 
         let key = entry_key(id.block_id.borrow(), id.ty);
         match self.db.package_entries.get(key)? {
-            Some(data) => Ok(BlockContentsLock { _lock: lock, data }),
+            Some(data) => Ok(FullBlockDataGuard { _lock: lock, data }),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
     }
@@ -1154,12 +1162,12 @@ pub struct BlockGcStats {
     pub total_entries_removed: usize,
 }
 
-struct BlockContentsLock<'a> {
-    _lock: tokio::sync::RwLockReadGuard<'a, ()>,
+struct FullBlockDataGuard<'a> {
+    _lock: BlockDataGuard<'a>,
     data: rocksdb::DBPinnableSlice<'a>,
 }
 
-impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
+impl<'a> AsRef<[u8]> for FullBlockDataGuard<'a> {
     fn as_ref(&self) -> &[u8] {
         self.data.as_ref()
     }
