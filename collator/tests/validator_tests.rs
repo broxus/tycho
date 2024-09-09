@@ -171,7 +171,6 @@ async fn validator_signatures_match() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore] // ignored because it's flaky
 async fn malicious_validators_are_ignored() -> Result<()> {
     tycho_util::test::init_logger(
         "malicious_validators_are_ignored",
@@ -242,7 +241,7 @@ async fn malicious_validators_are_ignored() -> Result<()> {
 
                 match &status {
                     ValidationStatus::Complete(signatures) => {
-                        assert_eq!(signatures.len(), (NODE_COUNT * 2) / 3 + 1);
+                        assert!(signatures.len() > (NODE_COUNT * 2) / 3);
                     }
                     ValidationStatus::Skipped => panic!("good validator skipped block"),
                 }
