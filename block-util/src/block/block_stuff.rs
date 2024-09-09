@@ -30,7 +30,7 @@ impl BlockStuff {
 
         let block = Block {
             global_id: 0,
-            info: Lazy::new(&BlockInfo::default()).unwrap(),
+            info: Lazy::new(&block_info).unwrap(),
             value_flow: Lazy::new(&ValueFlow::default()).unwrap(),
             state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
             out_msg_queue_updates: OutMsgQueueUpdates {
