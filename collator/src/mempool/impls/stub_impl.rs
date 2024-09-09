@@ -26,9 +26,12 @@ pub struct MempoolAdapterStubImpl {
 }
 
 impl MempoolAdapterStubImpl {
-    pub fn with_stub_externals(listener: Arc<dyn MempoolEventListener>) -> Arc<Self> {
+    pub fn with_stub_externals(
+        listener: Arc<dyn MempoolEventListener>,
+        now: Option<u64>,
+    ) -> Arc<Self> {
         Self::with_generator(listener, |a| {
-            tokio::spawn(Self::stub_externals_generator(a));
+            tokio::spawn(Self::stub_externals_generator(a, now));
             Ok(())
         })
         .unwrap()
@@ -69,7 +72,7 @@ impl MempoolAdapterStubImpl {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn stub_externals_generator(self: Arc<Self>) {
+    async fn stub_externals_generator(self: Arc<Self>, now: Option<u64>) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
         defer! {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
@@ -82,7 +85,14 @@ impl MempoolAdapterStubImpl {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let anchor = make_stub_anchor(anchor_id);
+            let mut anchor = make_stub_anchor(anchor_id);
+
+            if let Some(now) = now {
+                anchor.chain_time += now;
+            }
+
+            let anchor = Arc::new(anchor);
+
             self.anchors_cache.write().insert(anchor_id, anchor.clone());
 
             tracing::debug!(
@@ -349,7 +359,7 @@ pub(crate) fn make_empty_anchor(id: MempoolAnchorId, chain_time: u64) -> Arc<Mem
     })
 }
 
-pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> Arc<MempoolAnchor> {
+pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> MempoolAnchor {
     let chain_time = id as u64 * 1736 % 1000000000;
 
     let externals_count = (chain_time % 10) as u32;
@@ -383,12 +393,12 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> Arc<MempoolAnchor> {
         externals.push(Arc::new(ExternalMessage { cell, info }));
     }
 
-    Arc::new(MempoolAnchor {
+    MempoolAnchor {
         id,
         author: PeerId(Default::default()),
         chain_time,
         externals,
-    })
+    }
 }
 
 pub(crate) fn make_anchor_from_file(
@@ -450,7 +460,7 @@ mod tests {
         tycho_util::test::init_logger("test_stub_anchors_generator", "trace");
 
         let adapter =
-            MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener));
+            MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
 
         // try get existing anchor by id
         let opt_anchor = adapter.get_anchor_by_id(3).await?;

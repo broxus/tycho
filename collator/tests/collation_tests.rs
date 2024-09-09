@@ -52,9 +52,8 @@ impl StateSubscriber for StrangeBlockProvider {
     }
 }
 
-/// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --ignored --nocapture`
-#[tokio::test]
-#[ignore]
+/// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_collation_process_on_stubs() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_collation_process_on_stubs", "debug");
@@ -110,12 +109,17 @@ async fn test_collation_process_on_stubs() {
     let queue = queue_factory.create();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
     let manager = CollationManager::start(
         node_1_keypair.clone(),
         config,
         Arc::new(message_queue_adapter),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
-        MempoolAdapterStubImpl::with_stub_externals,
+        |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
         ValidatorStdImpl::new(
             validator_network,
             node_1_keypair.clone(),
