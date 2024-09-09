@@ -36,7 +36,7 @@ impl BlockProvider for StorageBlockProvider {
         Box::pin(async {
             let block_storage = self.storage.block_storage();
             match block_storage
-                .wait_for_block(block_id_relation.block_id())
+                .wait_for_block(&block_id_relation.block_id)
                 .await
             {
                 Ok(block) => Some(Ok(block)),

@@ -14,16 +14,6 @@ pub struct BlockIdRelation {
     pub block_id: BlockId,
 }
 
-impl BlockIdRelation {
-    pub fn mc_block_id(&self) -> &BlockId {
-        &self.mc_block_id
-    }
-
-    pub fn block_id(&self) -> &BlockId {
-        &self.block_id
-    }
-}
-
 impl Display for BlockIdRelation {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(

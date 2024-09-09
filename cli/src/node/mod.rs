@@ -698,7 +698,7 @@ impl BlockProvider for CollatorBlockProvider {
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        self.adapter.wait_for_block(block_id_relation.block_id())
+        self.adapter.wait_for_block(&block_id_relation.block_id)
     }
 }
 

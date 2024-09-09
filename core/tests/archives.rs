@@ -35,8 +35,7 @@ pub struct ArchiveProvider {
 
 impl ArchiveProvider {
     async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
-        let (block, proof, diff) = match self.archive.get_entry_by_id(block_id_relation.block_id())
-        {
+        let (block, proof, diff) = match self.archive.get_entry_by_id(&block_id_relation.block_id) {
             Ok(entry) => entry,
             Err(e) => return Some(Err(e.into())),
         };

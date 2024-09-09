@@ -5,6 +5,7 @@ use anyhow::Result;
 use everscale_crypto::ed25519;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
+use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
@@ -38,9 +39,9 @@ impl BlockProvider for StrangeBlockProvider {
         self.adapter.wait_for_block(prev_block_id)
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, block_id: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         tracing::info!("Get block: {:?}", block_id);
-        self.adapter.wait_for_block(block_id)
+        self.adapter.wait_for_block(&block_id.block_id)
     }
 }
 

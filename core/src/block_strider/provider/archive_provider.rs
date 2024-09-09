@@ -130,7 +130,7 @@ impl ArchiveBlockProvider {
             let mut fallback = Some(&this.prev_known_archive);
 
             while let Some(a) = &archive {
-                match a.get_entry_by_id(block_id_relation.block_id()) {
+                match a.get_entry_by_id(&block_id_relation.block_id) {
                     // Successfully found the block and proof
                     Ok(entry) => break 'found entry,
                     // Block not found in the archive so try the fallback archive
