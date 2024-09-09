@@ -3598,6 +3598,7 @@ dependencies = [
  "dashmap",
  "everscale-types",
  "fdlimit",
+ "futures-util",
  "humantime",
  "libc",
  "metrics",

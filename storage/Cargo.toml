@@ -47,12 +47,14 @@ tycho-util = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytesize = { workspace = true }
+futures-util = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
-tycho-util = { workspace = true, features = ["test"] }
+tycho-block-util = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
+tycho-util = { workspace = true, features = ["test"] }
 
 [features]
 test = ["dep:tempfile"]

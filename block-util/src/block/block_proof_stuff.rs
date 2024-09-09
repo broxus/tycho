@@ -18,6 +18,55 @@ pub struct BlockProofStuff {
 }
 
 impl BlockProofStuff {
+    #[cfg(any(test, feature = "test"))]
+    pub fn new_empty(block_id: &BlockId) -> Self {
+        use everscale_types::merkle::MerkleUpdate;
+
+        struct AlwaysInclude;
+
+        impl MerkleFilter for AlwaysInclude {
+            fn check(&self, _: &HashBytes) -> FilterAction {
+                FilterAction::Include
+            }
+        }
+
+        let block_info = BlockInfo {
+            shard: block_id.shard,
+            seqno: block_id.seqno,
+            ..Default::default()
+        };
+
+        let block = Block {
+            global_id: 0,
+            info: Lazy::new(&block_info).unwrap(),
+            value_flow: Lazy::new(&ValueFlow::default()).unwrap(),
+            state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
+            out_msg_queue_updates: OutMsgQueueUpdates {
+                diff_hash: Default::default(),
+            },
+            extra: Lazy::new(&BlockExtra::default()).unwrap(),
+        };
+
+        let root = CellBuilder::build_from(&block).unwrap();
+        let root = MerkleProofBuilder::new(root.as_ref(), AlwaysInclude)
+            .build()
+            .unwrap();
+
+        Self::from_proof(Box::new(BlockProof {
+            proof_for: *block_id,
+            root: CellBuilder::build_from(root).unwrap(),
+            signatures: block_id.is_masterchain().then_some(BlockSignatures {
+                validator_info: ValidatorBaseInfo {
+                    validator_list_hash_short: 0,
+                    catchain_seqno: 0,
+                },
+                signature_count: 0,
+                total_weight: 0,
+                signatures: Dict::new(),
+            }),
+        }))
+    }
+
     pub fn from_proof(proof: Box<BlockProof>) -> Self {
         Self {
             inner: Arc::new(Inner { proof }),

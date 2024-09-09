@@ -1226,10 +1226,111 @@ enum BlockStorageError {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
+
     use ahash::HashMap;
+    use tycho_block_util::archive::WithArchiveData;
+    use tycho_util::futures::JoinTask;
 
     use super::*;
     use crate::{BlockConnection, Storage};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_store_data() -> Result<()> {
+        let (storage, _tmp_dir) = Storage::new_temp().await?;
+
+        let shard = ShardIdent::MASTERCHAIN;
+        for seqno in 0..1000 {
+            let block = BlockStuff::new_empty(shard, seqno);
+            let block = {
+                let data = BocRepr::encode_rayon(block.as_ref()).unwrap();
+                WithArchiveData::new(block, data)
+            };
+            let block_id = block.id();
+
+            let proof = BlockProofStuff::new_empty(block_id);
+            let proof = {
+                let data = BocRepr::encode_rayon(proof.as_ref()).unwrap();
+                WithArchiveData::new(proof, data)
+            };
+
+            let queue_diff = QueueDiffStuff::builder(shard, seqno, &HashBytes::ZERO)
+                .serialize()
+                .build(block_id);
+
+            let block_meta = NewBlockMeta {
+                is_key_block: seqno == 0,
+                gen_utime: 0,
+                mc_ref_seqno: Some(seqno),
+            };
+
+            let store_block_data = || {
+                let storage = storage.clone();
+                JoinTask::new(async move {
+                    let res = storage
+                        .block_storage()
+                        .store_block_data(&block, &block.archive_data, block_meta)
+                        .await?;
+
+                    Ok::<_, anyhow::Error>(res.handle)
+                })
+            };
+
+            let store_proof_and_queue = || {
+                let storage = storage.clone();
+                let proof = proof.clone();
+                let queue_diff = queue_diff.clone();
+                JoinTask::new(async move {
+                    if rand::random::<bool>() {
+                        tokio::task::yield_now().await;
+                    }
+
+                    let res = storage
+                        .block_storage()
+                        .store_block_proof(&proof, MaybeExistingHandle::New(block_meta))
+                        .await?;
+
+                    if rand::random::<bool>() {
+                        tokio::task::yield_now().await;
+                    }
+
+                    let res = storage
+                        .block_storage()
+                        .store_queue_diff(&queue_diff, res.handle.into())
+                        .await?;
+
+                    if rand::random::<bool>() {
+                        tokio::task::yield_now().await;
+                    }
+
+                    Ok::<_, anyhow::Error>(res.handle)
+                })
+            };
+
+            let (data_res, proof_and_queue_res) = async move {
+                let data_fut = pin!(store_block_data());
+                let proof_and_queue_fut = pin!(async {
+                    tokio::select! {
+                        left = store_proof_and_queue() => left,
+                        right = store_proof_and_queue() => right,
+                    }
+                });
+
+                let (data, other) = futures_util::future::join(data_fut, proof_and_queue_fut).await;
+
+                Ok::<_, anyhow::Error>((data?, other?))
+            }
+            .await?;
+
+            assert!(std::ptr::addr_eq(
+                arc_swap::RefCnt::as_ptr(&data_res),
+                arc_swap::RefCnt::as_ptr(&proof_and_queue_res)
+            ));
+            assert!(data_res.has_all_block_parts());
+        }
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn blocks_gc() -> Result<()> {
@@ -1248,7 +1349,11 @@ mod tests {
         let block_handles = storage.block_handle_storage();
         let block_connections = storage.block_connection_storage();
 
-        let mut shard_block_ids = HashMap::<ShardIdent, Vec<BlockId>>::default();
+        let mut shard_block_ids: std::collections::HashMap<
+            ShardIdent,
+            Vec<BlockId>,
+            ahash::RandomState,
+        > = HashMap::<ShardIdent, Vec<BlockId>>::default();
 
         for shard in [ShardIdent::MASTERCHAIN, ShardIdent::BASECHAIN] {
             let entry = shard_block_ids.entry(shard).or_default();
