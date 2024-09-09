@@ -130,7 +130,7 @@ impl StarterInner {
                                 let (handle, data) = res.split();
                                 handle.accept();
 
-                                if ids_tx.send(data.block_ids).is_err() {
+                                if ids_tx.send((block_id, data.block_ids)).is_err() {
                                     tracing::debug!(%block_id, "stop downloading next key blocks");
                                     return;
                                 }
@@ -149,7 +149,9 @@ impl StarterInner {
         // Start getting next key blocks
         tasks_tx.send(*prev_key_block.handle().id())?;
 
-        while let Some(ids) = ids_rx.recv().await {
+        let mut retry_counter = KeyBlocksRetryCounter::default();
+
+        while let Some((requested_key_block, ids)) = ids_rx.recv().await {
             let stream = futures_util::stream::iter(ids)
                 .map(|block_id| {
                     JoinTask::new(download_block_proof_task(
@@ -162,6 +164,12 @@ impl StarterInner {
 
             let mut proofs = stream.collect::<Vec<_>>().await;
             proofs.sort_by_key(|x| *x.id());
+
+            if proofs.is_empty() {
+                // Retry getting next key block ids
+                tasks_tx.send(requested_key_block)?;
+                retry_counter.update(&requested_key_block, 1);
+            }
 
             // Save previous key block to restart downloading in case of error
             let fallback_key_block = prev_key_block.clone();
@@ -222,7 +230,9 @@ impl StarterInner {
             );
 
             // Prevent infinite key blocks loading
-            if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime {
+            if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime
+                && retry_counter.is_retries_exceeded()
+            {
                 break;
             }
         }
@@ -747,6 +757,42 @@ impl InitBlock {
             }
         }
         .map(move |_| res)
+    }
+}
+
+/// Retry counter for empty list of Key Blocks
+#[derive(Default)]
+struct KeyBlocksRetryCounter {
+    block_id: BlockId,
+    count: usize,
+}
+
+impl KeyBlocksRetryCounter {
+    const MAX_RETRIES: usize = 10;
+
+    /// Updates the retry counter for a given `BlockId`
+    fn update(&mut self, block_id: &BlockId, increment: usize) {
+        if self.block_id == *block_id {
+            self.increment_count(increment);
+        } else {
+            self.reset(block_id);
+        }
+    }
+
+    /// Increments the retry count
+    fn increment_count(&mut self, increment: usize) {
+        self.count += increment;
+    }
+
+    /// Resets the counter for a new `BlockId`
+    fn reset(&mut self, new_block_id: &BlockId) {
+        self.count = 0;
+        self.block_id = *new_block_id;
+    }
+
+    /// Checks if the number of retries has exceeded the maximum allowed
+    fn is_retries_exceeded(&self) -> bool {
+        self.count > Self::MAX_RETRIES
     }
 }
 
