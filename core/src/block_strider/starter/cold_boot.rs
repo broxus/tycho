@@ -168,7 +168,7 @@ impl StarterInner {
             if proofs.is_empty() {
                 // Retry getting next key block ids
                 tasks_tx.send(requested_key_block)?;
-                retry_counter.update(&requested_key_block, 1);
+                retry_counter.update(&requested_key_block);
             }
 
             // Save previous key block to restart downloading in case of error
@@ -231,7 +231,7 @@ impl StarterInner {
 
             // Prevent infinite key blocks loading
             if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime
-                && retry_counter.is_retries_exceeded()
+                || retry_counter.is_retries_exceeded()
             {
                 break;
             }
@@ -771,23 +771,18 @@ impl KeyBlocksRetryCounter {
     const MAX_RETRIES: usize = 10;
 
     /// Updates the retry counter for a given `BlockId`
-    fn update(&mut self, block_id: &BlockId, increment: usize) {
+    fn update(&mut self, block_id: &BlockId) {
         if self.block_id == *block_id {
-            self.increment_count(increment);
+            self.count += 1;
+            tracing::warn!(
+                attempt = self.count,
+                ?block_id,
+                "retry getting next key block ids"
+            );
         } else {
-            self.reset(block_id);
+            self.count = 0;
+            self.block_id = *block_id;
         }
-    }
-
-    /// Increments the retry count
-    fn increment_count(&mut self, increment: usize) {
-        self.count += increment;
-    }
-
-    /// Resets the counter for a new `BlockId`
-    fn reset(&mut self, new_block_id: &BlockId) {
-        self.count = 0;
-        self.block_id = *new_block_id;
     }
 
     /// Checks if the number of retries has exceeded the maximum allowed
