@@ -109,10 +109,7 @@ async fn test_collation_process_on_stubs() {
     let queue = queue_factory.create();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now = tycho_util::time::now_millis();
 
     let manager = CollationManager::start(
         node_1_keypair.clone(),
