@@ -27,7 +27,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let tracker = MinRefMcStateTracker::default();
 
     // master state
-    let master_bytes = include_bytes!("../../test/test_state_2_master.boc");
+    let master_bytes = include_bytes!("../../test/test_state_3_master.boc");
     let master_file_hash = Boc::file_hash_blake(master_bytes);
     let master_root = Boc::decode(master_bytes)?;
     let master_root_hash = *master_root.repr_hash();
