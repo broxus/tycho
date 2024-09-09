@@ -210,10 +210,7 @@ async fn test_import_init_anchors() {
     let last_block_chain_time = 0;
     let shard_id = ShardIdent::default();
     let mut anchors_cache = AnchorsCache::default();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now = tycho_util::time::now_millis();
 
     let adapter =
         MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), Some(now));
