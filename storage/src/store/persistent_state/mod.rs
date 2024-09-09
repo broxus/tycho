@@ -13,8 +13,7 @@ use tycho_block_util::block::KEY_BLOCK_UTIME_STEP;
 use tycho_util::sync::rayon_run;
 
 use crate::db::{BaseDb, FileDb, MappedFile};
-use crate::models::BlockHandle;
-use crate::store::BlockHandleStorage;
+use crate::store::{BlockHandle, BlockHandleStorage};
 
 mod state_writer;
 

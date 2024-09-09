@@ -6,8 +6,7 @@ use arc_swap::ArcSwapAny;
 use tokio::sync::{watch, Notify};
 use tycho_block_util::state::*;
 
-use crate::models::BlockHandle;
-use crate::BlockHandleStorage;
+use crate::store::{BlockHandle, BlockHandleStorage};
 
 pub struct PersistentStateKeeper {
     block_handle_storage: Arc<BlockHandleStorage>,

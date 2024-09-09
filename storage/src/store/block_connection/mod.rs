@@ -2,7 +2,7 @@ use everscale_types::models::*;
 use parking_lot::RwLock;
 
 use crate::db::*;
-use crate::models::*;
+use crate::store::{BlockFlags, BlockHandle};
 use crate::util::*;
 
 /// Stores relations between blocks
@@ -82,6 +82,10 @@ impl BlockConnectionStorage {
         if handle.is_key_block() {
             let mut write_batch = weedb::rocksdb::WriteBatch::default();
 
+            // NOTE: Acquire a lock to sync handle meta update.
+            // NOTE: Acquire it after creating a write batch to reduce the lock time a bit.
+            let _handle_guard = handle.storage_mutex().lock();
+
             write_batch.put_cf(
                 &self.db.block_handles.cf(),
                 id.root_hash.as_slice(),
@@ -95,6 +99,9 @@ impl BlockConnectionStorage {
 
             self.db.rocksdb().write(write_batch).unwrap();
         } else {
+            // NOTE: Acquire a lock to sync handle meta update.
+            let _handle_guard = handle.storage_mutex().lock();
+
             self.db
                 .block_handles
                 .insert(id.root_hash.as_slice(), handle.meta().to_vec())
