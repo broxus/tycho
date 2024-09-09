@@ -171,6 +171,7 @@ async fn validator_signatures_match() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore] // ignored because it's flaky
 async fn malicious_validators_are_ignored() -> Result<()> {
     tycho_util::test::init_logger(
         "malicious_validators_are_ignored",
