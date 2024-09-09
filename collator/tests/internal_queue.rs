@@ -91,7 +91,7 @@ async fn create_stored_object(key: u64, dest_str: &str) -> anyhow::Result<Arc<St
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue() -> anyhow::Result<()> {
-    let storage = prepare_test_storage().await?;
+    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory: SessionStateImplFactory {
@@ -237,7 +237,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_clear() -> anyhow::Result<()> {
-    let storage = prepare_test_storage().await?;
+    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory: SessionStateImplFactory {

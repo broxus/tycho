@@ -69,7 +69,7 @@ async fn test_add_and_get_block() {
 
 #[tokio::test]
 async fn test_storage_accessors() {
-    let storage = prepare_test_storage().await.unwrap();
+    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
@@ -141,7 +141,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel", "debug");
 
-    let storage = prepare_test_storage().await.unwrap();
+    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 

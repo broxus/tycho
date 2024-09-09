@@ -58,7 +58,7 @@ async fn test_collation_process_on_stubs() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_collation_process_on_stubs", "debug");
 
-    let storage = prepare_test_storage().await.unwrap();
+    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
@@ -163,7 +163,7 @@ async fn test_collation_process_on_stubs() {
             println!();
             println!("Ctrl-C received, shutting down the test");
         },
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(20)) => {
             println!();
             println!("Test timeout elapsed");
         }
