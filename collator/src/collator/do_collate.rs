@@ -1256,6 +1256,7 @@ impl CollatorStdImpl {
                 proof_funds,
                 #[cfg(feature = "block-creator-stats")]
                 creators,
+                min_int_processed_to_lt,
             } = top_block_descr;
 
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
@@ -1289,18 +1290,26 @@ impl CollatorStdImpl {
             // update shards and collation data
             collation_data_builder.update_shards_max_end_lt(new_shard_descr.end_lt);
 
-            match collation_data_builder.shards_mut()?.entry(shard_id) {
+            let top_sc_block_updated = match collation_data_builder.shards_mut()?.entry(shard_id) {
                 hash_map::Entry::Vacant(entry) => {
                     // if shard was not present before consider top shard block was changed
                     new_shard_descr.top_sc_block_updated = true;
                     entry.insert(new_shard_descr);
+                    true
                 }
                 hash_map::Entry::Occupied(mut entry) => {
                     // set flag if top shard block seqno changed
                     let prev_shard_descr = entry.get();
-                    new_shard_descr.top_sc_block_updated =
-                        prev_shard_descr.seqno != new_shard_descr.seqno;
+                    let top_sc_block_updated = prev_shard_descr.seqno != new_shard_descr.seqno;
+                    new_shard_descr.top_sc_block_updated = top_sc_block_updated;
                     entry.insert(new_shard_descr);
+                    top_sc_block_updated
+                }
+            };
+
+            if top_sc_block_updated {
+                if let Some(min_int_processed_to_lt) = min_int_processed_to_lt {
+                    collation_data_builder.set_min_int_processed_to_lt(min_int_processed_to_lt);
                 }
             }
 

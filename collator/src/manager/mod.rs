@@ -1812,6 +1812,11 @@ where
     ) -> Result<Vec<TopBlockDescription>> {
         let mut result = vec![];
         for mut shard_cache in self.blocks_cache.shards.iter_mut() {
+            let value_flow = std::mem::take(&mut shard_cache.value_flow);
+            let proof_funds = std::mem::take(&mut shard_cache.proof_funds);
+            #[cfg(feature = "block-creator-stats")]
+            let creators = std::mem::take(&mut shard_cache.creators);
+
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if (entry.containing_mc_block.is_none()
                     || entry.containing_mc_block == Some(next_mc_block_id_short))
@@ -1827,10 +1832,11 @@ where
                         block_id: *entry.block_id(),
                         block_info: candidate_stuff.candidate.block.load_info()?,
                         processed_to_anchor_id: candidate_stuff.candidate.processed_to_anchor_id,
-                        value_flow: std::mem::take(&mut shard_cache.value_flow),
-                        proof_funds: std::mem::take(&mut shard_cache.proof_funds),
+                        value_flow,
+                        proof_funds,
                         #[cfg(feature = "block-creator-stats")]
-                        creators: std::mem::take(&mut shard_cache.creators),
+                        creators,
+                        min_int_processed_to_lt: candidate_stuff.candidate.min_int_processed_to,
                     });
                     break;
                 }

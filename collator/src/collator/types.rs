@@ -191,6 +191,7 @@ pub(super) struct BlockCollationDataBuilder {
     pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
     pub top_shard_blocks_ids: Vec<BlockId>,
+    pub min_int_processed_to_lt: Option<u64>,
 }
 
 impl BlockCollationDataBuilder {
@@ -216,6 +217,7 @@ impl BlockCollationDataBuilder {
             rand_seed,
             #[cfg(feature = "block-creator-stats")]
             block_create_count: Default::default(),
+            min_int_processed_to_lt: Default::default(),
             created_by,
             shards: None,
             top_shard_blocks_ids: vec![],
@@ -234,6 +236,14 @@ impl BlockCollationDataBuilder {
     pub fn update_shards_max_end_lt(&mut self, val: u64) {
         if val > self.shards_max_end_lt {
             self.shards_max_end_lt = val;
+        }
+    }
+
+    pub fn set_min_int_processed_to_lt(&mut self, val: u64) {
+        if let Some(min_lt) = self.min_int_processed_to_lt.as_mut() {
+            *min_lt = std::cmp::min(*min_lt, val);
+        } else {
+            self.min_int_processed_to_lt = Some(val);
         }
     }
 
@@ -279,6 +289,7 @@ impl BlockCollationDataBuilder {
             top_shard_blocks_ids: self.top_shard_blocks_ids,
             shard_fees: self.shard_fees,
             value_flow: self.value_flow,
+            min_shards_int_processed_to: self.min_int_processed_to_lt,
             block_limit,
             start_lt,
             next_lt: start_lt + 1,
@@ -314,6 +325,8 @@ pub(super) struct BlockCollationData {
     pub gen_utime_ms: u16,
 
     pub tx_count: u64,
+
+    pub min_shards_int_processed_to: Option<u64>,
 
     pub block_limit: BlockLimitStats,
 

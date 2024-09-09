@@ -246,6 +246,7 @@ pub struct BlockCandidate {
     pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
+    pub min_int_processed_to: Option<u64>,
     pub processed_to_anchor_id: u32,
     pub fees_collected: CurrencyCollection,
     pub funds_created: CurrencyCollection,
@@ -366,6 +367,7 @@ pub struct TopBlockDescription {
     pub proof_funds: ProofFunds,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
+    pub min_int_processed_to_lt: Option<u64>,
 }
 
 #[derive(Debug)]
