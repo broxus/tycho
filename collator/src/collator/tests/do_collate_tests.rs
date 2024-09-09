@@ -23,7 +23,7 @@ fn test_read_next_externals() {
         if anchor_id % 4 != 0 {
             continue;
         }
-        let anchor = make_stub_anchor(anchor_id);
+        let anchor = Arc::new(make_stub_anchor(anchor_id));
         let our_exts_count = anchor.count_externals_for(&shard_id, 0);
         let has_externals = our_exts_count > 0;
         if has_externals {
@@ -210,8 +210,13 @@ async fn test_import_init_anchors() {
     let last_block_chain_time = 0;
     let shard_id = ShardIdent::default();
     let mut anchors_cache = AnchorsCache::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
 
-    let adapter = MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener));
+    let adapter =
+        MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), Some(now));
     let mpool_adapter = adapter;
 
     // =========================================================================
