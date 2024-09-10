@@ -139,6 +139,8 @@ impl StarterInner {
                             }
                             Err(e) => {
                                 tracing::warn!(%block_id, "failed to download key block ids: {e:?}");
+
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         }
                     }
@@ -149,8 +151,7 @@ impl StarterInner {
         // Start getting next key blocks
         tasks_tx.send(*prev_key_block.handle().id())?;
 
-        let mut retry_counter = KeyBlocksRetryCounter::default();
-
+        let mut retry_counter = 0usize;
         while let Some((requested_key_block, ids)) = ids_rx.recv().await {
             let stream = futures_util::stream::iter(ids)
                 .map(|block_id| {
@@ -164,12 +165,6 @@ impl StarterInner {
 
             let mut proofs = stream.collect::<Vec<_>>().await;
             proofs.sort_by_key(|x| *x.id());
-
-            if proofs.is_empty() {
-                // Retry getting next key block ids
-                tasks_tx.send(requested_key_block)?;
-                retry_counter.update(&requested_key_block);
-            }
 
             // Save previous key block to restart downloading in case of error
             let fallback_key_block = prev_key_block.clone();
@@ -222,6 +217,7 @@ impl StarterInner {
 
             let now_utime = now_sec();
             let last_utime = prev_key_block.handle().meta().gen_utime();
+            let no_proofs = proofs_len == 0;
 
             tracing::debug!(
                 now_utime,
@@ -231,9 +227,21 @@ impl StarterInner {
 
             // Prevent infinite key blocks loading
             if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime
-                || retry_counter.is_retries_exceeded()
+                || no_proofs && retry_counter >= MAX_EMPTY_PROOF_RETRIES
             {
                 break;
+            }
+
+            if no_proofs {
+                retry_counter += 1;
+                tracing::warn!(
+                    attempt = retry_counter,
+                    block_id = %requested_key_block,
+                    "retry getting next key block ids"
+                );
+                tasks_tx.send(requested_key_block)?;
+            } else {
+                retry_counter = 0;
             }
         }
 
@@ -760,35 +768,5 @@ impl InitBlock {
     }
 }
 
-/// Retry counter for empty list of Key Blocks
-#[derive(Default)]
-struct KeyBlocksRetryCounter {
-    block_id: BlockId,
-    count: usize,
-}
-
-impl KeyBlocksRetryCounter {
-    const MAX_RETRIES: usize = 10;
-
-    /// Updates the retry counter for a given `BlockId`
-    fn update(&mut self, block_id: &BlockId) {
-        if self.block_id == *block_id {
-            self.count += 1;
-            tracing::warn!(
-                attempt = self.count,
-                ?block_id,
-                "retry getting next key block ids"
-            );
-        } else {
-            self.count = 0;
-            self.block_id = *block_id;
-        }
-    }
-
-    /// Checks if the number of retries has exceeded the maximum allowed
-    fn is_retries_exceeded(&self) -> bool {
-        self.count > Self::MAX_RETRIES
-    }
-}
-
 const INITIAL_SYNC_TIME_SECONDS: u32 = 300;
+const MAX_EMPTY_PROOF_RETRIES: usize = 10;
