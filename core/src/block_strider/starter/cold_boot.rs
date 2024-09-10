@@ -130,7 +130,7 @@ impl StarterInner {
                                 let (handle, data) = res.split();
                                 handle.accept();
 
-                                if ids_tx.send(data.block_ids).is_err() {
+                                if ids_tx.send((block_id, data.block_ids)).is_err() {
                                     tracing::debug!(%block_id, "stop downloading next key blocks");
                                     return;
                                 }
@@ -139,6 +139,8 @@ impl StarterInner {
                             }
                             Err(e) => {
                                 tracing::warn!(%block_id, "failed to download key block ids: {e:?}");
+
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         }
                     }
@@ -149,7 +151,8 @@ impl StarterInner {
         // Start getting next key blocks
         tasks_tx.send(*prev_key_block.handle().id())?;
 
-        while let Some(ids) = ids_rx.recv().await {
+        let mut retry_counter = 0usize;
+        while let Some((requested_key_block, ids)) = ids_rx.recv().await {
             let stream = futures_util::stream::iter(ids)
                 .map(|block_id| {
                     JoinTask::new(download_block_proof_task(
@@ -214,6 +217,7 @@ impl StarterInner {
 
             let now_utime = now_sec();
             let last_utime = prev_key_block.handle().meta().gen_utime();
+            let no_proofs = proofs_len == 0;
 
             tracing::debug!(
                 now_utime,
@@ -222,8 +226,22 @@ impl StarterInner {
             );
 
             // Prevent infinite key blocks loading
-            if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime {
+            if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime
+                || no_proofs && retry_counter >= MAX_EMPTY_PROOF_RETRIES
+            {
                 break;
+            }
+
+            if no_proofs {
+                retry_counter += 1;
+                tracing::warn!(
+                    attempt = retry_counter,
+                    block_id = %requested_key_block,
+                    "retry getting next key block ids"
+                );
+                tasks_tx.send(requested_key_block)?;
+            } else {
+                retry_counter = 0;
             }
         }
 
@@ -751,3 +769,4 @@ impl InitBlock {
 }
 
 const INITIAL_SYNC_TIME_SECONDS: u32 = 300;
+const MAX_EMPTY_PROOF_RETRIES: usize = 10;
