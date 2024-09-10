@@ -131,7 +131,6 @@ bitflags::bitflags! {
         const HAS_PREV_2 = 1 << 9;
         const IS_APPLIED = 1 << 10;
         const IS_KEY_BLOCK = 1 << 11;
-        const IS_ARCHIVED = 1 << 12;
 
         // Composite flags
         const HAS_ALL_BLOCK_PARTS =
