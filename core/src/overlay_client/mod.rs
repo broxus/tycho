@@ -6,7 +6,7 @@ use bytes::Bytes;
 use tokio::task::AbortHandle;
 use tycho_network::{Network, PublicOverlay, Request};
 
-pub use self::config::PublicOverlayClientConfig;
+pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats};
 pub use self::neighbours::Neighbours;
 pub use self::validators::{Validator, ValidatorSetPeers, ValidatorsResolver};
@@ -31,20 +31,23 @@ impl PublicOverlayClient {
     ) -> Self {
         let ttl = overlay.entry_ttl_sec();
 
+        let neighbors_config = &config.neighbors;
+
         let entries = overlay
             .read_entries()
-            .choose_multiple(&mut rand::thread_rng(), config.max_neighbours)
+            .choose_multiple(&mut rand::thread_rng(), neighbors_config.keep)
             .map(|entry_data| {
                 Neighbour::new(
                     entry_data.entry.peer_id,
                     entry_data.expires_at(ttl),
-                    &config.default_roundtrip,
+                    &neighbors_config.default_roundtrip,
                 )
             })
             .collect::<Vec<_>>();
 
-        let neighbours = Neighbours::new(entries, config.max_neighbours);
-        let subscriber = ValidatorsResolver::new(overlay.peer_resolver().clone());
+        let neighbours = Neighbours::new(entries, config.neighbors.keep);
+        let subscriber =
+            ValidatorsResolver::new(network.clone(), overlay.clone(), config.validators.clone());
 
         let mut res = Inner {
             network,
@@ -80,8 +83,9 @@ impl PublicOverlayClient {
         self.inner.validators_resolver.update_validator_set(vset);
     }
 
-    pub fn get_random_validators(&self, amount: usize) -> Vec<Validator> {
-        self.inner.validators_resolver.choose_multiple(amount)
+    // Returns a small random subset of possibly alive validators.
+    pub fn get_broadcast_targets(&self) -> Arc<Vec<Validator>> {
+        self.inner.validators_resolver.get_broadcast_targets()
     }
 
     pub fn validators_resolver(&self) -> &ValidatorsResolver {
@@ -184,7 +188,7 @@ impl Inner {
         let req = Request::from_tl(overlay::Ping);
 
         // Start pinging neighbours
-        let mut interval = tokio::time::interval(self.config.neighbours_ping_interval);
+        let mut interval = tokio::time::interval(self.config.neighbors.ping_interval);
         loop {
             interval.tick().await;
 
@@ -220,13 +224,13 @@ impl Inner {
 
     async fn update_neighbours_task(self) {
         let ttl = self.overlay.entry_ttl_sec();
-        let max_neighbours = self.config.max_neighbours;
-        let default_roundtrip = self.config.default_roundtrip;
+        let max_neighbours = self.config.neighbors.keep;
+        let default_roundtrip = self.config.neighbors.default_roundtrip;
 
         let mut overlay_peers_added = self.overlay.entires_added().notified();
         let mut overlay_peer_count = self.overlay.read_entries().len();
 
-        let mut interval = tokio::time::interval(self.config.neighbours_update_interval);
+        let mut interval = tokio::time::interval(self.config.neighbors.update_interval);
 
         loop {
             if overlay_peer_count < max_neighbours {
