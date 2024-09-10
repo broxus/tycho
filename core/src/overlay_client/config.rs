@@ -3,26 +3,35 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct PublicOverlayClientConfig {
+    /// Ordinary peers used to download blocks and other stuff.
+    pub neighbors: NeighborsConfig,
+    /// Validators as broadcast targets.
+    pub validators: ValidatorsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NeighborsConfig {
     /// The interval at which neighbours list is updated.
     ///
     /// Default: 2 minutes.
     #[serde(with = "serde_helpers::humantime")]
-    pub neighbours_update_interval: Duration,
+    pub update_interval: Duration,
 
     /// The interval at which current neighbours are pinged.
     ///
     /// Default: 30 seconds.
     #[serde(with = "serde_helpers::humantime")]
-    pub neighbours_ping_interval: Duration,
+    pub ping_interval: Duration,
 
     /// The maximum number of neighbours to keep.
     ///
     /// Default: 5.
-    pub max_neighbours: usize,
+    pub keep: usize,
 
     /// The maximum number of ping tasks to run concurrently.
     ///
@@ -36,14 +45,51 @@ pub struct PublicOverlayClientConfig {
     pub default_roundtrip: Duration,
 }
 
-impl Default for PublicOverlayClientConfig {
+impl Default for NeighborsConfig {
     fn default() -> Self {
         Self {
-            neighbours_update_interval: Duration::from_secs(2 * 60),
-            neighbours_ping_interval: Duration::from_secs(30),
-            max_neighbours: 5,
+            update_interval: Duration::from_secs(2 * 60),
+            ping_interval: Duration::from_secs(30),
+            keep: 5,
             max_ping_tasks: 5,
             default_roundtrip: Duration::from_millis(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidatorsConfig {
+    /// The interval at which target validators are pinged.
+    ///
+    /// Default: 60 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub ping_interval: Duration,
+
+    /// The timeout for a ping.
+    ///
+    /// Default: 1 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub ping_timeout: Duration,
+
+    /// The maximum number of validators to keep.
+    ///
+    /// Default: 5.
+    pub keep: usize,
+
+    /// The maximum number of ping tasks to run concurrently.
+    ///
+    /// Default: 5.
+    pub max_ping_tasks: usize,
+}
+
+impl Default for ValidatorsConfig {
+    fn default() -> Self {
+        Self {
+            ping_interval: Duration::from_secs(60),
+            ping_timeout: Duration::from_secs(1),
+            keep: 5,
+            max_ping_tasks: 5,
         }
     }
 }

@@ -34,6 +34,7 @@ pub trait SelfBroadcastListener: Send + Sync + 'static {
 pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
     mandatory_fields: MandatoryFields,
     broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
+    broadcast_timeout: Duration,
 }
 
 impl BlockchainRpcClientBuilder<PublicOverlayClient> {
@@ -42,6 +43,7 @@ impl BlockchainRpcClientBuilder<PublicOverlayClient> {
             inner: Arc::new(Inner {
                 overlay_client: self.mandatory_fields,
                 broadcast_listener: self.broadcast_listener,
+                broadcast_timeout: self.broadcast_timeout,
             }),
         }
     }
@@ -55,6 +57,7 @@ impl BlockchainRpcClientBuilder<()> {
         BlockchainRpcClientBuilder {
             mandatory_fields: client,
             broadcast_listener: self.broadcast_listener,
+            broadcast_timeout: self.broadcast_timeout,
         }
     }
 }
@@ -62,6 +65,11 @@ impl BlockchainRpcClientBuilder<()> {
 impl<T> BlockchainRpcClientBuilder<T> {
     pub fn with_self_broadcast_listener(mut self, listener: impl SelfBroadcastListener) -> Self {
         self.broadcast_listener = Some(Box::new(listener));
+        self
+    }
+
+    pub fn with_broadcast_timeout(mut self, timeout: Duration) -> Self {
+        self.broadcast_timeout = timeout;
         self
     }
 }
@@ -77,6 +85,7 @@ impl BlockchainRpcClient {
         BlockchainRpcClientBuilder {
             mandatory_fields: (),
             broadcast_listener: None,
+            broadcast_timeout: Duration::from_secs(1),
         }
     }
 
@@ -88,7 +97,10 @@ impl BlockchainRpcClient {
         &self.inner.overlay_client
     }
 
-    pub async fn broadcast_external_message(&self, message: &[u8]) {
+    // TODO: Add rate limiting
+    /// Broadcasts a message to the current targets list and
+    /// returns the number of peers the message was delivered to.
+    pub async fn broadcast_external_message(&self, message: &[u8]) -> usize {
         struct ExternalMessage<'a> {
             data: &'a [u8],
         }
@@ -114,26 +126,40 @@ impl BlockchainRpcClient {
             l.handle_message(Bytes::copy_from_slice(message)).await;
         }
 
-        // TODO: Add a proper target selector
-        // TODO: Add rate limiting
-        const TARGET_COUNT: usize = 5;
-
-        let req = Request::from_tl(ExternalMessage { data: message });
-
         let client = &self.inner.overlay_client;
 
-        let validator_subset = client.get_random_validators(TARGET_COUNT);
+        let mut delivered_to = 0;
+
+        let targets = client.get_broadcast_targets();
+        let request = Request::from_tl(ExternalMessage { data: message });
 
         let mut futures = FuturesUnordered::new();
-        for val in validator_subset {
-            futures.push(client.send_to_validator(val, req.clone()));
+        for validator in targets.as_ref() {
+            let client = client.clone();
+            let validator = validator.clone();
+            let request = request.clone();
+            futures.push(JoinTask::new(async move {
+                client.send_to_validator(validator, request).await
+            }));
         }
 
-        while let Some(res) = futures.next().await {
-            if let Err(e) = res {
-                tracing::warn!("failed to broadcast external message: {e}");
+        tokio::time::timeout(self.inner.broadcast_timeout, async {
+            while let Some(res) = futures.next().await {
+                if let Err(e) = res {
+                    tracing::warn!("failed to broadcast external message: {e}");
+                } else {
+                    delivered_to += 1;
+                }
             }
+        })
+        .await
+        .ok();
+
+        if delivered_to == 0 {
+            tracing::debug!("message was not delivered to any peer");
         }
+
+        delivered_to
     }
 
     pub async fn get_next_key_block_ids(
@@ -528,6 +554,7 @@ impl BlockchainRpcClient {
 struct Inner {
     overlay_client: PublicOverlayClient,
     broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
+    broadcast_timeout: Duration,
 }
 
 #[derive(Clone)]

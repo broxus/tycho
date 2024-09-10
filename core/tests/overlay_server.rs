@@ -206,18 +206,19 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
         .map(|x| *x.dht_client.network().peer_id())
         .collect::<Vec<PeerId>>();
 
-    tracing::info!("broadcasting messages...");
     for node in &nodes {
         node.force_update_validators(peers.clone());
+    }
 
-        // NOTE: Yield is required to wait until validators are resolved.
-        //       Might fail on multi-threaded tests. In that cast use sleep.
-        tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
+    tracing::info!("broadcasting messages...");
+    for node in &nodes {
         node.blockchain_client
             .broadcast_external_message(b"hello world")
             .await;
     }
+
     let total_received = broadcast_counter.total_received.load(Ordering::Acquire);
 
     assert!(total_received > nodes.len() * 4 && total_received <= nodes.len() * 5);

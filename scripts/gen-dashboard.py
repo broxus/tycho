@@ -475,6 +475,23 @@ def core_blockchain_rpc() -> RowPanel:
         "getPersistentStatePart",
     ]
     metrics = [
+        create_gauge_panel(
+            "tycho_core_overlay_client_validators_to_resolve",
+            "Number of validators to resolve",
+        ),
+        create_gauge_panel(
+            "tycho_core_overlay_client_resolved_validators",
+            "Number of resolved validators",
+        ),
+        create_gauge_panel(
+            "tycho_core_overlay_client_target_validators",
+            "Number of selected broadcast targets",
+        ),
+        create_heatmap_panel(
+            "tycho_core_overlay_client_validator_ping_time", "Time to ping validator"
+        ),
+    ]
+    metrics += [
         create_heatmap_panel(
             "tycho_blockchain_rpc_method_time",
             f"Blockchain RPC {method} time",
