@@ -791,10 +791,10 @@ where
                 // save mc block latest chain time
                 self.renew_mc_block_latest_chain_time(candidate_chain_time);
 
-                // enqueue next master block collation if there are pending internals
-                if collation_result.has_pending_internals {
+                // enqueue next master block collation if there are unprocessed messages
+                if collation_result.has_unprocessed_messages {
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        "There are pending messages in master queue, enqueue next collation",
+                        "There are unprocessed messages in buffer or queue in master, enqueue next collation",
                     );
                     self.enqueue_mc_block_collation(
                         collation_result.prev_mc_block_id.get_next_id_short(),

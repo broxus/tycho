@@ -26,7 +26,15 @@ pub(super) struct WorkingState {
     pub mc_data: Arc<McData>,
     pub prev_shard_data: Box<PrevData>,
     pub usage_tree: UsageTree,
-    pub has_pending_internals: Option<bool>,
+    pub has_unprocessed_messages: Option<bool>,
+    pub msgs_buffer: Option<MessagesBuffer>,
+}
+
+impl WorkingState {
+    pub fn take_msgs_buffer(mut self) -> (Self, MessagesBuffer) {
+        let msgs_buffer = self.msgs_buffer.take().unwrap();
+        (self, msgs_buffer)
+    }
 }
 
 pub(super) struct PrevData {
@@ -1109,6 +1117,34 @@ impl std::fmt::Display for DisplayMessageGroups<'_> {
             m.entry(k, &DisplayMessageGroup(v));
         }
         m.finish()
+    }
+}
+
+pub(super) struct MessagesBuffer {
+    /// messages groups
+    pub message_groups: MessageGroups,
+    /// current read positions of internals mq iterator
+    /// when it is not finished
+    pub current_iterator_positions: Option<FastHashMap<ShardIdent, QueueKey>>,
+}
+
+impl MessagesBuffer {
+    pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit").set(group_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
+            .set(group_vert_size as f64);
+        Self {
+            message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
+            current_iterator_positions: Some(FastHashMap::default()),
+        }
+    }
+
+    pub fn message_groups_offset(&self) -> u32 {
+        self.message_groups.offset()
+    }
+
+    pub fn has_pending_messages(&self) -> bool {
+        !self.message_groups.is_empty()
     }
 }
 
