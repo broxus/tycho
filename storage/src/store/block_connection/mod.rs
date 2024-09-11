@@ -79,15 +79,14 @@ impl BlockConnectionStorage {
 
         let id = handle.id();
 
+        let block_handle_cf = &self.db.block_handles.cf();
+        let rocksdb = self.db.rocksdb();
+
         if handle.is_key_block() {
             let mut write_batch = weedb::rocksdb::WriteBatch::default();
 
-            // NOTE: Acquire a lock to sync handle meta update.
-            // NOTE: Acquire it after creating a write batch to reduce the lock time a bit.
-            let _handle_guard = handle.storage_mutex().lock();
-
-            write_batch.put_cf(
-                &self.db.block_handles.cf(),
+            write_batch.merge_cf(
+                block_handle_cf,
                 id.root_hash.as_slice(),
                 handle.meta().to_vec(),
             );
@@ -97,16 +96,16 @@ impl BlockConnectionStorage {
                 id.to_vec(),
             );
 
-            self.db.rocksdb().write(write_batch).unwrap();
+            rocksdb.write(write_batch)
         } else {
-            // NOTE: Acquire a lock to sync handle meta update.
-            let _handle_guard = handle.storage_mutex().lock();
-
-            self.db
-                .block_handles
-                .insert(id.root_hash.as_slice(), handle.meta().to_vec())
-                .unwrap();
+            rocksdb.merge_cf_opt(
+                block_handle_cf,
+                id.root_hash.as_slice(),
+                handle.meta().to_vec(),
+                self.db.block_handles.write_config(),
+            )
         }
+        .unwrap();
     }
 
     pub fn load_connection(

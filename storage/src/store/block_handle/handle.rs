@@ -33,7 +33,6 @@ impl BlockHandle {
             inner: Arc::new(Inner {
                 id: *id,
                 meta,
-                storage_mutex: Default::default(),
                 block_data_lock: Default::default(),
                 proof_data_block: Default::default(),
                 queue_diff_data_lock: Default::default(),
@@ -66,26 +65,31 @@ impl BlockHandle {
     }
 
     pub fn has_data(&self) -> bool {
-        self.inner.meta.flags().contains(BlockFlags::HAS_DATA)
+        const MASK: u32 = BlockFlags::HAS_DATA.bits() | BlockFlags::IS_REMOVED.bits();
+        let flags = self.inner.meta.flags();
+        flags.bits() & MASK == BlockFlags::HAS_DATA.bits()
     }
 
     pub fn has_proof(&self) -> bool {
-        self.inner.meta.flags().contains(BlockFlags::HAS_PROOF)
+        const MASK: u32 = BlockFlags::HAS_PROOF.bits() | BlockFlags::IS_REMOVED.bits();
+        let flags = self.inner.meta.flags();
+        flags.bits() & MASK == BlockFlags::HAS_PROOF.bits()
     }
 
     pub fn has_queue_diff(&self) -> bool {
-        self.inner.meta.flags().contains(BlockFlags::HAS_QUEUE_DIFF)
+        const MASK: u32 = BlockFlags::HAS_QUEUE_DIFF.bits() | BlockFlags::IS_REMOVED.bits();
+        let flags = self.inner.meta.flags();
+        flags.bits() & MASK == BlockFlags::HAS_QUEUE_DIFF.bits()
+    }
+
+    pub fn has_all_block_parts(&self) -> bool {
+        const MASK: u32 = BlockFlags::HAS_ALL_BLOCK_PARTS.bits() | BlockFlags::IS_REMOVED.bits();
+        let flags = self.inner.meta.flags();
+        flags.bits() & MASK == BlockFlags::HAS_ALL_BLOCK_PARTS.bits()
     }
 
     pub fn has_next1(&self) -> bool {
         self.inner.meta.flags().contains(BlockFlags::HAS_NEXT_1)
-    }
-
-    pub fn has_all_block_parts(&self) -> bool {
-        self.inner
-            .meta
-            .flags()
-            .contains(BlockFlags::HAS_ALL_BLOCK_PARTS)
     }
 
     pub fn has_state(&self) -> bool {
@@ -105,10 +109,6 @@ impl BlockHandle {
         } else {
             self.inner.meta.mc_ref_seqno()
         }
-    }
-
-    pub(crate) fn storage_mutex(&self) -> &parking_lot::Mutex<()> {
-        &self.inner.storage_mutex
     }
 
     pub(crate) fn block_data_lock(&self) -> &BlockDataLock {
@@ -154,7 +154,6 @@ unsafe impl arc_swap::RefCnt for BlockHandle {
 pub struct Inner {
     id: BlockId,
     meta: BlockMeta,
-    storage_mutex: parking_lot::Mutex<()>,
     block_data_lock: BlockDataLock,
     proof_data_block: BlockDataLock,
     queue_diff_data_lock: BlockDataLock,
