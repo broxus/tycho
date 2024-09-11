@@ -1041,6 +1041,12 @@ def collator_time_metrics() -> RowPanel:
             UNITS.SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_do_collate_ext_msgs_time_diff",
+            "Externals time diff",
+            UNITS.SECONDS,
+            labels=['workchain=~"$workchain"'],
+        ),
         create_heatmap_panel(
             "tycho_do_collate_from_prev_block_time",
             "Time elapsed from prev block",

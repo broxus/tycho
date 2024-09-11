@@ -18,7 +18,8 @@ use tycho_util::FastHashMap;
 
 use super::execution_manager::{ExecutionManager, MessagesExecutor};
 use super::types::{
-    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, SpecialOrigin, WorkingState,
+    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, ParsedExternals, SpecialOrigin,
+    WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
@@ -475,6 +476,8 @@ impl CollatorStdImpl {
         let apply_queue_diff_elapsed = update_queue_task.await?;
         exec_manager.set_current_iterator_positions(current_positions);
 
+        let last_read_to_anchor_chain_time = exec_manager.get_last_read_to_anchor_chain_time();
+
         // return updated exec manager into collator
         self.set_exec_manager(exec_manager);
 
@@ -578,6 +581,12 @@ impl CollatorStdImpl {
             diff_time
         };
 
+        // block time diff from min ext chain time
+        let diff_time =
+            now_millis() as i64 - last_read_to_anchor_chain_time.unwrap_or(next_chain_time) as i64;
+        metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
+            .set(diff_time as f64 / 1000.0);
+
         tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -652,7 +661,7 @@ impl CollatorStdImpl {
         count: usize,
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
-    ) -> Result<Vec<Box<ParsedMessage>>> {
+    ) -> Result<ParsedExternals> {
         Self::read_next_externals_impl(
             &self.shard_id,
             &mut self.anchors_cache,
@@ -669,7 +678,7 @@ impl CollatorStdImpl {
         count: usize,
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
-    ) -> Result<Vec<Box<ParsedMessage>>> {
+    ) -> Result<ParsedExternals> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -706,6 +715,7 @@ impl CollatorStdImpl {
 
         let mut anchors_cache_fully_read = false;
         let mut next_idx = 0;
+        let mut last_read_to_anchor_chain_time = None;
         loop {
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 "try read next anchor from cache",
@@ -742,6 +752,7 @@ impl CollatorStdImpl {
                     read_from_anchor_opt = Some(key);
                 }
                 last_read_anchor_opt = Some(key);
+                last_read_to_anchor_chain_time = Some(entry.1.chain_time);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "last_read_anchor: {}", key,
                 );
@@ -812,6 +823,7 @@ impl CollatorStdImpl {
                 // get iterator and read messages
                 let mut msgs_collected_from_last_anchor = 0;
                 let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
+
                 for ext_msg in iter {
                     tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "read ext_msg dst: {}", ext_msg.info.dst,
@@ -912,7 +924,10 @@ impl CollatorStdImpl {
 
         anchors_cache.set_has_pending_externals(has_pending_externals);
 
-        Ok(ext_messages)
+        Ok(ParsedExternals {
+            ext_messages,
+            last_read_to_anchor_chain_time,
+        })
     }
 
     /// Get max LT from masterchain (and shardchain) then calc start LT

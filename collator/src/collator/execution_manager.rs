@@ -23,6 +23,7 @@ use super::types::{
     ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
+use crate::collator::types::ParsedExternals;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -41,6 +42,8 @@ pub(super) struct ExecutionManager {
     ext_messages_reader_started: bool,
     /// flag indicates that should read new messages
     read_new_messages: bool,
+    /// last read to anchor chain time
+    last_read_to_anchor_chain_time: Option<u64>,
     /// internal mq adapter
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     /// current read positions of internals mq iterator
@@ -97,6 +100,7 @@ impl ExecutionManager {
             read_new_messages_total_elapsed: Duration::ZERO,
             read_ext_messages_total_elapsed: Duration::ZERO,
             add_to_message_groups_total_elapsed: Duration::ZERO,
+            last_read_to_anchor_chain_time: None,
         }
     }
 
@@ -110,6 +114,10 @@ impl ExecutionManager {
 
     pub fn message_groups_offset(&self) -> u32 {
         self.message_groups.offset()
+    }
+
+    pub fn get_last_read_to_anchor_chain_time(&self) -> Option<u64> {
+        self.last_read_to_anchor_chain_time
     }
 
     pub fn has_pending_messages_in_buffer(&self) -> bool {
@@ -194,6 +202,9 @@ impl ExecutionManager {
                         );
                     }
                 }
+
+                self.last_read_to_anchor_chain_time = None;
+
                 self.message_groups.reset();
             }
         }
@@ -296,17 +307,21 @@ impl ExecutionManager {
 
             let mut externals_read_count = 0;
             loop {
-                let ext_msgs = collator.read_next_externals(
+                let ParsedExternals {
+                    ext_messages,
+                    last_read_to_anchor_chain_time,
+                } = collator.read_next_externals(
                     3,
                     collation_data,
                     self.ext_messages_reader_started,
                 )?;
                 self.ext_messages_reader_started = true;
+                self.last_read_to_anchor_chain_time = last_read_to_anchor_chain_time;
 
-                externals_read_count += ext_msgs.len() as u64;
+                externals_read_count += ext_messages.len() as u64;
 
                 let timer_add_to_groups = std::time::Instant::now();
-                for ext_msg in ext_msgs {
+                for ext_msg in ext_messages {
                     self.message_groups.add_message(ext_msg);
                 }
                 add_to_groups_elapsed += timer_add_to_groups.elapsed();
@@ -358,6 +373,8 @@ impl ExecutionManager {
                         );
                     }
                 }
+
+                self.last_read_to_anchor_chain_time = None;
 
                 self.message_groups.reset();
 

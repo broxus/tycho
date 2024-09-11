@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
-use crate::collator::types::BlockCollationDataBuilder;
+use crate::collator::types::{BlockCollationDataBuilder, ParsedExternals};
 use crate::collator::{AnchorsCache, CollatorStdImpl};
 use crate::mempool::{
     make_stub_anchor, MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener,
@@ -59,7 +59,10 @@ fn test_read_next_externals() {
     )
     .build(0, DEFAULT_BLOCK_LIMITS);
 
-    let externals = CollatorStdImpl::read_next_externals_impl(
+    let ParsedExternals {
+        ext_messages: externals,
+        ..
+    } = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
         3,
@@ -81,7 +84,10 @@ fn test_read_next_externals() {
         read_to: (12, 1),
     });
 
-    let externals = CollatorStdImpl::read_next_externals_impl(
+    let ParsedExternals {
+        ext_messages: externals,
+        ..
+    } = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
         3,
@@ -98,7 +104,10 @@ fn test_read_next_externals() {
     let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 8);
 
-    let externals = CollatorStdImpl::read_next_externals_impl(
+    let ParsedExternals {
+        ext_messages: externals,
+        ..
+    } = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
         10,
@@ -115,7 +124,10 @@ fn test_read_next_externals() {
     let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 12);
 
-    let externals = CollatorStdImpl::read_next_externals_impl(
+    let ParsedExternals {
+        ext_messages: externals,
+        ..
+    } = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
         20,
@@ -132,7 +144,10 @@ fn test_read_next_externals() {
     let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 24);
 
-    let externals = CollatorStdImpl::read_next_externals_impl(
+    let ParsedExternals {
+        ext_messages: externals,
+        ..
+    } = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
         3,
@@ -150,7 +165,10 @@ fn test_read_next_externals() {
     assert!(kv.is_none());
 
     // all anchors removed from cache, should not fail on empty cache
-    let externals = CollatorStdImpl::read_next_externals_impl(
+    let ParsedExternals {
+        ext_messages: externals,
+        ..
+    } = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
         &mut anchors_cache,
         3,
