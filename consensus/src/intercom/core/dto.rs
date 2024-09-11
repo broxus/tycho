@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use anyhow::anyhow;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -11,7 +13,16 @@ use crate::models::{Point, PointId, Round};
 // as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
 // and 1 mapping of 32 (peer_id) to 64 (signature) valuable bytes (evidence);
 // the size of other data is fixed, and estimate is more than enough to handle `Bytes` encoding
-const LARGEST_DATA_BYTES: usize = u16::MAX as usize + MempoolConfig::PAYLOAD_BATCH_BYTES;
+static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
+    // size of BOC of least possible ExtIn message
+    const EXT_IN_BOC_MIN: usize = 48;
+
+    let boc = vec![0_u8; EXT_IN_BOC_MIN];
+    let payload = vec![boc; 1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN];
+    let payload_size = bincode::serialized_size(&payload).expect("cannot happen");
+
+    u16::MAX as usize + payload_size as usize
+});
 
 // broadcast uses simple send_message with () return value
 impl From<&Point> for tycho_network::Request {
@@ -43,7 +54,7 @@ impl TryFrom<&ServiceRequest> for MPQuery {
     type Error = anyhow::Error;
 
     fn try_from(request: &ServiceRequest) -> Result<Self, Self::Error> {
-        if request.body.len() > LARGEST_DATA_BYTES {
+        if request.body.len() > *LARGEST_DATA_BYTES {
             anyhow::bail!("too large request: {} bytes", request.body.len())
         }
         Ok(bincode::deserialize::<MPQuery>(&request.body)?)
@@ -73,7 +84,7 @@ impl TryFrom<&Response> for MPResponse {
     type Error = anyhow::Error;
 
     fn try_from(response: &Response) -> Result<Self, Self::Error> {
-        if response.body.len() > LARGEST_DATA_BYTES {
+        if response.body.len() > *LARGEST_DATA_BYTES {
             anyhow::bail!("too large response: {} bytes", response.body.len())
         }
         match bincode::deserialize::<MPResponse>(&response.body) {
