@@ -21,7 +21,7 @@ pub struct CollationConfig {
 
     #[serde(with = "serde_helpers::humantime")]
     pub mc_block_min_interval: Duration,
-    pub max_mc_block_delta_from_bc_to_await_own: i32,
+    pub min_mc_block_delta_from_bc_to_sync: u32,
     pub max_uncommitted_chain_length: u32,
     pub gas_used_to_import_next_anchor: u64,
 
@@ -35,7 +35,7 @@ impl Default for CollationConfig {
             supported_capabilities: supported_capabilities(),
 
             mc_block_min_interval: Duration::from_millis(2500),
-            max_mc_block_delta_from_bc_to_await_own: 2,
+            min_mc_block_delta_from_bc_to_sync: 3,
 
             max_uncommitted_chain_length: 31,
             gas_used_to_import_next_anchor: 250_000_000u64,

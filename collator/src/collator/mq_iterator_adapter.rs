@@ -206,6 +206,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 ranges_updated = true;
             }
 
+            // TODO: for mc block here we will read internals from shards on previous mc block
+            //      because we use previous mc_data. Needs to pass actual shards descriptions here
+
             // try update shardchains ranges
             for shard in working_state.mc_data.shards.iter() {
                 let (shard_id, shard_descr) = shard?;
