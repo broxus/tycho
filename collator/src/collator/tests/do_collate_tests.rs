@@ -62,7 +62,7 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         ..
-    } = CollatorStdImpl::read_next_externals_impl(
+    } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
         3,
@@ -87,7 +87,7 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         ..
-    } = CollatorStdImpl::read_next_externals_impl(
+    } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
         3,
@@ -107,7 +107,7 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         ..
-    } = CollatorStdImpl::read_next_externals_impl(
+    } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
         10,
@@ -127,7 +127,7 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         ..
-    } = CollatorStdImpl::read_next_externals_impl(
+    } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
         20,
@@ -147,7 +147,7 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         ..
-    } = CollatorStdImpl::read_next_externals_impl(
+    } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
         3,
@@ -168,7 +168,7 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         ..
-    } = CollatorStdImpl::read_next_externals_impl(
+    } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
         3,

@@ -91,8 +91,9 @@ pub struct BlockCollationResult {
     pub candidate: Box<BlockCandidate>,
     pub prev_mc_block_id: BlockId,
     pub mc_data: Option<Arc<McData>>,
-    /// There are unprocessed internals in shard queue after block collation
-    pub has_pending_internals: bool,
+    /// There are unprocessed messages in buffer
+    /// or shard queue after block collation
+    pub has_unprocessed_messages: bool,
 }
 
 /// Processed up to info for externals and internals.
