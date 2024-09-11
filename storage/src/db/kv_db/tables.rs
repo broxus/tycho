@@ -101,6 +101,7 @@ impl ColumnFamilyOptions<Caches> for BlockHandles {
         block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
         block_factory.set_format_version(5);
 
+        opts.set_merge_operator_associative("block_handle_merge", block_handle_merge);
         opts.set_block_based_table_factory(&block_factory);
         optimize_for_point_lookup(opts, caches);
     }
@@ -335,6 +336,26 @@ fn archive_data_merge(
     }
 
     Some(result)
+}
+
+fn block_handle_merge(
+    _: &[u8],
+    current_value: Option<&[u8]>,
+    operands: &MergeOperands,
+) -> Option<Vec<u8>> {
+    let mut value = [0u8; 12];
+    if let Some(current_value) = current_value {
+        value.copy_from_slice(current_value);
+    }
+
+    for operand in operands {
+        assert_eq!(operand.len(), 12);
+        for (a, b) in std::iter::zip(&mut value, operand) {
+            *a |= *b;
+        }
+    }
+
+    Some(value.to_vec())
 }
 
 fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {

@@ -78,11 +78,6 @@ impl BlockMeta {
         self.flags.fetch_or(flags, Ordering::Release) & flags != flags
     }
 
-    pub(crate) fn clear_flags(&self, flags: BlockFlags) {
-        let mask = !((flags.bits() as u64) << BLOCK_FLAGS_OFFSET);
-        self.flags.fetch_and(mask, Ordering::Release);
-    }
-
     pub(crate) fn set_mc_ref_seqno(&self, seqno: u32) -> u32 {
         self.flags.fetch_or(seqno as u64, Ordering::Release) as u32
     }
@@ -132,6 +127,8 @@ bitflags::bitflags! {
         const IS_APPLIED = 1 << 10;
         const IS_KEY_BLOCK = 1 << 11;
 
+        const IS_REMOVED = 1 << 15;
+
         // Composite flags
         const HAS_ALL_BLOCK_PARTS =
             Self::HAS_DATA.bits() | Self::HAS_PROOF.bits() | Self::HAS_QUEUE_DIFF.bits();
@@ -170,7 +167,10 @@ mod tests {
             BlockFlags::HAS_ALL_BLOCK_PARTS | BlockFlags::IS_KEY_BLOCK
         );
 
-        meta.clear_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
-        assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
+        meta.add_flags(BlockFlags::IS_REMOVED);
+        assert_eq!(
+            meta.flags(),
+            BlockFlags::IS_KEY_BLOCK | BlockFlags::HAS_ALL_BLOCK_PARTS | BlockFlags::IS_REMOVED
+        );
     }
 }

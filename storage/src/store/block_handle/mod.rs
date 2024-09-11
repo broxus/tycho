@@ -132,15 +132,15 @@ impl BlockHandleStorage {
     pub fn store_handle(&self, handle: &BlockHandle) {
         let id = handle.id();
 
-        {
-            // NOTE: Acquire a lock to sync handle meta update.
-            let _handle_guard = handle.storage_mutex().lock();
-
-            self.db
-                .block_handles
-                .insert(id.root_hash.as_slice(), handle.meta().to_vec())
-                .unwrap();
-        }
+        self.db
+            .rocksdb()
+            .merge_cf_opt(
+                &self.db.block_handles.cf(),
+                id.root_hash.as_slice(),
+                handle.meta().to_vec(),
+                self.db.block_handles.write_config(),
+            )
+            .unwrap();
 
         if handle.is_key_block() {
             self.db
@@ -271,7 +271,7 @@ impl BlockHandleStorage {
             } else {
                 // Remove all outdated
                 total_removed += 1;
-                value.meta().clear_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
+                value.meta().add_flags(BlockFlags::IS_REMOVED);
                 false
             }
         });
@@ -328,5 +328,73 @@ impl Iterator for KeyBlocksIterator<'_> {
             self.raw_iterator.next();
         }
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use everscale_types::models::ShardIdent;
+
+    use super::*;
+    use crate::Storage;
+
+    #[tokio::test]
+    async fn merge_operator_works() -> anyhow::Result<()> {
+        let (storage, _tmp_dir) = Storage::new_temp().await?;
+
+        let block_handles = storage.block_handle_storage();
+
+        let block_id = BlockId {
+            shard: ShardIdent::BASECHAIN,
+            seqno: 100,
+            ..Default::default()
+        };
+
+        let meta = NewBlockMeta {
+            is_key_block: false,
+            gen_utime: 123,
+            mc_ref_seqno: None,
+        };
+
+        {
+            let (handle, status) = block_handles.create_or_load_handle(&block_id, meta);
+            assert_eq!(status, HandleCreationStatus::Created);
+
+            block_handles.assign_mc_ref_seq_no(&handle, 456);
+            assert_eq!(handle.mc_ref_seqno(), 456);
+            assert!(!handle.is_key_block());
+            assert!(!handle.is_applied());
+
+            let updated = block_handles.set_block_applied(&handle);
+            assert!(updated);
+            assert!(handle.is_applied());
+
+            // Ensure that handles are reused
+            let (handle2, status) = block_handles.create_or_load_handle(&block_id, meta);
+            assert_eq!(status, HandleCreationStatus::Fetched);
+
+            assert_eq!(
+                arc_swap::RefCnt::as_ptr(&handle),
+                arc_swap::RefCnt::as_ptr(&handle2),
+            );
+        }
+
+        // Ensure that the handle is dropped
+        assert!(!block_handles.cache.contains_key(&block_id));
+
+        // Ensure that storage is properly updated
+        {
+            let (handle, status) = block_handles.create_or_load_handle(&block_id, meta);
+            assert_eq!(status, HandleCreationStatus::Fetched);
+
+            assert_eq!(handle.mc_ref_seqno(), 456);
+            assert!(!handle.is_key_block());
+            assert!(handle.is_applied());
+        }
+
+        // Ensure that the handle is dropped
+        assert!(!block_handles.cache.contains_key(&block_id));
+
+        Ok(())
     }
 }
