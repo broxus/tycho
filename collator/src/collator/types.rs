@@ -1223,3 +1223,9 @@ impl AnchorsCache {
         }
     }
 }
+
+pub struct ParsedExternals {
+    #[allow(clippy::vec_box)]
+    pub ext_messages: Vec<Box<ParsedMessage>>,
+    pub last_read_to_anchor_chain_time: Option<u64>,
+}
