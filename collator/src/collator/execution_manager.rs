@@ -19,21 +19,18 @@ use tycho_util::FastHashMap;
 
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
-    AccountId, BlockCollationData, Dequeued, MessageGroup, MessageGroups, ParsedMessage,
-    ShardAccountStuff, WorkingState,
+    AccountId, AnchorsCache, BlockCollationData, Dequeued, MessageGroup, MessagesBuffer,
+    ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::ParsedExternals;
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
 
 /// Execution manager
 pub(super) struct ExecutionManager {
     shard_id: ShardIdent,
-    /// messages groups
-    message_groups: MessageGroups,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
     /// flag indicates that should read ext messages
@@ -44,11 +41,6 @@ pub(super) struct ExecutionManager {
     read_new_messages: bool,
     /// last read to anchor chain time
     last_read_to_anchor_chain_time: Option<u64>,
-    /// internal mq adapter
-    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    /// current read positions of internals mq iterator
-    /// when it is not finished
-    current_iterator_positions: FastHashMap<ShardIdent, QueueKey>,
 
     /// sum total time of reading existing internal messages
     read_existing_messages_total_elapsed: Duration,
@@ -74,28 +66,16 @@ pub(super) struct MessagesExecutor {
 
 impl ExecutionManager {
     /// constructor
-    pub fn new(
-        shard_id: ShardIdent,
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        messages_buffer_limit: usize,
-        group_limit: usize,
-        group_vert_size: usize,
-    ) -> Self {
+    pub fn new(shard_id: ShardIdent, messages_buffer_limit: usize) -> Self {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
             .set(messages_buffer_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit").set(group_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
-            .set(group_vert_size as f64);
 
         Self {
             shard_id,
             messages_buffer_limit,
-            message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
             read_ext_messages: false,
             ext_messages_reader_started: false,
             read_new_messages: false,
-            mq_adapter,
-            current_iterator_positions: Default::default(),
             read_existing_messages_total_elapsed: Duration::ZERO,
             read_new_messages_total_elapsed: Duration::ZERO,
             read_ext_messages_total_elapsed: Duration::ZERO,
@@ -104,41 +84,8 @@ impl ExecutionManager {
         }
     }
 
-    pub fn get_current_iterator_positions(&self) -> FastHashMap<ShardIdent, QueueKey> {
-        self.current_iterator_positions.clone()
-    }
-
-    pub fn set_current_iterator_positions(&mut self, positions: FastHashMap<ShardIdent, QueueKey>) {
-        self.current_iterator_positions = positions;
-    }
-
-    pub fn message_groups_offset(&self) -> u32 {
-        self.message_groups.offset()
-    }
-
     pub fn get_last_read_to_anchor_chain_time(&self) -> Option<u64> {
         self.last_read_to_anchor_chain_time
-    }
-
-    pub fn has_pending_messages_in_buffer(&self) -> bool {
-        !self.message_groups.is_empty()
-    }
-
-    pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter<EnqueuedMessage> {
-        self.read_ext_messages = false;
-        self.read_new_messages = false;
-
-        self.read_existing_messages_total_elapsed = Duration::ZERO;
-        self.read_new_messages_total_elapsed = Duration::ZERO;
-        self.read_ext_messages_total_elapsed = Duration::ZERO;
-        self.add_to_message_groups_total_elapsed = Duration::ZERO;
-
-        let current_iterator_positions = std::mem::take(&mut self.current_iterator_positions);
-        QueueIteratorAdapter::new(
-            self.shard_id,
-            self.mq_adapter.clone(),
-            Some(current_iterator_positions),
-        )
     }
 
     pub fn read_existing_messages_total_elapsed(&self) -> Duration {
@@ -160,7 +107,8 @@ impl ExecutionManager {
     #[tracing::instrument(skip_all)]
     pub async fn get_next_message_group(
         &mut self,
-        collator: &mut CollatorStdImpl,
+        msgs_buffer: &mut MessagesBuffer,
+        anchors_cache: &mut AnchorsCache,
         collation_data: &mut BlockCollationData,
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
         max_new_message_key_to_current_shard: &QueueKey,
@@ -184,11 +132,11 @@ impl ExecutionManager {
 
         // when buffer contains externals from prev collation
         // we should process them all before reading existing internals
-        if self.message_groups.ext_messages_count() > 0 && !self.read_ext_messages {
+        if msgs_buffer.message_groups.ext_messages_count() > 0 && !self.read_ext_messages {
             // just extract message group with externals from buffer
-            group_opt = self.message_groups.extract_first_group();
+            group_opt = msgs_buffer.message_groups.extract_first_group();
 
-            if self.message_groups.is_empty() {
+            if msgs_buffer.message_groups.is_empty() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "all externals from message_groups buffer where processed, will read existing internals"
                 );
@@ -205,7 +153,7 @@ impl ExecutionManager {
 
                 self.last_read_to_anchor_chain_time = None;
 
-                self.message_groups.reset();
+                msgs_buffer.message_groups.reset();
             }
         }
 
@@ -226,26 +174,28 @@ impl ExecutionManager {
                 existing_internals_read_count += 1;
 
                 let timer_add_to_groups = std::time::Instant::now();
-                self.message_groups.add_message(Box::new(ParsedMessage {
-                    info: MsgInfo::Int(int_msg.item.message.info.clone()),
-                    dst_in_current_shard: true,
-                    cell: int_msg.item.message.cell.clone(),
-                    special_origin: None,
-                    dequeued: Some(Dequeued {
-                        same_shard: int_msg.item.source == self.shard_id,
-                    }),
-                }));
+                msgs_buffer
+                    .message_groups
+                    .add_message(Box::new(ParsedMessage {
+                        info: MsgInfo::Int(int_msg.item.message.info.clone()),
+                        dst_in_current_shard: true,
+                        cell: int_msg.item.message.cell.clone(),
+                        special_origin: None,
+                        dequeued: Some(Dequeued {
+                            same_shard: int_msg.item.source == self.shard_id,
+                        }),
+                    }));
                 add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
-                if self.message_groups.messages_count() >= self.messages_buffer_limit {
+                if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "message_groups buffer filled on {}/{}, stop reading existing internals",
-                        self.message_groups.messages_count(), self.messages_buffer_limit,
+                        msgs_buffer.message_groups.messages_count(), self.messages_buffer_limit,
                     );
                     break;
                 }
 
-                if self.message_groups.first_group_is_full() {
+                if msgs_buffer.message_groups.first_group_is_full() {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "first message group is full, stop reading existing internals",
                     );
@@ -257,10 +207,10 @@ impl ExecutionManager {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "existing_internals_read_count={}, buffer int={}, ext={}",
                 existing_internals_read_count,
-                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
+                msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
             );
 
-            group_opt = self.message_groups.extract_first_group();
+            group_opt = msgs_buffer.message_groups.extract_first_group();
 
             self.read_existing_messages_total_elapsed += timer.elapsed();
             self.read_existing_messages_total_elapsed -= add_to_groups_elapsed;
@@ -269,7 +219,8 @@ impl ExecutionManager {
             // when message_groups buffer is empty and no more existing internals in current iterator
             // then set all read messages as processed
             // and try to init iterator for the next available ranges
-            if self.message_groups.is_empty() && mq_iterator_adapter.no_pending_existing_internals()
+            if msgs_buffer.message_groups.is_empty()
+                && mq_iterator_adapter.no_pending_existing_internals()
             {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "message_groups buffer is empty and there are no pending existing internals, \
@@ -285,7 +236,7 @@ impl ExecutionManager {
                     .iterator()
                     .commit(updated_processed_to)?;
 
-                self.message_groups.reset();
+                msgs_buffer.message_groups.reset();
 
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
@@ -310,7 +261,9 @@ impl ExecutionManager {
                 let ParsedExternals {
                     ext_messages,
                     last_read_to_anchor_chain_time,
-                } = collator.read_next_externals(
+                } = CollatorStdImpl::read_next_externals(
+                    &self.shard_id,
+                    anchors_cache,
                     3,
                     collation_data,
                     self.ext_messages_reader_started,
@@ -322,26 +275,26 @@ impl ExecutionManager {
 
                 let timer_add_to_groups = std::time::Instant::now();
                 for ext_msg in ext_messages {
-                    self.message_groups.add_message(ext_msg);
+                    msgs_buffer.message_groups.add_message(ext_msg);
                 }
                 add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
-                if self.message_groups.messages_count() >= self.messages_buffer_limit {
+                if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "message_groups buffer filled on {}/{}, stop reading externals",
-                        self.message_groups.messages_count(), self.messages_buffer_limit,
+                        msgs_buffer.message_groups.messages_count(), self.messages_buffer_limit,
                     );
                     break;
                 }
 
-                if self.message_groups.first_group_is_full() {
+                if msgs_buffer.message_groups.first_group_is_full() {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "first message group is full, stop reading externals",
                     );
                     break;
                 }
 
-                if !collator.anchors_cache.has_pending_externals() {
+                if !anchors_cache.has_pending_externals() {
                     break;
                 }
             }
@@ -350,16 +303,16 @@ impl ExecutionManager {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "externals_read_count={}, buffer int={}, ext={}",
                 externals_read_count,
-                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
+                msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
             );
 
-            group_opt = self.message_groups.extract_first_group();
+            group_opt = msgs_buffer.message_groups.extract_first_group();
 
             self.read_ext_messages_total_elapsed += timer.elapsed();
             self.read_ext_messages_total_elapsed -= add_to_groups_elapsed;
             self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
-            if self.message_groups.is_empty() && !collator.anchors_cache.has_pending_externals() {
+            if msgs_buffer.message_groups.is_empty() && !anchors_cache.has_pending_externals() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "message_groups buffer is empty and there are no pending externals, will read new internals"
                 );
@@ -376,7 +329,7 @@ impl ExecutionManager {
 
                 self.last_read_to_anchor_chain_time = None;
 
-                self.message_groups.reset();
+                msgs_buffer.message_groups.reset();
 
                 self.read_new_messages = true;
             }
@@ -401,24 +354,26 @@ impl ExecutionManager {
                 new_internals_read_count += 1;
 
                 let timer_add_to_groups = std::time::Instant::now();
-                self.message_groups.add_message(Box::new(ParsedMessage {
-                    info: MsgInfo::Int(int_msg.item.message.info.clone()),
-                    dst_in_current_shard: true,
-                    cell: int_msg.item.message.cell.clone(),
-                    special_origin: None,
-                    dequeued: None,
-                }));
+                msgs_buffer
+                    .message_groups
+                    .add_message(Box::new(ParsedMessage {
+                        info: MsgInfo::Int(int_msg.item.message.info.clone()),
+                        dst_in_current_shard: true,
+                        cell: int_msg.item.message.cell.clone(),
+                        special_origin: None,
+                        dequeued: None,
+                    }));
                 add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
-                if self.message_groups.messages_count() >= self.messages_buffer_limit {
+                if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "message_groups buffer filled on {}/{}, stop reading new internals",
-                        self.message_groups.messages_count(), self.messages_buffer_limit,
+                        msgs_buffer.message_groups.messages_count(), self.messages_buffer_limit,
                     );
                     break;
                 }
 
-                if self.message_groups.len() > 1 {
+                if msgs_buffer.message_groups.len() > 1 {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "next new message does not fit first group, stop reading new internals",
                     );
@@ -430,13 +385,13 @@ impl ExecutionManager {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "new_internals_read_count={}, buffer int={}, ext={}",
                 new_internals_read_count,
-                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
+                msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
             );
 
             // when we have 2 groups, the second one contains only one message
             // that does not fit first group,
             // so append this one message to first group (merge)
-            group_opt = self.message_groups.extract_merged_group();
+            group_opt = msgs_buffer.message_groups.extract_merged_group();
 
             self.read_new_messages_total_elapsed += timer.elapsed();
             self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
@@ -444,34 +399,34 @@ impl ExecutionManager {
 
             // actually, we process all message groups with new messages in one step,
             // so we update internals processed_upto each step
-            if self.message_groups.is_empty()
-                && self.message_groups.max_message_key() > &QueueKey::MIN
+            if msgs_buffer.message_groups.is_empty()
+                && msgs_buffer.message_groups.max_message_key() > &QueueKey::MIN
             {
                 // set_int_upto_all_processed(&mut collation_data.processed_upto)?;
                 update_internals_processed_upto(
                     &mut collation_data.processed_upto,
                     self.shard_id,
                     Some(ProcessedUptoUpdate::Force(
-                        *self.message_groups.max_message_key(),
+                        *msgs_buffer.message_groups.max_message_key(),
                     )),
                     Some(ProcessedUptoUpdate::Force(
-                        *self.message_groups.max_message_key(),
+                        *msgs_buffer.message_groups.max_message_key(),
                     )),
                 );
 
                 // commit processed message to iterator
                 mq_iterator_adapter.iterator().commit(vec![(
                     self.shard_id,
-                    *self.message_groups.max_message_key(),
+                    *msgs_buffer.message_groups.max_message_key(),
                 )])?;
 
-                self.message_groups.reset();
+                msgs_buffer.message_groups.reset();
             }
         }
 
         // store actual offset of current interator range
-        if collation_data.processed_upto.processed_offset != self.message_groups.offset() {
-            collation_data.processed_upto.processed_offset = self.message_groups.offset();
+        if collation_data.processed_upto.processed_offset != msgs_buffer.message_groups.offset() {
+            collation_data.processed_upto.processed_offset = msgs_buffer.message_groups.offset();
             tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
                 collation_data.processed_upto.processed_offset,
             );

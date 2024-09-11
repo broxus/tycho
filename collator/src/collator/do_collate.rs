@@ -17,6 +17,7 @@ use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{ExecutionManager, MessagesExecutor};
+use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
     AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, ParsedExternals, SpecialOrigin,
     WorkingState,
@@ -56,7 +57,8 @@ impl CollatorStdImpl {
         let prepare_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
-        let mut exec_manager = self.take_exec_manager();
+        // INFO: this is a temporary implementation, further will just clone messages buffer from the working state
+        let (working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
 
         let mc_data = &working_state.mc_data;
         let prev_shard_data = &working_state.prev_shard_data;
@@ -172,21 +174,32 @@ impl CollatorStdImpl {
             prev_shard_data.observable_accounts().clone(),
         );
 
+        // create exec_manager
+        let mut exec_manager = ExecutionManager::new(
+            self.shard_id,
+            self.config.msgs_exec_params.buffer_limit as _,
+        );
+
         // create iterator adapter
-        let mut mq_iterator_adapter = exec_manager.create_iterator_adapter();
+        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
+            self.shard_id,
+            self.mq_adapter.clone(),
+            msgs_buffer.current_iterator_positions.take().unwrap(),
+        );
 
         // refill messages buffer and skip groups upto offset (on node restart)
         let prev_processed_offset = collation_data.processed_upto.processed_offset;
-        if !exec_manager.has_pending_messages_in_buffer() && prev_processed_offset > 0 {
+        if !msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 prev_processed_offset,
                 "refill messages buffer and skip groups upto",
             );
 
-            while exec_manager.message_groups_offset() < prev_processed_offset {
+            while msgs_buffer.message_groups_offset() < prev_processed_offset {
                 let msg_group = exec_manager
                     .get_next_message_group(
-                        self,
+                        &mut msgs_buffer,
+                        &mut self.anchors_cache,
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         &QueueKey::MIN,
@@ -240,7 +253,8 @@ impl CollatorStdImpl {
                 let mut timer = std::time::Instant::now();
                 let msgs_group_opt = exec_manager
                     .get_next_message_group(
-                        self,
+                        &mut msgs_buffer,
+                        &mut self.anchors_cache,
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         &max_new_message_key_to_current_shard,
@@ -371,14 +385,16 @@ impl CollatorStdImpl {
         let histogram_create_queue_diff =
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
 
-        let (current_positions, has_pending_internals, diff_with_messages) =
-            mq_iterator_adapter.release(!exec_manager.has_pending_messages_in_buffer())?;
+        let (has_pending_internals_in_iterator, diff_with_messages) = mq_iterator_adapter.release(
+            !msgs_buffer.has_pending_messages(),
+            &mut msgs_buffer.current_iterator_positions,
+        )?;
 
         let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
 
         let diff_messages_len = diff_with_messages.messages.len();
-        let has_pending_internals =
-            exec_manager.has_pending_messages_in_buffer() || has_pending_internals;
+        let has_unprocessed_messages =
+            msgs_buffer.has_pending_messages() || has_pending_internals_in_iterator;
 
         let (min_message, max_message) = {
             let messages = &diff_with_messages.messages;
@@ -474,12 +490,6 @@ impl CollatorStdImpl {
 
         // resolve update queue task
         let apply_queue_diff_elapsed = update_queue_task.await?;
-        exec_manager.set_current_iterator_positions(current_positions);
-
-        let last_read_to_anchor_chain_time = exec_manager.get_last_read_to_anchor_chain_time();
-
-        // return updated exec manager into collator
-        self.set_exec_manager(exec_manager);
 
         let handle_block_candidate_elapsed;
         {
@@ -495,18 +505,19 @@ impl CollatorStdImpl {
                     candidate: finalized.block_candidate,
                     prev_mc_block_id: working_state.mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
-                    has_pending_internals,
+                    has_unprocessed_messages,
                 })
                 .await?;
 
             // spawn update PrevData and working state
             Self::prepare_working_state_update(
-                &mut self.working_state,
+                &mut self.delayed_working_state,
                 new_state_stuff,
                 new_queue_diff_hash,
                 finalized.mc_data.clone(),
-                has_pending_internals,
+                has_unprocessed_messages,
                 working_state,
+                msgs_buffer,
             )?;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -582,6 +593,7 @@ impl CollatorStdImpl {
         };
 
         // block time diff from min ext chain time
+        let last_read_to_anchor_chain_time = exec_manager.get_last_read_to_anchor_chain_time();
         let diff_time =
             now_millis() as i64 - last_read_to_anchor_chain_time.unwrap_or(next_chain_time) as i64;
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
@@ -598,7 +610,7 @@ impl CollatorStdImpl {
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_pending_internals={}",
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}",
             block_id, block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
@@ -607,7 +619,7 @@ impl CollatorStdImpl {
             collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages
         );
 
         assert_eq!(
@@ -646,33 +658,10 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    fn take_exec_manager(&mut self) -> ExecutionManager {
-        self.exec_manager.take().unwrap()
-    }
-    fn set_exec_manager(&mut self, exec_manager: ExecutionManager) {
-        self.exec_manager = Some(exec_manager);
-    }
-
     /// Read specified number of externals from imported anchors
     /// using actual `processed_upto` info
     #[allow(clippy::vec_box)]
     pub(super) fn read_next_externals(
-        &mut self,
-        count: usize,
-        collation_data: &mut BlockCollationData,
-        continue_from_read_to: bool,
-    ) -> Result<ParsedExternals> {
-        Self::read_next_externals_impl(
-            &self.shard_id,
-            &mut self.anchors_cache,
-            count,
-            collation_data,
-            continue_from_read_to,
-        )
-    }
-
-    #[allow(clippy::vec_box)]
-    fn read_next_externals_impl(
         shard_id: &ShardIdent,
         anchors_cache: &mut AnchorsCache,
         count: usize,

@@ -31,13 +31,21 @@ pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     current_positions: FastHashMap<ShardIdent, QueueKey>,
     /// sum total iterators initialization time
     init_iterator_total_elapsed: Duration,
+    /// indicates if `release()` was called
+    released: bool,
+}
+
+impl<V: InternalMessageValue> Drop for QueueIteratorAdapter<V> {
+    fn drop(&mut self) {
+        assert!(self.released, "release() should be called");
+    }
 }
 
 impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     pub fn new(
         shard_id: ShardIdent,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        current_positions_opt: Option<FastHashMap<ShardIdent, QueueKey>>,
+        current_positions: FastHashMap<ShardIdent, QueueKey>,
     ) -> Self {
         Self {
             shard_id,
@@ -46,19 +54,17 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             no_pending_existing_internals: true,
             no_pending_new_messages: true,
             new_messages_read_to: QueueKey::MIN,
-            current_positions: current_positions_opt.unwrap_or_default(),
+            current_positions,
             init_iterator_total_elapsed: Duration::ZERO,
+            released: false,
         }
     }
 
     pub fn release(
         mut self,
         check_pending_internals: bool,
-    ) -> Result<(
-        FastHashMap<ShardIdent, QueueKey>,
-        bool,
-        QueueDiffWithMessages<V>,
-    )> {
+        current_positions: &mut Option<FastHashMap<ShardIdent, QueueKey>>,
+    ) -> Result<(bool, QueueDiffWithMessages<V>)> {
         let current_position = self.iterator().current_position();
 
         for (shard_id, key) in current_position {
@@ -78,11 +84,15 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         }
         let full_diff = self.iterator().extract_full_diff();
 
-        Ok((
-            self.current_positions,
-            has_pending_internals,
-            full_diff.diff,
-        ))
+        *current_positions = Some(std::mem::take(&mut self.current_positions));
+
+        self.set_released();
+
+        Ok((has_pending_internals, full_diff.diff))
+    }
+
+    pub fn set_released(&mut self) {
+        self.released = true;
     }
 
     pub fn no_pending_existing_internals(&self) -> bool {

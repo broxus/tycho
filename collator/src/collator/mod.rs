@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use error::CollatorError;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
-use execution_manager::ExecutionManager;
 use futures_util::future::Future;
 use mq_iterator_adapter::QueueIteratorAdapter;
 use tokio::sync::oneshot;
@@ -15,7 +14,7 @@ use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuardWithLabels;
-use types::{AnchorInfo, AnchorsCache};
+use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
@@ -197,11 +196,10 @@ pub struct CollatorStdImpl {
 
     listener: Arc<dyn CollatorEventListener>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    exec_manager: Option<ExecutionManager>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
-    working_state: DelayedWorkingState,
+    delayed_working_state: DelayedWorkingState,
     anchors_cache: AnchorsCache,
     stats: CollatorStats,
     timer: std::time::Instant,
@@ -242,11 +240,10 @@ impl CollatorStdImpl {
             collation_session,
             listener,
             mq_adapter,
-            exec_manager: None,
             mpool_adapter,
             state_node_adapter,
             shard_id,
-            working_state: DelayedWorkingState::new(shard_id, async move {
+            delayed_working_state: DelayedWorkingState::new(shard_id, async move {
                 match working_state_rx.await {
                     Ok(state) => state,
                     Err(_) => anyhow::bail!("collator init cancelled"),
@@ -307,9 +304,13 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
         // init working state
-        let working_state =
-            Self::init_working_state(self.state_node_adapter.clone(), mc_data, prev_blocks_ids)
-                .await?;
+        let working_state = Self::init_working_state(
+            &self.config,
+            self.state_node_adapter.clone(),
+            mc_data,
+            prev_blocks_ids,
+        )
+        .await?;
 
         // calc last processed to anchor info (will be None on zerostate)
         let processed_to_anchor_info_opt =
@@ -354,9 +355,6 @@ impl CollatorStdImpl {
                 );
             }
         }
-
-        // init exec manager
-        self.init_exec_manager();
 
         working_state_tx.send(Ok(working_state)).ok();
 
@@ -463,14 +461,14 @@ impl CollatorStdImpl {
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
         let working_state = if !reset {
-            let mut working_state = self.working_state.wait().await?;
+            let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
             if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
                 working_state.mc_data = mc_data;
 
-                if working_state.has_pending_internals == Some(false) {
-                    working_state.has_pending_internals = None;
+                if working_state.has_unprocessed_messages == Some(false) {
+                    working_state.has_unprocessed_messages = None;
                 }
             }
 
@@ -492,10 +490,17 @@ impl CollatorStdImpl {
                 "resume collation with reset",
             );
 
-            // reload prev data
-            let working_state =
-                Self::init_working_state(self.state_node_adapter.clone(), mc_data, prev_blocks_ids)
-                    .await?;
+            // reload prev data, reinit working state, drop msgs buffer
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "reset working state and msgs buffer",
+            );
+            let working_state = Self::init_working_state(
+                &self.config,
+                self.state_node_adapter.clone(),
+                mc_data,
+                prev_blocks_ids,
+            )
+            .await?;
 
             // calc last processed to anchor
             let processed_to_anchor_info_opt =
@@ -541,12 +546,6 @@ impl CollatorStdImpl {
                 }
             }
 
-            // reset exec manager with msgs buffer
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "reset exec manager with msgs buffer",
-            );
-            self.init_exec_manager();
-
             working_state
         };
 
@@ -557,19 +556,9 @@ impl CollatorStdImpl {
         }
     }
 
-    fn init_exec_manager(&mut self) {
-        let exec_manager = ExecutionManager::new(
-            self.shard_id,
-            self.mq_adapter.clone(),
-            self.config.msgs_exec_params.buffer_limit as _,
-            self.config.msgs_exec_params.group_limit as _,
-            self.config.msgs_exec_params.group_vert_size as _,
-        );
-        self.exec_manager = Some(exec_manager);
-    }
-
     #[tracing::instrument(skip_all)]
     async fn init_working_state(
+        config: &CollationConfig,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mc_data: Arc<McData>,
         prev_blocks_ids: Vec<BlockId>,
@@ -585,7 +574,7 @@ impl CollatorStdImpl {
         // build and validate working state
         tracing::debug!(target: tracing_targets::COLLATOR, "building working state...");
 
-        Self::build_and_validate_working_state(mc_data, prev_states, prev_queue_diff_hashes)
+        Self::build_and_validate_working_state(config, mc_data, prev_states, prev_queue_diff_hashes)
     }
 
     /// Build working state update that would be applied before next collation
@@ -594,8 +583,9 @@ impl CollatorStdImpl {
         new_state_stuff: JoinTask<Result<ShardStateStuff>>,
         new_queue_diff_hash: HashBytes,
         mc_data: Option<Arc<McData>>,
-        has_pending_internals: bool,
+        has_unprocessed_messages: bool,
         prev_working_state: WorkingState,
+        msgs_buffer: MessagesBuffer,
     ) -> Result<()> {
         // TODO: Check if the result mc_data is properly updated on masterchain block
         let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
@@ -615,7 +605,8 @@ impl CollatorStdImpl {
                 mc_data,
                 prev_shard_data,
                 usage_tree,
-                has_pending_internals: Some(has_pending_internals),
+                has_unprocessed_messages: Some(has_unprocessed_messages),
+                msgs_buffer: Some(msgs_buffer),
             })
         }));
 
@@ -681,6 +672,7 @@ impl CollatorStdImpl {
     ///
     /// Perform some validations on state
     fn build_and_validate_working_state(
+        config: &CollationConfig,
         mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
@@ -696,7 +688,12 @@ impl CollatorStdImpl {
             mc_data,
             prev_shard_data,
             usage_tree,
-            has_pending_internals: None,
+            has_unprocessed_messages: None,
+            msgs_buffer: Some(MessagesBuffer::new(
+                next_block_id_short.shard,
+                config.msgs_exec_params.group_limit as _,
+                config.msgs_exec_params.group_vert_size as _,
+            )),
         })
     }
 
@@ -903,43 +900,39 @@ impl CollatorStdImpl {
         Ok(anchors_info)
     }
 
-    async fn check_has_pending_internals(
+    async fn check_has_unprocessed_messages(
         &mut self,
         working_state: &mut WorkingState,
     ) -> Result<bool> {
-        if let Some(has_internals) = working_state.has_pending_internals {
-            return Ok(has_internals);
+        if let Some(has_messages) = working_state.has_unprocessed_messages {
+            return Ok(has_messages);
         }
 
+        // when processing offset is > 0 we have uprocessed messages in buffer
         if working_state
             .prev_shard_data
             .processed_upto()
             .processed_offset
             > 0
         {
-            working_state.has_pending_internals = Some(true);
+            working_state.has_unprocessed_messages = Some(true);
             return Ok(true);
         }
 
-        let has_pending_messages_in_buffer = self
-            .exec_manager
-            .as_ref()
-            .unwrap()
-            .has_pending_messages_in_buffer();
+        // check messages buffer directly
+        let msgs_buffer = working_state.msgs_buffer.as_ref().unwrap();
+
+        let has_pending_messages_in_buffer = msgs_buffer.has_pending_messages();
         if has_pending_messages_in_buffer {
-            working_state.has_pending_internals = Some(true);
+            working_state.has_unprocessed_messages = Some(true);
             return Ok(true);
         }
 
+        // check in queue using iterator
         let mut mq_iterator_adapter = QueueIteratorAdapter::new(
             self.shard_id,
             self.mq_adapter.clone(),
-            Some(
-                self.exec_manager
-                    .as_ref()
-                    .unwrap()
-                    .get_current_iterator_positions(),
-            ),
+            msgs_buffer.current_iterator_positions.clone().unwrap(),
         );
 
         let mut current_processed_upto = working_state.prev_shard_data.processed_upto().clone();
@@ -952,13 +945,15 @@ impl CollatorStdImpl {
         } else {
             false
         };
-        working_state.has_pending_internals = Some(has_internals);
+        mq_iterator_adapter.set_released();
+
+        working_state.has_unprocessed_messages = Some(has_internals);
 
         Ok(has_internals)
     }
 
     async fn wait_state_and_try_collate(&mut self) -> Result<()> {
-        let working_state = self.working_state.wait().await?;
+        let working_state = self.delayed_working_state.wait().await?;
 
         if self.shard_id.is_masterchain() {
             self.try_collate_next_master_block_impl(working_state).await
@@ -971,7 +966,7 @@ impl CollatorStdImpl {
         &mut self,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
-        let working_state = self.working_state.wait().await?;
+        let working_state = self.delayed_working_state.wait().await?;
         self.do_collate(working_state, Some(top_shard_blocks_info))
             .await
     }
@@ -998,18 +993,20 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        // check has pending internals
-        let has_internals = self.check_has_pending_internals(&mut working_state).await?;
-        if has_internals {
-            // collate if has internals
+        // check has unprocessed messages in buffer or queue
+        let has_unprocessed_messages = self
+            .check_has_unprocessed_messages(&mut working_state)
+            .await?;
+        if has_unprocessed_messages {
+            // collate if has unprocessed messages
             tracing::info!(target: tracing_targets::COLLATOR,
-                "there are unprocessed internals from previous block, will collate next block",
+                "there are unprocessed messages from previous block, will collate next block",
             );
             self.do_collate(working_state, None).await?;
         } else {
             // otherwise import next anchor and return it notify to manager
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "there are no internals, will import next anchor",
+                "there are no unprocessed messages, will import next anchor",
             );
             let (next_anchor, has_externals) = Self::import_next_anchor(
                 self.shard_id,
@@ -1033,7 +1030,7 @@ impl CollatorStdImpl {
                 )
                 .await?;
 
-            self.working_state.delay(working_state);
+            self.delayed_working_state.delay(working_state);
         }
 
         Ok(())
@@ -1063,11 +1060,13 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        // check has pending internals
-        let has_internals = self.check_has_pending_internals(&mut working_state).await?;
-        if has_internals {
+        // check has unprocessed messages in buffer or queue
+        let has_uprocessed_messages = self
+            .check_has_unprocessed_messages(&mut working_state)
+            .await?;
+        if has_uprocessed_messages {
             tracing::info!(target: tracing_targets::COLLATOR,
-                "there are unprocessed internals from previous block, will collate next block",
+                "there are unprocessed messages from previous block, will collate next block",
             );
         }
 
@@ -1100,7 +1099,7 @@ impl CollatorStdImpl {
             && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
-        let no_pending_msgs = !has_internals && !has_externals;
+        let no_pending_msgs = !has_uprocessed_messages && !has_externals;
 
         // import next anchor if meet one of above conditions
         let next_anchor_info_opt = if force_mc_block_by_uncommitted_chain {
@@ -1112,7 +1111,7 @@ impl CollatorStdImpl {
         } else if no_pending_msgs || force_import_anchor_by_used_gas {
             if no_pending_msgs {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "there are no internals or pending externals, will import next anchor",
+                    "there are no pending internals or externals, will import next anchor",
                 );
             } else if force_import_anchor_by_used_gas {
                 tracing::info!(target: tracing_targets::COLLATOR,
@@ -1142,7 +1141,7 @@ impl CollatorStdImpl {
         drop(collation_prepare_histogram);
 
         // collate block if has internals or externals
-        if (has_internals || has_externals) && !force_mc_block_by_uncommitted_chain {
+        if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
             self.do_collate(working_state, None).await?;
         } else {
             // here just imported anchor has no externals
@@ -1169,7 +1168,7 @@ impl CollatorStdImpl {
                 )
                 .await?;
 
-            self.working_state.delay(working_state);
+            self.delayed_working_state.delay(working_state);
         }
 
         Ok(())
