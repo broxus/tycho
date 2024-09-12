@@ -2,6 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
+use ahash::{HashMapExt, HashSet};
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
@@ -829,6 +830,12 @@ pub struct Dequeued {
     pub same_shard: bool,
 }
 
+struct Message {
+    message: Box<ParsedMessage>,
+    is_internal: bool,
+}
+
+
 #[derive(Default)]
 pub(super) struct MessageGroups {
     shard_id: ShardIdent,
@@ -890,7 +897,7 @@ impl MessageGroups {
         self.ext_messages_count
     }
 
-    fn incriment_counters(&mut self, is_int: bool) {
+    fn increment_counters(&mut self, is_int: bool) {
         if is_int {
             self.int_messages_count += 1;
         } else {
@@ -923,7 +930,7 @@ impl MessageGroups {
             }
         };
 
-        self.incriment_counters(is_int);
+        self.increment_counters(is_int);
 
         let mut offset = self.offset;
         loop {
@@ -938,8 +945,8 @@ impl MessageGroups {
             match group_entry.inner.entry(account_id) {
                 Entry::Vacant(entry) => {
                     if group_len < self.group_limit {
-                        entry.insert(vec![msg]);
-                        group_entry.incriment_counters(is_int);
+                        entry.insert(vec![Message { message: msg, is_internal: is_int }]);
+                        group_entry.increment_counters(is_int);
                         break;
                     }
 
@@ -948,7 +955,7 @@ impl MessageGroups {
                 Entry::Occupied(mut entry) => {
                     let msgs = entry.get_mut();
                     if msgs.len() < self.group_vert_size {
-                        msgs.push(msg);
+                        msgs.push(Message { message: msg, is_internal: is_int });
 
                         if msgs.len() == self.group_vert_size {
                             group_entry.filling += 1;
@@ -957,7 +964,7 @@ impl MessageGroups {
                             }
                         }
 
-                        group_entry.incriment_counters(is_int);
+                        group_entry.increment_counters(is_int);
 
                         break;
                     }
@@ -1045,7 +1052,7 @@ impl MessageGroups {
 #[derive(Default)]
 pub(super) struct MessageGroup {
     #[allow(clippy::vec_box)]
-    inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
+    inner: FastHashMap<HashBytes, Vec<Message>>,
     int_messages_count: usize,
     ext_messages_count: usize,
     filling: usize,
@@ -1061,7 +1068,7 @@ impl MessageGroup {
         self.int_messages_count + self.ext_messages_count
     }
 
-    fn incriment_counters(&mut self, is_int: bool) {
+    fn increment_counters(&mut self, is_int: bool) {
         if is_int {
             self.int_messages_count += 1;
         } else {
