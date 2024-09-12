@@ -737,6 +737,9 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_commit_archive_time", "Time to commit archive"
         ),
+        create_heatmap_panel(
+            "tycho_storage_split_block_data_time", "Time to split block data"
+        ),
         create_gauge_panel(
             "tycho_storage_cells_tree_cache_size", "Cells tree cache size"
         ),
