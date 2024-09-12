@@ -729,6 +729,13 @@ def storage() -> RowPanel:
         create_counter_panel(
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
+        create_heatmap_panel(
+            "tycho_storage_load_block_data_time", "Time to load block data"
+        ),
+        create_counter_panel(
+            "tycho_storage_load_block_data_time_count",
+            "Number of load_block_data calls",
+        ),
     ]
     return create_row("Storage", metrics)
 
