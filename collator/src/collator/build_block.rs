@@ -51,6 +51,25 @@ impl CollatorStdImpl {
         let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
         let config_address = &mc_data.config.address;
 
+        let min_internals_processed_upto_lt = collation_data
+            .processed_upto
+            .internals
+            .values()
+            .map(|x| x.processed_to_msg.lt)
+            .min();
+        // TODO: use for min ref seq no
+        let min_internals_lt = match (
+            min_internals_processed_upto_lt,
+            collation_data.min_shards_int_processed_to,
+        ) {
+            (Some(min_internals_lt), Some(min_shards_int_processed_to)) => {
+                Some(std::cmp::min(min_internals_lt, min_shards_int_processed_to))
+            }
+            (Some(min_internals_lt), None) => Some(min_internals_lt),
+            (None, Some(min_shards_int_processed_to)) => Some(min_shards_int_processed_to),
+            (None, None) => None,
+        };
+
         let mut processed_accounts_res = Ok(Default::default());
         let mut build_account_blocks_elapsed = Duration::ZERO;
         let mut in_msgs_res = Ok(Default::default());
@@ -366,6 +385,7 @@ impl CollatorStdImpl {
                 .as_ref()
                 .map(|upto| upto.processed_to.0)
                 .unwrap_or_default(),
+            min_int_processed_to: min_internals_lt,
             fees_collected: value_flow.fees_collected,
             funds_created: value_flow.created,
             created_by: collation_data.created_by,
