@@ -524,11 +524,16 @@ where
                     );
 
                     // get info about applied mc blocks in cache
-                    let applied_range_opt = self.blocks_cache.get_applied_mc_queue_range();
+                    let (last_collated_block_id, applied_range) = self
+                        .blocks_cache
+                        .get_last_collated_block_and_applied_mc_queue_range();
 
                     // run sync if have applied mc blocks
-                    self.sync_to_applied_mc_block_if_exist(applied_range_opt.as_ref())
-                        .await?;
+                    self.sync_to_applied_mc_block_if_exist(
+                        last_collated_block_id.as_ref(),
+                        applied_range.as_ref(),
+                    )
+                    .await?;
                 }
 
                 self.ready_to_sync.notify_one();
@@ -665,39 +670,26 @@ where
 
         // check if should sync to last applied mc block
         let should_sync_to_last_applied_mc_block = {
-            if let Some(applied_range) = store_res.applied_mc_queue_range {
+            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
                 if let Some(last_collated_mc_block_id) = store_res.last_collated_mc_block_id {
-                    let applied_range_start_delta = applied_range
-                        .0
-                        .saturating_sub(last_collated_mc_block_id.seqno);
-                    let applied_range_end_delta = applied_range
-                        .1
-                        .saturating_sub(last_collated_mc_block_id.seqno);
-                    if applied_range_start_delta > 1 {
-                        // should collate next own mc block because first applied is not next
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                            "check_should_sync: should collate next own mc block: \
-                            first applied ({}) ahead last collated ({}) on {} > 1",
-                            applied_range.0, last_collated_mc_block_id.seqno,
-                            applied_range_start_delta,
-                        );
-                        false
-                    } else if applied_range_end_delta < 3 {
+                    let applied_range_end_delta =
+                        applied_range_end.saturating_sub(last_collated_mc_block_id.seqno);
+                    if applied_range_end_delta < self.config.min_mc_block_delta_from_bc_to_sync {
                         // should collate next own mc block because last applied is not far ahead
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                             "check_should_sync: should collate next own mc block: \
-                            last applied ({}) ahead last collated ({}) on {} < 3",
-                            applied_range.1, last_collated_mc_block_id.seqno,
-                            applied_range_end_delta,
+                            last applied ({}) ahead last collated ({}) on {} < {}",
+                            applied_range_end, last_collated_mc_block_id.seqno,
+                            applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
                         );
                         false
                     } else {
                         // should sync to last applied mc block from bc because it is far ahead
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                             "check_should_sync: should sync to last applied mc block from bc: \
-                            last applied ({}) ahead last collated ({}) on {} >= 3",
-                            applied_range.1, last_collated_mc_block_id.seqno,
-                            applied_range_end_delta,
+                            last applied ({}) ahead last collated ({}) on {} >= {}",
+                            applied_range_end, last_collated_mc_block_id.seqno,
+                            applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
                         );
                         true
                     }
@@ -706,7 +698,7 @@ where
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                         "check_should_sync: should sync to last applied mc block from bc: \
                         last applied ({}) and last collated not exist",
-                        applied_range.1,
+                        applied_range_end,
                     );
                     true
                 }
@@ -751,11 +743,12 @@ where
         if should_sync_to_last_applied_mc_block {
             // INFO: last collated mc block subgraph is already committed here
 
-            let applied_range_opt = store_res.applied_mc_queue_range.as_ref();
+            let last_collated_block_id = store_res.last_collated_mc_block_id.as_ref();
+            let applied_range = store_res.applied_mc_queue_range.as_ref();
 
             if block_id.is_masterchain() {
                 // run sync if have applied mc blocks
-                self.sync_to_applied_mc_block_if_exist(applied_range_opt)
+                self.sync_to_applied_mc_block_if_exist(last_collated_block_id, applied_range)
                     .await?;
             } else {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -777,7 +770,7 @@ where
                     );
 
                     // run sync if have applied mc blocks
-                    self.sync_to_applied_mc_block_if_exist(applied_range_opt)
+                    self.sync_to_applied_mc_block_if_exist(last_collated_block_id, applied_range)
                         .await?;
                 }
             }
@@ -921,8 +914,11 @@ where
 
             if should_sync_to_last_applied_mc_block {
                 // run sync if have applied mc blocks
-                self.sync_to_applied_mc_block_if_exist(store_res.applied_mc_queue_range.as_ref())
-                    .await?;
+                self.sync_to_applied_mc_block_if_exist(
+                    store_res.last_collated_mc_block_id.as_ref(),
+                    store_res.applied_mc_queue_range.as_ref(),
+                )
+                .await?;
                 self.ready_to_sync.notify_one();
             } else {
                 self.ready_to_sync.notify_one();
@@ -945,6 +941,7 @@ where
 
     async fn sync_to_applied_mc_block_if_exist(
         &self,
+        _last_collated_block_id: Option<&BlockId>, // TODO: use to skip queue recovery
         applied_range: Option<&(BlockSeqno, BlockSeqno)>,
     ) -> Result<()> {
         if let Some(applied_range) = applied_range {

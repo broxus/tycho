@@ -20,9 +20,14 @@ use crate::types::{BlockCandidate, DisplaySlice, McData};
 use crate::validator::ValidationStatus;
 
 impl BlocksCache {
-    pub(super) fn get_applied_mc_queue_range(&self) -> Option<(BlockSeqno, BlockSeqno)> {
+    pub(super) fn get_last_collated_block_and_applied_mc_queue_range(
+        &self,
+    ) -> (Option<BlockId>, Option<(BlockSeqno, BlockSeqno)>) {
         let master_cache = self.masters.lock();
-        master_cache.applied_mc_queue_range
+        (
+            master_cache.last_collated_mc_block_id,
+            master_cache.applied_mc_queue_range,
+        )
     }
 
     pub(super) fn update_last_collated_mc_block_id(&self, block_id: BlockId) {

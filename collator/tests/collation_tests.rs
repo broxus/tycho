@@ -86,7 +86,7 @@ async fn test_collation_process_on_stubs() {
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
         mc_block_min_interval: Duration::from_secs(1),
-        max_mc_block_delta_from_bc_to_await_own: 2,
+        min_mc_block_delta_from_bc_to_sync: 3,
         max_uncommitted_chain_length: 31,
         msgs_exec_params: MsgsExecutionParams {
             buffer_limit: 9,
