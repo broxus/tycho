@@ -225,6 +225,8 @@ impl BlockStorage {
     }
 
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
+
         let raw_block = self.load_block_data_raw_ref(handle).await?;
         BlockStuff::deserialize(handle.id(), raw_block.as_ref())
     }
