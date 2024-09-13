@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use everscale_types::models::{
-    BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
+    BlockId, BlockIdShort, BlockInfo, CurrencyCollection, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
@@ -438,4 +438,12 @@ pub struct StoredCacheEntry {
 pub struct PrevBlocksIds {
     pub prev_shard_blocks_ids: VecDeque<BlockId>,
     pub prev_ids: Vec<BlockId>,
+}
+
+#[derive(Default)]
+pub struct AggregateShardBlocksInfo {
+    pub fees_collected: CurrencyCollection,
+    pub funds_created: CurrencyCollection,
+    #[cfg(feature = "block-creator-stats")]
+    pub created_by: HashBytes,
 }

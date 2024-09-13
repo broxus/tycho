@@ -9,9 +9,9 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
 
 use super::types::{
-    self, BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult, BlockSeqno, BlocksCache,
-    MasterBlocksCache, McBlockSubgraph, McBlockSubgraphExtract, PrevBlocksIds, SendSyncStatus,
-    StoredCacheEntry,
+    self, AggregateShardBlocksInfo, BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult,
+    BlockSeqno, BlocksCache, MasterBlocksCache, McBlockSubgraph, McBlockSubgraphExtract,
+    PrevBlocksIds, SendSyncStatus, StoredCacheEntry,
 };
 use super::utils;
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
@@ -211,16 +211,18 @@ impl BlocksCache {
         }
     }
 
-    /// Store shard block candidate in a cache
+    /// Store block candidate in a cache
     #[tracing::instrument(skip_all)]
-    fn store_shard_candidate(
-        &self,
+    fn store_candidate_common(
         entry: BlockCacheEntry,
         block_id: BlockId,
-    ) -> Result<BlockCacheStoreResult> {
-        // store shard block to cache
-        let mut shard_cache = self.shards.entry(block_id.shard).or_default();
-
+        blocks: &mut BTreeMap<BlockSeqno, BlockCacheEntry>,
+        is_master: bool,
+    ) -> Result<(
+        StoredCacheEntry,
+        Option<VecDeque<BlockId>>,
+        Option<AggregateShardBlocksInfo>,
+    )> {
         let candidate_stuff = match &entry.data {
             BlockCacheEntryData::Collated {
                 candidate_stuff, ..
@@ -233,7 +235,7 @@ impl BlocksCache {
             }
         };
 
-        let (stored, aggregate) = match shard_cache.blocks.entry(block_id.seqno) {
+        match blocks.entry(block_id.seqno) {
             btree_map::Entry::Occupied(mut occupied) => {
                 let existing = occupied.get_mut();
 
@@ -241,7 +243,7 @@ impl BlocksCache {
                     data = %existing.data,
                     send_sync_status = ?existing.send_sync_status,
                     is_valid = existing.is_valid,
-                    "blocks_cache contains shard block"
+                    "blocks_cache contains block"
                 );
 
                 assert_eq!(
@@ -258,65 +260,103 @@ impl BlocksCache {
                             ..
                         } => {
                             *collated_after_receive = true;
-                            *additional_shard_block_cache_info =
-                                Some(AdditionalShardBlockCacheInfo {
-                                    processed_to_anchor_id: candidate_stuff
-                                        .candidate
-                                        .processed_to_anchor_id,
-                                    block_info: candidate_stuff.candidate.block.load_info()?,
-                                });
-                            (
+                            if !is_master {
+                                *additional_shard_block_cache_info =
+                                    Some(AdditionalShardBlockCacheInfo {
+                                        processed_to_anchor_id: candidate_stuff
+                                            .candidate
+                                            .processed_to_anchor_id,
+                                        block_info: candidate_stuff.candidate.block.load_info()?,
+                                    });
+                            }
+                            Ok((
                                 StoredCacheEntry {
                                     received_and_collated: *collated_after_receive,
                                     send_sync_status: existing.send_sync_status,
                                 },
                                 None,
-                            )
+                                None,
+                            ))
                         }
                         BlockCacheEntryData::Collated { .. } => {
-                            bail!("Should not store collated candidate with same shard block again! ({})", block_id);
+                            bail!(
+                                "Should not store collated candidate with same block again! ({})",
+                                block_id
+                            );
                         }
                     }
                 } else {
-                    bail!(
-                        "Should not collate the same shard block again! ({})",
-                        block_id,
-                    );
+                    bail!("Should not collate the same block again! ({})", block_id,);
                 }
             }
             btree_map::Entry::Vacant(vacant) => {
-                let aggregate = (
-                    candidate_stuff.candidate.fees_collected.clone(),
-                    candidate_stuff.candidate.funds_created.clone(),
-                    #[cfg(feature = "block-creator-stats")]
-                    candidate_stuff.candidate.created_by,
-                );
+                let (prev_shard_blocks_ids, aggregate) = if is_master {
+                    (
+                        Some(
+                            entry
+                                .top_shard_blocks_ids_iter()
+                                .cloned()
+                                .collect::<VecDeque<_>>(),
+                        ),
+                        None,
+                    )
+                } else {
+                    (
+                        None,
+                        Some(AggregateShardBlocksInfo {
+                            fees_collected: candidate_stuff.candidate.fees_collected.clone(),
+                            funds_created: candidate_stuff.candidate.funds_created.clone(),
+                            #[cfg(feature = "block-creator-stats")]
+                            created_by: candidate_stuff.candidate.created_by,
+                        }),
+                    )
+                };
 
                 let inserted = vacant.insert(entry);
-                inserted.send_sync_status = SendSyncStatus::Ready;
-                inserted.is_valid = true;
-                (
+                if !is_master {
+                    inserted.send_sync_status = SendSyncStatus::Ready;
+                    inserted.is_valid = true;
+                }
+                Ok((
                     StoredCacheEntry {
                         received_and_collated: false,
                         send_sync_status: inserted.send_sync_status,
                     },
-                    Some(aggregate),
-                )
+                    prev_shard_blocks_ids,
+                    aggregate,
+                ))
             }
-        };
+        }
+    }
 
+    /// Store shard block candidate in a cache
+    #[tracing::instrument(skip_all)]
+    fn store_shard_candidate(
+        &self,
+        entry: BlockCacheEntry,
+        block_id: BlockId,
+    ) -> Result<BlockCacheStoreResult> {
+        let mut shard_cache = self.shards.entry(block_id.shard).or_default();
+        let (stored, _, aggregate) =
+            Self::store_candidate_common(entry, block_id, &mut shard_cache.blocks, false)?;
         // aggregate additional info for TopBlockDescription
-        if let Some(aggregate) = aggregate {
+        if let Some(AggregateShardBlocksInfo {
+            fees_collected,
+            funds_created,
+            #[cfg(feature = "block-creator-stats")]
+            created_by,
+        }) = aggregate
+        {
             shard_cache
                 .proof_funds
                 .fees_collected
-                .checked_add(&aggregate.0)?;
+                .checked_add(&fees_collected)?;
             shard_cache
                 .proof_funds
                 .funds_created
-                .checked_add(&aggregate.1)?;
+                .checked_add(&funds_created)?;
             #[cfg(feature = "block-creator-stats")]
-            shard_cache.creators.push(aggregate.2);
+            shard_cache.creators.push(created_by);
         }
         drop(shard_cache); // TODO: use scope instead
 
@@ -337,68 +377,9 @@ impl BlocksCache {
         entry: BlockCacheEntry,
         block_id: BlockId,
     ) -> Result<BlockCacheStoreResult> {
-        // store master block to cache
         let mut guard = self.masters.lock();
-        let (stored, prev_shard_blocks_ids) = match guard.blocks.entry(block_id.seqno) {
-            btree_map::Entry::Occupied(mut occupied) => {
-                let existing = occupied.get_mut();
-
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    data = %existing.data,
-                    send_sync_status = ?existing.send_sync_status,
-                    is_valid = existing.is_valid,
-                    "blocks_cache contains master block"
-                );
-
-                assert_eq!(
-                    existing.block_id(),
-                    entry.block_id(),
-                    "Block received from bc mismatch with collated one"
-                );
-
-                if existing.send_sync_status == SendSyncStatus::Synced {
-                    match &mut existing.data {
-                        BlockCacheEntryData::Received {
-                            ref mut collated_after_receive,
-                            ..
-                        } => {
-                            *collated_after_receive = true;
-                            (
-                                StoredCacheEntry {
-                                    received_and_collated: *collated_after_receive,
-                                    send_sync_status: existing.send_sync_status,
-                                },
-                                VecDeque::new(),
-                            )
-                        }
-                        BlockCacheEntryData::Collated { .. } => {
-                            bail!("Should not store collated candidate with same master block again! ({})", block_id);
-                        }
-                    }
-                } else {
-                    bail!(
-                        "Should not collate the same master block again! ({})",
-                        block_id,
-                    );
-                }
-            }
-            btree_map::Entry::Vacant(vacant) => {
-                let prev_shard_blocks_ids = entry
-                    .top_shard_blocks_ids_iter()
-                    .cloned()
-                    .collect::<VecDeque<_>>();
-
-                let inserted = vacant.insert(entry);
-                (
-                    StoredCacheEntry {
-                        received_and_collated: false,
-                        send_sync_status: inserted.send_sync_status,
-                    },
-                    prev_shard_blocks_ids,
-                )
-            }
-        };
-
+        let (stored, prev_shard_blocks_ids, _) =
+            Self::store_candidate_common(entry, block_id, &mut guard.blocks, true)?;
         // update last collated mc block id and applied mc queue range info
         Self::update_last_collated_mc_block_id_and_applied_mc_queue_range(&mut guard, block_id);
 
@@ -413,7 +394,10 @@ impl BlocksCache {
 
         if !stored.received_and_collated {
             // traverse through including shard blocks and update their link to the containing master block
-            self.set_containing_mc_block(block_id.as_short_id(), prev_shard_blocks_ids);
+            self.set_containing_mc_block(
+                block_id.as_short_id(),
+                prev_shard_blocks_ids.unwrap_or_default(),
+            );
         }
 
         Ok(result)
@@ -498,6 +482,8 @@ impl BlocksCache {
         let (stored, _) =
             Self::store_block_from_bc_common(entry, block_id, &mut shard_cache.blocks, false)?;
 
+        drop(shard_cache); // TODO: use scope instead
+
         let mc_guard = self.masters.lock();
 
         Ok(Some(BlockCacheStoreResult {
@@ -570,6 +556,8 @@ impl BlocksCache {
             applied_mc_queue_range: guard.applied_mc_queue_range,
         };
 
+        drop(guard); // TODO: use scope instead
+
         if !stored.received_and_collated {
             // traverse through including shard blocks and update their link to the containing master block
             self.set_containing_mc_block(block_id.as_short_id(), prev_shard_blocks_ids);
@@ -582,7 +570,7 @@ impl BlocksCache {
         entry: BlockCacheEntry,
         block_id: BlockId,
         blocks: &mut BTreeMap<BlockSeqno, BlockCacheEntry>,
-        with_prev_ids: bool,
+        return_prev_ids: bool,
     ) -> Result<(StoredCacheEntry, Option<PrevBlocksIds>)> {
         match blocks.entry(block_id.seqno) {
             btree_map::Entry::Occupied(mut occupied) => {
@@ -635,7 +623,7 @@ impl BlocksCache {
             btree_map::Entry::Vacant(vacant) => {
                 let inserted = vacant.insert(entry);
 
-                let prev_ids = if with_prev_ids {
+                let prev_ids = if return_prev_ids {
                     Some(PrevBlocksIds {
                         prev_shard_blocks_ids: inserted
                             .top_shard_blocks_ids_iter()
