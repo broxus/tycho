@@ -16,7 +16,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use types::{
-    ActiveCollator, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryKind, BlockSeqno,
+    ActiveCollator, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryData, BlockSeqno,
     CollatorState, DisplayBlockCacheStoreResult, McBlockSubgraph,
 };
 
@@ -430,28 +430,29 @@ where
         Ok((min_top_processed_to_anchor_id, mc_processed_to_anchor_id))
     }
 
-    #[tracing::instrument(skip_all, fields(block_id = %block_entry.block_id().as_short_id()))]
-    async fn commit_block_queue_diff(&self, block_entry: &BlockCacheEntry) -> Result<()> {
-        let block_short_id = block_entry.block_id().as_short_id();
-
-        if !block_short_id.shard.is_masterchain() {
+    #[tracing::instrument(skip_all, fields(block_id = %block_id))]
+    async fn commit_block_queue_diff(
+        &self,
+        block_id: BlockIdShort,
+        top_shard_blocks_info: &[(BlockId, bool)],
+    ) -> Result<()> {
+        if !block_id.shard.is_masterchain() {
             return Ok(());
         }
 
         let _histogram =
             HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
 
-        let mut top_blocks: Vec<_> = block_entry
-            .top_shard_blocks_info
+        let mut top_blocks: Vec<_> = top_shard_blocks_info
             .iter()
             .map(|(id, updated)| (id.as_short_id(), *updated))
             .collect();
-        top_blocks.push((block_short_id, true));
+        top_blocks.push((block_id, true));
 
         if let Err(err) = self.mq_adapter.commit_diff(top_blocks).await {
             bail!(
                 "Error committing message queue diff of block ({}): {:?}",
-                block_short_id,
+                block_id,
                 err,
             )
         }
@@ -472,12 +473,13 @@ where
         }
 
         // if block was collated then queue diff is already applied
-        if matches!(
-            block_entry.kind,
-            BlockCacheEntryKind::Collated
-                | BlockCacheEntryKind::CollatedAndReceived
-                | BlockCacheEntryKind::ReceivedAndCollated
-        ) {
+        if match block_entry.data {
+            BlockCacheEntryData::Collated { .. } => true,
+            BlockCacheEntryData::Received {
+                collated_after_receive,
+                ..
+            } => collated_after_receive,
+        } {
             return Ok(());
         }
 
@@ -714,7 +716,7 @@ where
         // run validation or commit block
         if block_id.is_masterchain() {
             // run validation or commit block
-            if store_res.kind == BlockCacheEntryKind::ReceivedAndCollated {
+            if store_res.received_and_collated {
                 self.commit_valid_master_block(&block_id).await?;
             } else {
                 let validator = self.validator.clone();
@@ -923,7 +925,7 @@ where
             } else {
                 self.ready_to_sync.notify_one();
                 // stop validation if block was collated first
-                if store_res.kind == BlockCacheEntryKind::CollatedAndReceived {
+                if store_res.received_and_collated {
                     self.validator.cancel_validation(&block_id.as_short_id())?;
 
                     // TODO: here master block subgraph could be already extracted,
@@ -1116,9 +1118,13 @@ where
                 )
                 .await?;
 
-                self.commit_block_queue_diff(mc_block_entry).await?;
+                self.commit_block_queue_diff(
+                    mc_block_entry.block_id().as_short_id(),
+                    &mc_block_entry.top_shard_blocks_info,
+                )
+                .await?;
 
-                let state = mc_block_entry.state()?;
+                let state = mc_block_entry.master_state()?;
 
                 // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
                 //      because anchors from stub have older chain time than in zerostate and it will brake collation
@@ -1810,26 +1816,23 @@ where
         let mut result = vec![];
         for mut shard_cache in self.blocks_cache.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
-                if (entry.containing_mc_block.is_none()
-                    || entry.containing_mc_block == Some(next_mc_block_id_short))
-                    && matches!(
-                        entry.kind,
-                        BlockCacheEntryKind::Collated
-                            | BlockCacheEntryKind::CollatedAndReceived
-                            | BlockCacheEntryKind::ReceivedAndCollated
-                    )
+                if entry.containing_mc_block.is_none()
+                    || entry.containing_mc_block == Some(next_mc_block_id_short)
                 {
-                    let candidate_stuff = entry.candidate_stuff()?;
-                    result.push(TopBlockDescription {
-                        block_id: *entry.block_id(),
-                        block_info: candidate_stuff.candidate.block.load_info()?,
-                        processed_to_anchor_id: candidate_stuff.candidate.processed_to_anchor_id,
-                        value_flow: std::mem::take(&mut shard_cache.value_flow),
-                        proof_funds: std::mem::take(&mut shard_cache.proof_funds),
-                        #[cfg(feature = "block-creator-stats")]
-                        creators: std::mem::take(&mut shard_cache.creators),
-                    });
-                    break;
+                    if let Some(additional_info) =
+                        entry.data.get_additional_shard_block_cache_info()?
+                    {
+                        result.push(TopBlockDescription {
+                            block_id: *entry.block_id(),
+                            block_info: additional_info.block_info,
+                            processed_to_anchor_id: additional_info.processed_to_anchor_id,
+                            value_flow: std::mem::take(&mut shard_cache.value_flow),
+                            proof_funds: std::mem::take(&mut shard_cache.proof_funds),
+                            #[cfg(feature = "block-creator-stats")]
+                            creators: std::mem::take(&mut shard_cache.creators),
+                        });
+                        break;
+                    }
                 }
             }
         }
@@ -2000,30 +2003,48 @@ where
             .extract_mc_block_subgraph_for_sync(block_id, true)?
         {
             McBlockSubgraphExtract::Extracted(McBlockSubgraph {
-                mut master_block,
+                master_block,
                 shard_blocks,
             }) => {
                 extract_elapsed = histogram_extract.finish();
 
+                let block_id = master_block.block_id().as_short_id();
+                let BlockCacheEntry {
+                    data,
+                    send_sync_status,
+                    top_shard_blocks_info,
+                    ..
+                } = master_block;
                 // send to sync only if was not received from bc
-                if master_block.kind == BlockCacheEntryKind::Collated {
-                    let histogram =
-                        HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
+                if let BlockCacheEntryData::Collated {
+                    received_after_collation,
+                    ..
+                } = data
+                {
+                    if !received_after_collation {
+                        let histogram =
+                            HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
 
-                    self.send_block_to_sync(&mut master_block).await?;
+                        self.send_block_to_sync(send_sync_status, data).await?;
 
-                    for mut entry_to_sync in shard_blocks {
-                        self.send_block_to_sync(&mut entry_to_sync).await?;
+                        for entry_to_sync in shard_blocks {
+                            self.send_block_to_sync(
+                                entry_to_sync.send_sync_status,
+                                entry_to_sync.data,
+                            )
+                            .await?;
+                        }
+
+                        sync_elapsed = histogram.finish();
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            total = sync_elapsed.as_millis(),
+                            "send_blocks_to_sync timings",
+                        );
                     }
-
-                    sync_elapsed = histogram.finish();
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        total = sync_elapsed.as_millis(),
-                        "send_blocks_to_sync timings",
-                    );
                 }
 
-                self.commit_block_queue_diff(&master_block).await?;
+                self.commit_block_queue_diff(block_id, &top_shard_blocks_info)
+                    .await?;
             }
             McBlockSubgraphExtract::NotFullValid => {
                 bail!(
@@ -2050,24 +2071,30 @@ where
         Ok(())
     }
 
-    async fn send_block_to_sync(&self, entry_to_sync: &mut BlockCacheEntry) -> Result<()> {
-        if !matches!(
-            entry_to_sync.send_sync_status,
-            SendSyncStatus::Sending | SendSyncStatus::Sent | SendSyncStatus::Synced,
-        ) {
-            let candidate_stuff = entry_to_sync.candidate_stuff.take().unwrap();
-            let block_id = *candidate_stuff.candidate.block.id();
-            let block_stuff_for_sync = candidate_stuff.into();
-            entry_to_sync.send_sync_status = SendSyncStatus::Sending;
-            self.state_node_adapter
-                .accept_block(block_stuff_for_sync)
-                .await?;
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Block was successfully sent to sync ({})",
-                block_id,
-            );
-            entry_to_sync.send_sync_status = SendSyncStatus::Sent;
+    async fn send_block_to_sync(
+        &self,
+        send_sync_status: SendSyncStatus,
+        data: BlockCacheEntryData,
+    ) -> Result<()> {
+        if send_sync_status != SendSyncStatus::Synced {
+            if let BlockCacheEntryData::Collated {
+                candidate_stuff,
+                received_after_collation,
+            } = data
+            {
+                if !received_after_collation {
+                    let block_id = *candidate_stuff.candidate.block.id();
+                    let block_stuff_for_sync = candidate_stuff.into();
+                    self.state_node_adapter
+                        .accept_block(block_stuff_for_sync)
+                        .await?;
+                    tracing::debug!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "Block was successfully sent to sync ({})",
+                        block_id,
+                    );
+                }
+            }
         }
 
         Ok(())
