@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
@@ -432,4 +432,10 @@ pub struct LoadedQueueDiffContext {
 pub struct StoredCacheEntry {
     pub received_and_collated: bool,
     pub send_sync_status: SendSyncStatus,
+}
+
+#[derive(Default)]
+pub struct PrevBlocksIds {
+    pub prev_shard_blocks_ids: VecDeque<BlockId>,
+    pub prev_ids: Vec<BlockId>,
 }
