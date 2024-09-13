@@ -29,7 +29,7 @@ use crate::collator::types::{
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
-    BlockCollationResult, BlockIdExt, DisplayBlockIdsList, McData, TopBlockDescription,
+    BlockCollationResult, BlockIdExt, DisplayBlockIdsIter, McData, TopBlockDescription,
 };
 
 #[cfg(test)]
@@ -65,8 +65,8 @@ impl CollatorStdImpl {
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: top_shard_blocks_ids: {:?}",
-            top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsList(
-                v.iter().map(|i| i.block_id).collect::<Vec<_>>()
+            top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
+                v.iter().map(|i| &i.block_id)
             )),
         );
 

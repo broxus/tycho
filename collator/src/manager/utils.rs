@@ -8,7 +8,7 @@ use tycho_block_util::queue::QueueDiffStuff;
 use super::types::LoadedQueueDiffContext;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
-use crate::types::DisplaySlice;
+use crate::types::DisplayIntoIter;
 
 pub fn find_us_in_collators_set(
     keypair: &KeyPair,
@@ -54,7 +54,7 @@ pub async fn load_block_queue_diff_stuff(
     prev_ids.extend(prev2);
 
     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-        prev_block_ids = %DisplaySlice(&prev_ids),
+        prev_block_ids = %DisplayIntoIter(&prev_ids),
         "loaded block and queue diff stuff",
     );
 

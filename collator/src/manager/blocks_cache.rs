@@ -16,7 +16,7 @@ use super::utils;
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, DisplaySlice, McData};
+use crate::types::{BlockCandidate, DisplayIntoIter, DisplayIter, McData};
 use crate::validator::ValidationStatus;
 
 impl BlocksCache {
@@ -842,9 +842,8 @@ impl BlocksCache {
             target: tracing_targets::COLLATION_MANAGER,
             "Extracted master block subgraph ({}): {}",
             mc_block_key,
-            DisplaySlice(
-                subgraph.shard_blocks.iter().map(|sb| *sb.key())
-                .collect::<Vec<_>>().as_slice()
+            DisplayIter(
+                subgraph.shard_blocks.iter().map(|sb| sb.key())
             ),
         );
 
@@ -854,12 +853,12 @@ impl BlocksCache {
     pub(super) fn remove_prev_blocks_from_cache(&self, to_blocks_keys: &[BlockCacheKey]) {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Removing prev blocks from cache before: {}",
-            DisplaySlice(to_blocks_keys),
+            DisplayIntoIter(to_blocks_keys),
         );
         scopeguard::defer! {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 "Prev blocks removed from cache before: {}",
-                DisplaySlice(to_blocks_keys),
+                DisplayIntoIter(to_blocks_keys),
             );
         };
         for block_key in to_blocks_keys.iter() {
@@ -876,12 +875,12 @@ impl BlocksCache {
     pub(super) fn _cleanup_blocks_from_cache(&self, blocks_keys: Vec<BlockCacheKey>) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Cleaning up blocks from cache: {}",
-            DisplaySlice(&blocks_keys),
+            DisplayIntoIter(&blocks_keys),
         );
         scopeguard::defer! {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 "Blocks cleaned up from cache: {}",
-                DisplaySlice(&blocks_keys),
+                DisplayIntoIter(&blocks_keys),
             );
         };
         for block_key in blocks_keys.iter() {

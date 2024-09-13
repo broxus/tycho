@@ -35,7 +35,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationConfig, CollationSessionId, CollationSessionInfo,
-    DebugIter, DisplayAsShortId, DisplayBTreeMap, DisplayBlockIdsSlice, McData,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple2, McData,
     ShardDescriptionExt, TopBlockDescription,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
@@ -991,7 +991,7 @@ where
             .await?;
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            min_processed_to_by_shards = %DisplayBTreeMap(&min_processed_to_by_shards),
+            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple2)),
         );
 
         // find first applied mc block and tail shard blocks and get previous
@@ -1007,7 +1007,7 @@ where
                         "({}, id={:?}, prev_ids={})",
                         shard_id,
                         id.as_ref().map(DisplayAsShortId),
-                        DisplayBlockIdsSlice(prev_ids),
+                        DisplayBlockIdsIntoIter(prev_ids),
                     )
                 }).collect::<Vec<_>>().as_slice(),
         );
@@ -1445,7 +1445,7 @@ where
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Will keep existing collation sessions: {:?}",
-            DebugIter(sessions_to_keep.iter().map(|(shard_ident, _, _)| *shard_ident)),
+            DebugIter(sessions_to_keep.iter().map(|(shard_ident, _, _)| shard_ident)),
         );
         if !sessions_to_start.is_empty() {
             tracing::info!(
