@@ -14,6 +14,7 @@ use everscale_types::models::{
     ShardIdentFull, ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use rayon::iter::IntoParallelIterator;
+use tl_proto::TlWrite;
 use ton_executor::{AccountMeta, ExecutedTransaction};
 use tycho_block_util::queue::{QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -1353,4 +1354,14 @@ impl ForceMasterCollation {
     pub fn is_forced(&self) -> bool {
         !matches!(self, Self::No)
     }
+}
+
+/// Rand seed for block source data.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, TlWrite)]
+#[tl(boxed, id = "collator.randSeed", scheme = "proto.tl")]
+pub struct RandSeed {
+    #[tl(with = "tycho_block_util::tl::shard_ident")]
+    pub shard: ShardIdent,
+    pub seqno: u32,
+    pub next_chain_time: u64,
 }

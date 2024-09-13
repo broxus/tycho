@@ -9,7 +9,6 @@ use everscale_types::prelude::*;
 use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
-use sha2::Digest;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
@@ -23,7 +22,7 @@ use super::types::{
 };
 use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::types::{
-    AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt,
+    AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, RandSeed, ShardDescriptionExt,
     UpdateQueueDiffResult,
 };
 use crate::internal_queue::types::EnqueuedMessage;
@@ -966,8 +965,11 @@ impl CollatorStdImpl {
     ) -> Result<Box<BlockCollationData>> {
         // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor
-        let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
-        let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
+        let rand_seed = HashBytes(tl_proto::hash(RandSeed {
+            shard: next_block_id_short.shard,
+            seqno: next_block_id_short.seqno,
+            next_chain_time,
+        }));
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
         let is_masterchain = self.shard_id.is_masterchain();

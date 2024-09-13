@@ -1,3 +1,5 @@
+// === Validator ===
+
 ---types---
 
 /**
@@ -43,3 +45,21 @@ validator.exchangeSignatures
     block_seqno:int
     signature:bytes
     = validator.Exchange;
+
+// === Collator ===
+
+---types---
+
+/**
+* Collator context for rand seed.
+* NOTE: Temp, will be replaced with consensus-based solution.
+*
+* @param shard_ident        current shard ident
+* @param block_seqno        current block seqno
+* @param next_chain_time    block unixtime in milliseconds
+*/
+collator.randSeed
+    shard_ident:validator.shardIdent
+    block_seqno:int
+    next_chain_time:long
+    = collator.RandSeed;
