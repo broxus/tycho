@@ -12,6 +12,7 @@ use everscale_types::models::{
     ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib,
     SpecialFlags, StateInit, Transaction, ValueFlow,
 };
+use tl_proto::TlWrite;
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
@@ -1264,4 +1265,15 @@ pub struct ParsedExternals {
     #[allow(clippy::vec_box)]
     pub ext_messages: Vec<Box<ParsedMessage>>,
     pub last_read_to_anchor_chain_time: Option<u64>,
+}
+
+/// Rand seed for block source data.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, TlWrite)]
+pub struct RandSeed {
+    /// next chain time
+    pub next_chain_time: u64,
+    /// Block number in shard.
+    pub seqno: u32,
+    /// workchain id
+    pub workchain: i32,
 }

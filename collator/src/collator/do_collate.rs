@@ -24,7 +24,8 @@ use super::types::{
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
-    BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
+    BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, RandSeed,
+    ShardDescriptionExt,
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
@@ -75,11 +76,14 @@ impl CollatorStdImpl {
             .get_last_imported_anchor_ct_and_author()
             .unwrap();
 
-        // TODO: need to generate unique for each block
-        // generate seed from the chain_time from the anchor
-        let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
+        let rand_seed = RandSeed {
+            next_chain_time,
+            seqno: working_state.next_block_id_short.seqno,
+            workchain: working_state.next_block_id_short.shard.workchain(),
+        };
+        let hash_bytes = sha2::Sha256::digest(tl_proto::serialize(rand_seed));
         let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
-        tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
+        tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time and block seqno: {}", rand_seed);
 
         let is_masterchain = self.shard_id.is_masterchain();
 
