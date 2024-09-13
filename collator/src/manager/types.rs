@@ -368,58 +368,37 @@ impl BlockCacheEntry {
     pub fn top_shard_blocks_ids_iter(&self) -> impl Iterator<Item = &BlockId> {
         self.top_shard_blocks_info.iter().map(|(id, _)| id)
     }
-}
 
-impl AppliedBlockStuffContainer for BlockCacheEntry {
-    fn key(&self) -> &BlockCacheKey {
-        &self.key
-    }
-
-    fn applied_block_stuff_state(&self) -> Option<&ShardStateStuff> {
+    pub fn cached_state(&self) -> Result<&ShardStateStuff> {
         if let BlockCacheEntryData::Received { cached_state, .. } = &self.data {
-            cached_state.as_ref()
+            cached_state.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "`cached_state` shoul not be None for block ({})",
+                    self.block_id
+                )
+            })
         } else {
-            None
+            anyhow::bail!(
+                "Block should be `Received` to contain `cached_state` ({})",
+                self.block_id
+            )
         }
     }
 
-    fn applied_block_stuff_queue_diff(&self) -> Option<(&QueueDiffStuff, &Lazy<OutMsgDescr>)> {
+    pub fn queue_diff_and_msgs(&self) -> Result<(&QueueDiffStuff, &Lazy<OutMsgDescr>)> {
         if let BlockCacheEntryData::Received {
             queue_diff,
             out_msgs,
             ..
         } = &self.data
         {
-            Some((queue_diff, out_msgs))
+            Ok((queue_diff, out_msgs))
         } else {
-            None
+            anyhow::bail!(
+                "Block should be `Received` to contain `queue_diff` and `out_msgs` ({})",
+                self.block_id
+            )
         }
-    }
-}
-
-pub(super) trait AppliedBlockStuffContainer {
-    fn key(&self) -> &BlockCacheKey;
-
-    fn applied_block_stuff_state(&self) -> Option<&ShardStateStuff>;
-
-    fn applied_block_stuff_queue_diff(&self) -> Option<(&QueueDiffStuff, &Lazy<OutMsgDescr>)>;
-
-    fn master_state(&self) -> Result<&ShardStateStuff> {
-        self.applied_block_stuff_state().ok_or_else(|| {
-            anyhow!(
-                "cached_state should not be None for master block ({})",
-                self.key(),
-            )
-        })
-    }
-
-    fn queue_diff_and_msgs(&self) -> Result<(&QueueDiffStuff, &Lazy<OutMsgDescr>)> {
-        self.applied_block_stuff_queue_diff().ok_or_else(|| {
-            anyhow!(
-                "unable to get queue diff and msgs, block should be Received ({})",
-                self.key(),
-            )
-        })
     }
 }
 

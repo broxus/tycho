@@ -16,8 +16,8 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use types::{
-    ActiveCollator, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryData, BlockSeqno,
-    CollatorState, DisplayBlockCacheStoreResult, McBlockSubgraph,
+    ActiveCollator, BlockCacheEntry, BlockCacheEntryData, BlockSeqno, CollatorState,
+    DisplayBlockCacheStoreResult, McBlockSubgraph,
 };
 
 use self::types::{
@@ -1124,7 +1124,7 @@ where
                 )
                 .await?;
 
-                let state = mc_block_entry.master_state()?;
+                let state = mc_block_entry.cached_state()?;
 
                 // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
                 //      because anchors from stub have older chain time than in zerostate and it will brake collation

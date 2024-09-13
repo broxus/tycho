@@ -9,9 +9,8 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
 
 use super::types::{
-    self, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult,
-    BlockSeqno, BlocksCache, MasterBlocksCache, McBlockSubgraph, McBlockSubgraphExtract,
-    SendSyncStatus, StoredCacheEntry,
+    self, BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult, BlockSeqno, BlocksCache,
+    MasterBlocksCache, McBlockSubgraph, McBlockSubgraphExtract, SendSyncStatus, StoredCacheEntry,
 };
 use super::utils;
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
