@@ -104,13 +104,8 @@ impl CollatorStdImpl {
             let shards = prev_shard_data.observable_states()[0]
                 .shards()?
                 .iter()
-                .filter_map(|entry| {
-                    entry
-                        .ok()
-                        .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
-                })
-                .collect::<FastHashMap<_, _>>();
-
+                .map(|entry| entry.map(|(shard_ident, descr)| (shard_ident, Box::new(descr))))
+                .collect::<Result<FastHashMap<_, _>, _>>()?;
             collation_data_builder.set_shards(shards);
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
