@@ -9,6 +9,7 @@ use bytesize::ByteSize;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
+use scopeguard::guard;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::AbortHandle;
@@ -57,7 +58,9 @@ impl ArchiveBlockProvider {
                 last_known_archive: ArcSwapOption::empty(),
                 prev_known_archive: ArcSwapOption::empty(),
 
-                // reloaded_archive_info: Mutex::new(None),
+                last_reloaded_archive_info: Mutex::new(Default::default()),
+                prev_reloaded_archive_info: Mutex::new(Default::default()),
+
                 next_archive: Mutex::new(None),
 
                 storage,
@@ -74,10 +77,9 @@ impl ArchiveBlockProvider {
         let next_block_seqno = block_id.seqno + 1;
 
         // Clear the previous archive if the next block is too far ahead
-        if let Some(prev) = &*this.prev_known_archive.load() {
+        if let Some(prev) = this.prev_known_archive.load_full() {
             let mut clear_last = true;
-            let guard = prev.archive.read();
-            if let Some((prev_max_seqno, _)) = guard.mc_block_ids.last_key_value() {
+            if let Some((prev_max_seqno, _)) = prev.mc_block_ids.last_key_value() {
                 clear_last &= next_block_seqno > *prev_max_seqno + MAX_OVERLAP_BLOCKS;
             }
             if clear_last {
@@ -89,11 +91,10 @@ impl ArchiveBlockProvider {
             let block_id;
             let archive = 'download: loop {
                 if let Some(archive) = this.last_known_archive.load_full() {
-                    let guard = archive.archive.read();
-                    if let Some(mc_block_id) = guard.mc_block_ids.get(&next_block_seqno) {
+                    if let Some(mc_block_id) = archive.mc_block_ids.get(&next_block_seqno) {
                         block_id = *mc_block_id;
                         tracing::debug!(%mc_block_id, "block found in the last known archive");
-                        break 'download archive.clone();
+                        break 'download archive;
                     }
                 }
 
@@ -102,14 +103,13 @@ impl ArchiveBlockProvider {
                         // Duplicate the last known archive
                         if let Some(last) = this.last_known_archive.load_full() {
                             this.prev_known_archive.store(Some(last));
+                            this.move_archive_info_from_last_to_prev().await;
                         }
 
                         // Update the last known archive
-                        this.last_known_archive.store(Some(Arc::new(ArchiveInfo {
-                            archive: RwLock::new(archive),
-                            downloaded_from: RwLock::new(downloaded_from),
-                            is_valid: AtomicBool::new(true),
-                        })));
+                        this.last_known_archive.store(Some(Arc::new(archive)));
+                        this.update_archive_info(ReloadedArchiveType::Last, downloaded_from, true)
+                            .await;
                     }
                     Err(e) => {
                         tracing::error!("failed to get next archive {e:?}");
@@ -121,13 +121,12 @@ impl ArchiveBlockProvider {
 
             let check_successful = 'checks: {
                 {
-                    let guard = archive.archive.read();
                     match (
-                        guard.mc_block_ids.first_key_value(),
-                        guard.mc_block_ids.last_key_value(),
+                        archive.mc_block_ids.first_key_value(),
+                        archive.mc_block_ids.last_key_value(),
                     ) {
                         (Some((first_seqno, _)), Some((last_seqno, _))) => {
-                            if (*last_seqno - first_seqno) != guard.mc_block_ids.len() as u32 {
+                            if (*last_seqno - first_seqno) != archive.mc_block_ids.len() as u32 {
                                 tracing::error!("Archive does not contain some mc blocks");
                                 break 'checks false;
                             }
@@ -139,7 +138,7 @@ impl ArchiveBlockProvider {
                     }
                 }
 
-                let (block, proof, diff) = match archive.archive.read().get_entry_by_id(&block_id) {
+                let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
                     Ok(entry) => entry,
                     Err(e) => {
                         tracing::error!(
@@ -184,23 +183,14 @@ impl ArchiveBlockProvider {
 
         let last_opt_guard = self.inner.last_known_archive.load();
         let search_result = match &*last_opt_guard {
-            Some(archive_info) => {
-                let guard = archive_info.archive.read();
-                guard.mc_block_ids.get(&mc_seqno).map(|block| *block)
-            },
+            Some(archive) => archive.mc_block_ids.get(&mc_seqno).map(|block| *block),
             None => None,
         };
 
         let suitable_type = match search_result {
             None => match &*self.inner.prev_known_archive.load() {
-                Some(archive_info) => {
-                    if archive_info
-                        .archive
-                        .read()
-                        .mc_block_ids
-                        .get(&mc_seqno)
-                        .is_some()
-                    {
+                Some(archive) => {
+                    if archive.mc_block_ids.get(&mc_seqno).is_some() {
                         ReloadedArchiveType::Previous
                     } else {
                         ReloadedArchiveType::NotFound
@@ -223,9 +213,16 @@ impl ArchiveBlockProvider {
         'archive: loop {
             let (block, proof, diff) = match &archive {
                 Some(a) => {
-                    let is_valid = a.is_valid.load(Ordering::Acquire);
-                    if  is_valid{
-                        match a.archive.read().get_entry_by_id(&block_id_relation.block_id) {
+                    let mut guard = match &suitable_type {
+                        ReloadedArchiveType::Last => this.last_reloaded_archive_info.lock().await,
+                        ReloadedArchiveType::Previous => {
+                            this.prev_reloaded_archive_info.lock().await
+                        }
+                        ReloadedArchiveType::NotFound => unreachable!(),
+                    };
+
+                    if guard.is_valid {
+                        match a.get_entry_by_id(&block_id_relation.block_id) {
                             // Successfully found the block and proof
                             Ok(entry) => entry,
                             Err(e) => {
@@ -233,8 +230,10 @@ impl ArchiveBlockProvider {
                                     "Failed to find block {} in archive {e:?}",
                                     block_id_relation.block_id
                                 );
-                                a.downloaded_from.read().track_reliability(false);
-                                a.is_valid.store(false, Ordering::Release);
+                                if let Some(n) = &guard.downloaded_from {
+                                    n.track_reliability(false)
+                                }
+                                guard.is_valid = false;
                                 continue 'archive;
                             }
                         }
@@ -243,15 +242,9 @@ impl ArchiveBlockProvider {
 
                         match result_opt {
                             Ok((archive, neighbour)) => {
-                                {
-                                    let mut guard = a.downloaded_from.write();
-                                    *guard = neighbour;
-                                }
-                                {
-                                    let mut guard = a.archive.write();
-                                    *guard = archive;
-                                }
-                                a.is_valid.store(true, Ordering::Release);
+                                guard.is_valid = true;
+                                guard.downloaded_from = Some(neighbour);
+                                this.store_archive(&suitable_type, archive);
                             }
                             Err(e) => {
                                 tracing::error!("Failed to reload archive {e:?}");
@@ -363,16 +356,53 @@ struct Inner {
 
     client: BlockchainRpcClient,
     proof_checker: ProofChecker,
-    last_known_archive: ArcSwapOption<ArchiveInfo>,
-    prev_known_archive: ArcSwapOption<ArchiveInfo>,
+    last_known_archive: ArcSwapOption<Archive>,
+    prev_known_archive: ArcSwapOption<Archive>,
 
-    // reloaded_archive_info: Mutex<Option<ReloadedArchiveInfo>>,
+    last_reloaded_archive_info: Mutex<ArchiveInfo>,
+    prev_reloaded_archive_info: Mutex<ArchiveInfo>,
+
     next_archive: tokio::sync::Mutex<Option<NextArchive>>,
 
     config: ArchiveBlockProviderConfig,
 }
 
 impl Inner {
+    fn store_archive(&self, ty: &ReloadedArchiveType, archive: Archive) {
+        match ty {
+            ReloadedArchiveType::NotFound => (),
+            ReloadedArchiveType::Previous => self.prev_known_archive.store(Some(Arc::new(archive))),
+            ReloadedArchiveType::Last => self.last_known_archive.store(Some(Arc::new(archive))),
+        }
+    }
+    async fn move_archive_info_from_last_to_prev(&self) {
+        let mut last_guard = self.last_reloaded_archive_info.lock().await;
+        let mut prev_guard = self.prev_reloaded_archive_info.lock().await;
+
+        prev_guard.downloaded_from = last_guard.downloaded_from.clone();
+        prev_guard.is_valid = last_guard.is_valid;
+    }
+    async fn update_archive_info(
+        &self,
+        archive_type: ReloadedArchiveType,
+        downloaded_from: Neighbour,
+        is_valid: bool,
+    ) {
+        match archive_type {
+            ReloadedArchiveType::NotFound => (),
+            ReloadedArchiveType::Last => {
+                let mut guard = self.last_reloaded_archive_info.lock().await;
+                guard.downloaded_from = Some(downloaded_from);
+                guard.is_valid = is_valid;
+            }
+            ReloadedArchiveType::Previous => {
+                let mut guard = self.prev_reloaded_archive_info.lock().await;
+                guard.downloaded_from = Some(downloaded_from);
+                guard.is_valid = is_valid;
+            }
+        }
+    }
+
     async fn reload_archive(&self, mc_block_id: &BlockId) -> Result<(Archive, Neighbour)> {
         let downloader = self.make_downloader();
         let (archive_data, neighbour) = downloader.try_download(mc_block_id.seqno).await?;
@@ -526,9 +556,19 @@ pub enum ReloadedArchiveType {
 }
 
 pub struct ArchiveInfo {
-    pub archive: RwLock<Archive>,
-    pub downloaded_from: RwLock<Neighbour>,
-    pub is_valid: AtomicBool,
+    pub archive: ReloadedArchiveType,
+    pub downloaded_from: Option<Neighbour>,
+    pub is_valid: bool,
+}
+
+impl Default for ArchiveInfo {
+    fn default() -> Self {
+        ArchiveInfo {
+            archive: ReloadedArchiveType::NotFound,
+            downloaded_from: None,
+            is_valid: false,
+        }
+    }
 }
 
 pub struct PreloadedArchiveInfo {

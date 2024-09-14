@@ -90,7 +90,6 @@ impl BlockchainBlockProvider {
         // TODO: Backoff?
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
 
-
         loop {
             tracing::debug!(block_id = %block_id_relation.block_id.as_short_id(), "get_block_full requested");
             match self
