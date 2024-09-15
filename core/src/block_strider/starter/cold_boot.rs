@@ -622,7 +622,7 @@ impl StarterInner {
 
         // Download block state
         if !handle.has_state() {
-            let state_update = block.block().load_state_update()?;
+            let state_update = block.as_ref().load_state_update()?;
 
             tracing::info!(block_id = %handle.id(), "downloading state");
             let (_, shard_state) = self.load_or_download_state(block_id).await?;

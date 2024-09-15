@@ -164,6 +164,10 @@ impl BlockProofStuff {
             block_id.root_hash,
         );
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "We are working with a virtual block here, so `load_info` and other methods are necessary"
+        )]
         let info = virt_block.load_info()?;
         let _value_flow = virt_block.load_value_flow()?;
         let _state_update = virt_block.load_state_update()?;
@@ -344,6 +348,10 @@ impl BlockProofStuff {
             "expected a proof for a key block",
         );
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "We are working with a virtual block here, so `load_extra` and other methods are necessary"
+        )]
         let (validator_set, catchain_config) = {
             let extra = virt_key_block.load_extra()?;
             let Some(custom) = extra.load_custom()? else {
@@ -464,6 +472,10 @@ pub fn check_with_master_state(
     proof.check_signatures(&subset)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "We are working with a virtual block here, so `load_extra` and other methods are necessary"
+)]
 fn pre_check_key_block_proof(virt_block: &Block) -> Result<()> {
     let extra = virt_block.load_extra()?;
     let Some(mc_extra) = extra.load_custom()? else {

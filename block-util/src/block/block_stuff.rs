@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -61,6 +61,9 @@ impl BlockStuff {
                 id: *id,
                 block,
                 root,
+                block_info: Default::default(),
+                block_extra: Default::default(),
+                block_mc_extra: Default::default(),
             }),
         }
     }
@@ -88,6 +91,9 @@ impl BlockStuff {
                 id: *id,
                 block,
                 root,
+                block_info: Default::default(),
+                block_extra: Default::default(),
+                block_mc_extra: Default::default(),
             }),
         })
     }
@@ -116,7 +122,7 @@ impl BlockStuff {
     }
 
     pub fn construct_prev_id(&self) -> Result<(BlockId, Option<BlockId>)> {
-        let header = self.inner.block.load_info()?;
+        let header = self.load_info()?;
         match header.load_prev_ref()? {
             PrevBlockRef::Single(prev) => {
                 let shard = if header.after_split {
@@ -161,15 +167,46 @@ impl BlockStuff {
         }
     }
 
-    pub fn load_info(&self) -> Result<BlockInfo> {
-        self.inner.block.load_info().map_err(Into::into)
+    pub fn load_info(&self) -> Result<&BlockInfo, everscale_types::error::Error> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "We are implementing that load_info getter here"
+        )]
+        self.inner
+            .block_info
+            .get_or_init(|| self.inner.block.load_info())
+            .as_ref()
+            .map_err(|e| e.clone())
     }
 
-    pub fn load_custom(&self) -> Result<McBlockExtra> {
-        let Some(data) = self.inner.block.load_extra()?.load_custom()? else {
-            anyhow::bail!("given block is not a master block");
-        };
-        Ok(data)
+    pub fn load_extra(&self) -> Result<&BlockExtra, everscale_types::error::Error> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "We are implementing that load_extra getter here"
+        )]
+        self.inner
+            .block_extra
+            .get_or_init(|| self.inner.block.load_extra())
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    pub fn load_custom(&self) -> Result<&McBlockExtra, everscale_types::error::Error> {
+        let extra = self.load_extra()?;
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "We are implementing that load_custom getter here"
+        )]
+        self.inner
+            .block_mc_extra
+            .get_or_init(|| {
+                extra
+                    .load_custom()
+                    .and_then(|c| c.ok_or(everscale_types::error::Error::InvalidData))
+            })
+            .as_ref()
+            .map_err(|e| e.clone())
     }
 
     pub fn shard_blocks(&self) -> Result<FastHashMap<ShardIdent, BlockId>> {
@@ -219,4 +256,7 @@ pub struct Inner {
     id: BlockId,
     block: Block,
     root: Cell,
+    block_info: OnceLock<Result<BlockInfo, everscale_types::error::Error>>,
+    block_extra: OnceLock<Result<BlockExtra, everscale_types::error::Error>>,
+    block_mc_extra: OnceLock<Result<McBlockExtra, everscale_types::error::Error>>,
 }

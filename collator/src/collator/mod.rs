@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use error::CollatorError;
 use everscale_types::cell::HashBytes;
@@ -415,10 +415,8 @@ impl CollatorStdImpl {
                         .await?
                         .unwrap();
                     let created_by = block_stuff
-                        .block()
-                        .extra
-                        .load()
-                        .map_err(|e| anyhow!(e))?
+                        .load_extra()
+                        .map_err(|e| CollatorError::Anyhow(e.into()))?
                         .created_by;
                     self.anchors_cache.set_last_imported_anchor_info(
                         mempool_start_round,

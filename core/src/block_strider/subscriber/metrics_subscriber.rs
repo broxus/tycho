@@ -58,8 +58,8 @@ fn handle_block_fut(block: BlockStuff) -> BoxFuture<'static, Result<()>> {
 
 fn handle_block(block: &BlockStuff) -> Result<()> {
     let block_id = block.id();
-    let info = block.as_ref().load_info()?;
-    let extra = block.as_ref().load_extra()?;
+    let info = block.load_info()?;
+    let extra = block.load_extra()?;
 
     let mut in_msg_count: u32 = 0;
     for descr in extra.in_msg_description.load()?.iter() {

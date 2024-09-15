@@ -539,7 +539,7 @@ impl RpcStorage {
 
             let _span = span.enter();
 
-            let extra = block.as_ref().load_extra()?;
+            let extra = block.load_extra()?;
             let account_blocks = extra.account_blocks.load()?;
 
             let accounts = if account_blocks.is_empty() {
