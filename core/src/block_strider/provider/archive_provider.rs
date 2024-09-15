@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{ Result};
+use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
 use everscale_types::models::BlockId;
@@ -11,11 +11,10 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::AbortHandle;
-use tycho_block_util::archive::{Archive, ArchiveError};
+use tycho_block_util::archive::Archive;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::{NewBlockMeta, Storage};
 use tycho_util::time::now_sec;
-use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive};
@@ -68,7 +67,7 @@ impl ArchiveBlockProvider {
 
         let next_block_seqno = block_id.seqno + 1;
 
-        if let Some((archive_id, info)) = this.look_for_archive(block_id.seqno).await {
+        if let Some((archive_key, info)) = this.look_for_archive(block_id.seqno).await {
             let mut should_clear_outdated = true;
 
             if let Some((first_seqno, _)) = info.archive.mc_block_ids.first_key_value() {
@@ -76,13 +75,13 @@ impl ArchiveBlockProvider {
             }
 
             if should_clear_outdated {
-                this.clear_outdated_archives(archive_id).await;
+                this.clear_outdated_archives(archive_key).await;
             }
         }
 
         'main: loop {
             let block_id;
-            let (id, archive, source) = 'download: loop {
+            let (archive_key, archive, source) = 'download: loop {
                 if let Some((id, info)) = this.look_for_archive(next_block_seqno).await {
                     if let Some(mc_block_id) = info.archive.mc_block_ids.get(&next_block_seqno) {
                         block_id = *mc_block_id;
@@ -106,7 +105,7 @@ impl ArchiveBlockProvider {
                 }
             };
 
-            let check_successful = 'checks: {
+            'checks: {
                 {
                     match (
                         archive.mc_block_ids.first_key_value(),
@@ -115,12 +114,12 @@ impl ArchiveBlockProvider {
                         (Some((first_seqno, _)), Some((last_seqno, _))) => {
                             if (*last_seqno - first_seqno) != archive.mc_block_ids.len() as u32 {
                                 tracing::error!("Archive does not contain some mc blocks");
-                                break 'checks false;
+                                break 'checks;
                             }
                         }
                         _ => {
                             tracing::error!("Archive is empty");
-                            break 'checks false;
+                            break 'checks;
                         }
                     }
                 }
@@ -131,7 +130,7 @@ impl ArchiveBlockProvider {
                         tracing::error!(
                             "Archive is corrupted {e:?}. Retrying archive downloading."
                         );
-                        break 'checks false;
+                        break 'checks;
                     }
                 };
 
@@ -150,17 +149,13 @@ impl ArchiveBlockProvider {
                     }
                     Err(e) => {
                         tracing::error!("Failed to check block proof {e:?}");
-                        break 'checks false;
+                        break 'checks;
                     }
-                }
-
-                true
+                };
             };
 
-            if !check_successful {
-                self.inner.remove_archive(id).await;
-                continue 'main;
-            }
+            self.inner.remove_archive(archive_key).await;
+            source.track_reliability(false);
         }
     }
 
@@ -211,17 +206,15 @@ impl ArchiveBlockProvider {
     ) -> Result<(u32, Arc<Archive>, Neighbour)> {
         loop {
             let mut guard = self.inner.known_archives.lock().await;
-            let mut pending = match guard.get_mut(&next_block_seqno) {
-                Some(archive_slot) => {
-                    match archive_slot {
-                        ArchiveSlot::Pending(ref mut next) => Some((next_block_seqno, next)),
-                        ArchiveSlot::Downloaded(_) => {
-                            tracing::error!(archive_id = %next_block_seqno, "Archive is present and for some reason has wrong id");
-                            anyhow::bail!("bad archive id key");
-                        },
+            let pending = match guard.get_mut(&next_block_seqno) {
+                Some(archive_slot) => match archive_slot {
+                    ArchiveSlot::Pending(ref mut next) => Some((next_block_seqno, next)),
+                    ArchiveSlot::Downloaded(_) => {
+                        tracing::error!(archive_id = %next_block_seqno, "Archive is present and for some reason has wrong id");
+                        anyhow::bail!("bad archive id key");
                     }
-                }
-                None => None
+                },
+                None => None,
             };
 
             match pending {
@@ -250,19 +243,18 @@ impl ArchiveBlockProvider {
                         .await;
 
                     if let Some((seqno, _)) = archive.mc_block_ids.last_key_value() {
-                        let mut tree = self.inner.known_archives.lock().await;
                         let next = self.make_next_archive_task(seqno + 1);
-                        tree.insert(next_block_seqno, ArchiveSlot::Pending(next));
+                        self.inner.add_pending_archive(seqno + 1, next).await?;
                     }
 
                     return Ok((key, archive, archive_data.neighbour));
                 }
                 None => {
-                    let mut tree = self.inner.known_archives.lock().await;
                     let next = self.make_next_archive_task(next_block_seqno);
-                    tree.insert(next_block_seqno, ArchiveSlot::Pending(next));
+                    self.inner
+                        .add_pending_archive(next_block_seqno, next)
+                        .await?;
                 }
-                _ => {}
             }
         }
     }
@@ -275,8 +267,6 @@ impl ArchiveBlockProvider {
 
         // NOTE: Use a separate downloader to prevent reference cycles
         let downloader = self.inner.make_downloader();
-        let this = self.inner.clone();
-
         let handle = tokio::spawn(async move {
             tracing::debug!(seqno, "started preloading archive");
             scopeguard::defer! {
@@ -313,44 +303,18 @@ struct Inner {
     client: BlockchainRpcClient,
     proof_checker: ProofChecker,
 
-    known_archives: Mutex<BTreeMap<u32, ArchiveSlot>>,
-
-    // next_archive: NextArchive,
+    known_archives: Mutex<ArchivesMap>,
     config: ArchiveBlockProviderConfig,
 }
 
 impl Inner {
-    // async fn reload_archive(&self, mc_block_id: &BlockId) -> Result<(Archive, Neighbour)> {
-    //     let downloader = self.make_downloader();
-    //     let (archive_data, neighbour) = downloader.try_download(mc_block_id.seqno).await?;
-    //     let archive = self.construct_archive(archive_data).await?;
-    //     Ok((archive, neighbour))
-    // }
-
-    // async fn get_pending_archive(&self, key: u32) -> Result<Option<(u32, NextArchive)>> {
-    //     let mut guard = self.known_archives.lock().await;
-    //     match guard.entry(key) {
-    //         Entry::Occupied(occupied) => {
-    //             let archive_slot = occupied.get();
-    //             match archive_slot {
-    //                 ArchiveSlot::Pending(next) => Ok(Some((key, &next.clone()))),
-    //                 ArchiveSlot::Downloaded(a) => {
-    //                     tracing::error!(archive_id = %key, "Archive is already downloaded");
-    //                     anyhow::bail!("Archive {key} is already downloaded");
-    //                 },
-    //             }
-    //         }
-    //         Entry::Vacant(_) => Ok(None)
-    //     }
-    // }
-
     async fn add_pending_archive(&self, key: u32, next: NextArchive) -> Result<()> {
         let mut guard = self.known_archives.lock().await;
         match guard.entry(key) {
             Entry::Vacant(vacant) => {
                 vacant.insert(ArchiveSlot::Pending(next));
             }
-            Entry::Occupied(occupied) => {
+            Entry::Occupied(_) => {
                 anyhow::bail!("Failed to add pending archive with existing key {key}")
             }
         }
@@ -373,7 +337,7 @@ impl Inner {
             Entry::Occupied(mut occupied) => {
                 occupied.insert(new_value);
             }
-            Entry::Vacant(mut vacant) => {
+            Entry::Vacant(vacant) => {
                 vacant.insert(new_value); // TODO: maybe error?
             }
         }
@@ -383,11 +347,11 @@ impl Inner {
 
     async fn look_for_archive(&self, mc_block_seqno: u32) -> Option<(u32, ArchiveInfo)> {
         let guard = self.known_archives.lock().await;
-        for (archive_id, value) in guard.iter() {
+        for (archive_key, value) in guard.iter() {
             match value {
                 ArchiveSlot::Downloaded(info) => {
                     if info.archive.mc_block_ids.contains_key(&mc_block_seqno) {
-                        return Some((*archive_id, info.clone()));
+                        return Some((*archive_key, info.clone()));
                     }
                 }
                 ArchiveSlot::Pending { .. } => (),
@@ -399,7 +363,7 @@ impl Inner {
 
     async fn clear_outdated_archives(&self, bound: u32) {
         let mut guard = self.known_archives.lock().await;
-        guard.retain(|key, _| *key >= bound)
+        guard.retain(|key, _| *key >= bound);
     }
 
     fn make_downloader(&self) -> ArchiveDownloader {
@@ -470,8 +434,6 @@ struct NextArchive {
     abort_handle: AbortHandle,
 }
 
-
-
 #[derive(Clone)]
 enum ArchiveData {
     Bytes(Bytes),
@@ -533,7 +495,6 @@ enum ArchiveSlot {
     Pending(NextArchive),
 }
 
-
 impl NextArchive {
     pub async fn wait_for_archive(
         &mut self,
@@ -558,7 +519,7 @@ pub struct ArchiveInfo {
     pub archive: Arc<Archive>,
 }
 
-pub struct PreloadedArchiveInfo {
+struct PreloadedArchiveInfo {
     pub data: ArchiveData,
     pub neighbour: Neighbour,
 }
