@@ -432,8 +432,7 @@ impl Node {
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
         mempool_adapter.run(
             self.keypair.clone(),
-            self.dht_client.network(),
-            &self.peer_resolver,
+            &self.dht_client,
             &self.overlay_service,
             self.storage.mempool_storage(),
             get_validator_peer_ids(&mc_state)?,

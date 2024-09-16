@@ -12,7 +12,7 @@ use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::prelude::{Engine, InputBuffer};
 use tycho_consensus::test_utils::*;
-use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
+use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId};
 use tycho_storage::Storage;
 
 mod logger;
@@ -138,7 +138,7 @@ fn make_network(
                     .build()
                     .expect("new tokio runtime")
                     .block_on(async move {
-                        let (dht_client, peer_resolver, overlay_service) = from_validator(
+                        let (dht_client, overlay_service) = from_validator(
                             bind_address,
                             &secret_key,
                             None::<Address>,
@@ -149,7 +149,6 @@ fn make_network(
                                 routing_table_refresh_period_max_jitter: Duration::from_secs(1),
                                 ..Default::default()
                             },
-                            None::<PeerResolverConfig>,
                             None::<OverlayConfig>,
                             NetworkConfig::default(),
                         );
@@ -164,8 +163,7 @@ fn make_network(
                             Storage::new_temp().await.expect("new storage");
                         let mut engine = Engine::new(
                             key_pair,
-                            dht_client.network(),
-                            &peer_resolver,
+                            &dht_client,
                             &overlay_service,
                             mock_storage.mempool_storage(),
                             committed_tx.clone(),

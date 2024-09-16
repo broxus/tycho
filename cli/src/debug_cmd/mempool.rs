@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tycho_consensus::prelude::{Engine, InputBuffer};
 use tycho_consensus::test_utils::AnchorConsumer;
 use tycho_core::global_config::GlobalConfig;
-use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
+use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_storage::Storage;
 use tycho_util::cli::error::ResultExt;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
@@ -119,7 +119,6 @@ struct Mempool {
     keypair: Arc<ed25519::KeyPair>,
 
     dht_client: DhtClient,
-    peer_resolver: PeerResolver,
     overlay_service: OverlayService,
     storage: Storage,
 
@@ -135,16 +134,14 @@ impl Mempool {
     ) -> Result<Self> {
         let local_addr = SocketAddr::from((node_config.local_ip, node_config.port));
 
-        let (dht_client, peer_resolver, overlay_service) =
-            tycho_consensus::test_utils::from_validator(
-                local_addr,
-                &keys.as_secret(),
-                Some(public_addr),
-                node_config.dht,
-                Some(node_config.peer_resolver),
-                Some(node_config.overlay),
-                node_config.network,
-            );
+        let (dht_client, overlay_service) = tycho_consensus::test_utils::from_validator(
+            local_addr,
+            &keys.as_secret(),
+            Some(public_addr),
+            node_config.dht,
+            Some(node_config.overlay),
+            node_config.network,
+        );
 
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
         let local_id: PeerId = keypair.public_key.into();
@@ -183,7 +180,6 @@ impl Mempool {
         Ok(Self {
             keypair,
             dht_client,
-            peer_resolver,
             overlay_service,
             all_peers,
             storage,
@@ -203,8 +199,7 @@ impl Mempool {
 
         let mut engine = Engine::new(
             self.keypair.clone(),
-            self.dht_client.network(),
-            &self.peer_resolver,
+            &self.dht_client,
             &self.overlay_service,
             self.storage.mempool_storage(),
             committed_tx,

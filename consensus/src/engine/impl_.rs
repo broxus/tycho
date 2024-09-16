@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::mpsc;
-use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
+use tycho_network::{DhtClient, OverlayId, OverlayService, PeerId, PrivateOverlay};
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 
@@ -35,8 +35,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
-        network: &Network,
-        peer_resolver: &PeerResolver,
+        dht_client: &DhtClient,
         overlay_service: &OverlayService,
         mempool_storage: &MempoolStorage,
         committed: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
@@ -51,14 +50,19 @@ impl Engine {
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
+        let peer_resolver = dht_client
+            .service()
+            .make_peer_resolver()
+            .build(dht_client.network());
+
         let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
-            .with_peer_resolver(peer_resolver.clone())
+            .with_peer_resolver(peer_resolver)
             .named("tycho-consensus")
             .build(responder.clone());
 
         overlay_service.add_private_overlay(&private_overlay);
 
-        let dispatcher = Dispatcher::new(network, &private_overlay);
+        let dispatcher = Dispatcher::new(dht_client.network(), &private_overlay);
         let peer_schedule = PeerSchedule::new(key_pair, private_overlay);
 
         let store = MempoolStore::new(
