@@ -23,7 +23,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
     BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
-    DisplayBlockIdsSlice, McData, TopBlockDescription,
+    DisplayBlockIdsIntoIter, McData, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE,
@@ -486,7 +486,7 @@ impl CollatorStdImpl {
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 mc_data_block_id = %mc_data.block_id.as_short_id(),
-                prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
+                prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
                 "resume collation with reset",
             );
 
@@ -565,7 +565,7 @@ impl CollatorStdImpl {
     ) -> Result<WorkingState> {
         // load prev states and queue diff hashes
         tracing::debug!(target: tracing_targets::COLLATOR,
-            prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
+            prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
             "loading prev states and queue diffs...",
         );
         let (prev_states, prev_queue_diff_hashes) =

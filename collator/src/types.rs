@@ -425,34 +425,48 @@ impl ShardDescriptionExt for ShardDescription {
     }
 }
 
-struct DebugDisplay<'a, T>(pub &'a T);
-impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplay<'_, T> {
+pub struct DebugDisplay<T>(pub T);
+impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplay<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self.0, f)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
-pub(super) struct DisplaySlice<'a, T>(pub &'a [T]);
-impl<T: std::fmt::Display> std::fmt::Debug for DisplaySlice<'_, T> {
+pub struct DebugDisplayOpt<T>(pub Option<T>);
+impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplayOpt<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
+        std::fmt::Debug::fmt(&self.0.as_ref().map(DebugDisplay), f)
     }
 }
-impl<T: std::fmt::Display> std::fmt::Display for DisplaySlice<'_, T> {
+
+pub(super) struct DisplayIter<I>(pub I);
+impl<I> std::fmt::Display for DisplayIter<I>
+where
+    I: Iterator<Item: std::fmt::Display> + Clone,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut l = f.debug_list();
-        for block_id in self.0 {
-            l.entry(&DebugDisplay(block_id));
-        }
-        l.finish()
+        f.debug_list()
+            .entries(self.0.clone().map(DebugDisplay))
+            .finish()
+    }
+}
+
+pub(super) struct DisplayIntoIter<I>(pub I);
+impl<I> std::fmt::Display for DisplayIntoIter<I>
+where
+    I: IntoIterator<Item: std::fmt::Display> + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.clone().into_iter().map(DebugDisplay))
+            .finish()
     }
 }
 
 pub(super) struct DebugIter<I>(pub I);
-
 impl<I> std::fmt::Debug for DebugIter<I>
 where
-    I: IntoIterator<Item: std::fmt::Debug> + Clone,
+    I: Iterator<Item: std::fmt::Debug> + Clone,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.0.clone()).finish()
@@ -471,32 +485,43 @@ impl std::fmt::Display for DisplayAsShortId<'_> {
     }
 }
 
-pub(super) struct DisplayBlockIdsSlice<'a>(pub &'a [BlockId]);
-impl std::fmt::Debug for DisplayBlockIdsSlice<'_> {
+pub(super) struct DisplayBlockIdsIter<I>(pub I);
+impl<'a, I> std::fmt::Debug for DisplayBlockIdsIter<I>
+where
+    I: Iterator<Item = &'a BlockId> + Clone,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
-impl std::fmt::Display for DisplayBlockIdsSlice<'_> {
+impl<'a, I> std::fmt::Display for DisplayBlockIdsIter<I>
+where
+    I: Iterator<Item = &'a BlockId> + Clone,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut l = f.debug_list();
-        for block_id in self.0 {
-            l.entry(&DisplayAsShortId(block_id));
-        }
-        l.finish()
+        f.debug_list()
+            .entries(self.0.clone().map(DisplayAsShortId))
+            .finish()
     }
 }
 
-pub(super) struct DisplayBlockIdsList(pub Vec<BlockId>);
-impl std::fmt::Debug for DisplayBlockIdsList {
+pub(super) struct DisplayBlockIdsIntoIter<I>(pub I);
+impl<'a, I> std::fmt::Debug for DisplayBlockIdsIntoIter<I>
+where
+    I: IntoIterator<Item = &'a BlockId> + Clone,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
-impl std::fmt::Display for DisplayBlockIdsList {
+impl<'a, I> std::fmt::Display for DisplayBlockIdsIntoIter<I>
+where
+    I: IntoIterator<Item = &'a BlockId> + Clone,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let slice = self.0.as_slice();
-        std::fmt::Display::fmt(&DisplayBlockIdsSlice(slice), f)
+        f.debug_list()
+            .entries(self.0.clone().into_iter().map(DisplayAsShortId))
+            .finish()
     }
 }
 
@@ -509,21 +534,5 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTu
 impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple2<'_, T1, T2> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {})", self.0 .0, self.0 .1)
-    }
-}
-
-pub(super) struct DisplayBTreeMap<'a, K, V>(pub &'a BTreeMap<K, V>);
-impl<K: std::fmt::Display, V: std::fmt::Display> std::fmt::Debug for DisplayBTreeMap<'_, K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl<K: std::fmt::Display, V: std::fmt::Display> std::fmt::Display for DisplayBTreeMap<'_, K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut l = f.debug_list();
-        for kv in self.0.iter() {
-            l.entry(&DisplayTuple2(kv));
-        }
-        l.finish()
     }
 }

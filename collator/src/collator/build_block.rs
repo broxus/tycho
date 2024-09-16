@@ -583,7 +583,7 @@ impl CollatorStdImpl {
             }
 
             let account_block = AccountBlock {
-                state_update: updated_account.build_hash_update(), // TODO: fix state update
+                state_update: updated_account.build_hash_update(),
                 account: updated_account.account_addr,
                 transactions: AugDict::try_from_btree(&updated_account.transactions)?,
             };

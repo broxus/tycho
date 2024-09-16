@@ -1,16 +1,15 @@
-use std::collections::BTreeMap;
+use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
-use everscale_types::models::{BlockId, BlockIdShort, Lazy, OutMsgDescr, ShardIdent, ValueFlow};
-use parking_lot::Mutex;
+use anyhow::{anyhow, Result};
+use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_util::{FastDashMap, FastHashMap};
+use tycho_util::FastHashMap;
 
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, McData, ProofFunds, ShardDescriptionExt,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ShardDescriptionExt,
 };
 
 pub(super) type BlockCacheKey = BlockIdShort;
@@ -35,79 +34,26 @@ pub(super) struct ChainTimesSyncState {
     pub last_collated_chain_times_by_shards: FastHashMap<ShardIdent, Vec<(u64, bool)>>,
 }
 
-#[derive(Debug)]
 pub(super) struct BlockCacheStoreResult {
-    pub block_id: BlockId,
-    pub kind: BlockCacheEntryKind,
-    pub send_sync_status: SendSyncStatus,
+    pub received_and_collated: bool,
     pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
 }
 
-pub(super) struct DisplayBlockCacheStoreResult<'a>(pub &'a BlockCacheStoreResult);
-impl std::fmt::Debug for DisplayBlockCacheStoreResult<'_> {
+impl Debug for BlockCacheStoreResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
+        f.debug_struct("BlockCacheStoreResult")
+            .field("received_and_collated", &self.received_and_collated)
+            .field(
+                "last_collated_mc_block_id",
+                &DebugDisplayOpt(self.last_collated_mc_block_id),
+            )
+            .field("applied_mc_queue_range", &self.applied_mc_queue_range)
+            .finish()
     }
 }
 
-impl std::fmt::Display for DisplayBlockCacheStoreResult<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "block_id={}, kind={:?}, last_collated_mc_block_id={:?}, send_sync_status={:?}, ",
-            self.0.block_id,
-            self.0.kind,
-            self.0.last_collated_mc_block_id.map(|id| id.to_string()),
-            self.0.send_sync_status,
-        )?;
-        write!(
-            f,
-            "applied_mc_queue_range={:?}",
-            self.0.applied_mc_queue_range,
-        )
-    }
-}
-
-#[derive(Default)]
-pub(super) struct BlocksCache {
-    pub masters: Mutex<MasterBlocksCache>,
-    pub shards: FastDashMap<ShardIdent, ShardBlocksCache>,
-}
-
-#[derive(Default)]
-pub(super) struct MasterBlocksCache {
-    pub blocks: BTreeMap<BlockSeqno, BlockCacheEntry>,
-    pub last_known_synced: Option<BlockSeqno>,
-    /// id of last master block collated by ourselves
-    pub last_collated_mc_block_id: Option<BlockId>,
-    pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
-}
-
-#[derive(Default)]
-pub(super) struct ShardBlocksCache {
-    pub blocks: BTreeMap<BlockSeqno, BlockCacheEntry>,
-    pub last_known_synced: Option<BlockSeqno>,
-    pub value_flow: ValueFlow,
-    pub proof_funds: ProofFunds,
-    #[cfg(feature = "block-creator-stats")]
-    pub creators: Vec<everscale_types::cell::HashBytes>,
-}
-
-/// Returns Some(seqno: u32) of last known synced block when it newer than provided
-pub(super) fn check_refresh_last_known_synced(
-    last_known_seqno: &mut Option<BlockSeqno>,
-    block_seqno: BlockSeqno,
-) -> Option<BlockSeqno> {
-    if let Some(last_known) = last_known_seqno {
-        if *last_known >= block_seqno {
-            return Some(*last_known);
-        }
-    }
-    *last_known_seqno = Some(block_seqno);
-    None
-}
-
+#[derive(Clone)]
 pub(super) struct BlockCandidateStuff {
     pub candidate: BlockCandidate,
     pub signatures: FastHashMap<PeerId, ArcSignature>,
@@ -138,50 +84,91 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct AppliedBlockStuff {
-    pub state: Option<ShardStateStuff>,
-    pub queue_diff_and_msgs: Option<(QueueDiffStuff, Lazy<OutMsgDescr>)>,
-}
-
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
-pub(super) enum SendSyncStatus {
-    NotReady,
-    Ready,
-    Sending,
-    Sent,
+pub(super) enum CandidateStatus {
+    Collated,
+    Validated,
     Synced,
 }
 
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub(super) enum BlockCacheEntryKind {
-    Collated,
-    CollatedAndReceived,
-    Received,
-    ReceivedAndCollated,
+pub(super) enum BlockCacheEntryData {
+    Collated {
+        /// Collated block candidate with signatures
+        candidate_stuff: BlockCandidateStuff,
+
+        /// Candidate lifecycle status
+        status: CandidateStatus,
+
+        /// Whether the block was received after collation
+        received_after_collation: bool,
+    },
+    Received {
+        /// Cached state of the applied master block
+        cached_state: Option<ShardStateStuff>,
+        /// Applied block queue diff
+        queue_diff: QueueDiffStuff,
+        /// Applied block out messages
+        out_msgs: Lazy<OutMsgDescr>,
+
+        /// Whether the block was collated after receiving
+        collated_after_receive: bool,
+
+        /// Additional shard block cache info
+        additional_shard_block_cache_info: Option<AdditionalShardBlockCacheInfo>,
+    },
+}
+
+impl BlockCacheEntryData {
+    pub fn get_additional_shard_block_cache_info(
+        &self,
+    ) -> Result<Option<AdditionalShardBlockCacheInfo>> {
+        Ok(match self {
+            Self::Collated {
+                candidate_stuff, ..
+            } => Some(AdditionalShardBlockCacheInfo {
+                processed_to_anchor_id: candidate_stuff.candidate.processed_to_anchor_id,
+                block_info: candidate_stuff.candidate.block.load_info()?,
+            }),
+            Self::Received {
+                additional_shard_block_cache_info,
+                ..
+            } => additional_shard_block_cache_info.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AdditionalShardBlockCacheInfo {
+    pub block_info: BlockInfo,
+    pub processed_to_anchor_id: u32,
+}
+
+impl Display for BlockCacheEntryData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Collated {
+                received_after_collation,
+                ..
+            } => f
+                .debug_struct("Collated")
+                .field("received_after_collation", received_after_collation)
+                .finish(),
+            Self::Received {
+                collated_after_receive,
+                ..
+            } => f
+                .debug_struct("Received")
+                .field("collated_after_receive", collated_after_receive)
+                .finish(),
+        }
+    }
 }
 
 pub(super) struct BlockCacheEntry {
-    key: BlockCacheKey,
-    block_id: BlockId,
+    pub block_id: BlockId,
 
-    pub kind: BlockCacheEntryKind,
-
-    /// Collated block candidate with signatures
-    pub candidate_stuff: Option<BlockCandidateStuff>,
-    /// Appliend block data received from bc
-    pub applied_block_stuff: Option<AppliedBlockStuff>,
-
-    /// True when the candidate became valid due to the applied validation result
-    /// (updated by `set_validation_result()`). Or when received applied block from bc.
-    pub is_valid: bool,
-
-    /// * `NotReady` - is not ready to sync (not master block or it is not validated)
-    /// * `Ready` - is ready to sync (master block valid and all including shard blocks too)
-    /// * `Sending` - block extracted for sending to sync
-    /// * `Sent` - block is already sent to sync
-    /// * `Synced` - block is already synced
-    pub send_sync_status: SendSyncStatus,
+    /// Block cache entry data
+    pub data: BlockCacheEntryData,
 
     /// Ids of 1 (or 2 in case of merge) previous blocks in shard or master chain
     pub prev_blocks_ids: Vec<BlockId>,
@@ -196,12 +183,12 @@ pub(super) struct BlockCacheEntry {
 }
 
 impl BlockCacheEntry {
-    pub fn from_candidate(
+    pub fn from_collated(
         candidate: Box<BlockCandidate>,
         mc_data: Option<Arc<McData>>,
     ) -> Result<Self> {
         let block_id = *candidate.block.id();
-        let key = block_id.as_short_id();
+        let prev_blocks_ids = candidate.prev_blocks_ids.clone();
         let entry = BlockCandidateStuff {
             candidate: *candidate,
             signatures: Default::default(),
@@ -219,30 +206,28 @@ impl BlockCacheEntry {
         }
 
         Ok(Self {
-            key,
             block_id,
-            kind: BlockCacheEntryKind::Collated,
-            prev_blocks_ids: entry.candidate.prev_blocks_ids.clone(),
+            data: BlockCacheEntryData::Collated {
+                candidate_stuff: entry,
+                status: CandidateStatus::Collated,
+                received_after_collation: false,
+            },
+            prev_blocks_ids,
             top_shard_blocks_info,
-            candidate_stuff: Some(entry),
-            applied_block_stuff: None,
-            is_valid: false,
             containing_mc_block: None,
-            send_sync_status: SendSyncStatus::NotReady,
         })
     }
 
-    pub fn from_block_from_bc(
+    pub fn from_received(
         state: ShardStateStuff,
         prev_blocks_ids: Vec<BlockId>,
         queue_diff: QueueDiffStuff,
         out_msgs: Lazy<OutMsgDescr>,
     ) -> Result<Self> {
         let block_id = *state.block_id();
-        let key = block_id.as_short_id();
 
         let mut top_shard_blocks_info = vec![];
-        if block_id.is_masterchain() {
+        let cached_state = if block_id.is_masterchain() {
             for item in state.shards()?.iter() {
                 let (shard_id, shard_descr) = item?;
                 top_shard_blocks_info.push((
@@ -250,112 +235,64 @@ impl BlockCacheEntry {
                     shard_descr.top_sc_block_updated,
                 ));
             }
-        }
-
-        let applied_block_stuff = AppliedBlockStuff {
-            state: Some(state),
-            queue_diff_and_msgs: Some((queue_diff, out_msgs)),
+            Some(state)
+        } else {
+            None
         };
 
         Ok(Self {
-            key,
             block_id,
-            kind: BlockCacheEntryKind::Received,
-            candidate_stuff: None,
-            applied_block_stuff: Some(applied_block_stuff),
-            is_valid: true,
-            send_sync_status: SendSyncStatus::Synced,
+            data: BlockCacheEntryData::Received {
+                cached_state,
+                queue_diff,
+                out_msgs,
+                collated_after_receive: false,
+                additional_shard_block_cache_info: None,
+            },
             prev_blocks_ids,
             top_shard_blocks_info,
             containing_mc_block: None,
         })
     }
 
-    pub fn key(&self) -> &BlockCacheKey {
-        &self.key
+    pub fn key(&self) -> BlockCacheKey {
+        self.block_id.as_short_id()
     }
 
-    pub fn block_id(&self) -> &BlockId {
-        &self.block_id
-    }
-
-    /// Add signatures to block candidate
-    /// or mark that it was already synced
-    /// and update `is_valid` flag
-    pub fn set_validation_result(
-        &mut self,
-        is_valid: bool,
-        already_synced: bool,
-        signatures: FastHashMap<PeerId, ArcSignature>,
-    ) {
-        if let Some(ref mut candidate_stuff) = self.candidate_stuff {
-            candidate_stuff.signatures = signatures;
-            self.is_valid = is_valid;
-            if self.is_valid {
-                if already_synced {
-                    // already synced block is valid and won't be sent to sync again
-                    self.send_sync_status = SendSyncStatus::Synced;
-                } else {
-                    // block is ready for sync when validated
-                    self.send_sync_status = SendSyncStatus::Ready;
-                }
-            }
-        }
-    }
-
-    pub fn top_shard_blocks_ids_iter(&self) -> impl Iterator<Item = &BlockId> {
+    pub fn iter_top_block_ids(&self) -> impl Iterator<Item = &BlockId> {
         self.top_shard_blocks_info.iter().map(|(id, _)| id)
     }
 
-    pub fn candidate_stuff(&self) -> Result<&BlockCandidateStuff> {
-        self.candidate_stuff
-            .as_ref()
-            .ok_or_else(|| anyhow!("`candidate_stuff` was extracted"))
-    }
-}
-
-impl AppliedBlockStuffContainer for BlockCacheEntry {
-    fn key(&self) -> &BlockCacheKey {
-        &self.key
-    }
-
-    fn applied_block_stuff(&self) -> Option<&AppliedBlockStuff> {
-        self.applied_block_stuff.as_ref()
-    }
-}
-
-pub(super) trait AppliedBlockStuffContainer {
-    fn key(&self) -> &BlockCacheKey;
-
-    fn applied_block_stuff(&self) -> Option<&AppliedBlockStuff>;
-
-    fn state(&self) -> Result<&ShardStateStuff> {
-        let Some(applied_block_stuff) = self.applied_block_stuff() else {
-            bail!(
-                "applied_block_stuff should not be None for block ({})",
-                self.key(),
+    pub fn cached_state(&self) -> Result<&ShardStateStuff> {
+        if let BlockCacheEntryData::Received { cached_state, .. } = &self.data {
+            cached_state.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "`cached_state` shoul not be None for block ({})",
+                    self.block_id
+                )
+            })
+        } else {
+            anyhow::bail!(
+                "Block should be `Received` to contain `cached_state` ({})",
+                self.block_id
             )
-        };
-        let Some(state) = applied_block_stuff.state.as_ref() else {
-            bail!("state should not be None for block ({})", self.key(),)
-        };
-        Ok(state)
+        }
     }
 
-    fn queue_diff_and_msgs(&self) -> Result<&(QueueDiffStuff, Lazy<OutMsgDescr>)> {
-        let Some(applied_block_stuff) = self.applied_block_stuff() else {
-            bail!(
-                "applied_block_stuff should not be None for block ({})",
-                self.key(),
+    pub fn queue_diff_and_msgs(&self) -> Result<(&QueueDiffStuff, &Lazy<OutMsgDescr>)> {
+        if let BlockCacheEntryData::Received {
+            queue_diff,
+            out_msgs,
+            ..
+        } = &self.data
+        {
+            Ok((queue_diff, out_msgs))
+        } else {
+            anyhow::bail!(
+                "Block should be `Received` to contain `queue_diff` and `out_msgs` ({})",
+                self.block_id
             )
-        };
-        let Some(result) = applied_block_stuff.queue_diff_and_msgs.as_ref() else {
-            bail!(
-                "queue_diff_and_msgs should not be None for block ({})",
-                self.key(),
-            )
-        };
-        Ok(result)
+        }
     }
 }
 
@@ -366,7 +303,6 @@ pub(super) struct McBlockSubgraph {
 
 pub(super) enum McBlockSubgraphExtract {
     Extracted(McBlockSubgraph),
-    NotFullValid,
     AlreadyExtracted,
 }
 
@@ -374,14 +310,7 @@ impl std::fmt::Display for McBlockSubgraphExtract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Extracted(_) => write!(f, "Extracted"),
-            Self::NotFullValid => write!(f, "NotFullValid"),
             Self::AlreadyExtracted => write!(f, "AlreadyExtracted"),
         }
     }
-}
-
-pub struct LoadedQueueDiffContext {
-    pub prev_ids: Vec<BlockId>,
-    pub queue_diff: QueueDiffStuff,
-    pub out_msgs: Lazy<OutMsgDescr>,
 }
