@@ -247,7 +247,7 @@ where
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
 
         let update = block
-            .block()
+            .as_ref()
             .load_state_update()
             .context("Failed to load state update")?;
 

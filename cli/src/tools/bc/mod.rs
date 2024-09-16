@@ -216,7 +216,7 @@ async fn send_config_action(client: &JrpcClient, action: Action, sign: &KeyArgs)
         .contains(GlobalCapability::CapSignatureWithId)
         .then_some(res.global_id);
 
-    let seqno = prepare_action(&client, &config_addr, &keypair.public_key).await?;
+    let seqno = prepare_action(client, &config_addr, &keypair.public_key).await?;
     let (message, expire_at) = create_message(
         seqno,
         &config_addr,

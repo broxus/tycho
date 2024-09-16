@@ -1,7 +1,6 @@
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use anyhow::Context;
 use arc_swap::ArcSwap;
 use everscale_types::models::ValidatorSet;
 use futures_util::stream::FuturesUnordered;
@@ -112,19 +111,20 @@ impl BlockSubscriber for ValidatorsResolver {
         }
 
         let config = match cx.block.load_custom() {
-            Ok(extra) => extra.config,
+            Ok(extra) => &extra.config,
             Err(e) => {
-                tracing::error!("failed to load mc_extra: {e:?}");
-                None
+                return futures_util::future::ready(Err(anyhow::anyhow!(
+                    "failed to load mc block extra: {e:?}"
+                )))
             }
         };
 
-        let config = config.context("No config in keyblock").unwrap();
-
-        match config.get_current_validator_set() {
-            Ok(vset) => self.update_validator_set(&vset),
-            Err(e) => {
-                tracing::error!("failed to get validator set from blockchain config: {e:?}");
+        if let Some(config) = config {
+            match config.get_current_validator_set() {
+                Ok(vset) => self.update_validator_set(&vset),
+                Err(e) => {
+                    tracing::error!("failed to get validator set from blockchain config: {e:?}");
+                }
             }
         }
 

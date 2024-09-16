@@ -1047,11 +1047,7 @@ where
                         .load_block(&prev_block_id)
                         .await?
                         .unwrap();
-                    let out_msgs = block_stuff
-                        .block()
-                        .load_extra()?
-                        .out_msg_description
-                        .load()?;
+                    let out_msgs = block_stuff.load_extra()?.out_msg_description.load()?;
 
                     let queue_diff_with_messages =
                         QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs)?;

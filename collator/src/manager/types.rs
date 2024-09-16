@@ -127,7 +127,7 @@ impl BlockCacheEntryData {
                 candidate_stuff, ..
             } => Some(AdditionalShardBlockCacheInfo {
                 processed_to_anchor_id: candidate_stuff.candidate.processed_to_anchor_id,
-                block_info: candidate_stuff.candidate.block.load_info()?,
+                block_info: candidate_stuff.candidate.block.load_info()?.clone(),
             }),
             Self::Received {
                 additional_shard_block_cache_info,

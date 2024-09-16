@@ -7,11 +7,12 @@ disallowed-methods = [
     { path = "std::fs::File::create_new", reason = "use tycho_storage::FileDb instead" },
     { path = "std::fs::File::open", reason = "use tycho_storage::FileDb instead" },
     { path = "std::fs::File::options", reason = "use tycho_storage::FileDb instead" },
+    { path = "everscale_types::models::Block::load_info", reason = "use `BlockStuff::load_info` to avoid unnecessary deserialization" },
+    { path = "everscale_types::models::Block::load_extra", reason = "use `BlockStuff::load_extra` to avoid unnecessary deserialization" },
+    { path = "everscale_types::models::BlockExtra::load_custom", reason = "use `BlockStuff::load_custom` to avoid unnecessary deserialization" },
 ]
 
-disallowed-types = [
-    { path = "std::fs::OpenOptions", reason = "use tycho_storage::FileDb instead" },
-]
+disallowed-types = [{ path = "std::fs::OpenOptions", reason = "use tycho_storage::FileDb instead" }]
 
 # https://rust-lang.github.io/rust-clippy/master/index.html#await_holding_invalid_type
 # until #[must_not_suspend] is stabilized https://github.com/rust-lang/rust/issues/83310

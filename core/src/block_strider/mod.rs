@@ -160,10 +160,8 @@ where
 
         let started_at = Instant::now();
 
-        let (is_key_block, shards) = {
-            let custom = block.load_custom()?;
-            (custom.config.is_some(), custom.shards)
-        };
+        let custom = block.load_custom()?;
+        let is_key_block = custom.config.is_some();
 
         // Begin preparing master block in the background
         let prepared_master = {
@@ -184,7 +182,7 @@ where
         // Start downloading shard blocks
         let mut shard_heights = FastHashMap::default();
         let mut download_futures = FuturesUnordered::new();
-        for entry in shards.latest_blocks() {
+        for entry in custom.shards.latest_blocks() {
             let top_block_id = entry?;
             shard_heights.insert(top_block_id.shard, top_block_id.seqno);
             download_futures.push(Box::pin(self.download_shard_blocks(top_block_id)));
@@ -237,7 +235,7 @@ where
             let info = block.data.load_info()?;
 
             // Add new block to result
-            result.push(block);
+            result.push(block.clone());
 
             // Process block refs
             if info.after_split || info.after_merge {

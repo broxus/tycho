@@ -6,23 +6,10 @@ pub enum CollationCancelReason {
     NextAnchorNotFound(MempoolAnchorId),
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CollatorError {
+    #[error("Cancelled(reason: {0:?})")]
     Cancelled(CollationCancelReason),
-    Anyhow(anyhow::Error),
-}
-
-impl From<anyhow::Error> for CollatorError {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Anyhow(value)
-    }
-}
-
-impl From<CollatorError> for anyhow::Error {
-    fn from(value: CollatorError) -> Self {
-        match value {
-            CollatorError::Anyhow(error) => error,
-            CollatorError::Cancelled(reason) => anyhow::anyhow!("Cancelled(reason: {:?}", reason),
-        }
-    }
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
 }

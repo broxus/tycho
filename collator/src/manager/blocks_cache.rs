@@ -603,7 +603,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 if !block_id.is_masterchain() {
                     *additional_shard_block_cache_info = Some(AdditionalShardBlockCacheInfo {
                         processed_to_anchor_id: candidate.processed_to_anchor_id,
-                        block_info: candidate.block.load_info()?,
+                        block_info: candidate.block.load_info()?.clone(),
                     });
                 }
 
@@ -877,7 +877,7 @@ impl ReceivedBlockContext {
             bail!("block not found: {block_id}");
         };
 
-        let out_msgs = block_stuff.block().load_extra()?.out_msg_description;
+        let out_msgs = block_stuff.load_extra()?.out_msg_description.clone();
         let queue_diff = state_node_adapter.load_diff(block_id).await?.unwrap();
 
         let (prev1, prev2) = block_stuff.construct_prev_id()?;

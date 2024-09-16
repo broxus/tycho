@@ -280,7 +280,6 @@ impl ShardStateStorage {
 
         let block_data = self.block_storage.load_block_data(&handle).await?;
         let block_info = block_data
-            .block()
             .load_info()
             .context("Failed to read target block info")?;
 

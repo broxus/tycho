@@ -356,6 +356,10 @@ impl StateNodeAdapterStdImpl {
 }
 
 // TODO: This should possibly panic on error?
+#[expect(
+    clippy::disallowed_methods,
+    reason = "We are working with a virtual block here, so `load_extra` and other methods are necessary"
+)]
 fn prepare_block_proof(
     block_stuff: &BlockStuff,
     signatures: &FastHashMap<PeerId, ArcSignature>,
