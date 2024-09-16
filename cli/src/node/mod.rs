@@ -10,6 +10,7 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
+use tokio::runtime::Runtime;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
@@ -123,27 +124,107 @@ impl CmdRun {
             .stack_size(8 * 1024 * 1024)
             .thread_name(|_| "rayon_worker".to_string())
             .num_threads(node_config.threads.rayon_threads)
-            .build_global()
-            .unwrap();
+            .build_global()?;
 
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(node_config.threads.tokio_workers)
-            .build()?
-            .block_on(async move {
-                let run_fut = tokio::spawn(self.run_impl(node_config));
-                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-                tokio::select! {
-                    res = run_fut => res.unwrap(),
-                    signal = stop_fut => match signal {
-                        Ok(signal) => {
-                            tracing::info!(?signal, "received termination signal");
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
+        let runtime = Self::build_tokio_runtime(&node_config)?;
+
+        runtime.block_on(async move {
+            let run_fut = tokio::spawn(self.run_impl(node_config));
+            let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+            tokio::select! {
+                res = run_fut => res.unwrap(),
+                signal = stop_fut => match signal {
+                    Ok(signal) => {
+                        tracing::info!(?signal, "received termination signal");
+                        Ok(())
                     }
+                    Err(e) => Err(e.into()),
                 }
-            })
+            }
+        })
+    }
+
+    fn build_tokio_runtime(node_config: &NodeConfig) -> Result<Runtime> {
+        let mut rt = tokio::runtime::Builder::new_multi_thread();
+
+        rt.enable_all()
+            .worker_threads(node_config.threads.tokio_workers);
+
+        #[cfg(all(feature = "tokio-metrics", tokio_unstable))]
+        const NUM_BUCKETS: usize = 16;
+        #[cfg(all(feature = "tokio-metrics", tokio_unstable))]
+        {
+            use tokio::runtime::HistogramScale;
+            rt.enable_metrics_poll_count_histogram()
+                .metrics_poll_count_histogram_scale(HistogramScale::Log)
+                .metrics_poll_count_histogram_buckets(NUM_BUCKETS); // b = r * 2^(n-1); r = 100mcs, n = 16, b = 3.2s
+        }
+
+        let rt = rt.build()?;
+
+        #[cfg(all(feature = "tokio-metrics", tokio_unstable))]
+        rt.spawn(async move {
+            fn fill_log_buckets() -> [f64; NUM_BUCKETS] {
+                let mut buckets = [0.0; NUM_BUCKETS];
+                let mut current_micros = 100.0;
+
+                for bucket in &mut buckets {
+                    *bucket = current_micros / 1_000_000.0; // Convert microseconds to seconds
+                    current_micros *= 2.0;
+                }
+
+                buckets
+            }
+            let log_buckets: [f64; NUM_BUCKETS] = fill_log_buckets();
+
+            // we can use histogram when https://github.com/metrics-rs/metrics/issues/509 is resolved
+            // otherwise it will burn CPU and memory
+            let handle = tokio::runtime::Handle::current();
+            let runtime_monitor = tokio_metrics::RuntimeMonitor::new(&handle);
+            for interval in runtime_monitor.intervals() {
+                let histogram = interval.poll_count_histogram;
+                const METRIC_NAME: &str = "tycho_tokio_poll_count_time";
+
+                let mut cumulative_count = 0;
+                let mut sum = 0.0;
+
+                for (idx, value) in histogram.iter().enumerate() {
+                    let bucket = log_buckets[idx];
+                    cumulative_count += *value;
+                    let le = format!("{:.6}", bucket);
+                    metrics::gauge!(METRIC_NAME, "le" => le).set(cumulative_count as f64);
+                    sum += bucket * (*value as f64);
+                }
+
+                let mean_poll_time = interval.mean_poll_duration.as_secs_f64();
+                metrics::gauge!("tycho_tokio_mean_poll_time").set(mean_poll_time);
+
+                let max_poll_time = interval.mean_poll_duration_worker_max.as_secs_f64();
+                metrics::gauge!("tycho_tokio_max_poll_time").set(max_poll_time);
+
+                // Add +Inf bucket
+                metrics::gauge!(METRIC_NAME, "le" => "+Inf").set(cumulative_count as f64);
+
+                // Add sum and count
+                metrics::gauge!(format!("{}_sum", METRIC_NAME)).set(sum);
+                metrics::gauge!(format!("{}_count", METRIC_NAME)).set(cumulative_count as f64);
+
+                let metrics = handle.metrics();
+                metrics::gauge!("tycho_tokio_num_alive_tasks")
+                    .set(metrics.num_alive_tasks() as f64);
+
+                let num_blocking_threads = metrics.num_blocking_threads();
+                metrics::gauge!("tycho_tokio_num_blocking_threads")
+                    .set(num_blocking_threads as f64);
+
+                let spawned_tasks = metrics.spawned_tasks_count();
+                metrics::gauge!("tycho_tokio_spawned_tasks_count").set(spawned_tasks as f64);
+
+                tokio::time::sleep(Duration::from_millis(5000)).await;
+            }
+        });
+
+        Ok(rt)
     }
 
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {

@@ -1684,6 +1684,25 @@ def rayon_stats() -> RowPanel:
     return create_row("Rayon Stats", metrics)
 
 
+def tokio_stats() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_tokio_poll_count_time", "Poll Count Time", yaxis(UNITS.SECONDS)
+        ),
+        create_gauge_panel(
+            "tycho_tokio_mean_poll_time", "Mean Poll Time", UNITS.SECONDS
+        ),
+        create_gauge_panel("tycho_tokio_max_poll_time", "Max Poll Time", UNITS.SECONDS),
+        create_gauge_panel(
+            "tycho_tokio_num_alive_tasks", "Num Alive Tasks", UNITS.NUMBER_FORMAT
+        ),
+        create_gauge_panel("tycho_tokio_num_blocking_threads", "Num Blocking Threads"),
+        create_counter_panel("tycho_tokio_spawned_tasks_count", "Spawned Tasks Count"),
+    ]
+
+    return create_row("Tokio Stats", metrics)
+
+
 def templates() -> Templating:
     return Templating(
         list=[
@@ -1773,6 +1792,7 @@ dashboard = Dashboard(
         net_dht(),
         allocator_stats(),
         rayon_stats(),
+        tokio_stats(),
         jrpc(),
         jrpc_timings(),
     ],

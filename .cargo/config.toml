@@ -1,0 +1,12 @@
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/clang"
+rustflags = [
+    "-Clink-arg=-fuse-ld=lld",
+    "-Ctarget_cpu=native",
+    "-Cforce-frame-pointers=true",
+    "--cfg",
+    "tokio_unstable",
+]
+
+[net]
+git-fetch-with-cli = true
