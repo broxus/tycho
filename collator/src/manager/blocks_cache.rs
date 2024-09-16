@@ -686,6 +686,11 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     ctx.out_msgs,
                 )?);
 
+                // Remove state from prev block because we need only last one
+                if block_id.is_masterchain() {
+                    prev_ids_to_clear = entry.prev_blocks_ids.clone();
+                }
+
                 let new_data = self.data.on_insert_received(entry)?;
 
                 StoredBlock {
