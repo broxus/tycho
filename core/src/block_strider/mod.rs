@@ -328,11 +328,11 @@ where
             Some(Ok(block)) => Ok(block),
             Some(Err(e)) => {
                 anyhow::bail!(
-                    "BUGGY PROVIDER. failed to fetch block for relation {block_id_relation}: {e:?}"
+                    "BUGGY PROVIDER. failed to fetch block for {block_id_relation:?}: {e:?}"
                 )
             }
             None => {
-                anyhow::bail!("BUGGY PROVIDER. block not found for relation: {block_id_relation}")
+                anyhow::bail!("BUGGY PROVIDER. block not found for {block_id_relation:?}")
             }
         }
     }

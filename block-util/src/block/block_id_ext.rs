@@ -1,5 +1,3 @@
-use std::fmt::{Display, Formatter};
-
 use everscale_types::models::BlockId;
 
 pub trait BlockIdExt {
@@ -8,25 +6,26 @@ pub trait BlockIdExt {
     fn relative_to_self(self) -> BlockIdRelation;
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct BlockIdRelation {
     pub mc_block_id: BlockId,
     pub block_id: BlockId,
 }
 
-impl Display for BlockIdRelation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "McBlockId {}:{}:{}:{} - BlockId {}:{}:{}:{}",
-            self.mc_block_id.shard,
-            self.mc_block_id.seqno,
-            self.mc_block_id.root_hash,
-            self.mc_block_id.file_hash,
-            self.block_id.shard,
-            self.block_id.seqno,
-            self.block_id.root_hash,
-            self.block_id.file_hash,
-        ))
+impl std::fmt::Debug for BlockIdRelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct DebugBlockId<'a>(&'a BlockId);
+
+        impl std::fmt::Debug for DebugBlockId<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Display::fmt(self.0, f)
+            }
+        }
+
+        f.debug_struct("BlockIdRelation")
+            .field("mc_block_id", &DebugBlockId(&self.mc_block_id))
+            .field("block_id", &DebugBlockId(&self.block_id))
+            .finish()
     }
 }
 
