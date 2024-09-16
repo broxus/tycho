@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockIdExt, BlockStuff};
 use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider, StorageBlockProvider};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
@@ -25,7 +25,9 @@ async fn storage_block_strider() -> anyhow::Result<()> {
     let archive = utils::parse_archive(&archive_data)?;
     for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
-            let block = storage_provider.get_block(&block_id).await;
+            let block = storage_provider
+                .get_block(&block_id.relative_to_self())
+                .await;
             assert!(block.is_some());
 
             if let Some(block) = block {
@@ -128,7 +130,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     let archive_data = utils::read_file("archive.bin")?;
     let archive = utils::parse_archive(&archive_data)?;
     for block_id in archive.mc_block_ids.values() {
-        let block = provider.get_block(block_id).await;
+        let block = provider.get_block(&block_id.relative_to_self()).await;
         assert!(block.is_some());
 
         if let Some(block) = block {

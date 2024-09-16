@@ -1,5 +1,6 @@
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
+use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::Storage;
 
 use crate::block_strider::provider::OptionalBlockStuff;
@@ -31,10 +32,13 @@ impl BlockProvider for StorageBlockProvider {
         })
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(async {
             let block_storage = self.storage.block_storage();
-            match block_storage.wait_for_block(block_id).await {
+            match block_storage
+                .wait_for_block(&block_id_relation.block_id)
+                .await
+            {
                 Ok(block) => Some(Ok(block)),
                 Err(e) => Some(Err(e)),
             }

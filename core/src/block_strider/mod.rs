@@ -6,7 +6,9 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::Future;
 use tokio::time::Instant;
 use tycho_block_util::archive::ArchiveData;
-use tycho_block_util::block::{BlockStuff, BlockStuffAug, ShardHeights};
+use tycho_block_util::block::{
+    BlockIdExt, BlockIdRelation, BlockStuff, BlockStuffAug, ShardHeights,
+};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
@@ -185,7 +187,9 @@ where
         for entry in custom.shards.latest_blocks() {
             let top_block_id = entry?;
             shard_heights.insert(top_block_id.shard, top_block_id.seqno);
-            download_futures.push(Box::pin(self.download_shard_blocks(top_block_id)));
+            download_futures.push(Box::pin(
+                self.download_shard_blocks(mc_block_id, top_block_id),
+            ));
         }
 
         // Start processing shard blocks in parallel
@@ -212,7 +216,11 @@ where
     }
 
     /// Downloads blocks for the single shard in descending order starting from the top block.
-    async fn download_shard_blocks(&self, mut top_block_id: BlockId) -> Result<Vec<BlockStuffAug>> {
+    async fn download_shard_blocks(
+        &self,
+        mc_block_id: BlockId,
+        mut top_block_id: BlockId,
+    ) -> Result<Vec<BlockStuffAug>> {
         const MAX_DEPTH: u32 = 32;
 
         tracing::debug!(%top_block_id, "downloading shard blocks");
@@ -224,7 +232,9 @@ where
             let block = {
                 let _histogram = HistogramGuard::begin("tycho_core_download_sc_block_time");
 
-                let block = self.fetch_block(&top_block_id).await?;
+                let block = self
+                    .fetch_block(&top_block_id.relative_to(mc_block_id))
+                    .await?;
                 tracing::debug!(block_id = %top_block_id, "fetched shard block");
                 debug_assert_eq!(block.id(), &top_block_id);
 
@@ -313,14 +323,16 @@ where
         }
     }
 
-    async fn fetch_block(&self, block_id: &BlockId) -> Result<BlockStuffAug> {
-        match self.provider.get_block(block_id).await {
+    async fn fetch_block(&self, block_id_relation: &BlockIdRelation) -> Result<BlockStuffAug> {
+        match self.provider.get_block(block_id_relation).await {
             Some(Ok(block)) => Ok(block),
             Some(Err(e)) => {
-                anyhow::bail!("BUGGY PROVIDER. failed to fetch block {block_id}: {e:?}")
+                anyhow::bail!(
+                    "BUGGY PROVIDER. failed to fetch block for {block_id_relation:?}: {e:?}"
+                )
             }
             None => {
-                anyhow::bail!("BUGGY PROVIDER. block not found: {block_id}")
+                anyhow::bail!("BUGGY PROVIDER. block not found for {block_id_relation:?}")
             }
         }
     }

@@ -9,6 +9,7 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
+use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
@@ -635,7 +636,7 @@ impl BlockProvider for ActivateCollator {
         futures_util::future::ready(None)
     }
 
-    fn get_block<'a>(&'a self, _: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, _: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         futures_util::future::ready(None)
     }
 }
@@ -696,8 +697,8 @@ impl BlockProvider for CollatorBlockProvider {
         self.adapter.wait_for_block_next(prev_block_id)
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        self.adapter.wait_for_block(block_id)
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        self.adapter.wait_for_block(&block_id_relation.block_id)
     }
 }
 
