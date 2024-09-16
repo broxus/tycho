@@ -943,7 +943,6 @@ impl CollatorStdImpl {
         } else {
             false
         };
-        mq_iterator_adapter.set_released();
 
         working_state.has_unprocessed_messages = Some(has_internals);
 

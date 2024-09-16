@@ -31,14 +31,6 @@ pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     current_positions: FastHashMap<ShardIdent, QueueKey>,
     /// sum total iterators initialization time
     init_iterator_total_elapsed: Duration,
-    /// indicates if `release()` was called
-    released: bool,
-}
-
-impl<V: InternalMessageValue> Drop for QueueIteratorAdapter<V> {
-    fn drop(&mut self) {
-        assert!(self.released, "release() should be called");
-    }
 }
 
 impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
@@ -56,7 +48,6 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             new_messages_read_to: QueueKey::MIN,
             current_positions,
             init_iterator_total_elapsed: Duration::ZERO,
-            released: false,
         }
     }
 
@@ -86,13 +77,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
 
         *current_positions = Some(std::mem::take(&mut self.current_positions));
 
-        self.set_released();
-
         Ok((has_pending_internals, full_diff.diff))
-    }
-
-    pub fn set_released(&mut self) {
-        self.released = true;
     }
 
     pub fn no_pending_existing_internals(&self) -> bool {
