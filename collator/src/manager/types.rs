@@ -8,7 +8,9 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync, McData, ShardDescriptionExt};
+use crate::types::{
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ShardDescriptionExt,
+};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -32,11 +34,23 @@ pub(super) struct ChainTimesSyncState {
     pub last_collated_chain_times_by_shards: FastHashMap<ShardIdent, Vec<(u64, bool)>>,
 }
 
-#[derive(Debug)]
 pub(super) struct BlockCacheStoreResult {
     pub received_and_collated: bool,
     pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
+}
+
+impl Debug for BlockCacheStoreResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockCacheStoreResult")
+            .field("received_and_collated", &self.received_and_collated)
+            .field(
+                "last_collated_mc_block_id",
+                &DebugDisplayOpt(self.last_collated_mc_block_id),
+            )
+            .field("applied_mc_queue_range", &self.applied_mc_queue_range)
+            .finish()
+    }
 }
 
 #[derive(Clone)]

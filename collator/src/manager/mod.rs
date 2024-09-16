@@ -868,7 +868,7 @@ where
         };
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            res = ?store_res,
+            ?store_res,
             "Saved block from bc to cache",
         );
 
@@ -1090,7 +1090,9 @@ where
 
             let subgraph = match mc_block_subgraph_extract {
                 McBlockSubgraphExtract::Extracted(subgraph) => subgraph,
-                other => bail!("mc block subgraph extract result cannot be {}", other),
+                McBlockSubgraphExtract::AlreadyExtracted => {
+                    bail!("mc block subgraph extract result cannot be AlreadyExtracted")
+                }
             };
 
             // apply queue diffs

@@ -425,10 +425,17 @@ impl ShardDescriptionExt for ShardDescription {
     }
 }
 
-struct DebugDisplay<T>(pub T);
+pub struct DebugDisplay<T>(pub T);
 impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplay<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+pub struct DebugDisplayOpt<T>(pub Option<T>);
+impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplayOpt<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0.as_ref().map(DebugDisplay), f)
     }
 }
 

@@ -319,12 +319,15 @@ impl BlocksCache {
                     set_containing_mc_block = Some(ids.top_shard_block_ids);
                 }
             } else {
-                let mut g = self.shards.entry(block_id.shard).or_default();
-                if let Some(last_known_synced) = g.check_refresh_last_known_synced(block_id.seqno) {
-                    break 'sync last_known_synced;
-                }
-                let res = g.store_received_block(ctx)?;
-                drop(g);
+                let res = {
+                    let mut g = self.shards.entry(block_id.shard).or_default();
+                    if let Some(last_known_synced) =
+                        g.check_refresh_last_known_synced(block_id.seqno)
+                    {
+                        break 'sync last_known_synced;
+                    }
+                    g.store_received_block(ctx)?
+                };
 
                 received_and_collated = res.received_and_collated;
 
@@ -439,7 +442,7 @@ impl BlocksCache {
             }
         }
         let mc_block_entry = extracted_mc_block_entry.unwrap();
-        let subgraph_extract = self.extract_mc_block_subgraph_internal(mc_block_entry)?;
+        let subgraph_extract = self.extract_mc_block_subgraph(mc_block_entry)?;
         Ok((subgraph_extract, is_last))
     }
 
@@ -467,10 +470,10 @@ impl BlocksCache {
             occupied_entry
         };
 
-        self.extract_mc_block_subgraph_internal(mc_block_entry)
+        self.extract_mc_block_subgraph(mc_block_entry)
     }
 
-    fn extract_mc_block_subgraph_internal(
+    fn extract_mc_block_subgraph(
         &self,
         mc_block_entry: BlockCacheEntry,
     ) -> Result<McBlockSubgraphExtract> {
@@ -858,7 +861,7 @@ impl ReceivedBlockContext {
 
         let block_id = state.block_id();
         if block_id.seqno == 0 {
-            let queue_diff = QueueDiffStuff::new_empty(&block_id);
+            let queue_diff = QueueDiffStuff::new_empty(block_id);
 
             return Ok(Self {
                 state,
@@ -871,7 +874,7 @@ impl ReceivedBlockContext {
         }
 
         let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
-            anyhow::bail!("block not found: {block_id}");
+            bail!("block not found: {block_id}");
         };
 
         let out_msgs = block_stuff.block().load_extra()?.out_msg_description;
