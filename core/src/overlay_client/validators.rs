@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 use tycho_network::{KnownPeerHandle, Network, PeerId, PeerResolver, PublicOverlay, Request};
 use tycho_util::futures::JoinTask;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashSet;
 
 use crate::block_strider::{BlockSubscriber, BlockSubscriberContext};
@@ -360,7 +361,7 @@ impl Validators {
 
                 JoinTask::new(async move {
                     let _histogram =
-                        metrics::histogram!("tycho_core_overlay_client_validator_ping_time");
+                        HistogramGuard::begin("tycho_core_overlay_client_validator_ping_time");
 
                     let peer_id = validator.peer_id();
                     let res = tokio::time::timeout(
