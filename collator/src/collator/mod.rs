@@ -232,7 +232,7 @@ impl CollatorStdImpl {
         let (dispatcher, receiver) =
             AsyncQueuedDispatcher::new(STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
 
-        let (working_state_tx, working_state_rx) = oneshot::channel::<Result<WorkingState>>();
+        let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
         let processor = Self {
             next_block_info,
@@ -299,7 +299,7 @@ impl CollatorStdImpl {
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
-        working_state_tx: oneshot::Sender<Result<WorkingState>>,
+        working_state_tx: oneshot::Sender<Result<Box<WorkingState>>>,
     ) -> Result<()> {
         tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
@@ -560,7 +560,7 @@ impl CollatorStdImpl {
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mc_data: Arc<McData>,
         prev_blocks_ids: Vec<BlockId>,
-    ) -> Result<WorkingState> {
+    ) -> Result<Box<WorkingState>> {
         // load prev states and queue diff hashes
         tracing::debug!(target: tracing_targets::COLLATOR,
             prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
@@ -582,7 +582,7 @@ impl CollatorStdImpl {
         new_queue_diff_hash: HashBytes,
         mc_data: Option<Arc<McData>>,
         has_unprocessed_messages: bool,
-        prev_working_state: WorkingState,
+        prev_working_state: Box<WorkingState>,
         msgs_buffer: MessagesBuffer,
     ) -> Result<()> {
         // TODO: Check if the result mc_data is properly updated on masterchain block
@@ -598,14 +598,14 @@ impl CollatorStdImpl {
 
             let next_block_id_short = Self::calc_next_block_id_short(prev_shard_data.blocks_ids());
 
-            Ok(WorkingState {
+            Ok(Box::new(WorkingState {
                 next_block_id_short,
                 mc_data,
                 prev_shard_data,
                 usage_tree,
                 has_unprocessed_messages: Some(has_unprocessed_messages),
                 msgs_buffer: Some(msgs_buffer),
-            })
+            }))
         }));
 
         Ok(())
@@ -674,14 +674,14 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
-    ) -> Result<WorkingState> {
+    ) -> Result<Box<WorkingState>> {
         // TODO: consider split/merge
 
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         let next_block_id_short = Self::calc_next_block_id_short(prev_shard_data.blocks_ids());
 
-        Ok(WorkingState {
+        Ok(Box::new(WorkingState {
             next_block_id_short,
             mc_data,
             prev_shard_data,
@@ -692,7 +692,7 @@ impl CollatorStdImpl {
                 config.msgs_exec_params.group_limit as _,
                 config.msgs_exec_params.group_vert_size as _,
             )),
-        })
+        }))
     }
 
     fn try_calc_last_processed_to_anchor_info(
@@ -977,7 +977,7 @@ impl CollatorStdImpl {
     )]
     async fn try_collate_next_master_block_impl(
         &mut self,
-        mut working_state: WorkingState,
+        mut working_state: Box<WorkingState>,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Check if can collate next master block",
@@ -1047,7 +1047,7 @@ impl CollatorStdImpl {
     )]
     async fn try_collate_next_shard_block_impl(
         &mut self,
-        mut working_state: WorkingState,
+        mut working_state: Box<WorkingState>,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Check if can collate next shard block",
@@ -1180,14 +1180,17 @@ impl CollatorStdImpl {
 
 struct DelayedWorkingState {
     shard_id: ShardIdent,
-    future: Option<Pin<Box<dyn Future<Output = Result<WorkingState>> + Send + Sync + 'static>>>,
-    unused: Option<WorkingState>,
+    future: Option<DelayedWorkingStateFut>,
+    unused: Option<Box<WorkingState>>,
 }
+
+type DelayedWorkingStateFut =
+    Pin<Box<dyn Future<Output = Result<Box<WorkingState>>> + Send + Sync + 'static>>;
 
 impl DelayedWorkingState {
     fn new<F>(shard_id: ShardIdent, f: F) -> Self
     where
-        F: Future<Output = Result<WorkingState>> + Send + Sync + 'static,
+        F: Future<Output = Result<Box<WorkingState>>> + Send + Sync + 'static,
     {
         Self {
             shard_id,
@@ -1196,7 +1199,7 @@ impl DelayedWorkingState {
         }
     }
 
-    async fn wait(&mut self) -> Result<WorkingState> {
+    async fn wait(&mut self) -> Result<Box<WorkingState>> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram =
             HistogramGuardWithLabels::begin("tycho_collator_wait_for_working_state_time", &labels);
@@ -1212,7 +1215,7 @@ impl DelayedWorkingState {
         anyhow::bail!("No pending working state found");
     }
 
-    fn delay(&mut self, state: WorkingState) {
+    fn delay(&mut self, state: Box<WorkingState>) {
         self.unused = Some(state);
     }
 }

@@ -7,10 +7,10 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, CurrencyCollection, ExtInMsgInfo, HashUpdate, ImportFees, InMsg, IntMsgInfo, Lazy,
-    LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts,
-    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib,
-    SpecialFlags, StateInit, Transaction, ValueFlow,
+    BlockRef, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate, ImportFees, InMsg,
+    IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
@@ -24,14 +24,14 @@ use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
-    pub prev_shard_data: Box<PrevData>,
+    pub prev_shard_data: PrevData,
     pub usage_tree: UsageTree,
     pub has_unprocessed_messages: Option<bool>,
     pub msgs_buffer: Option<MessagesBuffer>,
 }
 
 impl WorkingState {
-    pub fn take_msgs_buffer(mut self) -> (Self, MessagesBuffer) {
+    pub fn take_msgs_buffer(mut self: Box<Self>) -> (Box<Self>, MessagesBuffer) {
         let msgs_buffer = self.msgs_buffer.take().unwrap();
         (self, msgs_buffer)
     }
@@ -61,7 +61,7 @@ impl PrevData {
     pub fn build(
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
-    ) -> Result<(Box<Self>, UsageTree)> {
+    ) -> Result<(Self, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -87,7 +87,7 @@ impl PrevData {
         let underload_history = observable_states[0].state().underload_history;
         let processed_upto_info = pure_prev_states[0].state().processed_upto.load()?;
 
-        let prev_data = Box::new(Self {
+        let prev_data = Self {
             observable_states,
             observable_accounts,
 
@@ -104,7 +104,7 @@ impl PrevData {
 
             processed_upto: processed_upto_info.try_into()?,
             prev_queue_diff_hash: prev_queue_diff_hashes.first().copied(),
-        });
+        };
 
         Ok((prev_data, usage_tree))
     }
@@ -198,6 +198,7 @@ pub(super) struct BlockCollationDataBuilder {
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
+    pub global_version: GlobalVersion,
     pub top_shard_blocks_ids: Vec<BlockId>,
 }
 
@@ -209,6 +210,7 @@ impl BlockCollationDataBuilder {
         next_chain_time: u64,
         processed_upto: ProcessedUptoInfoStuff,
         created_by: HashBytes,
+        global_version: GlobalVersion,
     ) -> Self {
         let gen_utime = (next_chain_time / 1000) as u32;
         let gen_utime_ms = (next_chain_time % 1000) as u16;
@@ -225,6 +227,7 @@ impl BlockCollationDataBuilder {
             #[cfg(feature = "block-creator-stats")]
             block_create_count: Default::default(),
             created_by,
+            global_version,
             shards: None,
             top_shard_blocks_ids: vec![],
         }
@@ -283,6 +286,7 @@ impl BlockCollationDataBuilder {
             min_ref_mc_seqno: self.min_ref_mc_seqno,
             rand_seed: self.rand_seed,
             created_by: self.created_by,
+            global_version: self.global_version,
             shards: self.shards,
             top_shard_blocks_ids: self.top_shard_blocks_ids,
             shard_fees: self.shard_fees,
@@ -371,6 +375,8 @@ pub(super) struct BlockCollationData {
     pub rand_seed: HashBytes,
 
     pub created_by: HashBytes,
+
+    pub global_version: GlobalVersion,
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
