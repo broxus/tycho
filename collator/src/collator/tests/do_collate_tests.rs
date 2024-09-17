@@ -10,6 +10,7 @@ use crate::mempool::{
     make_stub_anchor, MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener,
 };
 use crate::test_utils::try_init_test_tracing;
+use crate::types::supported_capabilities;
 
 #[test]
 fn test_read_next_externals() {
@@ -56,6 +57,10 @@ fn test_read_next_externals() {
             .unwrap_or_default(),
         Default::default(),
         HashBytes::ZERO,
+        GlobalVersion {
+            version: 50,
+            capabilities: supported_capabilities(),
+        },
     )
     .build(0, DEFAULT_BLOCK_LIMITS);
 

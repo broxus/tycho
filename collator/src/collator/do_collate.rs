@@ -47,7 +47,7 @@ impl CollatorStdImpl {
     )]
     pub(super) async fn do_collate(
         &mut self,
-        working_state: WorkingState,
+        working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -58,7 +58,7 @@ impl CollatorStdImpl {
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
         // INFO: this is a temporary implementation, further will just clone messages buffer from the working state
-        let (working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+        let (mut working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
 
         let mc_data = &working_state.mc_data;
         let prev_shard_data = &working_state.prev_shard_data;
@@ -97,6 +97,10 @@ impl CollatorStdImpl {
             next_chain_time,
             prev_shard_data.processed_upto().clone(),
             created_by,
+            GlobalVersion {
+                version: self.config.supported_block_version,
+                capabilities: self.config.supported_capabilities,
+            },
         );
 
         // init ShardHashes descriptions for master
@@ -450,12 +454,23 @@ impl CollatorStdImpl {
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
-        // TODO: Move into rayon
-        tokio::task::yield_now().await;
-        let finalized = tokio::task::block_in_place(|| {
-            self.finalize_block(&mut collation_data, executor, &working_state, queue_diff)
-        })?;
-        tokio::task::yield_now().await;
+
+        let finalized = tycho_util::sync::rayon_run({
+            let collation_session = self.collation_session.clone();
+            move || {
+                Self::finalize_block(
+                    collation_data,
+                    collation_session,
+                    executor,
+                    working_state,
+                    queue_diff,
+                )
+            }
+        })
+        .await?;
+        collation_data = finalized.collation_data;
+        working_state = finalized.working_state;
+
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);

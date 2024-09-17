@@ -20,9 +20,11 @@ use super::types::WorkingState;
 use super::CollatorStdImpl;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, McData};
+use crate::types::{BlockCandidate, CollationSessionInfo, McData};
 
 pub struct FinalizedBlock {
+    pub collation_data: Box<BlockCollationData>,
+    pub working_state: Box<WorkingState>,
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
@@ -30,15 +32,17 @@ pub struct FinalizedBlock {
 
 impl CollatorStdImpl {
     pub(super) fn finalize_block(
-        &mut self,
-        collation_data: &mut BlockCollationData,
+        mut collation_data: Box<BlockCollationData>,
+        collation_session: Arc<CollationSessionInfo>,
         executor: MessagesExecutor,
-        working_state: &WorkingState,
+        working_state: Box<WorkingState>,
         queue_diff: SerializedQueueDiff,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
-        let labels = &[("workchain", self.shard_id.workchain().to_string())];
+        let shard = collation_data.block_id_short.shard;
+
+        let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
 
@@ -48,7 +52,7 @@ impl CollatorStdImpl {
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = executor.executor_params().state_libs.clone();
 
-        let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
+        let is_masterchain = shard.is_masterchain();
         let config_address = &mc_data.config.address;
 
         let mut processed_accounts_res = Ok(Default::default());
@@ -62,21 +66,6 @@ impl CollatorStdImpl {
             labels,
         );
         rayon::scope(|s| {
-            s.spawn(|_| {
-                let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_finalize_build_account_blocks_time",
-                    labels,
-                );
-
-                processed_accounts_res = Self::build_accounts(
-                    executor,
-                    prev_shard_data,
-                    is_masterchain,
-                    config_address,
-                    &mut global_libraries,
-                );
-                build_account_blocks_elapsed = histogram.finish();
-            });
             s.spawn(|_| {
                 let histogram = HistogramGuard::begin_with_labels(
                     "tycho_collator_finalize_build_in_msgs_time",
@@ -93,7 +82,22 @@ impl CollatorStdImpl {
                 out_msgs_res = Self::build_out_msgs(&collation_data.out_msgs);
                 build_out_msgs_elapsed = histogram.finish();
             });
+
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_account_blocks_time",
+                labels,
+            );
+
+            processed_accounts_res = Self::build_accounts(
+                executor,
+                prev_shard_data,
+                is_masterchain,
+                config_address,
+                &mut global_libraries,
+            );
+            build_account_blocks_elapsed = histogram.finish();
         });
+
         let build_account_blocks_and_messages_elased =
             histogram_build_account_blocks_and_messages.finish();
 
@@ -134,14 +138,14 @@ impl CollatorStdImpl {
             );
 
             let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
-                collation_data,
+                &mut collation_data,
                 processed_accounts
                     .new_config_params
                     .map(|params| BlockchainConfig {
                         address: *config_address,
                         params,
                     }),
-                working_state,
+                &working_state,
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
 
@@ -162,8 +166,8 @@ impl CollatorStdImpl {
             gen_utime_ms: collation_data.gen_utime_ms,
             start_lt: collation_data.start_lt,
             end_lt: collation_data.next_lt,
-            gen_validator_list_hash_short: self.collation_session.collators().short_hash,
-            gen_catchain_seqno: self.collation_session.seqno(),
+            gen_validator_list_hash_short: collation_session.collators().short_hash,
+            gen_catchain_seqno: collation_session.seqno(),
             min_ref_mc_seqno: collation_data.min_ref_mc_seqno,
             prev_key_block_seqno: mc_data.prev_key_block_seqno,
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
@@ -180,10 +184,7 @@ impl CollatorStdImpl {
 
         let capabilities = mc_data.config.get_global_version()?.capabilities;
         if capabilities.contains(GlobalCapability::CapReportVersion) {
-            new_block_info.set_gen_software(Some(GlobalVersion {
-                version: self.config.supported_block_version,
-                capabilities: self.config.supported_capabilities,
-            }));
+            new_block_info.set_gen_software(Some(collation_data.global_version));
         }
 
         let build_state_update_elapsed;
@@ -388,6 +389,8 @@ impl CollatorStdImpl {
         );
 
         Ok(FinalizedBlock {
+            collation_data,
+            working_state,
             block_candidate,
             mc_data,
             new_state_root,
