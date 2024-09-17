@@ -118,7 +118,10 @@ impl BlocksCache {
         {
             let master_cache = self.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
-                bail!("Master block not found in cache! ({})", mc_block_key)
+                bail!(
+                    "get_all_processed_to_by_mc_block_from_cache: Master block not found in cache! ({})",
+                    mc_block_key,
+                )
             };
             updated_top_shard_block_ids = mc_block_entry
                 .top_shard_blocks_info
@@ -171,7 +174,10 @@ impl BlocksCache {
         {
             let master_cache = self.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
-                bail!("Master block not found in cache! ({})", mc_block_key)
+                bail!(
+                    "read_before_tail_ids_of_mc_block: Master block not found in cache! ({})",
+                    mc_block_key,
+                )
             };
 
             result.insert(
@@ -611,7 +617,6 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
 
                 Ok(StoredBlock {
                     received_and_collated: true,
-                    // status: CandidateStatus::Synced,
                     new_data: None,
                 })
             }
@@ -622,7 +627,6 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
 
                 Ok(StoredBlock {
                     received_and_collated: false,
-                    // status: CandidateStatus::Collated,
                     new_data: Some(new_data),
                 })
             }
@@ -671,13 +675,11 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 if block_id.is_masterchain() {
                     prev_ids_to_clear = entry.prev_blocks_ids.clone();
                 }
-                // TODO: remove state from prev shard blocks that are not top blocks for masters
 
                 self.data.on_update_received(entry)?;
 
                 StoredBlock {
                     received_and_collated: true,
-                    // status: CandidateStatus::Synced,
                     new_data: None,
                 }
             }
@@ -698,7 +700,6 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
 
                 StoredBlock {
                     received_and_collated: false,
-                    // status: CandidateStatus::Synced,
                     new_data: Some(new_data),
                 }
             }
@@ -785,6 +786,8 @@ impl BlocksCacheData for MasterBlocksCacheData {
     }
 
     fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<Self::NewCollated> {
+        self.update_last_collated_block_id(candidate.block.id());
+
         Ok(MasterBlockIds {
             top_shard_block_ids: candidate.top_shard_blocks_ids.iter().copied().collect(),
         })
@@ -839,7 +842,6 @@ impl BlocksCacheData for ShardBlocksCacheData {
     }
 
     fn on_insert_received(&mut self, _: &BlockCacheEntry) -> Result<Self::NewReceived> {
-        // FIXME: Why we are not updating `value_flow` here?
         Ok(())
     }
 }
