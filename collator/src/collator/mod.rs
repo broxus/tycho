@@ -1011,7 +1011,10 @@ impl CollatorStdImpl {
                 self.mpool_adapter.clone(),
                 self.mempool_start_round,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
+            })?;
             if has_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals for master",
@@ -1122,7 +1125,10 @@ impl CollatorStdImpl {
                 self.mpool_adapter.clone(),
                 self.mempool_start_round,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
+            })?;
             has_externals = next_anchor_has_externals;
             if has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
