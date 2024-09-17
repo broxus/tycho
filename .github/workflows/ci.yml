@@ -16,7 +16,7 @@ env:
 jobs:
   test:
     name: Test Suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     needs: rustfmt
     steps:
       - name: Checkout repository
@@ -44,7 +44,7 @@ jobs:
           args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control
   rustfmt:
     name: Rustfmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -74,7 +74,7 @@ jobs:
         run: python scripts/check-metrics.py
   cli-builds: # replace later with clippy
     name: tycho-cli check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     needs: rustfmt
     steps:
       - name: Checkout repository
@@ -99,7 +99,7 @@ jobs:
   clippy:
     name: Clippy
     needs: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -126,7 +126,7 @@ jobs:
     if: |
       contains(github.event.pull_request.files.*.path, '.proto') ||
       (github.event_name == 'push' && contains(join(github.event.commits.*.added, github.event.commits.*.modified), '.proto'))
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
