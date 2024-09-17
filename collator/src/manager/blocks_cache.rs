@@ -815,15 +815,8 @@ struct ShardBlocksCacheData {
     creators: Vec<everscale_types::cell::HashBytes>,
 }
 
-impl BlocksCacheData for ShardBlocksCacheData {
-    type NewCollated = ();
-    type NewReceived = ();
-
-    fn on_update_collated(&mut self, _: &BlockCandidate) -> Result<()> {
-        Ok(())
-    }
-
-    fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
+impl ShardBlocksCacheData {
+    fn update_proof_funds_and_creators(&mut self, candidate: &BlockCandidate) -> Result<()> {
         self.proof_funds
             .fees_collected
             .try_add_assign(&candidate.fees_collected)?;
@@ -835,6 +828,19 @@ impl BlocksCacheData for ShardBlocksCacheData {
         self.creators.push(candidate.created_by);
 
         Ok(())
+    }
+}
+
+impl BlocksCacheData for ShardBlocksCacheData {
+    type NewCollated = ();
+    type NewReceived = ();
+
+    fn on_update_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
+        self.update_proof_funds_and_creators(candidate)
+    }
+
+    fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
+        self.update_proof_funds_and_creators(candidate)
     }
 
     fn on_update_received(&mut self, _: &BlockCacheEntry) -> Result<()> {
