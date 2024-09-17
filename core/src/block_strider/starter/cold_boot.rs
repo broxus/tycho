@@ -19,7 +19,8 @@ use tycho_util::FastHashMap;
 
 use super::{StarterInner, ZerostateProvider};
 use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::proto::blockchain::{BlockFull, KeyBlockProof};
+use crate::overlay_client::PunishReason;
+use crate::proto::blockchain::KeyBlockProof;
 
 impl StarterInner {
     #[tracing::instrument(skip_all)]
@@ -529,9 +530,16 @@ impl StarterInner {
 
             // TODO: add retry count to interrupt infinite loop
             let (block, proof, diff, meta_data) = loop {
-                let (handle, block_full) =
+                let (block_full, neighbour) =
                     match blockchain_rpc_client.get_block_full(block_id).await {
-                        Ok(res) => res.split(),
+                        Ok(Some(block_full)) => block_full,
+                        Ok(None) => {
+                            tracing::warn!(%block_id, "block not found");
+
+                            // TODO: Backoff
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
                         Err(e) => {
                             tracing::warn!(%block_id, "failed to download block: {e:?}");
 
@@ -541,57 +549,46 @@ impl StarterInner {
                         }
                     };
 
-                // TODO: Use `ProofChecker` instead
-                match block_full {
-                    BlockFull::Found {
-                        block_id,
-                        block: block_data,
-                        proof: proof_data,
-                        queue_diff: queue_diff_data,
-                    } => {
-                        let block = match BlockStuff::deserialize_checked(&block_id, &block_data) {
-                            Ok(block) => WithArchiveData::new(block, block_data),
-                            Err(e) => {
-                                tracing::error!(%block_id, "failed to deserialize block: {e}");
-                                handle.reject();
-                                continue;
-                            }
-                        };
-
-                        let proof = match BlockProofStuff::deserialize(&block_id, &proof_data) {
-                            Ok(proof) => WithArchiveData::new(proof, proof_data),
-                            Err(e) => {
-                                tracing::error!(%block_id, "failed to deserialize block proof: {e}");
-                                handle.reject();
-                                continue;
-                            }
-                        };
-
-                        let diff = match QueueDiffStuff::deserialize(&block_id, &queue_diff_data) {
-                            Ok(diff) => WithArchiveData::new(diff, queue_diff_data),
-                            Err(e) => {
-                                tracing::error!(%block_id, "failed to deserialize queue diff: {e}");
-                                handle.reject();
-                                continue;
-                            }
-                        };
-
-                        match proof.pre_check_block_proof() {
-                            Ok((_, block_info)) => {
-                                break (block, proof, diff, NewBlockMeta {
-                                    is_key_block: block_info.key_block,
-                                    gen_utime: block_info.gen_utime,
-                                    mc_ref_seqno: Some(mc_seqno),
-                                });
-                            }
-                            Err(e) => {
-                                tracing::error!("received invalid block: {e:?}");
-                            }
-                        }
+                let block = match BlockStuff::deserialize_checked(block_id, &block_full.block_data)
+                {
+                    Ok(block) => WithArchiveData::new(block, block_full.block_data),
+                    Err(e) => {
+                        tracing::error!(%block_id, "failed to deserialize block: {e}");
+                        neighbour.punish(PunishReason::Malicious);
+                        continue;
                     }
-                    BlockFull::NotFound => {
-                        tracing::warn!(%block_id, "block not found");
-                        handle.reject();
+                };
+
+                let proof = match BlockProofStuff::deserialize(block_id, &block_full.proof_data) {
+                    Ok(proof) => WithArchiveData::new(proof, block_full.proof_data),
+                    Err(e) => {
+                        tracing::error!(%block_id, "failed to deserialize block proof: {e}");
+                        neighbour.punish(PunishReason::Malicious);
+                        continue;
+                    }
+                };
+
+                let diff = match QueueDiffStuff::deserialize(block_id, &block_full.queue_diff_data)
+                {
+                    Ok(diff) => WithArchiveData::new(diff, block_full.queue_diff_data),
+                    Err(e) => {
+                        tracing::error!(%block_id, "failed to deserialize queue diff: {e}");
+                        neighbour.punish(PunishReason::Malicious);
+                        continue;
+                    }
+                };
+
+                // TODO: Use `ProofChecker` instead
+                match proof.pre_check_block_proof() {
+                    Ok((_, block_info)) => {
+                        break (block, proof, diff, NewBlockMeta {
+                            is_key_block: block_info.key_block,
+                            gen_utime: block_info.gen_utime,
+                            mc_ref_seqno: Some(mc_seqno),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("received invalid block: {e:?}");
                     }
                 }
             };

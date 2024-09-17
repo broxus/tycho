@@ -9,7 +9,7 @@ macro_rules! define_non_zero {
             use super::*;
 
             #[inline]
-            pub const fn size_hint(_: $ty) -> usize {
+            pub const fn size_hint(_: &$ty) -> usize {
                 std::mem::size_of::<$ty>()
             }
 

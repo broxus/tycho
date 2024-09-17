@@ -71,6 +71,10 @@ impl BlockStorage {
         NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
     }
 
+    pub fn block_data_chunk_size(&self) -> NonZeroU32 {
+        NonZeroU32::new(BLOCK_DATA_CHUNK_SIZE).unwrap()
+    }
+
     pub async fn finish_block_data(&self) -> Result<()> {
         let started_at = Instant::now();
 
@@ -636,6 +640,42 @@ impl BlockStorage {
         Ok(chunk.to_vec())
     }
 
+    pub fn get_block_size(&self, block_id: &BlockId) -> Result<u32> {
+        let key = BlockDataEntryKey {
+            block_id: block_id.into(),
+            chunk_index: BLOCK_DATA_SIZE_MAGIC,
+        };
+        let size = self
+            .db
+            .block_data_entries
+            .get(key.to_vec())?
+            .map(|slice| u32::from_le_bytes(slice.as_ref().try_into().unwrap()))
+            .ok_or(BlockStorageError::BlockNotFound)?;
+
+        Ok(size)
+    }
+
+    pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Vec<u8>> {
+        let block_size = self.get_block_size(block_id)?;
+
+        if offset % BLOCK_DATA_CHUNK_SIZE != 0 || offset >= block_size {
+            return Err(BlockStorageError::InvalidOffset.into());
+        }
+
+        let key = BlockDataEntryKey {
+            block_id: block_id.into(),
+            chunk_index: offset / BLOCK_DATA_CHUNK_SIZE,
+        };
+
+        let chunk = self
+            .db
+            .block_data_entries
+            .get(key.to_vec())?
+            .ok_or(BlockStorageError::BlockNotFound)?;
+
+        Ok(chunk.to_vec())
+    }
+
     // === GC stuff ===
 
     #[tracing::instrument(skip(self, max_blocks_per_batch))]
@@ -964,9 +1004,9 @@ impl BlockStorage {
                 let _histogram = HistogramGuard::begin("tycho_storage_split_block_data_time");
 
                 let mut compressed = Vec::new();
-                tycho_util::compression::zstd_compress(&data, &mut compressed, 3); // TODO: compression level
+                tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
 
-                let chunks = compressed.chunks(BLOCK_DATA_CHUNK_SIZE);
+                let chunks = compressed.chunks(BLOCK_DATA_CHUNK_SIZE as usize);
                 for (index, chunk) in chunks.enumerate() {
                     let key = BlockDataEntryKey {
                         block_id,
@@ -981,7 +1021,7 @@ impl BlockStorage {
                     chunk_index: BLOCK_DATA_SIZE_MAGIC,
                 };
                 db.block_data_entries
-                    .insert(key.to_vec(), compressed.len().to_be_bytes())?;
+                    .insert(key.to_vec(), (compressed.len() as u32).to_le_bytes())?;
 
                 Ok(())
             }
@@ -1170,6 +1210,7 @@ fn remove_blocks(
     let raw = db.rocksdb().as_ref();
     let block_connections_cf = db.block_connections.cf();
     let package_entries_cf = db.package_entries.cf();
+    let block_data_entries_cf = db.block_data_entries.cf();
     let block_handles_cf = db.block_handles.cf();
     let key_blocks_cf = db.key_blocks.cf();
 
@@ -1210,6 +1251,7 @@ fn remove_blocks(
             // It will delete all entries in range [from_seqno, to_seqno) for this shard.
             // Note that package entry keys are the same as block connection keys.
             batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
+            batch.delete_range_cf(&block_data_entries_cf, &*range_from, &range_to);
             batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
 
             tracing::debug!(%from, %to, "delete_range");
@@ -1330,7 +1372,7 @@ const ARCHIVE_TO_COMMIT_MAGIC: u64 = u64::MAX - 1;
 // Reserved key in which we store the fact that archive was started
 const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 2;
 
-const BLOCK_DATA_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1MB
 
 // Reserved key in which the compressed block size is stored
 const BLOCK_DATA_SIZE_MAGIC: u32 = u32::MAX;
@@ -1348,6 +1390,8 @@ struct PreparedArchiveId {
 enum BlockStorageError {
     #[error("Archive not found")]
     ArchiveNotFound,
+    #[error("Block not found")]
+    BlockNotFound,
     #[error("Block data not found")]
     BlockDataNotFound,
     #[error("Block proof not found")]

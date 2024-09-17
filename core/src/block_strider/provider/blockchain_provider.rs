@@ -13,9 +13,8 @@ use tycho_util::sync::rayon_run;
 
 use crate::block_strider::provider::{OptionalBlockStuff, ProofChecker};
 use crate::block_strider::BlockProvider;
-use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::overlay_client::QueryResponse;
-use crate::proto::blockchain::BlockFull;
+use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient};
+use crate::overlay_client::{Neighbour, PunishReason};
 
 // TODO: Use backoff instead of simple polling.
 
@@ -73,12 +72,13 @@ impl BlockchainBlockProvider {
         loop {
             tracing::debug!(%prev_block_id, "get_next_block_full requested");
             match self.client.get_next_block_full(prev_block_id).await {
-                Ok(response) => {
-                    let parsed = self.process_received_block(response).await;
+                Ok(Some((block_full, neighbour))) => {
+                    let parsed = self.process_received_block(block_full, neighbour).await;
                     if parsed.is_some() {
                         return parsed;
                     }
                 }
+                Ok(None) => tracing::warn!(?prev_block_id, "block not found"),
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
 
@@ -97,12 +97,13 @@ impl BlockchainBlockProvider {
                 .get_block_full(&block_id_relation.block_id)
                 .await
             {
-                Ok(response) => {
-                    let parsed = self.process_received_block(response).await;
+                Ok(Some((block_full, neighbour))) => {
+                    let parsed = self.process_received_block(block_full, neighbour).await;
                     if parsed.is_some() {
                         return parsed;
                     }
                 }
+                Ok(None) => tracing::warn!(%block_id_relation.block_id, "block not found"),
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
 
@@ -112,29 +113,19 @@ impl BlockchainBlockProvider {
 
     async fn process_received_block(
         &self,
-        response: QueryResponse<BlockFull>,
+        block_full: BlockDataFull,
+        neighbour: Neighbour,
     ) -> OptionalBlockStuff {
-        let (handle, data) = response.split();
-
-        let BlockFull::Found {
-            block_id,
-            block: block_data,
-            proof: proof_data,
-            queue_diff: queue_diff_data,
-        } = data
-        else {
-            handle.accept();
-            return None;
-        };
-
         let block_stuff_fut = pin!(rayon_run({
-            let block_data = block_data.clone();
+            let block_id = block_full.block_id;
+            let block_data = block_full.block_data.clone();
             move || BlockStuff::deserialize_checked(&block_id, &block_data)
         }));
 
         let other_data_fut = pin!(rayon_run({
-            let proof_data = proof_data.clone();
-            let queue_diff_data = queue_diff_data.clone();
+            let block_id = block_full.block_id;
+            let proof_data = block_full.proof_data.clone();
+            let queue_diff_data = block_full.queue_diff_data.clone();
             move || {
                 (
                     BlockProofStuff::deserialize(&block_id, &proof_data),
@@ -148,23 +139,22 @@ impl BlockchainBlockProvider {
 
         match (block_stuff, block_proof, queue_diff) {
             (Ok(block), Ok(proof), Ok(diff)) => {
-                let proof = WithArchiveData::new(proof, proof_data);
-                let diff = WithArchiveData::new(diff, queue_diff_data);
+                let proof = WithArchiveData::new(proof, block_full.proof_data);
+                let diff = WithArchiveData::new(diff, block_full.queue_diff_data);
                 if let Err(e) = self
                     .proof_checker
                     .check_proof(&block, &proof, &diff, true)
                     .await
                 {
-                    handle.reject();
+                    neighbour.punish(PunishReason::Malicious);
                     tracing::error!("got invalid block proof: {e}");
                     return None;
                 }
 
-                handle.accept();
-                Some(Ok(block.with_archive_data(block_data)))
+                Some(Ok(block.with_archive_data(block_full.block_data)))
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                handle.reject();
+                neighbour.punish(PunishReason::Malicious);
                 tracing::error!("failed to deserialize shard block or block proof: {e}");
                 None
             }

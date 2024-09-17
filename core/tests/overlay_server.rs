@@ -1,105 +1,22 @@
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService, BroadcastListener};
 use tycho_core::overlay_client::PublicOverlayClient;
-use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStateInfo};
+use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
 use tycho_storage::Storage;
+
+use crate::network::TestNode;
 
 mod network;
 mod storage;
 mod utils;
-
-trait TestNode {
-    fn network(&self) -> &Network;
-    fn public_overlay(&self) -> &PublicOverlay;
-    fn force_update_validators(&self, peers: Vec<PeerId>);
-}
-
-impl TestNode for network::Node {
-    fn network(&self) -> &Network {
-        self.network()
-    }
-
-    fn public_overlay(&self) -> &PublicOverlay {
-        self.public_overlay()
-    }
-
-    fn force_update_validators(&self, _: Vec<PeerId>) {}
-}
-
-async fn discover<N: TestNode>(nodes: &[N]) -> Result<()> {
-    tracing::info!("discovering nodes");
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let mut peer_states = BTreeMap::<&PeerId, PeerState>::new();
-
-        for (i, left) in nodes.iter().enumerate() {
-            for (j, right) in nodes.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-
-                let left_id = left.network().peer_id();
-                let right_id = right.network().peer_id();
-
-                if left.public_overlay().read_entries().contains(right_id) {
-                    peer_states.entry(left_id).or_default().knows_about += 1;
-                    peer_states.entry(right_id).or_default().known_by += 1;
-                }
-            }
-        }
-
-        tracing::info!("{peer_states:#?}");
-
-        let total_filled = peer_states
-            .values()
-            .filter(|state| state.knows_about == nodes.len() - 1)
-            .count();
-
-        tracing::info!(
-            "peers with filled overlay: {} / {}",
-            total_filled,
-            nodes.len()
-        );
-        if total_filled == nodes.len() {
-            break;
-        }
-    }
-
-    tracing::info!("resolving entries...");
-    for node in nodes {
-        let resolved = FuturesUnordered::new();
-        for entry in node.public_overlay().read_entries().iter() {
-            let handle = entry.resolver_handle.clone();
-            resolved.push(async move { handle.wait_resolved().await });
-        }
-
-        // Ensure all entries are resolved.
-        resolved.collect::<Vec<_>>().await;
-        tracing::info!(
-            peer_id = %node.network().peer_id(),
-            "all entries resolved",
-        );
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Default)]
-struct PeerState {
-    knows_about: usize,
-    known_by: usize,
-}
 
 #[tokio::test]
 async fn overlay_server_msg_broadcast() -> Result<()> {
@@ -199,7 +116,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
         }
     }
 
-    discover(&nodes).await?;
+    network::discover(&nodes).await?;
 
     let peers = nodes
         .iter()
@@ -234,7 +151,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     let nodes = network::make_network(storage, 10);
 
-    discover(&nodes).await?;
+    network::discover(&nodes).await?;
 
     tracing::info!("making overlay requests...");
 
@@ -252,14 +169,14 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert_eq!(response.data(), &BlockFull::NotFound);
+        assert!(response.is_none());
     }
 
     let result = client.get_next_block_full(&BlockId::default()).await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert_eq!(response.data(), &BlockFull::NotFound);
+        assert!(response.is_none());
     }
 
     let result = client.get_next_key_block_ids(&BlockId::default(), 10).await;
@@ -280,12 +197,6 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         assert_eq!(response.data(), &PersistentStateInfo::NotFound);
     }
 
-    let result = client.get_archive_info(0).await;
-    assert!(result.is_err());
-
-    let result = client.get_archive_chunk(0, 0).await;
-    assert!(result.is_err());
-
     tracing::info!("done!");
     Ok(())
 }
@@ -298,7 +209,7 @@ async fn overlay_server_blocks() -> Result<()> {
 
     let nodes = network::make_network(storage, 10);
 
-    discover(&nodes).await?;
+    network::discover(&nodes).await?;
 
     tracing::info!("making overlay requests...");
 
@@ -318,31 +229,21 @@ async fn overlay_server_blocks() -> Result<()> {
     for block_id in archive.blocks.keys() {
         if block_id.shard.is_masterchain() {
             let result = client.get_block_full(block_id).await;
-            assert!(result.is_ok());
 
             let (archive_block, archive_proof, archive_queue_diff) =
                 archive.get_entry_by_id(block_id)?;
 
-            if let Ok(response) = &result {
-                match response.data() {
-                    BlockFull::Found {
-                        block_id,
-                        block,
-                        proof,
-                        queue_diff,
-                    } => {
-                        let block = BlockStuff::deserialize_checked(block_id, block)?;
-                        assert_eq!(block.as_ref(), archive_block.block());
+            if let Ok(Some((block_full, _))) = &result {
+                let block = BlockStuff::deserialize_checked(block_id, &block_full.block_data)?;
+                assert_eq!(block.as_ref(), archive_block.block());
 
-                        let proof = BlockProofStuff::deserialize(block_id, proof)?;
-                        assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
-                        assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
+                let proof = BlockProofStuff::deserialize(block_id, &block_full.proof_data)?;
+                assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
+                assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
 
-                        let queue_diff = QueueDiffStuff::deserialize(block_id, queue_diff)?;
-                        assert_eq!(queue_diff.diff(), archive_queue_diff.diff());
-                    }
-                    BlockFull::NotFound => anyhow::bail!("block not found"),
-                }
+                let queue_diff =
+                    QueueDiffStuff::deserialize(block_id, &block_full.queue_diff_data)?;
+                assert_eq!(queue_diff.diff(), archive_queue_diff.diff());
             }
         }
     }

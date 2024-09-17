@@ -467,6 +467,7 @@ def core_blockchain_rpc() -> RowPanel:
     methods = [
         "getNextKeyBlockIds",
         "getBlockFull",
+        "getBlockDataChunk",
         "getNextBlockFull",
         "getKeyBlockProof",
         "getArchiveInfo",

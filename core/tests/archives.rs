@@ -5,16 +5,23 @@ use everscale_types::prelude::*;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::archive::Archive;
-use tycho_block_util::block::{BlockIdExt, BlockIdRelation};
+use tycho_block_util::block::{BlockIdExt, BlockIdRelation, BlockProofStuff, BlockStuff};
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
     ProofChecker, ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
+use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_network::PeerId;
 use tycho_storage::{ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
 use tycho_util::compression::zstd_decompress;
 use tycho_util::project_root;
 
+use crate::network::TestNode;
+
+mod network;
 mod utils;
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -316,6 +323,87 @@ async fn heavy_archives() -> Result<()> {
 
     check_archive(&storage, &archive_data, archive_chunk_size, 1).await?;
     check_archive(&storage, &next_archive_data, archive_chunk_size, 101).await?;
+
+    // Make network
+    let nodes = network::make_network(storage, 10);
+    network::discover(&nodes).await?;
+
+    let peers = nodes
+        .iter()
+        .map(|x| *x.network().peer_id())
+        .collect::<Vec<PeerId>>();
+
+    for node in &nodes {
+        node.force_update_validators(peers.clone());
+    }
+
+    let node = nodes.first().unwrap();
+
+    let client = BlockchainRpcClient::builder()
+        .with_public_overlay_client(PublicOverlayClient::new(
+            node.network().clone(),
+            node.public_overlay().clone(),
+            Default::default(),
+        ))
+        .build();
+
+    // Get archive
+    let archive_path = integration_test_path.join("archive.bin");
+    let archive_data = std::fs::read(archive_path)?;
+    let archive = utils::parse_archive(&archive_data)?;
+
+    // Request blocks from network and check with archive blocks
+    let mut sorted: Vec<_> = archive.blocks.into_iter().collect();
+    sorted.sort_by_key(|(x, _)| *x);
+
+    // getBlockFull
+    for (block_id, data_entry) in &sorted {
+        let result = client.get_block_full(block_id).await?;
+        assert!(result.is_some());
+
+        if let Some((block_full, _)) = result {
+            let block = BlockStuff::deserialize_checked(block_id, &block_full.block_data)?;
+            let proof = BlockProofStuff::deserialize(block_id, &block_full.proof_data)?;
+            let queue_diff = QueueDiffStuff::deserialize(block_id, &block_full.queue_diff_data)?;
+
+            assert!(data_entry.block.is_some());
+            if let Some(data) = data_entry.block.as_ref() {
+                let archive_block = BlockStuff::deserialize_checked(block_id, data)?;
+                assert_eq!(block.block(), archive_block.block());
+            }
+
+            assert!(data_entry.proof.is_some());
+            if let Some(data) = data_entry.proof.as_ref() {
+                let archive_proof = BlockProofStuff::deserialize(block_id, data)?;
+                assert_eq!(proof.proof().root, archive_proof.proof().root);
+            }
+
+            assert!(data_entry.queue_diff.is_some());
+            if let Some(data) = data_entry.queue_diff.as_ref() {
+                let archive_queue_diff = QueueDiffStuff::deserialize(block_id, data)?;
+                assert_eq!(queue_diff.diff(), archive_queue_diff.diff());
+            }
+        }
+    }
+
+    // getNextBlockFull
+    for (block_id, _) in &sorted {
+        let result = client.get_next_block_full(block_id).await?;
+        assert!(result.is_some());
+
+        if let Some((block_full, _neighbour)) = result {
+            let block =
+                BlockStuff::deserialize_checked(&block_full.block_id, &block_full.block_data);
+            assert!(block.is_ok());
+
+            let proof = BlockProofStuff::deserialize(&block_full.block_id, &block_full.proof_data);
+            assert!(proof.is_ok());
+
+            let queue_diff =
+                QueueDiffStuff::deserialize(&block_full.block_id, &block_full.queue_diff_data);
+            assert!(queue_diff.is_ok());
+        }
+    }
 
     Ok(())
 }
