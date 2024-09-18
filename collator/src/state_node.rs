@@ -53,13 +53,14 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff>;
-    /// Store shard state root in the storage and make a new `ShardStateStuff` from it.
+    /// Store shard state root in the storage.
+    /// Returns `true` when state was updated in storage.
     async fn store_state_root(
         &self,
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
-    ) -> Result<ShardStateStuff>;
+    ) -> Result<bool>;
     /// Return block by it's id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block handle by it's id from node local state
@@ -132,7 +133,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<bool> {
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
         let (handle, _) = self
@@ -140,17 +141,13 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .block_handle_storage()
             .create_or_load_handle(block_id, meta);
 
-        self.storage
+        let updated = self
+            .storage
             .shard_state_storage()
             .store_state_root(&handle, state_root)
             .await?;
 
-        let state = self
-            .storage
-            .shard_state_storage()
-            .load_state(block_id)
-            .await?;
-        Ok(state)
+        Ok(updated)
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {

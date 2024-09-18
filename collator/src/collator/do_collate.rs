@@ -62,7 +62,7 @@ impl CollatorStdImpl {
         let (mut working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
 
         let mc_data = &working_state.mc_data;
-        let prev_shard_data = &working_state.prev_shard_data;
+        let prev_shard_data = working_state.prev_shard_data_ref();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: next_block_id_short={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
@@ -412,9 +412,10 @@ impl CollatorStdImpl {
         let queue_diff = QueueDiffStuff::builder(
             self.shard_id,
             collation_data.block_id_short.seqno,
-            &working_state
-                .prev_shard_data
-                .prev_queue_diff_hash()
+            &prev_shard_data
+                .prev_queue_diff_hashes()
+                .first()
+                .cloned()
                 .unwrap_or_default(),
         )
         .with_processed_upto(
@@ -482,7 +483,7 @@ impl CollatorStdImpl {
 
         let block_id = *finalized.block_candidate.block.id();
         let is_key_block = finalized.block_candidate.is_key_block;
-        let new_state_stuff = JoinTask::new({
+        let store_new_state_task = JoinTask::new({
             let meta = NewBlockMeta {
                 is_key_block,
                 gen_utime: collation_data.gen_utime,
@@ -490,13 +491,14 @@ impl CollatorStdImpl {
             };
             let adapter = self.state_node_adapter.clone();
             let labels = labels.clone();
+            let new_state_root = finalized.new_state_root.clone();
             async move {
                 let _histogram = HistogramGuard::begin_with_labels(
                     "tycho_collator_build_new_state_time",
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, finalized.new_state_root)
+                    .store_state_root(&block_id, meta, new_state_root)
                     .await
             }
         });
@@ -523,15 +525,18 @@ impl CollatorStdImpl {
                 .await?;
 
             // spawn update PrevData and working state
-            Self::prepare_working_state_update(
-                &mut self.delayed_working_state,
-                new_state_stuff,
+            self.prepare_working_state_update(
+                block_id,
+                finalized.new_observable_state,
+                finalized.new_state_root,
+                store_new_state_task,
                 new_queue_diff_hash,
-                finalized.mc_data.clone(),
+                finalized.mc_data,
                 has_unprocessed_messages,
                 working_state,
                 msgs_buffer,
-            )?;
+            )
+            .await?;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "working state updated prepare spawned",

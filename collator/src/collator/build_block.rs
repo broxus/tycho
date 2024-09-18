@@ -29,6 +29,7 @@ pub struct FinalizedBlock {
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
+    pub new_observable_state: Box<ShardStateUnsplit>,
 }
 
 impl CollatorStdImpl {
@@ -48,7 +49,7 @@ impl CollatorStdImpl {
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
 
         let mc_data = working_state.mc_data.as_ref();
-        let prev_shard_data = &working_state.prev_shard_data;
+        let prev_shard_data = working_state.prev_shard_data_ref();
 
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = executor.executor_params().state_libs.clone();
@@ -198,6 +199,11 @@ impl CollatorStdImpl {
                 labels,
             );
 
+            // compute total gas used from last anchor
+            let gas_used_from_last_anchor = working_state
+                .gas_used_from_last_anchor
+                .saturating_add(collation_data.block_limit.gas_used as _);
+
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
                 global_id: mc_data.global_id,
@@ -211,8 +217,7 @@ impl CollatorStdImpl {
                 processed_upto: Lazy::new(&collation_data.processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
-                overload_history: prev_shard_data.gas_used_from_last_anchor()
-                    + collation_data.block_limit.gas_used as u64,
+                overload_history: gas_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: prev_shard_data.total_validator_fees().clone(),
@@ -242,11 +247,10 @@ impl CollatorStdImpl {
             let merkle_update = create_merkle_update(
                 prev_shard_data.pure_state_root(),
                 &new_state_root,
-                &working_state.usage_tree,
+                working_state.usage_tree.as_ref().unwrap(),
             )?;
 
             build_state_update_elapsed = histogram.finish();
-
             (merkle_update, new_observable_state)
         };
 
@@ -422,6 +426,7 @@ impl CollatorStdImpl {
             block_candidate,
             mc_data,
             new_state_root,
+            new_observable_state,
         })
     }
 
@@ -430,7 +435,7 @@ impl CollatorStdImpl {
         config_params: Option<BlockchainConfig>,
         working_state: &WorkingState,
     ) -> Result<(McStateExtra, u32)> {
-        let prev_shard_data = &working_state.prev_shard_data;
+        let prev_shard_data = working_state.prev_shard_data_ref();
         let prev_state = &prev_shard_data.observable_states()[0];
 
         // 1. update config params and detect key block

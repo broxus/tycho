@@ -24,13 +24,18 @@ use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
-    pub prev_shard_data: PrevData,
-    pub usage_tree: UsageTree,
+    pub gas_used_from_last_anchor: u64,
+    pub prev_shard_data: Option<PrevData>,
+    pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
     pub msgs_buffer: Option<MessagesBuffer>,
 }
 
 impl WorkingState {
+    pub fn prev_shard_data_ref(&self) -> &PrevData {
+        self.prev_shard_data.as_ref().unwrap()
+    }
+
     pub fn take_msgs_buffer(mut self: Box<Self>) -> (Box<Self>, MessagesBuffer) {
         let msgs_buffer = self.msgs_buffer.take().unwrap();
         (self, msgs_buffer)
@@ -54,7 +59,8 @@ pub(super) struct PrevData {
     _underload_history: u64,
 
     processed_upto: ProcessedUptoInfoStuff,
-    prev_queue_diff_hash: Option<HashBytes>,
+
+    prev_queue_diff_hashes: Vec<HashBytes>,
 }
 
 impl PrevData {
@@ -103,7 +109,8 @@ impl PrevData {
             _underload_history: underload_history,
 
             processed_upto: processed_upto_info.try_into()?,
-            prev_queue_diff_hash: prev_queue_diff_hashes.first().copied(),
+
+            prev_queue_diff_hashes,
         };
 
         Ok((prev_data, usage_tree))
@@ -151,6 +158,10 @@ impl PrevData {
         Ok(prev_ref)
     }
 
+    pub fn pure_states(&self) -> &Vec<ShardStateStuff> {
+        &self.pure_states
+    }
+
     pub fn pure_state_root(&self) -> &Cell {
         &self.pure_state_root
     }
@@ -167,10 +178,6 @@ impl PrevData {
         self.gas_used_from_last_anchor
     }
 
-    pub fn clear_gas_used(&mut self) {
-        self.gas_used_from_last_anchor = 0;
-    }
-
     pub fn total_validator_fees(&self) -> &CurrencyCollection {
         &self.total_validator_fees
     }
@@ -178,8 +185,9 @@ impl PrevData {
     pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
         &self.processed_upto
     }
-    pub fn prev_queue_diff_hash(&self) -> &Option<HashBytes> {
-        &self.prev_queue_diff_hash
+
+    pub fn prev_queue_diff_hashes(&self) -> &Vec<HashBytes> {
+        &self.prev_queue_diff_hashes
     }
 }
 
