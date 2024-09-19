@@ -29,7 +29,8 @@ use crate::collator::types::{
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
-    BlockCollationResult, BlockIdExt, DisplayBlockIdsIter, McData, TopBlockDescription,
+    BlockCollationResult, BlockIdExt, DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData,
+    TopBlockDescription,
 };
 
 #[cfg(test)]
@@ -64,7 +65,9 @@ impl CollatorStdImpl {
         let prev_shard_data = &working_state.prev_shard_data;
 
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Start collating block: top_shard_blocks_ids: {:?}",
+            "Start collating block: next_block_id_short={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
+            working_state.next_block_id_short,
+            DisplayBlockIdsIntoIter(prev_shard_data.blocks_ids()),
             top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
                 v.iter().map(|i| &i.block_id)
             )),
@@ -609,7 +612,7 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 
-        tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
+        tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, time_diff={}, \
@@ -637,7 +640,7 @@ impl CollatorStdImpl {
             collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
         );
 
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::COLLATOR,
             block_time_diff = block_time_diff,
             from_prev_block = %format_duration(elapsed_from_prev_block),
@@ -1282,7 +1285,7 @@ impl CollatorStdImpl {
 
             // run checks
             if new_shard_descr.gen_utime > collation_data_builder.gen_utime {
-                tracing::debug!(target: tracing_targets::COLLATOR,
+                tracing::warn!(target: tracing_targets::COLLATOR,
                     "ShardTopBlockDescr for {} skipped: it generated at {}, but master block should be generated at {}",
                     shard_id, new_shard_descr.gen_utime, collation_data_builder.gen_utime,
                 );

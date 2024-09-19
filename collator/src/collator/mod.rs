@@ -9,7 +9,6 @@ use everscale_types::models::*;
 use futures_util::future::Future;
 use mq_iterator_adapter::QueueIteratorAdapter;
 use tokio::sync::oneshot;
-use tracing::field::display;
 use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
@@ -432,7 +431,7 @@ impl CollatorStdImpl {
 
         if import_init_anchors {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "import anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
+                "importing anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
                 processed_to_anchor_id, processed_to_msgs_offset,
                 working_state.prev_shard_data.gen_chain_time(),
             );
@@ -470,21 +469,22 @@ impl CollatorStdImpl {
                 }
             }
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
+            tracing::info!(target: tracing_targets::COLLATOR,
                 mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
                 "resume collation without reset",
             );
 
             working_state
         } else {
+            // reset any delayed working state because we will init a new one
+            self.delayed_working_state.reset();
+
             self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
 
-            let span = tracing::Span::current();
-            span.record("new_next_block_id", display(self.next_block_info));
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
+            tracing::info!(target: tracing_targets::COLLATOR,
                 mc_data_block_id = %mc_data.block_id.as_short_id(),
                 prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
+                new_next_block_id = %self.next_block_info,
                 "resume collation with reset",
             );
 
@@ -801,13 +801,14 @@ impl CollatorStdImpl {
 
         let chain_time_elapsed = next_anchor.chain_time.saturating_sub(ct);
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             elapsed = timer.elapsed().as_millis(),
             chain_time_elapsed,
-            "imported next anchor (id: {}, chain_time: {}, externals: {})",
+            "imported next anchor (id: {}, chain_time: {}, total_exts: {}, our_exts: {})",
             next_anchor.id,
             next_anchor.chain_time,
             next_anchor.externals.len(),
+            our_exts_count,
         );
 
         Ok((next_anchor, has_externals))
@@ -1217,6 +1218,11 @@ impl DelayedWorkingState {
 
     fn delay(&mut self, state: Box<WorkingState>) {
         self.unused = Some(state);
+    }
+
+    fn reset(&mut self) {
+        self.unused = None;
+        self.future = None;
     }
 }
 
