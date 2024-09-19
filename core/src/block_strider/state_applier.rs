@@ -48,10 +48,16 @@ where
 
         let state_storage = self.inner.storage.shard_state_storage();
 
+        let _histogram_2 = HistogramGuard::begin("tycho_core_state_applier_load_handle_time");
+
         // Load handle
         let handle = self
             .get_block_handle(&cx.mc_block_id, &cx.block, &cx.archive_data)
             .await?;
+
+        drop(_histogram_2);
+
+        let _histogram_3 = HistogramGuard::begin("tycho_core_state_applier_update_conn_time");
 
         let (prev_id, prev_id_alt) = cx
             .block

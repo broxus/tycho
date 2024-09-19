@@ -560,8 +560,13 @@ impl BlockStorage {
             key[4..].copy_from_slice(&ARCHIVE_TO_COMMIT_MAGIC.to_be_bytes());
             batch.put_cf(&chunks_cf, key, []);
         }
+
+        let _histogram_2 = HistogramGuard::begin("tycho_storage_move_into_archive_2_time");
+
         // 4. Execute transaction
         self.db.rocksdb().write(batch)?;
+
+        drop(_histogram_2);
 
         tracing::debug!(block_id = %handle.id(), "saved block id into archive");
         // Block will be removed after blocks gc
@@ -996,8 +1001,12 @@ impl BlockStorage {
 
                 let _histogram = HistogramGuard::begin("tycho_storage_split_block_data_time");
 
+                let _histogram_2 = HistogramGuard::begin("tycho_storage_compress_block_data_time");
+
                 let mut compressed = Vec::new();
                 tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
+
+                drop(_histogram_2);
 
                 let chunks = compressed.chunks(BLOCK_DATA_CHUNK_SIZE as usize);
                 for (index, chunk) in chunks.enumerate() {
