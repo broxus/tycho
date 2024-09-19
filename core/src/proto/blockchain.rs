@@ -69,9 +69,7 @@ pub enum ArchiveInfo {
     #[tl(id = "blockchain.archiveInfo.found", size_hint = 20)]
     Found {
         id: u64,
-        #[tl(with = "tl::non_zero_u64")]
         size: NonZeroU64,
-        #[tl(with = "tl::non_zero_u32")]
         chunk_size: NonZeroU32,
     },
     #[tl(id = "blockchain.archiveInfo.notFound")]
@@ -88,9 +86,7 @@ pub struct MessageBroadcastRef<'tl> {
 #[tl(boxed, id = "blockchain.blockData", scheme = "proto.tl")]
 pub struct BlockData {
     pub data: Bytes,
-    #[tl(with = "tl::non_zero_u32")]
     pub size: NonZeroU32,
-    #[tl(with = "tl::non_zero_u32")]
     pub chunk_size: NonZeroU32,
 }
 

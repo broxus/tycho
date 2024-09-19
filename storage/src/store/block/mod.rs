@@ -25,9 +25,8 @@ use tycho_util::FastHashSet;
 use weedb::rocksdb;
 use weedb::rocksdb::IteratorMode;
 
-pub use self::package_entry::PackageEntryKey;
+pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
 use crate::db::*;
-use crate::store::block::package_entry::{BlockDataEntryKey, PartialBlockId};
 use crate::util::*;
 use crate::{
     BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
@@ -617,11 +616,7 @@ impl BlockStorage {
 
     /// Loads an archive chunk.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
-        let archive_size = self
-            .get_archive_size(id)?
-            .ok_or(BlockStorageError::ArchiveNotFound)? as u64;
-
-        if offset % ARCHIVE_CHUNK_SIZE != 0 || offset >= archive_size {
+        if offset % ARCHIVE_CHUNK_SIZE != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
@@ -640,7 +635,7 @@ impl BlockStorage {
         Ok(chunk.to_vec())
     }
 
-    pub fn get_block_size(&self, block_id: &BlockId) -> Result<u32> {
+    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<u32> {
         let key = BlockDataEntryKey {
             block_id: block_id.into(),
             chunk_index: BLOCK_DATA_SIZE_MAGIC,
@@ -656,9 +651,7 @@ impl BlockStorage {
     }
 
     pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Vec<u8>> {
-        let block_size = self.get_block_size(block_id)?;
-
-        if offset % BLOCK_DATA_CHUNK_SIZE != 0 || offset >= block_size {
+        if offset % BLOCK_DATA_CHUNK_SIZE != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 

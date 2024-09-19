@@ -13,7 +13,7 @@ use tycho_util::sync::rayon_run;
 
 use crate::block_strider::provider::{OptionalBlockStuff, ProofChecker};
 use crate::block_strider::BlockProvider;
-use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient};
+use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
 
 // TODO: Use backoff instead of simple polling.
@@ -71,14 +71,20 @@ impl BlockchainBlockProvider {
 
         loop {
             tracing::debug!(%prev_block_id, "get_next_block_full requested");
-            match self.client.get_next_block_full(prev_block_id).await {
-                Ok(Some((block_full, neighbour))) => {
-                    let parsed = self.process_received_block(block_full, neighbour).await;
-                    if parsed.is_some() {
-                        return parsed;
+            match self
+                .client
+                .get_next_block_full(prev_block_id, DataRequirement::Optional)
+                .await
+            {
+                Ok(res) => match res.data {
+                    Some(data) => {
+                        let parsed = self.process_received_block(data, res.neighbour).await;
+                        if parsed.is_some() {
+                            return parsed;
+                        }
                     }
-                }
-                Ok(None) => tracing::warn!(?prev_block_id, "block not found"),
+                    None => tracing::warn!(?prev_block_id, "block not found"),
+                },
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
 
@@ -94,16 +100,18 @@ impl BlockchainBlockProvider {
             tracing::debug!(block_id = %block_id_relation.block_id, "get_block_full requested");
             match self
                 .client
-                .get_block_full(&block_id_relation.block_id)
+                .get_block_full(&block_id_relation.block_id, DataRequirement::Expected)
                 .await
             {
-                Ok(Some((block_full, neighbour))) => {
-                    let parsed = self.process_received_block(block_full, neighbour).await;
-                    if parsed.is_some() {
-                        return parsed;
+                Ok(res) => match res.data {
+                    Some(data) => {
+                        let parsed = self.process_received_block(data, res.neighbour).await;
+                        if parsed.is_some() {
+                            return parsed;
+                        }
                     }
-                }
-                Ok(None) => tracing::warn!(%block_id_relation.block_id, "block not found"),
+                    None => tracing::warn!(%block_id_relation.block_id, "block not found"),
+                },
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
 

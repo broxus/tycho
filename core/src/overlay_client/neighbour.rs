@@ -69,10 +69,21 @@ impl Neighbour {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PunishReason {
     Dumb,
     Slow,
     Malicious,
+}
+
+impl PunishReason {
+    pub fn score(self) -> u8 {
+        match self {
+            Self::Dumb => 4,
+            Self::Slow => 8,
+            Self::Malicious => 128,
+        }
+    }
 }
 
 /// Neighbour request statistics.
@@ -177,13 +188,7 @@ impl TrackedStats {
     }
 
     fn punish(&mut self, reason: PunishReason) {
-        let score_penalty = match reason {
-            PunishReason::Dumb => 4,
-            PunishReason::Slow => 8,
-            PunishReason::Malicious => 128,
-        };
-
-        self.score = self.score.saturating_add(score_penalty);
+        self.score = self.score.saturating_sub(reason.score());
     }
 }
 

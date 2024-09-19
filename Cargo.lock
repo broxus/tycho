@@ -2953,9 +2953,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6711faca0e884c1ac5b0b24e8eb878546019cc52a0db4e99bddab5fab8eb4a45"
+checksum = "267d0e01cbf3e70abc309492812717cd554d2081dcb2e95cb35ec39921737fbb"
 dependencies = [
  "bytes",
  "digest",

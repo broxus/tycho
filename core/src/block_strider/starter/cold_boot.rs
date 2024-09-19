@@ -18,7 +18,7 @@ use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
 use super::{StarterInner, ZerostateProvider};
-use crate::blockchain_rpc::BlockchainRpcClient;
+use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 
@@ -529,29 +529,34 @@ impl StarterInner {
             let blockchain_rpc_client = &self.blockchain_rpc_client;
 
             // TODO: add retry count to interrupt infinite loop
-            let (block, proof, diff, meta_data) = loop {
-                let (block_full, neighbour) =
-                    match blockchain_rpc_client.get_block_full(block_id).await {
-                        Ok(Some(block_full)) => block_full,
-                        Ok(None) => {
-                            tracing::warn!(%block_id, "block not found");
+            let (block, proof, diff, meta_data) = 'outer: loop {
+                let (block_data_full, neighbour) = 'res: {
+                    match blockchain_rpc_client
+                        .get_block_full(block_id, DataRequirement::Expected)
+                        .await
+                    {
+                        Ok(res) => match res.data {
+                            Some(data) => break 'res (data, res.neighbour),
+                            None => tracing::warn!(%block_id, "block not found"),
+                        },
+                        Err(e) => tracing::warn!(%block_id, "failed to download block: {e:?}"),
+                    }
 
-                            // TODO: Backoff
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!(%block_id, "failed to download block: {e:?}");
+                    // TODO: Backoff
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue 'outer;
+                };
 
-                            // TODO: Backoff
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    };
+                anyhow::ensure!(&block_data_full.block_id == block_id, "block id mismatch");
+                let BlockDataFull {
+                    block_data,
+                    proof_data,
+                    queue_diff_data,
+                    ..
+                } = block_data_full;
 
-                let block = match BlockStuff::deserialize_checked(block_id, &block_full.block_data)
-                {
-                    Ok(block) => WithArchiveData::new(block, block_full.block_data),
+                let block = match BlockStuff::deserialize_checked(block_id, &block_data) {
+                    Ok(block) => WithArchiveData::new(block, block_data),
                     Err(e) => {
                         tracing::error!(%block_id, "failed to deserialize block: {e}");
                         neighbour.punish(PunishReason::Malicious);
@@ -559,8 +564,8 @@ impl StarterInner {
                     }
                 };
 
-                let proof = match BlockProofStuff::deserialize(block_id, &block_full.proof_data) {
-                    Ok(proof) => WithArchiveData::new(proof, block_full.proof_data),
+                let proof = match BlockProofStuff::deserialize(block_id, &proof_data) {
+                    Ok(proof) => WithArchiveData::new(proof, proof_data),
                     Err(e) => {
                         tracing::error!(%block_id, "failed to deserialize block proof: {e}");
                         neighbour.punish(PunishReason::Malicious);
@@ -568,9 +573,8 @@ impl StarterInner {
                     }
                 };
 
-                let diff = match QueueDiffStuff::deserialize(block_id, &block_full.queue_diff_data)
-                {
-                    Ok(diff) => WithArchiveData::new(diff, block_full.queue_diff_data),
+                let diff = match QueueDiffStuff::deserialize(block_id, &queue_diff_data) {
+                    Ok(diff) => WithArchiveData::new(diff, queue_diff_data),
                     Err(e) => {
                         tracing::error!(%block_id, "failed to deserialize queue diff: {e}");
                         neighbour.punish(PunishReason::Malicious);

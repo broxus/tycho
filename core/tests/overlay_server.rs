@@ -6,7 +6,9 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService, BroadcastListener};
+use tycho_core::blockchain_rpc::{
+    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, DataRequirement,
+};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
@@ -165,18 +167,22 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         ))
         .build();
 
-    let result = client.get_block_full(&BlockId::default()).await;
+    let result = client
+        .get_block_full(&BlockId::default(), DataRequirement::Optional)
+        .await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert!(response.is_none());
+        assert!(response.data.is_none());
     }
 
-    let result = client.get_next_block_full(&BlockId::default()).await;
+    let result = client
+        .get_next_block_full(&BlockId::default(), DataRequirement::Optional)
+        .await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert!(response.is_none());
+        assert!(response.data.is_none());
     }
 
     let result = client.get_next_key_block_ids(&BlockId::default(), 10).await;
@@ -228,12 +234,14 @@ async fn overlay_server_blocks() -> Result<()> {
 
     for block_id in archive.blocks.keys() {
         if block_id.shard.is_masterchain() {
-            let result = client.get_block_full(block_id).await;
+            let result = client
+                .get_block_full(block_id, DataRequirement::Required)
+                .await?;
 
             let (archive_block, archive_proof, archive_queue_diff) =
                 archive.get_entry_by_id(block_id)?;
 
-            if let Ok(Some((block_full, _))) = &result {
+            if let Some(block_full) = &result.data {
                 let block = BlockStuff::deserialize_checked(block_id, &block_full.block_data)?;
                 assert_eq!(block.as_ref(), archive_block.block());
 

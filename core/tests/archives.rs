@@ -12,7 +12,7 @@ use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
     ProofChecker, ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
-use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::PeerId;
 use tycho_storage::{ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
@@ -358,10 +358,12 @@ async fn heavy_archives() -> Result<()> {
 
     // getBlockFull
     for (block_id, data_entry) in &sorted {
-        let result = client.get_block_full(block_id).await?;
-        assert!(result.is_some());
+        let result = client
+            .get_block_full(block_id, DataRequirement::Required)
+            .await?;
+        assert!(result.data.is_some());
 
-        if let Some((block_full, _)) = result {
+        if let Some(block_full) = result.data {
             let block = BlockStuff::deserialize_checked(block_id, &block_full.block_data)?;
             let proof = BlockProofStuff::deserialize(block_id, &block_full.proof_data)?;
             let queue_diff = QueueDiffStuff::deserialize(block_id, &block_full.queue_diff_data)?;
@@ -388,10 +390,12 @@ async fn heavy_archives() -> Result<()> {
 
     // getNextBlockFull
     for (block_id, _) in &sorted {
-        let result = client.get_next_block_full(block_id).await?;
-        assert!(result.is_some());
+        let result = client
+            .get_next_block_full(block_id, DataRequirement::Required)
+            .await?;
+        assert!(result.data.is_some());
 
-        if let Some((block_full, _neighbour)) = result {
+        if let Some(block_full) = result.data {
             let block =
                 BlockStuff::deserialize_checked(&block_full.block_id, &block_full.block_data);
             assert!(block.is_ok());

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use scopeguard::ScopeGuard;
@@ -180,43 +180,43 @@ impl BlockchainRpcClient {
     pub async fn get_block_full(
         &self,
         block: &BlockId,
-    ) -> Result<Option<BlockDataFullWithNeighbour>, Error> {
+        requirement: DataRequirement,
+    ) -> Result<BlockDataFullWithNeighbour, Error> {
         let overlay_client = self.inner.overlay_client.clone();
 
         let Some(neighbour) = overlay_client.neighbours().choose().await else {
             return Err(Error::NoNeighbours);
         };
 
-        let block_full_with_neighbour = download_block_inner(
+        download_block_inner(
             Request::from_tl(rpc::GetBlockFull { block_id: *block }),
             overlay_client,
             neighbour,
+            requirement,
         )
-        .await?;
-
-        Ok(block_full_with_neighbour)
+        .await
     }
 
     pub async fn get_next_block_full(
         &self,
         prev_block: &BlockId,
-    ) -> Result<Option<BlockDataFullWithNeighbour>, Error> {
+        requirement: DataRequirement,
+    ) -> Result<BlockDataFullWithNeighbour, Error> {
         let overlay_client = self.inner.overlay_client.clone();
 
         let Some(neighbour) = overlay_client.neighbours().choose().await else {
             return Err(Error::NoNeighbours);
         };
 
-        let block_full_with_neighbour = download_block_inner(
+        download_block_inner(
             Request::from_tl(rpc::GetNextBlockFull {
                 prev_block_id: *prev_block,
             }),
             overlay_client,
             neighbour,
+            requirement,
         )
-        .await?;
-
-        Ok(block_full_with_neighbour)
+        .await
     }
 
     pub async fn get_key_block_proof(
@@ -489,12 +489,15 @@ impl BlockchainRpcClient {
                     handle.reject();
                 });
 
-                downloaded += chunk.len() as u64;
+                anyhow::ensure!(chunk.len() <= chunk_size as _, "received invalid chunk");
 
+                downloaded += chunk.len() as u64;
                 tracing::debug!(
                     downloaded = %bytesize::ByteSize::b(downloaded),
                     "got archive chunk"
                 );
+
+                anyhow::ensure!(downloaded <= target_size, "received too many chunks");
 
                 decompressed_chunk.clear();
                 zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
@@ -522,7 +525,7 @@ impl BlockchainRpcClient {
                 let overlay_client = self.overlay_client().clone();
 
                 tracing::debug!(archive_id, offset, "downloading archive chunk");
-                JoinTask::new(download_archive_inner(
+                JoinTask::new(download_with_retries(
                     Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
                     overlay_client,
                     neighbour,
@@ -563,7 +566,7 @@ pub struct PendingArchive {
     pub neighbour: Neighbour,
 }
 
-async fn download_archive_inner(
+async fn download_with_retries(
     req: Request,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
@@ -601,13 +604,33 @@ pub struct BlockDataFull {
     pub queue_diff_data: Bytes,
 }
 
-pub type BlockDataFullWithNeighbour = (BlockDataFull, Neighbour);
+pub struct BlockDataFullWithNeighbour {
+    pub data: Option<BlockDataFull>,
+    pub neighbour: Neighbour,
+}
 
-pub async fn download_block_inner(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataRequirement {
+    /// Data is not required to be present on the neighbour (mostly for polling).
+    ///
+    /// NOTE: Node will not be punished if the data is not present.
+    Optional,
+    /// We assume that the node has the data, but it's not required.
+    ///
+    /// NOTE: Node will be punished as [`PunishReason::Dumb`] if the data is not present.
+    Expected,
+    /// Data must be present on the requested neighbour.
+    ///
+    /// NOTE: Node will be punished as [`PunishReason::Malicious`] if the data is not present.
+    Required,
+}
+
+async fn download_block_inner(
     req: Request,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
-) -> Result<Option<BlockDataFullWithNeighbour>, Error> {
+    requirement: DataRequirement,
+) -> Result<BlockDataFullWithNeighbour, Error> {
     let response = overlay_client
         .query_raw::<BlockFull>(neighbour.clone(), req)
         .await?;
@@ -621,8 +644,22 @@ pub async fn download_block_inner(
         queue_diff: queue_diff_data,
     } = block_full
     else {
-        handle.accept();
-        return Ok(None);
+        match requirement {
+            DataRequirement::Optional => {
+                handle.accept();
+            }
+            DataRequirement::Expected => {
+                handle.reject();
+            }
+            DataRequirement::Required => {
+                neighbour.punish(crate::overlay_client::PunishReason::Malicious);
+            }
+        }
+
+        return Ok(BlockDataFullWithNeighbour {
+            data: None,
+            neighbour,
+        });
     };
 
     const PARALLEL_REQUESTS: usize = 10;
@@ -641,16 +678,11 @@ pub async fn download_block_inner(
     let processing_task = tokio::task::spawn_blocking(move || {
         let mut zstd_decoder = ZstdDecompressStream::new(chunk_size as usize)?;
 
-        let mut decompressed_buffer = BytesMut::new();
-
-        // Reuse buffer for decompressed data
-        let mut decompressed_chunk = Vec::new();
+        // Buffer for decompressed data
+        let mut decompressed = Vec::new();
 
         // Decompress chunk
-        zstd_decoder.write(block_data.data.as_ref(), &mut decompressed_chunk)?;
-
-        // Append chunk to buffer
-        decompressed_buffer.extend_from_slice(decompressed_chunk.as_slice());
+        zstd_decoder.write(block_data.data.as_ref(), &mut decompressed)?;
 
         // Receive and process chunks
         let mut downloaded = block_data.data.len() as u32;
@@ -659,19 +691,18 @@ pub async fn download_block_inner(
                 handle.reject();
             });
 
+            anyhow::ensure!(chunk.len() <= chunk_size as _, "received invalid chunk");
+
             downloaded += chunk.len() as u32;
-
-            // Decompress chunk
-            decompressed_chunk.clear();
-            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
-
-            // Append chunk to buffer
-            decompressed_buffer.extend_from_slice(decompressed_chunk.as_slice());
-
             tracing::debug!(
-                downloaded = %bytesize::ByteSize::b(downloaded as u64),
+                downloaded = %bytesize::ByteSize::b(downloaded as _),
                 "got block data chunk"
             );
+
+            anyhow::ensure!(downloaded <= target_size, "received too many chunks");
+
+            // Decompress chunk
+            zstd_decoder.write(chunk.as_ref(), &mut decompressed)?;
 
             ScopeGuard::into_inner(guard).accept(); // defuse the guard
         }
@@ -681,7 +712,7 @@ pub async fn download_block_inner(
             "block size mismatch (target size: {target_size}; downloaded: {downloaded})",
         );
 
-        Ok(decompressed_buffer)
+        Ok(decompressed)
     });
 
     let mut stream =
@@ -691,7 +722,7 @@ pub async fn download_block_inner(
                 let overlay_client = overlay_client.clone();
 
                 tracing::debug!(%block_id, offset, "downloading block data chunk");
-                JoinTask::new(download_archive_inner(
+                JoinTask::new(download_with_retries(
                     Request::from_tl(rpc::GetBlockDataChunk { block_id, offset }),
                     overlay_client,
                     neighbour,
@@ -711,16 +742,16 @@ pub async fn download_block_inner(
     let block_data = processing_task
         .await
         .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to join blocking task: {e}")))?
-        .map_err(Error::Internal)?
-        .freeze();
+        .map(Bytes::from)
+        .map_err(Error::Internal)?;
 
-    Ok(Some((
-        BlockDataFull {
+    Ok(BlockDataFullWithNeighbour {
+        data: Some(BlockDataFull {
             block_id,
             block_data,
             proof_data,
             queue_diff_data,
-        },
-        neighbour.clone(),
-    )))
+        }),
+        neighbour: neighbour.clone(),
+    })
 }

@@ -601,11 +601,20 @@ impl<B> Inner<B> {
 
         Ok(match block_handle_storage.load_handle(block_id) {
             Some(handle) if handle.has_all_block_parts() => {
+                let data_chunk_size = block_storage.block_data_chunk_size();
+                let data = block_storage.get_block_data_chunk(block_id, 0)?;
+                let data_size = if data.len() < data_chunk_size.get() as usize {
+                    // NOTE: Skip one RocksDB read for relatively small blocks
+                    //       Average block size is 4KB, while the chunk size is 1MB.
+                    data.len() as u32
+                } else {
+                    block_storage.get_block_data_size(block_id)?
+                };
+
                 let block = BlockData {
-                    data: block_storage.get_block_data_chunk(block_id, 0)?.into(),
-                    size: NonZeroU32::new(block_storage.get_block_size(block_id)?)
-                        .expect("shouldn't happen"),
-                    chunk_size: block_storage.block_data_chunk_size(),
+                    data: data.into(),
+                    size: NonZeroU32::new(data_size).expect("shouldn't happen"),
+                    chunk_size: data_chunk_size,
                 };
 
                 let (proof, queue_diff) = tokio::join!(
