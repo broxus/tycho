@@ -169,7 +169,10 @@ where
         let shard_diff = shard_diffs.get(&block_id_short.seqno);
         if let Some(shard_diff) = shard_diff {
             if &shard_diff.hash != hash {
-                bail!("Duplicate diff with different hash")
+                bail!(
+                    "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
+                    block_id_short, shard_diff.hash,  hash,
+                )
             } else {
                 return Ok(());
             }

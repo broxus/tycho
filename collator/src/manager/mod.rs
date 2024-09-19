@@ -192,7 +192,7 @@ fn metrics_report_last_applied_block_and_anchor(
     metrics::gauge!("tycho_last_applied_block_seqno", &labels).set(block_id.seqno);
     metrics::gauge!("tycho_last_processed_to_anchor_id", &labels).set(processed_to_anchor_id);
 
-    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
         block_id = %DisplayAsShortId(block_id),
         processed_to_anchor_id = processed_to_anchor_id,
         "last applied block",
@@ -518,7 +518,7 @@ where
                     .iter()
                     .all(|ac| ac.state != CollatorState::Active);
                 if all_not_active {
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "collator cancelled or waiting in every shard and masterchain, \
                         will run sync to last applied mc block",
                     );
@@ -686,7 +686,7 @@ where
                         false
                     } else {
                         // should sync to last applied mc block from bc because it is far ahead
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                             "check_should_sync: should sync to last applied mc block from bc: \
                             last applied ({}) ahead last collated ({}) on {} >= {}",
                             applied_range_end, last_collated_mc_block_id.seqno,
@@ -696,7 +696,7 @@ where
                     }
                 } else {
                     // should sync to last applied mc block from bc when lat collated not exist
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "check_should_sync: should sync to last applied mc block from bc: \
                         last applied ({}) and last collated not exist",
                         applied_range_end,
@@ -753,7 +753,7 @@ where
                     .await?;
             } else {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "sync_to_applied_mc_block: mark collator cancelled for shard",
+                    "sync_to_applied_mc_block: mark collator Waiting for shard",
                 );
 
                 // mark collator waiting
@@ -765,7 +765,7 @@ where
                     .iter()
                     .all(|ac| ac.state != CollatorState::Active);
                 if all_not_active {
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "sync_to_applied_mc_block: collator cancelled or waiting in every shard, \
                         will run sync to last applied mc block",
                     );
@@ -787,7 +787,7 @@ where
 
                 // enqueue next master block collation if there are unprocessed messages
                 if collation_result.has_unprocessed_messages {
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "There are unprocessed messages in buffer or queue in master, enqueue next collation",
                     );
                     self.enqueue_mc_block_collation(
@@ -798,7 +798,7 @@ where
                     .await?;
                 } else {
                     // otherwise execute master block processing routines
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "Will notify mempool and refresh collation sessions",
                     );
 
@@ -846,7 +846,7 @@ where
             if let Some(from_mc_block_seqno) = self.from_mc_block_seqno {
                 if block_id.seqno < from_mc_block_seqno {
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        "recovery mode: skip block, should wait for specified last applied with seqno {}",
+                        "recovery restart: skip block, should wait for specified last applied with seqno {}",
                         from_mc_block_seqno,
                     );
                     return Ok(());
@@ -888,7 +888,7 @@ where
                         .iter()
                         .all(|ac| ac.state != CollatorState::Active);
                     if all_not_active {
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                             last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                             last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
                             "check_should_sync: should sync to last applied mc block \
@@ -906,7 +906,7 @@ where
                     }
                 } else {
                     // sync to last applied mc block when no last processed and collator not started
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "should sync to last applied mc block when no last processed",
                     );
                     true
@@ -951,14 +951,14 @@ where
                     shard: ShardIdent::MASTERCHAIN,
                     seqno: applied_range.1,
                 };
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     last_applied_mc_block_id = %last_applied_mc_block_id_short,
                     "sync_to_applied_mc_block: unable to sync to last applied mc block, \
                     need to receive next blocks from bc",
                 );
             }
         } else {
-            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 "sync_to_applied_mc_block: there is no received applied mc blocks in cache, \
                 will wait for next blocks from bc",
             );
@@ -971,7 +971,7 @@ where
         &self,
         applied_range: &(BlockSeqno, BlockSeqno),
     ) -> Result<bool> {
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "Start sync to applied mc block",
         );
 
@@ -1105,7 +1105,7 @@ where
 
             // if it is last one then commit diffs, notify mempool and refresh collation sessions
             if is_last {
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     "Will notify mempool and refresh collation sessions with HARD RESET",
                 );
 
@@ -1726,7 +1726,7 @@ where
                 .unwrap_or_default();
             let mc_block_interval_elapsed = chain_time_elapsed > mc_block_min_interval_ms;
             if mc_block_interval_elapsed {
-                tracing::debug!(
+                tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Master block interval is {}ms, elapsed chain time {}ms exceeded the interval in current shard {}",
                     mc_block_min_interval_ms, chain_time_elapsed, shard_id,
@@ -1839,7 +1839,7 @@ where
             .enqueue_do_collate(top_shard_blocks_info)
             .await?;
 
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "Master block collation enqueued: (block_id={} ct={})",
             next_mc_block_id_short,
             next_mc_block_chain_time,
@@ -1865,7 +1865,7 @@ where
 
         collator.enqueue_try_collate().await?;
 
-        tracing::debug!(
+        tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
             "Equeued next attempt to collate block for shard {}",
             shard_id,

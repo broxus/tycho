@@ -545,7 +545,7 @@ impl MessagesExecutor {
             .checked_div(group_horizontal_size as u32)
             .unwrap_or_default();
 
-        tracing::info!(target: tracing_targets::EXEC_MANAGER,
+        tracing::debug!(target: tracing_targets::EXEC_MANAGER,
             group_horizontal_size, group_max_vert_size,
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
