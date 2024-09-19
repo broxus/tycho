@@ -477,14 +477,16 @@ impl CollatorStdImpl {
 
             working_state
         } else {
-            self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
+            // NOTE: anyway should get old delayed working state
+            //      otherwise it could be returned unexpectedly instead of new result from next future
+            _ = self.delayed_working_state.wait().await?;
 
-            let span = tracing::Span::current();
-            span.record("new_next_block_id", display(self.next_block_info));
+            self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 mc_data_block_id = %mc_data.block_id.as_short_id(),
                 prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
+                new_next_block_id = %self.next_block_info,
                 "resume collation with reset",
             );
 
