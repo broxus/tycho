@@ -63,6 +63,12 @@ impl Neighbour {
         let roundtrip = truncate_time(roundtrip);
         self.inner.stats.write().update(roundtrip, success);
     }
+
+    pub fn track_reliability(&self, success: bool) {
+        let mut stats = self.inner.stats.write();
+        let duration = stats.roundtrip.0;
+        stats.update(truncate_time(&Duration::from_millis(duration)), success);
+    }
 }
 
 /// Neighbour request statistics.
