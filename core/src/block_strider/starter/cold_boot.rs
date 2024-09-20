@@ -324,8 +324,13 @@ impl StarterInner {
 
         // Download and save blocks and states from other shards
         for (_, block_id) in init_mc_block.shard_blocks()? {
-            self.download_block_with_state(mc_block_id, &block_id)
+            let (handle, _) = self
+                .download_block_with_state(mc_block_id, &block_id)
                 .await?;
+
+            self.storage
+                .block_handle_storage()
+                .set_block_applied(&handle);
         }
 
         Ok(())
@@ -635,6 +640,7 @@ impl StarterInner {
                 "downloaded shard state hash mismatch"
             );
         }
+        block_handle_storage.set_block_applied(&handle);
 
         Ok((handle, block))
     }
