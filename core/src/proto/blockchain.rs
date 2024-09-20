@@ -37,8 +37,7 @@ pub enum BlockFull {
     Found {
         #[tl(with = "tl_block_id")]
         block_id: everscale_types::models::BlockId,
-        #[tl(with = "BigBytes")]
-        block: Bytes,
+        block: BlockData,
         proof: Bytes,
         queue_diff: Bytes,
     },
@@ -67,12 +66,10 @@ pub enum PersistentStateInfo {
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
-    #[tl(id = "blockchain.archiveInfo.found", size_hint = 16)]
+    #[tl(id = "blockchain.archiveInfo.found", size_hint = 20)]
     Found {
         id: u64,
-        #[tl(with = "tl::non_zero_u64")]
         size: NonZeroU64,
-        #[tl(with = "tl::non_zero_u32")]
         chunk_size: NonZeroU32,
     },
     #[tl(id = "blockchain.archiveInfo.notFound")]
@@ -83,6 +80,14 @@ pub enum ArchiveInfo {
 #[tl(boxed, id = "blockchain.broadcast.message", scheme = "proto.tl")]
 pub struct MessageBroadcastRef<'tl> {
     pub data: &'tl [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, id = "blockchain.blockData", scheme = "proto.tl")]
+pub struct BlockData {
+    pub data: Bytes,
+    pub size: NonZeroU32,
+    pub chunk_size: NonZeroU32,
 }
 
 /// Blockchain RPC models.
@@ -109,6 +114,14 @@ pub mod rpc {
     pub struct GetNextBlockFull {
         #[tl(with = "tl_block_id")]
         pub prev_block_id: everscale_types::models::BlockId,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "blockchain.getBlockDataChunk", scheme = "proto.tl")]
+    pub struct GetBlockDataChunk {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
+        pub offset: u32,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
@@ -149,7 +162,7 @@ pub mod rpc {
     #[tl(
         boxed,
         id = "blockchain.getArchiveChunk",
-        size_hint = 20,
+        size_hint = 16,
         scheme = "proto.tl"
     )]
     pub struct GetArchiveChunk {

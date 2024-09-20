@@ -63,6 +63,27 @@ impl Neighbour {
         let roundtrip = truncate_time(roundtrip);
         self.inner.stats.write().update(roundtrip, success);
     }
+
+    pub fn punish(&self, reason: PunishReason) {
+        self.inner.stats.write().punish(reason);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PunishReason {
+    Dumb,
+    Slow,
+    Malicious,
+}
+
+impl PunishReason {
+    pub fn score(self) -> u8 {
+        match self {
+            Self::Dumb => 4,
+            Self::Slow => 8,
+            Self::Malicious => 128,
+        }
+    }
 }
 
 /// Neighbour request statistics.
@@ -164,6 +185,10 @@ impl TrackedStats {
 
         let roundtrip_buffer = &mut self.roundtrip;
         roundtrip_buffer.add(roundtrip);
+    }
+
+    fn punish(&mut self, reason: PunishReason) {
+        self.score = self.score.saturating_sub(reason.score());
     }
 }
 

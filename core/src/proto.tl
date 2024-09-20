@@ -68,10 +68,23 @@ blockchain.keyBlockIds block_ids:(vector blockchain.blockId) incomplete:Bool = b
 */
 blockchain.blockFull.found
     block_id:blockchain.blockId
-    block:bigBytes
+    block:blockchain.blockData
     proof:bytes
     queue_diff:bytes
     = blockchain.BlockFull;
+
+/**
+* A response for getting block info with the first chunk
+*
+* @param block          block data raw
+* @param size           block size in bytes
+* @param chunk_size     block chunk size in bytes
+*/
+blockchain.blockData
+    data:bytes
+    size:int
+    chunk_size:int
+    = blockchain.BlockData;
 
 /**
 * Block not found
@@ -157,6 +170,18 @@ blockchain.getBlockFull
 blockchain.getNextBlockFull
     prev_block_id:blockchain.blockId
     = overlay.Response blockchain.blockFull;
+
+/**
+* Get block data chunk
+*
+* @param block_id       target block id
+* @param offset         chunk offset in bytes (must be a multiple of `chunk_size`)
+*/
+blockchain.getBlockDataChunk
+    block_id:blockchain.blockId
+    offset:int
+    = overlay.Response blockchain.Data;
+
 
 /**
 * Get key block proof

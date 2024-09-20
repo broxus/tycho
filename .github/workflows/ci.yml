@@ -42,6 +42,39 @@ jobs:
         with:
           command: nextest
           args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control
+  integration-test:
+    name: Integration Test Suite
+    runs-on: [self-hosted, linux]
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: setup just
+        uses: extractions/setup-just@v2
+      - name: prepare test env
+        run: |
+          just prepare_integration_tests
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Test with latest nextest release
+        uses: actions-rs/cargo@v1
+        env:
+          RUST_LOG: warn
+        with:
+          command: nextest
+          args: run --package tycho-core --cargo-profile=release_check --test archives heavy_archives -- --ignored
   rustfmt:
     name: Rustfmt
     runs-on: [self-hosted, linux]

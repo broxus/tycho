@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -194,6 +194,15 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
                     let res = inner.handle_get_next_block_full(&req).await;
+                    Some(Response::from_tl(res))
+                })
+            },
+            rpc::GetBlockDataChunk as req => {
+                tracing::debug!(block_id = %req.block_id, offset = %req.offset, "getBlockDataChunk");
+
+                let inner = self.inner.clone();
+                BoxFutureOrNoop::future(async move {
+                    let res = inner.handle_get_block_data_chunk(&req);
                     Some(Response::from_tl(res))
                 })
             },
@@ -418,6 +427,20 @@ impl<B> Inner<B> {
         }
     }
 
+    fn handle_get_block_data_chunk(&self, req: &rpc::GetBlockDataChunk) -> overlay::Response<Data> {
+        let label = [("method", "getBlockDataChunk")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
+        let block_storage = self.storage.block_storage();
+        match block_storage.get_block_data_chunk(&req.block_id, req.offset) {
+            Ok(data) => overlay::Response::Ok(Data { data: data.into() }),
+            Err(e) => {
+                tracing::warn!("get_block_data_chunk failed: {e:?}");
+                overlay::Response::Err(INTERNAL_ERROR_CODE)
+            }
+        }
+    }
+
     async fn handle_get_key_block_proof(
         &self,
         req: &rpc::GetKeyBlockProof,
@@ -578,15 +601,30 @@ impl<B> Inner<B> {
 
         Ok(match block_handle_storage.load_handle(block_id) {
             Some(handle) if handle.has_all_block_parts() => {
-                let (block, proof, queue_diff) = tokio::join!(
-                    block_storage.load_block_data_raw(&handle),
+                let data_chunk_size = block_storage.block_data_chunk_size();
+                let data = block_storage.get_block_data_chunk(block_id, 0)?;
+                let data_size = if data.len() < data_chunk_size.get() as usize {
+                    // NOTE: Skip one RocksDB read for relatively small blocks
+                    //       Average block size is 4KB, while the chunk size is 1MB.
+                    data.len() as u32
+                } else {
+                    block_storage.get_block_data_size(block_id)?
+                };
+
+                let block = BlockData {
+                    data: data.into(),
+                    size: NonZeroU32::new(data_size).expect("shouldn't happen"),
+                    chunk_size: data_chunk_size,
+                };
+
+                let (proof, queue_diff) = tokio::join!(
                     block_storage.load_block_proof_raw(&handle),
                     block_storage.load_queue_diff_raw(&handle)
                 );
 
                 BlockFull::Found {
                     block_id: *block_id,
-                    block: block?.into(),
+                    block,
                     proof: proof?.into(),
                     queue_diff: queue_diff?.into(),
                 }

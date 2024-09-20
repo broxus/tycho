@@ -144,6 +144,7 @@ impl StorageBuilder {
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
 
+        block_storage.finish_block_data().await?;
         block_storage.preload_archive_ids().await?;
 
         let mempool_db =

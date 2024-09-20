@@ -25,7 +25,7 @@ use tycho_util::FastHashSet;
 use weedb::rocksdb;
 use weedb::rocksdb::IteratorMode;
 
-pub use self::package_entry::PackageEntryKey;
+pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
 use crate::db::*;
 use crate::util::*;
 use crate::{
@@ -68,6 +68,79 @@ impl BlockStorage {
     // it might be useful to allow configure it during the first run.
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
         NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
+    }
+
+    pub fn block_data_chunk_size(&self) -> NonZeroU32 {
+        NonZeroU32::new(BLOCK_DATA_CHUNK_SIZE).unwrap()
+    }
+
+    pub async fn finish_block_data(&self) -> Result<()> {
+        let started_at = Instant::now();
+
+        tracing::info!("started finishing compressed block data");
+
+        let mut iter = self.db.block_data_entries.raw_iterator();
+        iter.seek_to_first();
+
+        let mut blocks_to_finish = Vec::new();
+
+        loop {
+            let Some(key) = iter.key() else {
+                if let Err(e) = iter.status() {
+                    tracing::error!("failed to iterate through compressed block data: {e:?}");
+                }
+                break;
+            };
+
+            let key = BlockDataEntryKey::from_slice(key);
+
+            const _: () = const {
+                // Rely on the specific order of these constants
+                assert!(BLOCK_DATA_STARTED_MAGIC < BLOCK_DATA_SIZE_MAGIC);
+            };
+
+            // Chunk keys are sorted by offset.
+            match key.chunk_index {
+                // "Started" magic comes first, and indicates that the block exists.
+                BLOCK_DATA_STARTED_MAGIC => {
+                    blocks_to_finish.push(key.block_id);
+                }
+                // "Size" magic comes last, and indicates that the block data is finished.
+                BLOCK_DATA_SIZE_MAGIC => {
+                    // Last block id is already finished
+                    let last = blocks_to_finish.pop();
+                    anyhow::ensure!(last == Some(key.block_id), "invalid block data SIZE entry");
+                }
+                _ => {}
+            }
+
+            iter.next();
+        }
+
+        drop(iter);
+
+        for block_id in blocks_to_finish {
+            tracing::info!(?block_id, "found unfinished block");
+
+            let key = PackageEntryKey {
+                block_id,
+                ty: ArchiveEntryType::Block,
+            };
+
+            let data = match self.db.package_entries.get(key.to_vec())? {
+                Some(a) => a,
+                None => return Err(BlockStorageError::InvalidBlockData.into()),
+            };
+
+            self.spawn_split_block_data(&block_id, &data).await??;
+        }
+
+        tracing::info!(
+            elapsed = %humantime::format_duration(started_at.elapsed()),
+            "finished handling unfinished blocks"
+        );
+
+        Ok(())
     }
 
     /// Iterates over all archives and preloads their ids into memory.
@@ -209,7 +282,7 @@ impl BlockStorage {
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.has_data() {
-                self.add_data(&archive_id, data)?;
+                self.add_data_ext(&archive_id, data)?;
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
                     self.block_handle_storage.store_handle(&handle);
                     updated = true;
@@ -543,11 +616,7 @@ impl BlockStorage {
 
     /// Loads an archive chunk.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
-        let archive_size = self
-            .get_archive_size(id)?
-            .ok_or(BlockStorageError::ArchiveNotFound)? as u64;
-
-        if offset % ARCHIVE_CHUNK_SIZE != 0 || offset >= archive_size {
+        if offset % ARCHIVE_CHUNK_SIZE != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
@@ -562,6 +631,40 @@ impl BlockStorage {
             .archives
             .get(key.as_slice())?
             .ok_or(BlockStorageError::ArchiveNotFound)?;
+
+        Ok(chunk.to_vec())
+    }
+
+    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<u32> {
+        let key = BlockDataEntryKey {
+            block_id: block_id.into(),
+            chunk_index: BLOCK_DATA_SIZE_MAGIC,
+        };
+        let size = self
+            .db
+            .block_data_entries
+            .get(key.to_vec())?
+            .map(|slice| u32::from_le_bytes(slice.as_ref().try_into().unwrap()))
+            .ok_or(BlockStorageError::BlockNotFound)?;
+
+        Ok(size)
+    }
+
+    pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Vec<u8>> {
+        if offset % BLOCK_DATA_CHUNK_SIZE != 0 {
+            return Err(BlockStorageError::InvalidOffset.into());
+        }
+
+        let key = BlockDataEntryKey {
+            block_id: block_id.into(),
+            chunk_index: offset / BLOCK_DATA_CHUNK_SIZE,
+        };
+
+        let chunk = self
+            .db
+            .block_data_entries
+            .get(key.to_vec())?
+            .ok_or(BlockStorageError::BlockNotFound)?;
 
         Ok(chunk.to_vec())
     }
@@ -676,6 +779,26 @@ impl BlockStorage {
 
     fn add_data(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
         self.db.package_entries.insert(id.to_vec(), data)
+    }
+
+    fn add_data_ext(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
+        let mut batch = rocksdb::WriteBatch::default();
+
+        batch.put_cf(&self.db.package_entries.cf(), id.to_vec(), data);
+
+        // Store info that new block was started
+        let key = BlockDataEntryKey {
+            block_id: id.block_id,
+            chunk_index: BLOCK_DATA_STARTED_MAGIC,
+        };
+        batch.put_cf(&self.db.block_data_entries.cf(), key.to_vec(), []);
+
+        self.db.rocksdb().write(batch)?;
+
+        // Start splitting block data
+        let _handle = self.spawn_split_block_data(&id.block_id, data);
+
+        Ok(())
     }
 
     async fn get_data(&self, handle: &BlockHandle, id: &PackageEntryKey) -> Result<Vec<u8>> {
@@ -853,6 +976,51 @@ impl BlockStorage {
             is_running,
             handle: Some(handle),
         }
+    }
+
+    #[tracing::instrument(skip(self, data))]
+    fn spawn_split_block_data(
+        &self,
+        block_id: &PartialBlockId,
+        data: &[u8],
+    ) -> JoinHandle<Result<()>> {
+        let db = self.db.clone();
+
+        let span = tracing::Span::current();
+        let handle = tokio::task::spawn_blocking({
+            let block_id = *block_id;
+            let data = data.to_vec();
+
+            move || {
+                let _span = span.enter();
+
+                let _histogram = HistogramGuard::begin("tycho_storage_split_block_data_time");
+
+                let mut compressed = Vec::new();
+                tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
+
+                let chunks = compressed.chunks(BLOCK_DATA_CHUNK_SIZE as usize);
+                for (index, chunk) in chunks.enumerate() {
+                    let key = BlockDataEntryKey {
+                        block_id,
+                        chunk_index: index as u32,
+                    };
+
+                    db.block_data_entries.insert(key.to_vec(), chunk)?;
+                }
+
+                let key = BlockDataEntryKey {
+                    block_id,
+                    chunk_index: BLOCK_DATA_SIZE_MAGIC,
+                };
+                db.block_data_entries
+                    .insert(key.to_vec(), (compressed.len() as u32).to_le_bytes())?;
+
+                Ok(())
+            }
+        });
+
+        handle
     }
 }
 
@@ -1035,6 +1203,7 @@ fn remove_blocks(
     let raw = db.rocksdb().as_ref();
     let block_connections_cf = db.block_connections.cf();
     let package_entries_cf = db.package_entries.cf();
+    let block_data_entries_cf = db.block_data_entries.cf();
     let block_handles_cf = db.block_handles.cf();
     let key_blocks_cf = db.key_blocks.cf();
 
@@ -1075,6 +1244,7 @@ fn remove_blocks(
             // It will delete all entries in range [from_seqno, to_seqno) for this shard.
             // Note that package entry keys are the same as block connection keys.
             batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
+            batch.delete_range_cf(&block_data_entries_cf, &*range_from, &range_to);
             batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
 
             tracing::debug!(%from, %to, "delete_range");
@@ -1195,6 +1365,13 @@ const ARCHIVE_TO_COMMIT_MAGIC: u64 = u64::MAX - 1;
 // Reserved key in which we store the fact that archive was started
 const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 2;
 
+const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1MB
+
+// Reserved key in which the compressed block size is stored
+const BLOCK_DATA_SIZE_MAGIC: u32 = u32::MAX;
+// Reserved key in which we store the fact that compressed block was started
+const BLOCK_DATA_STARTED_MAGIC: u32 = u32::MAX - 2;
+
 #[derive(Default)]
 struct PreparedArchiveId {
     id: u32,
@@ -1206,6 +1383,8 @@ struct PreparedArchiveId {
 enum BlockStorageError {
     #[error("Archive not found")]
     ArchiveNotFound,
+    #[error("Block not found")]
+    BlockNotFound,
     #[error("Block data not found")]
     BlockDataNotFound,
     #[error("Block proof not found")]

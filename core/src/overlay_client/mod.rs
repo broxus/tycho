@@ -7,7 +7,7 @@ use tokio::task::AbortHandle;
 use tycho_network::{Network, PublicOverlay, Request};
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
-pub use self::neighbour::{Neighbour, NeighbourStats};
+pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
 pub use self::neighbours::Neighbours;
 pub use self::validators::{Validator, ValidatorSetPeers, ValidatorsResolver};
 use crate::proto::overlay;

@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use everscale_crypto::ed25519;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
 use tycho_core::blockchain_rpc::BlockchainRpcService;
 use tycho_network::{
-    DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService,
+    DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService, PeerId,
     PeerResolver, PublicOverlay, Router,
 };
 use tycho_storage::Storage;
@@ -134,6 +137,91 @@ pub fn make_network(storage: Storage, node_count: usize) -> Vec<Node> {
     }
 
     nodes
+}
+
+#[allow(dead_code)]
+pub trait TestNode {
+    fn network(&self) -> &Network;
+    fn public_overlay(&self) -> &PublicOverlay;
+    fn force_update_validators(&self, peers: Vec<PeerId>);
+}
+
+impl TestNode for Node {
+    fn network(&self) -> &Network {
+        self.network()
+    }
+
+    fn public_overlay(&self) -> &PublicOverlay {
+        self.public_overlay()
+    }
+
+    fn force_update_validators(&self, _: Vec<PeerId>) {}
+}
+
+#[allow(dead_code)]
+pub async fn discover<N: TestNode>(nodes: &[N]) -> anyhow::Result<()> {
+    tracing::info!("discovering nodes");
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let mut peer_states = BTreeMap::<&PeerId, PeerState>::new();
+
+        for (i, left) in nodes.iter().enumerate() {
+            for (j, right) in nodes.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+
+                let left_id = left.network().peer_id();
+                let right_id = right.network().peer_id();
+
+                if left.public_overlay().read_entries().contains(right_id) {
+                    peer_states.entry(left_id).or_default().knows_about += 1;
+                    peer_states.entry(right_id).or_default().known_by += 1;
+                }
+            }
+        }
+
+        tracing::info!("{peer_states:#?}");
+
+        let total_filled = peer_states
+            .values()
+            .filter(|state| state.knows_about == nodes.len() - 1)
+            .count();
+
+        tracing::info!(
+            "peers with filled overlay: {} / {}",
+            total_filled,
+            nodes.len()
+        );
+        if total_filled == nodes.len() {
+            break;
+        }
+    }
+
+    tracing::info!("resolving entries...");
+    for node in nodes {
+        let resolved = FuturesUnordered::new();
+        for entry in node.public_overlay().read_entries().iter() {
+            let handle = entry.resolver_handle.clone();
+            resolved.push(async move { handle.wait_resolved().await });
+        }
+
+        // Ensure all entries are resolved.
+        resolved.collect::<Vec<_>>().await;
+        tracing::info!(
+            peer_id = %node.network().peer_id(),
+            "all entries resolved",
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct PeerState {
+    knows_about: usize,
+    known_by: usize,
 }
 
 static PUBLIC_OVERLAY_ID: OverlayId = OverlayId([1; 32]);

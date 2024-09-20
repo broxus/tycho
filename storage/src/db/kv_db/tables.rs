@@ -158,6 +158,30 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
     }
 }
 
+/// Maps block id to compressed block data
+/// - Key: `BlockIdShort (16 bytes), [u8; 32], chunk index (4 byte)`
+/// - Value: `Vec<u8>`
+pub struct BlockDataEntries;
+
+impl BlockDataEntries {
+    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 4;
+}
+
+impl ColumnFamily for BlockDataEntries {
+    const NAME: &'static str = "block_data_entries";
+}
+
+impl ColumnFamilyOptions<Caches> for BlockDataEntries {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+
+        // data is already compressed
+        opts.set_compression_type(DBCompressionType::None);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+    }
+}
+
 /// Maps `BlockId` to root cell hash
 /// - Key: `BlockId`
 /// - Value: `[u8; 32]`
