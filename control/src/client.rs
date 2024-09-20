@@ -114,7 +114,7 @@ impl ControlClient {
             .await??
         {
             ArchiveInfoResponse::Found(info) => Ok(Some(info)),
-            ArchiveInfoResponse::NotFound => Ok(None),
+            ArchiveInfoResponse::TooNew | ArchiveInfoResponse::NotFound => Ok(None),
         }
     }
 

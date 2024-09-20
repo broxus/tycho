@@ -591,13 +591,24 @@ impl BlockStorage {
     }
 
     /// Returns a corresponding archive id for the specified masterchain seqno.
-    pub fn get_archive_id(&self, mc_seqno: u32) -> Option<u32> {
-        match self.archive_ids.read().range(..=mc_seqno).next_back() {
+    pub fn get_archive_id(&self, mc_seqno: u32) -> ArchiveId {
+        let archive_ids = self.archive_ids.read();
+
+        if archive_ids
+            .iter()
+            .max()
+            .filter(|&id| mc_seqno >= *id)
+            .is_some()
+        {
+            return ArchiveId::TooNew;
+        }
+
+        match archive_ids.range(..=mc_seqno).next_back() {
             // NOTE: handles case when mc_seqno is far in the future.
             // However if there is a key block between `id` and `mc_seqno`,
             // this will return an archive without that specified block.
-            Some(id) if mc_seqno < id + ARCHIVE_PACKAGE_SIZE => Some(*id),
-            _ => None,
+            Some(id) if mc_seqno < id + ARCHIVE_PACKAGE_SIZE => ArchiveId::Exist(*id),
+            _ => ArchiveId::NotFound,
         }
     }
 
@@ -1190,6 +1201,12 @@ pub struct StoreBlockResult {
     pub handle: BlockHandle,
     pub updated: bool,
     pub new: bool,
+}
+
+pub enum ArchiveId {
+    Exist(u32),
+    TooNew,
+    NotFound,
 }
 
 fn remove_blocks(

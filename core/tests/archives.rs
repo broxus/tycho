@@ -15,7 +15,7 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::PeerId;
-use tycho_storage::{ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
+use tycho_storage::{ArchiveId, ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
 use tycho_util::compression::zstd_decompress;
 use tycho_util::project_root;
 
@@ -211,7 +211,11 @@ async fn archives() -> Result<()> {
 
     block_strider.run().await?;
 
-    let archive_id = storage.block_storage().get_archive_id(1).unwrap();
+    let archive_id = storage.block_storage().get_archive_id(1);
+
+    let ArchiveId::Exist(archive_id) = archive_id else {
+        anyhow::bail!("archive not found")
+    };
 
     // Check archive size
     let archive_size = storage
@@ -419,7 +423,11 @@ async fn check_archive(
     seqno: u32,
 ) -> Result<()> {
     tracing::info!("Checking archive {}", seqno);
-    let archive_id = storage.block_storage().get_archive_id(seqno).unwrap();
+    let archive_id = storage.block_storage().get_archive_id(seqno);
+
+    let ArchiveId::Exist(archive_id) = archive_id else {
+        anyhow::bail!("archive not found")
+    };
 
     // Check archive size
     let archive_size = storage

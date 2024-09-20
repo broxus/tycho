@@ -113,6 +113,13 @@ blockchain.archiveInfo.found
     size:long
     chunk_size:long
     = blockchain.ArchiveInfo;
+
+/**
+* A successul response for the 'getArchiveInfo' query
+* says that requested block hasn't commited in archive yet
+*/
+blockchain.archiveInfo.tooNew = blockchain.ArchiveInfo;
+
 /**
 * An unsuccessul response for the 'getArchiveInfo' query
 */

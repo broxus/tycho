@@ -74,6 +74,7 @@ pub struct ArchiveInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ArchiveInfoResponse {
     Found(ArchiveInfo),
+    TooNew,
     NotFound,
 }
 
