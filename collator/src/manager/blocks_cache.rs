@@ -395,8 +395,17 @@ impl BlocksCache {
             ValidationStatus::Skipped => (CandidateStatus::Synced, Default::default()),
         };
 
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "Saving block validation result to cache: new_status={:?}",
+            new_status,
+        );
+
         let mut guard = self.masters.lock();
         let Some(entry) = guard.blocks.get_mut(&block_id.seqno) else {
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Block does not exist in cache - skip validation result",
+            );
             return false;
         };
 
@@ -410,10 +419,22 @@ impl BlocksCache {
                 let changed = *status != new_status;
                 candidate_stuff.signatures = signatures;
                 *status = new_status;
+                if !changed {
+                    tracing::debug!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "Block is Collated, validation status was not updated - skip validation result",
+                    );
+                }
                 changed
             }
             // We have already received a block from bc, discard validation result
-            BlockCacheEntryData::Received { .. } => false,
+            BlockCacheEntryData::Received { .. } => {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Block is Received, validation status was not updated - skip validation result",
+                );
+                false
+            }
         }
     }
 

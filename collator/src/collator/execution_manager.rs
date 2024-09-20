@@ -26,7 +26,9 @@ use super::CollatorStdImpl;
 use crate::collator::types::ParsedExternals;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
+use crate::types::{
+    DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
+};
 
 /// Execution manager
 pub(super) struct ExecutionManager {
@@ -146,7 +148,7 @@ impl ExecutionManager {
                     if externals.processed_to != externals.read_to {
                         externals.processed_to = externals.read_to;
                         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                            collation_data.processed_upto.externals,
+                            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
                         );
                     }
                 }
@@ -322,7 +324,7 @@ impl ExecutionManager {
                     if externals.processed_to != externals.read_to {
                         externals.processed_to = externals.read_to;
                         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                            collation_data.processed_upto.externals,
+                        collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
                         );
                     }
                 }
@@ -832,7 +834,7 @@ pub(super) fn set_int_upto_all_processed(
         int_upto.processed_to_msg = int_upto.read_to_msg;
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {}: {:?}",
+            "set processed_upto.internals for shard {}: {}",
             shard_id, int_upto,
         );
 
@@ -903,7 +905,7 @@ pub(super) fn update_internals_processed_upto(
     };
     if let Some(new_int_processed_upto) = new_int_processed_upto_opt {
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {}: {:?}",
+            "updated processed_upto.internals for shard {}: {}",
             shard_id, new_int_processed_upto,
         );
         processed_upto

@@ -97,7 +97,7 @@ pub struct BlockCollationResult {
 }
 
 /// Processed up to info for externals and internals.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct ProcessedUptoInfoStuff {
     /// Externals processed up to point and range
     pub externals: Option<ExternalsProcessedUpto>,
@@ -106,6 +106,39 @@ pub struct ProcessedUptoInfoStuff {
     /// Offset of processed messages from buffer.
     /// Will be `!=0` if there were unprocessed messages in buffer from prev collation.
     pub processed_offset: u32,
+}
+
+impl std::fmt::Debug for ProcessedUptoInfoStuff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessedUpto")
+            .field("offset", &self.processed_offset)
+            .field(
+                "externals",
+                &self.externals.as_ref().map(DisplayExternalsProcessedUpto),
+            )
+            .field(
+                "internals",
+                &DebugIter(self.internals.iter().map(|(k, v)| (k, DebugDisplay(v)))),
+            )
+            .finish()
+    }
+}
+
+pub struct DisplayExternalsProcessedUpto<'a>(pub &'a ExternalsProcessedUpto);
+impl std::fmt::Debug for DisplayExternalsProcessedUpto<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for DisplayExternalsProcessedUpto<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "processed_to: {}, read_to: {}",
+            DisplayTupleRef(&self.0.processed_to),
+            DisplayTupleRef(&self.0.read_to),
+        )
+    }
 }
 
 impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
@@ -160,6 +193,16 @@ pub struct InternalsProcessedUptoStuff {
     pub processed_to_msg: QueueKey,
     /// Needs to read internals to this point (LT, Hash) to reproduce buffer state from prev collation.
     pub read_to_msg: QueueKey,
+}
+
+impl std::fmt::Display for InternalsProcessedUptoStuff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "processed_to: {}, read_to: {}",
+            self.processed_to_msg, self.read_to_msg
+        )
+    }
 }
 
 impl From<InternalsProcessedUptoStuff> for InternalsProcessedUpto {
@@ -525,13 +568,27 @@ where
     }
 }
 
-pub(super) struct DisplayTuple2<'a, T1, T2>(pub (&'a T1, &'a T2));
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTuple2<'_, T1, T2> {
+pub(super) struct DisplayTupleRef<'a, T1, T2>(pub &'a (T1, T2));
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTupleRef<'_, T1, T2> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple2<'_, T1, T2> {
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display
+    for DisplayTupleRef<'_, T1, T2>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.0 .0, self.0 .1)
+    }
+}
+
+pub(super) struct DisplayTuple<T1, T2>(pub (T1, T2));
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTuple<T1, T2> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple<T1, T2> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {})", self.0 .0, self.0 .1)
     }

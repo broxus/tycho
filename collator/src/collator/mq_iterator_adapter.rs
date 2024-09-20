@@ -13,7 +13,7 @@ use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::ProcessedUptoInfoStuff;
+use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
 
 pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     shard_id: ShardIdent,
@@ -122,9 +122,10 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             "try_init_next_range_iterator: initialized={}, existing ranges_fully_read={}, \
-            ranges_from={:?}, ranges_to={:?}",
+            ranges_from={}, ranges_to={}",
             self.iterator_opt.is_some(), ranges_fully_read,
-            ranges_from, ranges_to,
+            DisplayIter(ranges_from.iter().map(DisplayTuple)),
+            DisplayIter(ranges_to.iter().map(DisplayTuple)),
         );
 
         let new_iterator_opt = if self.iterator_opt.is_none() && !ranges_fully_read {
@@ -150,9 +151,10 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "try_init_next_range_iterator: ranges updated from current position, ranges_fully_read={}, \
-                ranges_from={:?}, ranges_to={:?}",
+                ranges_from={}, ranges_to={}",
                 ranges_fully_read,
-                ranges_from, ranges_to,
+                DisplayIter(ranges_from.iter().map(DisplayTuple)),
+                DisplayIter(ranges_to.iter().map(DisplayTuple)),
             );
 
             let mut current_ranges_iterator = self
@@ -229,8 +231,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 ranges_fully_read = false;
 
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "try_init_next_range_iterator: updated ranges_from={:?}, ranges_to={:?}",
-                    ranges_from, ranges_to,
+                    "try_init_next_range_iterator: updated ranges_from={}, ranges_to={}",
+                    DisplayIter(ranges_from.iter().map(DisplayTuple)),
+                    DisplayIter(ranges_to.iter().map(DisplayTuple)),
                 );
                 // update processed_upto info
                 for (shard_id, new_process_to_key) in ranges_from.iter() {

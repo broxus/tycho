@@ -29,8 +29,8 @@ use crate::collator::types::{
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
-    BlockCollationResult, BlockIdExt, DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData,
-    TopBlockDescription,
+    BlockCollationResult, BlockIdExt, DisplayBlockIdsIntoIter, DisplayBlockIdsIter,
+    DisplayExternalsProcessedUpto, McData, TopBlockDescription,
 };
 
 #[cfg(test)]
@@ -134,7 +134,7 @@ impl CollatorStdImpl {
         let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
 
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
-            collation_data.processed_upto.externals,
+            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
         );
 
         // show internals processed upto
@@ -144,7 +144,7 @@ impl CollatorStdImpl {
             .iter()
             .for_each(|(shard_ident, processed_upto)| {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "initial processed_upto.internals for shard {}: {:?}",
+                    "initial processed_upto.internals for shard {}: {}",
                     shard_ident, processed_upto,
                 );
             });
