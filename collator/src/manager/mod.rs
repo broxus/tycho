@@ -695,7 +695,7 @@ where
                         true
                     }
                 } else {
-                    // should sync to last applied mc block from bc when lat collated not exist
+                    // should sync to last applied mc block from bc when last collated not exist
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "check_should_sync: should sync to last applied mc block from bc: \
                         last applied ({}) and last collated not exist",
@@ -752,12 +752,12 @@ where
                 self.sync_to_applied_mc_block_if_exist(last_collated_block_id, applied_range)
                     .await?;
             } else {
+                // cancel further collation of blocks in the current shard because we need to sync
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "sync_to_applied_mc_block: mark collator Waiting for shard",
+                    "sync_to_applied_mc_block: mark shard collator Cancelled for shard",
                 );
 
-                // mark collator waiting
-                self.set_collator_state(&block_id.shard, CollatorState::Waiting);
+                self.set_collator_state(&block_id.shard, CollatorState::Cancelled);
 
                 // run sync if all collators cancelled or waiting and we have applied mc blocks
                 let all_not_active = self
@@ -1133,6 +1133,10 @@ where
                 // replace last collated block id with last applied
                 self.blocks_cache
                     .update_last_collated_mc_block_id(*state.block_id());
+
+                // reset top shard blocks info
+                // because next we will start to collate new shard blocks after the sync
+                self.blocks_cache.reset_top_shard_blocks_additional_info()?;
 
                 let mc_data = McData::load_from_state(state)?;
 

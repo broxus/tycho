@@ -396,8 +396,7 @@ impl CollatorStdImpl {
                 .as_ref()
                 .map(|upto| upto.processed_to.0)
                 .unwrap_or_default(),
-            fees_collected: value_flow.fees_collected,
-            funds_created: value_flow.created,
+            value_flow,
             created_by: collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
         });

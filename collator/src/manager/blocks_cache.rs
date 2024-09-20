@@ -61,6 +61,13 @@ impl BlocksCache {
         Ok(result)
     }
 
+    pub fn reset_top_shard_blocks_additional_info(&self) -> Result<()> {
+        for mut shard_cache in self.shards.iter_mut() {
+            shard_cache.data.reset_top_shard_block_additional_info()?;
+        }
+        Ok(())
+    }
+
     /// Find shard block in cache and then get containing master block id if link exists
     pub fn find_containing_mc_block(&self, shard_block_id: &BlockId) -> Option<(BlockId, bool)> {
         // TODO: handle when master block link exist but there is not block itself
@@ -621,7 +628,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 };
 
                 assert_eq!(
-                    block_id, entry.block_id,
+                    entry.block_id, block_id,
                     "Block received from bc mismatch with collated one"
                 );
 
@@ -837,16 +844,28 @@ struct ShardBlocksCacheData {
 }
 
 impl ShardBlocksCacheData {
-    fn update_proof_funds_and_creators(&mut self, candidate: &BlockCandidate) -> Result<()> {
+    fn update_top_shard_block_additional_info(&mut self, candidate: &BlockCandidate) -> Result<()> {
+        self.value_flow = candidate.value_flow.clone();
+
         self.proof_funds
             .fees_collected
-            .try_add_assign(&candidate.fees_collected)?;
+            .try_add_assign(&candidate.value_flow.fees_collected)?;
         self.proof_funds
             .funds_created
-            .try_add_assign(&candidate.funds_created)?;
+            .try_add_assign(&candidate.value_flow.created)?;
 
         #[cfg(feature = "block-creator-stats")]
         self.creators.push(candidate.created_by);
+
+        Ok(())
+    }
+
+    fn reset_top_shard_block_additional_info(&mut self) -> Result<()> {
+        self.value_flow = Default::default();
+        self.proof_funds = Default::default();
+
+        #[cfg(feature = "block-creator-stats")]
+        self.creators.clear();
 
         Ok(())
     }
@@ -857,11 +876,11 @@ impl BlocksCacheData for ShardBlocksCacheData {
     type NewReceived = ();
 
     fn on_update_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
-        self.update_proof_funds_and_creators(candidate)
+        self.update_top_shard_block_additional_info(candidate)
     }
 
     fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
-        self.update_proof_funds_and_creators(candidate)
+        self.update_top_shard_block_additional_info(candidate)
     }
 
     fn on_update_received(&mut self, _: &BlockCacheEntry) -> Result<()> {

@@ -291,8 +291,7 @@ pub struct BlockCandidate {
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
     pub processed_to_anchor_id: u32,
-    pub fees_collected: CurrencyCollection,
-    pub funds_created: CurrencyCollection,
+    pub value_flow: ValueFlow,
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
 }
