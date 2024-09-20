@@ -34,7 +34,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationConfig, CollationSessionId, CollationSessionInfo,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple2, McData,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
     ShardDescriptionExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
@@ -872,6 +872,9 @@ where
             "Saved block from bc to cache",
         );
 
+        // stop any running validations up to this block
+        self.validator.cancel_validation(&block_id.as_short_id())?;
+
         if block_id.is_masterchain() {
             // when received block is master
 
@@ -923,15 +926,12 @@ where
                 self.ready_to_sync.notify_one();
             } else {
                 self.ready_to_sync.notify_one();
-                // stop validation if block was collated first
+                // try to commit block if it was collated first
                 if store_res.received_and_collated {
-                    self.validator.cancel_validation(&block_id.as_short_id())?;
-
-                    // TODO: here master block subgraph could be already extracted,
+                    // NOTE: here master block subgraph could be already extracted,
                     //      sent to sync, and removed from cache, because validation task
-                    //      could be finished after `store_block_from_bc` before this point.
+                    //      could be finished after `store_received()` but before this point.
 
-                    // so block is valid - we can run post validation routines
                     self.commit_valid_master_block(&block_id).await?;
                 }
             }
@@ -990,7 +990,7 @@ where
             .await?;
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple2)),
+            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
         );
 
         // find first applied mc block and tail shard blocks and get previous
@@ -1892,21 +1892,11 @@ where
 
         let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
 
-        // execute required actions if block invalid
-
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Saving block validation result to cache...",
-        );
-        // update block in cache with signatures info
+        // update block validation status
         let updated = self
             .blocks_cache
             .store_master_block_validation_result(&block_id, status);
         if !updated {
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Block does not exist in cache - skip validation result",
-            );
             return Ok(());
         }
 
