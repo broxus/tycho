@@ -7,7 +7,6 @@ use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use humantime::format_duration;
-use tokio::time::Instant;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
@@ -245,6 +244,7 @@ impl CollatorStdImpl {
 
             // calc merkle update
             let merkle_update = create_merkle_update(
+                &shard,
                 prev_shard_data.pure_state_root(),
                 &new_state_root,
                 working_state.usage_tree.as_ref().unwrap(),
@@ -736,17 +736,20 @@ struct ProcessedAccounts {
 }
 
 fn create_merkle_update(
+    shard_id: &ShardIdent,
     old_state_root: &Cell,
     new_state_root: &Cell,
     usage_tree: &UsageTree,
 ) -> Result<MerkleUpdate> {
-    let started_at = Instant::now();
+    let labels = [("workchain", shard_id.workchain().to_string())];
+    let histogram =
+        HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time", &labels);
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
     let state_update = merkle_update_builder.build()?;
 
-    let elapsed = started_at.elapsed();
+    let elapsed = histogram.finish();
 
     tracing::debug!(
         target: tracing_targets::COLLATOR,
@@ -754,6 +757,5 @@ fn create_merkle_update(
         "merkle update created"
     );
 
-    metrics::histogram!("tycho_collator_create_merkle_update_time").record(elapsed);
     Ok(state_update)
 }
