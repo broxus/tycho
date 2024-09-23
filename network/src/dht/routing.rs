@@ -292,7 +292,8 @@ impl AsPeerInfo for Arc<PeerInfo> {
 }
 
 impl AsPeerInfo for KnownPeerHandle {
-    type Guard<'a> = arc_swap::Guard<Arc<PeerInfo>, arc_swap::DefaultStrategy>
+    type Guard<'a>
+        = arc_swap::Guard<Arc<PeerInfo>, arc_swap::DefaultStrategy>
     where
         Self: 'a;
 
