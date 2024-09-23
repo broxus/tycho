@@ -13,6 +13,7 @@ use crate::internal_queue::state::session_state::SessionStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::tracing_targets;
+use crate::types::{DisplayIter, DisplayTuple, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>,
@@ -83,7 +84,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            range = ?ranges,
+            range = %DisplayIter(ranges
+                .iter()
+                .map(|(k, v)| DisplayTuple((k, DisplayTupleRef(v))))
+            ),
             elapsed = %humantime::format_duration(time_start.elapsed()),
             for_shard_id = %for_shard_id,
             "Iterator created"
@@ -107,7 +111,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             target: tracing_targets::MQ_ADAPTER,
                         new_messages_len = len,
                         elapsed = ?time.elapsed(),
-                        processed_upto = ?processed_upto,
+                        processed_upto = %DisplayIter(
+                            processed_upto.iter().map(DisplayTuple)
+                        ),
 
             "Diff applied",
         );

@@ -21,14 +21,14 @@ use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdI
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
-    Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
+    ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
-    BlockStrider, BlockSubscriber, BlockSubscriberExt, BlockchainBlockProvider,
-    BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
-    OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
+    BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
+    FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
+    PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
     StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
@@ -608,7 +608,6 @@ impl Node {
                     rpc_block_subscriber,
                     validator_subscriber,
                     MetricsSubscriber,
-                    ValidatorBlockSubscriber { validator },
                 )
                     .chain(gc_subscriber),
             )
@@ -655,33 +654,6 @@ impl StateSubscriber for CollatorStateSubscriber {
         } else {
             Box::pin(async move { Ok(()) })
         }
-    }
-}
-
-struct ValidatorBlockSubscriber {
-    validator: ValidatorStdImpl,
-}
-
-impl BlockSubscriber for ValidatorBlockSubscriber {
-    type Prepared = ();
-    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
-    type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
-
-    fn prepare_block<'a>(
-        &'a self,
-        _: &'a tycho_core::block_strider::BlockSubscriberContext,
-    ) -> Self::PrepareBlockFut<'a> {
-        futures_util::future::ok(())
-    }
-
-    fn handle_block<'a>(
-        &'a self,
-        cx: &'a tycho_core::block_strider::BlockSubscriberContext,
-        _: Self::Prepared,
-    ) -> Self::HandleBlockFut<'a> {
-        let block_id_short = cx.block.id().as_short_id();
-        let res = self.validator.cancel_validation(&block_id_short);
-        futures_util::future::ready(res)
     }
 }
 

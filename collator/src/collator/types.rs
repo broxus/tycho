@@ -1132,6 +1132,8 @@ pub(super) struct MessagesBuffer {
     /// current read positions of internals mq iterator
     /// when it is not finished
     pub current_iterator_positions: Option<FastHashMap<ShardIdent, QueueKey>>,
+    /// we started ext messages reading before and can continue reading from `read_to`
+    pub ext_messages_reader_started: bool,
 }
 
 impl MessagesBuffer {
@@ -1142,6 +1144,7 @@ impl MessagesBuffer {
         Self {
             message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
             current_iterator_positions: Some(FastHashMap::default()),
+            ext_messages_reader_started: false,
         }
     }
 

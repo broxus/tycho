@@ -18,6 +18,7 @@ use tycho_util::metrics::HistogramGuard;
 use super::execution_manager::MessagesExecutor;
 use super::types::WorkingState;
 use super::CollatorStdImpl;
+use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
 use crate::types::{BlockCandidate, CollationSessionInfo, McData};
@@ -173,7 +174,8 @@ impl CollatorStdImpl {
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
             ..Default::default()
         };
-        new_block_info.set_prev_ref(&prev_shard_data.get_blocks_ref()?);
+        let prev_ref = prev_shard_data.get_blocks_ref()?;
+        new_block_info.set_prev_ref(&prev_ref);
 
         // TODO: should set when slpit/merge logic implemented
         // info.after_merge = false;
@@ -190,7 +192,7 @@ impl CollatorStdImpl {
         let build_state_update_elapsed;
         let new_state_root;
         let total_validator_fees;
-        let state_update = {
+        let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
@@ -234,7 +236,7 @@ impl CollatorStdImpl {
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
-            total_validator_fees = new_observable_state.total_validator_fees;
+            total_validator_fees = new_observable_state.total_validator_fees.clone();
 
             // calc merkle update
             let merkle_update = create_merkle_update(
@@ -244,11 +246,12 @@ impl CollatorStdImpl {
             )?;
 
             build_state_update_elapsed = histogram.finish();
-            merkle_update
+
+            (merkle_update, new_observable_state)
         };
 
         let build_block_elapsed;
-        let new_block = {
+        let (new_block, new_block_extra, new_mc_block_extra) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_block_time",
                 labels,
@@ -264,7 +267,7 @@ impl CollatorStdImpl {
                 ..Default::default()
             };
 
-            if let Some(mc_state_extra) = &mc_state_extra {
+            let new_mc_block_extra = if let Some(mc_state_extra) = &mc_state_extra {
                 let new_mc_block_extra = McBlockExtra {
                     shards: mc_state_extra.shards.clone(),
                     fees: collation_data.shard_fees.clone(),
@@ -289,7 +292,11 @@ impl CollatorStdImpl {
                 };
 
                 new_block_extra.custom = Some(Lazy::new(&new_mc_block_extra)?);
-            }
+
+                Some(new_mc_block_extra)
+            } else {
+                None
+            };
 
             // construct block
             let block = Block {
@@ -318,12 +325,35 @@ impl CollatorStdImpl {
             build_block_elapsed = histogram.finish();
 
             let block = BlockStuff::from_block_and_root(&block_id, block, root);
-            WithArchiveData::new(block, data)
+
+            (
+                WithArchiveData::new(block, data),
+                new_block_extra,
+                new_mc_block_extra,
+            )
         };
+
+        let new_block_id = *new_block.id();
+
+        // log block debug info
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "collated_block_info: {:?}",
+            BlockDebugInfo {
+                block_id: &new_block_id,
+                block_info: &new_block_info,
+                prev_ref: &prev_ref,
+                state: &new_observable_state,
+                processed_upto: &collation_data.processed_upto,
+                mc_state_extra: mc_state_extra.as_ref(),
+                merkle_update: &state_update,
+                block_extra: &new_block_extra,
+                mc_block_extra: new_mc_block_extra.as_ref(),
+            },
+        );
 
         let mc_data = mc_state_extra.map(|extra| {
             let prev_key_block_seqno = if extra.after_key_block {
-                new_block.id().seqno
+                new_block_id.seqno
             } else if let Some(block_ref) = &extra.last_key_block {
                 block_ref.seqno
             } else {
@@ -352,7 +382,6 @@ impl CollatorStdImpl {
         // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
 
-        let new_block_id = *new_block.id();
         let block_candidate = Box::new(BlockCandidate {
             block: new_block,
             is_key_block: new_block_info.key_block,
@@ -367,8 +396,7 @@ impl CollatorStdImpl {
                 .as_ref()
                 .map(|upto| upto.processed_to.0)
                 .unwrap_or_default(),
-            fees_collected: value_flow.fees_collected,
-            funds_created: value_flow.created,
+            value_flow,
             created_by: collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
         });

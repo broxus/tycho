@@ -34,7 +34,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationConfig, CollationSessionId, CollationSessionInfo,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple2, McData,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
     ShardDescriptionExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
@@ -695,7 +695,7 @@ where
                         true
                     }
                 } else {
-                    // should sync to last applied mc block from bc when lat collated not exist
+                    // should sync to last applied mc block from bc when last collated not exist
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "check_should_sync: should sync to last applied mc block from bc: \
                         last applied ({}) and last collated not exist",
@@ -752,12 +752,12 @@ where
                 self.sync_to_applied_mc_block_if_exist(last_collated_block_id, applied_range)
                     .await?;
             } else {
+                // cancel further collation of blocks in the current shard because we need to sync
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "sync_to_applied_mc_block: mark collator Waiting for shard",
+                    "sync_to_applied_mc_block: mark shard collator Cancelled for shard",
                 );
 
-                // mark collator waiting
-                self.set_collator_state(&block_id.shard, CollatorState::Waiting);
+                self.set_collator_state(&block_id.shard, CollatorState::Cancelled);
 
                 // run sync if all collators cancelled or waiting and we have applied mc blocks
                 let all_not_active = self
@@ -872,6 +872,9 @@ where
             "Saved block from bc to cache",
         );
 
+        // stop any running validations up to this block
+        self.validator.cancel_validation(&block_id.as_short_id())?;
+
         if block_id.is_masterchain() {
             // when received block is master
 
@@ -923,15 +926,12 @@ where
                 self.ready_to_sync.notify_one();
             } else {
                 self.ready_to_sync.notify_one();
-                // stop validation if block was collated first
+                // try to commit block if it was collated first
                 if store_res.received_and_collated {
-                    self.validator.cancel_validation(&block_id.as_short_id())?;
-
-                    // TODO: here master block subgraph could be already extracted,
+                    // NOTE: here master block subgraph could be already extracted,
                     //      sent to sync, and removed from cache, because validation task
-                    //      could be finished after `store_block_from_bc` before this point.
+                    //      could be finished after `store_received()` but before this point.
 
-                    // so block is valid - we can run post validation routines
                     self.commit_valid_master_block(&block_id).await?;
                 }
             }
@@ -990,7 +990,7 @@ where
             .await?;
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple2)),
+            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
         );
 
         // find first applied mc block and tail shard blocks and get previous
@@ -1133,6 +1133,10 @@ where
                 // replace last collated block id with last applied
                 self.blocks_cache
                     .update_last_collated_mc_block_id(*state.block_id());
+
+                // reset top shard blocks info
+                // because next we will start to collate new shard blocks after the sync
+                self.blocks_cache.reset_top_shard_blocks_additional_info()?;
 
                 let mc_data = McData::load_from_state(state)?;
 
@@ -1892,21 +1896,11 @@ where
 
         let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
 
-        // execute required actions if block invalid
-
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Saving block validation result to cache...",
-        );
-        // update block in cache with signatures info
+        // update block validation status
         let updated = self
             .blocks_cache
             .store_master_block_validation_result(&block_id, status);
         if !updated {
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Block does not exist in cache - skip validation result",
-            );
             return Ok(());
         }
 

@@ -26,7 +26,9 @@ use super::CollatorStdImpl;
 use crate::collator::types::ParsedExternals;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
+use crate::types::{
+    DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
+};
 
 /// Execution manager
 pub(super) struct ExecutionManager {
@@ -35,8 +37,6 @@ pub(super) struct ExecutionManager {
     messages_buffer_limit: usize,
     /// flag indicates that should read ext messages
     read_ext_messages: bool,
-    /// we started ext messages reading before and can continue reading from `read_to`
-    ext_messages_reader_started: bool,
     /// flag indicates that should read new messages
     read_new_messages: bool,
     /// last read to anchor chain time
@@ -74,7 +74,6 @@ impl ExecutionManager {
             shard_id,
             messages_buffer_limit,
             read_ext_messages: false,
-            ext_messages_reader_started: false,
             read_new_messages: false,
             read_existing_messages_total_elapsed: Duration::ZERO,
             read_new_messages_total_elapsed: Duration::ZERO,
@@ -146,7 +145,7 @@ impl ExecutionManager {
                     if externals.processed_to != externals.read_to {
                         externals.processed_to = externals.read_to;
                         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                            collation_data.processed_upto.externals,
+                            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
                         );
                     }
                 }
@@ -266,9 +265,9 @@ impl ExecutionManager {
                     anchors_cache,
                     3,
                     collation_data,
-                    self.ext_messages_reader_started,
+                    msgs_buffer.ext_messages_reader_started,
                 )?;
-                self.ext_messages_reader_started = true;
+                msgs_buffer.ext_messages_reader_started = true;
                 self.last_read_to_anchor_chain_time = last_read_to_anchor_chain_time;
 
                 externals_read_count += ext_messages.len() as u64;
@@ -322,7 +321,7 @@ impl ExecutionManager {
                     if externals.processed_to != externals.read_to {
                         externals.processed_to = externals.read_to;
                         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                            collation_data.processed_upto.externals,
+                        collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
                         );
                     }
                 }
@@ -832,7 +831,7 @@ pub(super) fn set_int_upto_all_processed(
         int_upto.processed_to_msg = int_upto.read_to_msg;
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {}: {:?}",
+            "set processed_upto.internals for shard {}: {}",
             shard_id, int_upto,
         );
 
@@ -903,7 +902,7 @@ pub(super) fn update_internals_processed_upto(
     };
     if let Some(new_int_processed_upto) = new_int_processed_upto_opt {
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {}: {:?}",
+            "updated processed_upto.internals for shard {}: {}",
             shard_id, new_int_processed_upto,
         );
         processed_upto
