@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
-use tycho_util::metrics::HistogramGuardWithLabels;
+use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
@@ -461,8 +461,13 @@ impl CollatorStdImpl {
         reset: bool,
         new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
         let working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
+
+            let _histogram =
+                HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
 
             // update mc_data if newer
             if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
@@ -494,6 +499,9 @@ impl CollatorStdImpl {
         } else {
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
+
+            let _histogram =
+                HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
 
             self.next_block_info = Self::calc_next_block_id_short(&new_prev_blocks_ids);
 
@@ -657,6 +665,12 @@ impl CollatorStdImpl {
         prev_working_state: Box<WorkingState>,
         msgs_buffer: MessagesBuffer,
     ) -> Result<()> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        let _histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_prepare_working_state_update_time",
+            &labels,
+        );
+
         // TODO: Check if the result mc_data is properly updated on masterchain block
         let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
 
@@ -1103,8 +1117,7 @@ impl CollatorStdImpl {
         );
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-
-        let _histogram = HistogramGuardWithLabels::begin(
+        let histogram = HistogramGuardWithLabels::begin(
             "tycho_collator_try_collate_next_master_block_time",
             &labels,
         );
@@ -1118,6 +1131,7 @@ impl CollatorStdImpl {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed messages from previous block, will collate next block",
             );
+            drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
             // otherwise import next anchor and return it notify to manager
@@ -1176,9 +1190,8 @@ impl CollatorStdImpl {
         );
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-
-        let collation_prepare_histogram = HistogramGuardWithLabels::begin(
-            "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
+        let histogram = HistogramGuardWithLabels::begin(
+            "tycho_collator_try_collate_next_shard_block_time",
             &labels,
         );
 
@@ -1266,10 +1279,9 @@ impl CollatorStdImpl {
             None
         };
 
-        drop(collation_prepare_histogram);
-
         // collate block if has internals or externals
         if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
+            drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
             // here just imported anchor has no externals

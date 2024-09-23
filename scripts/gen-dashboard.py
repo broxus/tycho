@@ -270,21 +270,21 @@ def blockchain_stats() -> RowPanel:
         Stat(
             targets=[
                 Target(
-                    expr=f"{expr_max(
+                    expr=f"""{expr_max(
                         'tycho_last_applied_block_seqno',
                         label_selectors=['workchain="-1"'],
                         by_labels=[]
-                    )}",
+                    )}""",
                     legendFormat="Last Applied MC Block",
                     instant=True,
                     datasource=DATASOURCE,
                 ),
                 Target(
-                    expr=f"{expr_max(
+                    expr=f"""{expr_max(
                         'tycho_last_processed_to_anchor_id',
                         label_selectors=['workchain="-1"'],
                         by_labels=[]
-                    )}",
+                    )}""",
                     legendFormat="Last Used Anchor",
                     instant=True,
                     datasource=DATASOURCE,
@@ -867,6 +867,11 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_create_merkle_update_time",
+            "inc. Create MerkleUpdate",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_finalize_build_block_time",
             "Build Block",
             labels=['workchain=~"$workchain"'],
@@ -1087,16 +1092,37 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_adapter_handle_state_time", "Handle state"
+            "tycho_collator_prepare_working_state_update_time",
+            "Prepare WorkingState update",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_create_merkle_update_time", "Create Merkle update"
+            "tycho_collator_resume_collation_time",
+            "Resume collation",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_prepare_block_proof_time", "Prepare block proof"
+            "tycho_collator_build_new_state_time",
+            "Build Pure State for next collation",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_save_block_proof_time", "Save block proof"
+            "tycho_collator_wait_for_working_state_time",
+            "Wait for updated WorkingState",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_try_collate_next_master_block_time",
+            "Try collate next master block",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_try_collate_next_shard_block_time",
+            "Try collate next shard block",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_import_next_anchor_time",
+            "Import next anchor time",
+            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Time diffs", metrics)
@@ -1186,40 +1212,20 @@ def collator_core_operations_metrics() -> RowPanel:
 def collator_misc_operations_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_update_mc_data_time",
-            "Update mc data",
-            labels=['workchain=~"$workchain"'],
+            "tycho_collator_handle_collated_block_candidate_time",
+            "Handle collated block candidate",
         ),
         create_heatmap_panel(
-            "tycho_collator_import_next_anchor_time",
-            "Import next anchor time",
-            labels=['workchain=~"$workchain"'],
+            "tycho_collator_handle_block_from_bc_time",
+            "Handle block from bc",
         ),
         create_heatmap_panel(
-            "tycho_collator_try_collate_next_master_block_time",
-            "Try collate next master block",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
-            "Try collate next shard block",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_build_new_state_time",
-            "Build Pure State for next collation",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_collator_wait_for_working_state_time",
-            "Wait for updated WorkingState",
-            labels=['workchain=~"$workchain"'],
+            "tycho_collator_sync_to_applied_mc_block_time",
+            "Sync to applied master block",
         ),
         create_heatmap_panel(
             "tycho_collator_refresh_collation_sessions_time",
             "Refresh collation sessions",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_process_collated_block_candidate_time",
-            "Process collated block candidate",
         ),
         create_heatmap_panel(
             "tycho_collator_update_last_collated_chain_time_and_check_should_collate_mc_block_time",
@@ -1227,18 +1233,15 @@ def collator_misc_operations_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_collator_enqueue_mc_block_collation_time",
-            "Enqueue mc block collation",
+            "Enqueue master block collation",
         ),
         create_heatmap_panel(
-            "tycho_collator_process_validated_block_time", "Process validated block"
+            "tycho_collator_handle_validated_master_block_time",
+            "Handle validated master block"
         ),
         create_heatmap_panel(
-            "tycho_collator_process_valid_master_block_time",
-            "Process valid master block",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_extract_master_block_subgraph_time",
-            "Extract master block subgraph",
+            "tycho_collator_commit_queue_diffs_time",
+            "Commit queue diffs",
         ),
     ]
     return create_row("collator: Misc Operations Metrics", metrics)
@@ -1260,30 +1263,52 @@ def collator_special_transactions_metrics() -> RowPanel:
     return create_row("collator: Special Transactions Metrics", metrics)
 
 
-def collator_sync_metrics() -> RowPanel:
+def collator_commit_block_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_send_blocks_to_sync_time", "send blocks to sync total"
+            "tycho_collator_commit_valid_master_block_time",
+            "Commit valid master block",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_extract_master_block_subgraph_time",
+            "Extract master block subgraph",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_send_blocks_to_sync_time", "Send blocks to sync"
         ),
         create_heatmap_panel(
             "tycho_collator_send_blocks_to_sync_commit_diffs_time",
-            "send blocks to sync: commit diffs",
+            "Commit queue diffs after send",
         ),
     ]
-    return create_row("collator: Sync Metrics", metrics)
+    return create_row("collator: Commit block Metrics", metrics)
 
 
-def collator_adapter_metrics() -> RowPanel:
+def collator_state_adapter_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"
+            "tycho_collator_state_adapter_prepare_block_proof_time", "Prepare block proof"
         ),
         create_heatmap_panel(
-            "tycho_collator_adapter_on_block_accepted_ext_time",
-            "on_block_accepted_external",
+            "tycho_collator_state_adapter_save_block_proof_time", "Save block proof"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_state_store_state_root_time", "Store state root"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_state_load_state_time", "Load state"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_state_load_block_time", "Load block"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_state_load_queue_diff_time", "Load queue diff"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_state_adapter_handle_state_time", "Handle state update"
         ),
     ]
-    return create_row("collator: Adapter Metrics", metrics)
+    return create_row("collator: State Adapter Metrics", metrics)
 
 
 def validator() -> RowPanel:
@@ -1779,14 +1804,14 @@ dashboard = Dashboard(
         collator_execution_metrics(),
         collator_message_metrics(),
         collator_queue_metrics(),
+        collator_special_transactions_metrics(),
         collator_time_metrics(),
         collator_core_operations_metrics(),
-        collator_misc_operations_metrics(),
-        collator_special_transactions_metrics(),
-        collator_sync_metrics(),
-        collator_adapter_metrics(),
         collator_finalize_block(),
         collator_execution_manager(),
+        collator_state_adapter_metrics(),
+        collator_misc_operations_metrics(),
+        collator_commit_block_metrics(),
         validator(),
         mempool_rounds(),
         mempool_point_rates(),

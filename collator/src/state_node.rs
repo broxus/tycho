@@ -118,6 +118,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
         let state = self
@@ -134,6 +136,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         meta: NewBlockMeta,
         state_root: Cell,
     ) -> Result<bool> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
         let (handle, _) = self
@@ -151,6 +155,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_block_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
@@ -197,9 +203,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_collator_adapter_handle_state_time");
+        let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {}", state.block_id().as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
 
         let mut to_split = Vec::new();
@@ -232,17 +238,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
             match has_block {
                 false => {
-                    let _histogram =
-                        HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_ext_time");
-
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {}", block_id);
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block state handled external: {}", block_id);
                     self.listener.on_block_accepted_external(state).await?;
                 }
                 true => {
-                    let _histogram =
-                        HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
-
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {}", block_id);
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block state handled: {}", block_id);
                     self.listener.on_block_accepted(state).await?;
                 }
             }
@@ -258,6 +258,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_queue_diff_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load queue diff: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
@@ -308,11 +310,12 @@ impl StateNodeAdapterStdImpl {
     }
 
     async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_collator_save_block_proof_time");
-
         let PreparedProof { proof, block_info } =
             prepare_block_proof(&block.block_stuff_aug.data, &block.signatures)
                 .context("failed to prepare block proof")?;
+
+        let _histogram =
+            HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
 
         let block_proof_stuff = BlockProofStuff::from_proof(proof);
 
@@ -361,7 +364,7 @@ fn prepare_block_proof(
     block_stuff: &BlockStuff,
     signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<PreparedProof> {
-    let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
+    let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
 
     let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
     let tracked_cell = usage_tree.track(block_stuff.root_cell());

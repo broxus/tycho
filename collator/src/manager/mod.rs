@@ -439,8 +439,7 @@ where
             return Ok(());
         }
 
-        let _histogram =
-            HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
+        let _histogram = HistogramGuard::begin("tycho_collator_commit_queue_diffs_time");
 
         let mut top_blocks: Vec<_> = top_shard_blocks_info
             .iter()
@@ -634,7 +633,7 @@ where
         );
 
         let _histogram =
-            HistogramGuard::begin("tycho_collator_process_collated_block_candidate_time");
+            HistogramGuard::begin("tycho_collator_handle_collated_block_candidate_time");
 
         let block_id = *collation_result.candidate.block.id();
 
@@ -836,11 +835,13 @@ where
     /// 4. Refresh collation sessions according to master block
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
     pub async fn handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
-        let block_id = *state.block_id();
-
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start processing block from bc",
         );
+
+        let block_id = *state.block_id();
+
+        let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
 
         if block_id.is_masterchain() {
             if let Some(from_mc_block_seqno) = self.from_mc_block_seqno {
@@ -974,6 +975,8 @@ where
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "Start sync to applied mc block",
         );
+
+        let _histogram = HistogramGuard::begin("tycho_collator_sync_to_applied_mc_block_time");
 
         let first_applied_mc_block_key = BlockIdShort {
             shard: ShardIdent::MASTERCHAIN,
@@ -1894,7 +1897,7 @@ where
             "Start processing block validation result...",
         );
 
-        let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
+        let _histogram = HistogramGuard::begin("tycho_collator_handle_validated_master_block_time");
 
         // update block validation status
         let updated = self
@@ -1924,7 +1927,7 @@ where
             block_id.as_short_id(),
         );
 
-        let histogram = HistogramGuard::begin("tycho_collator_process_valid_master_block_time");
+        let histogram = HistogramGuard::begin("tycho_collator_commit_valid_master_block_time");
         let histogram_extract =
             HistogramGuard::begin("tycho_collator_extract_master_block_subgraph_time");
         let mut extract_elapsed = Default::default();
@@ -1961,6 +1964,9 @@ where
                         "send_blocks_to_sync timings",
                     );
                 }
+
+                let _histogram =
+                    HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
 
                 self.commit_block_queue_diff(
                     &master_block.block_id,
