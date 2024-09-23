@@ -490,12 +490,12 @@ impl<B> Inner<B> {
 
                 let id = block_storage.get_archive_id(mc_seqno);
                 let size_res = match id {
-                    ArchiveId::Exist(id) => block_storage.get_archive_size(id),
+                    ArchiveId::Found(id) => block_storage.get_archive_size(id),
                     ArchiveId::TooNew | ArchiveId::NotFound => Ok(None),
                 };
 
                 overlay::Response::Ok(match (id, size_res) {
-                    (ArchiveId::Exist(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
+                    (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
                         id: id as u64,
                         size: NonZeroU64::new(size as _).unwrap(),
                         chunk_size: block_storage.archive_chunk_size(),

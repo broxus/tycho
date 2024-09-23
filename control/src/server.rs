@@ -244,7 +244,7 @@ impl proto::ControlServer for ControlServer {
         let blocks = self.inner.storage.block_storage();
 
         let id = match blocks.get_archive_id(req.mc_seqno) {
-            ArchiveId::Exist(id) => id,
+            ArchiveId::Found(id) => id,
             ArchiveId::TooNew => return Ok(proto::ArchiveInfoResponse::TooNew),
             ArchiveId::NotFound => return Ok(proto::ArchiveInfoResponse::NotFound),
         };

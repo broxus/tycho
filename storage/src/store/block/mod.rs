@@ -594,12 +594,9 @@ impl BlockStorage {
     pub fn get_archive_id(&self, mc_seqno: u32) -> ArchiveId {
         let archive_ids = self.archive_ids.read();
 
-        if archive_ids
-            .iter()
-            .max()
-            .filter(|&id| mc_seqno >= *id)
-            .is_some()
-        {
+        if !matches!(archive_ids.last(), Some(id) if mc_seqno < *id) {
+            // Return `TooNew` if there are no archives yet, or the requested
+            // seqno is greater than the beginning of the last archive. beg
             return ArchiveId::TooNew;
         }
 
@@ -607,7 +604,7 @@ impl BlockStorage {
             // NOTE: handles case when mc_seqno is far in the future.
             // However if there is a key block between `id` and `mc_seqno`,
             // this will return an archive without that specified block.
-            Some(id) if mc_seqno < id + ARCHIVE_PACKAGE_SIZE => ArchiveId::Exist(*id),
+            Some(id) if mc_seqno < id + ARCHIVE_PACKAGE_SIZE => ArchiveId::Found(*id),
             _ => ArchiveId::NotFound,
         }
     }
@@ -1203,8 +1200,9 @@ pub struct StoreBlockResult {
     pub new: bool,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ArchiveId {
-    Exist(u32),
+    Found(u32),
     TooNew,
     NotFound,
 }

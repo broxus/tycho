@@ -213,7 +213,7 @@ async fn archives() -> Result<()> {
 
     let archive_id = storage.block_storage().get_archive_id(1);
 
-    let ArchiveId::Exist(archive_id) = archive_id else {
+    let ArchiveId::Found(archive_id) = archive_id else {
         anyhow::bail!("archive not found")
     };
 
@@ -425,7 +425,7 @@ async fn check_archive(
     tracing::info!("Checking archive {}", seqno);
     let archive_id = storage.block_storage().get_archive_id(seqno);
 
-    let ArchiveId::Exist(archive_id) = archive_id else {
+    let ArchiveId::Found(archive_id) = archive_id else {
         anyhow::bail!("archive not found")
     };
 

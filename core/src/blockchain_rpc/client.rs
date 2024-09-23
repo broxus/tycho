@@ -385,10 +385,7 @@ impl BlockchainRpcClient {
         )))
     }
 
-    pub async fn find_archive(
-        &self,
-        mc_seqno: u32,
-    ) -> std::result::Result<Option<PendingArchive>, Error> {
+    pub async fn find_archive(&self, mc_seqno: u32) -> Result<Option<PendingArchive>, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
         let neighbours = self
             .overlay_client()
