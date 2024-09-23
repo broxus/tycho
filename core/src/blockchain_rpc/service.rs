@@ -483,7 +483,7 @@ impl<B> Inner<B> {
         match node_state.load_last_mc_block_id() {
             Some(last_applied_mc_block) => {
                 if mc_seqno > last_applied_mc_block.seqno {
-                    return overlay::Response::Ok(ArchiveInfo::NotFound);
+                    return overlay::Response::Ok(ArchiveInfo::TooNew);
                 }
 
                 let block_storage = self.storage().block_storage();

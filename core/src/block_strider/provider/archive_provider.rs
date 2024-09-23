@@ -221,7 +221,7 @@ impl ArchiveBlockProvider {
                         break;
                     }
                     Err(e) => {
-                        tracing::error!(seqno, "failed to preload archive {e:?}");
+                        tracing::error!(seqno, "failed to preload archive {e}");
                         tokio::time::sleep(INTERVAL).await;
                     }
                 }
