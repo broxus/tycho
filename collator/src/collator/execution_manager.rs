@@ -37,8 +37,6 @@ pub(super) struct ExecutionManager {
     messages_buffer_limit: usize,
     /// flag indicates that should read ext messages
     read_ext_messages: bool,
-    /// we started ext messages reading before and can continue reading from `read_to`
-    ext_messages_reader_started: bool,
     /// flag indicates that should read new messages
     read_new_messages: bool,
     /// last read to anchor chain time
@@ -76,7 +74,6 @@ impl ExecutionManager {
             shard_id,
             messages_buffer_limit,
             read_ext_messages: false,
-            ext_messages_reader_started: false,
             read_new_messages: false,
             read_existing_messages_total_elapsed: Duration::ZERO,
             read_new_messages_total_elapsed: Duration::ZERO,
@@ -268,9 +265,9 @@ impl ExecutionManager {
                     anchors_cache,
                     3,
                     collation_data,
-                    self.ext_messages_reader_started,
+                    msgs_buffer.ext_messages_reader_started,
                 )?;
-                self.ext_messages_reader_started = true;
+                msgs_buffer.ext_messages_reader_started = true;
                 self.last_read_to_anchor_chain_time = last_read_to_anchor_chain_time;
 
                 externals_read_count += ext_messages.len() as u64;
