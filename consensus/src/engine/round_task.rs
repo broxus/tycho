@@ -13,7 +13,6 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
@@ -112,20 +111,18 @@ impl RoundTaskReady {
         current_dag_round: &DagRound,
         round_effects: &Effects<EngineContext>,
     ) -> BoxFuture<'static, Result<Option<Point>, JoinError>> {
-        let not_silent_since = Round(
-            (current_dag_round.round().0) // latest reliably detected consensus round
-                .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32),
-        );
+        let consensus_round = current_dag_round.round(); // latest reliably detected consensus round
         let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
         let top_known_anchor = top_known_anchor_recv.get();
+        let silence_upper_bound = TopKnownAnchor::silence_upper_bound(top_known_anchor);
         #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
-        let wait_collator_ready = if true || top_known_anchor >= not_silent_since {
+        let wait_collator_ready = if true || consensus_round > silence_upper_bound {
             future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
         } else {
             tracing::info!(
                 parent: round_effects.span(),
                 top_known_anchor = top_known_anchor.0,
-                not_silent_since = not_silent_since.0,
+                silence_upper_bound = silence_upper_bound.0,
                 "enter silent mode by collator feedback",
             );
             // must cancel on collector finish/err signal
@@ -135,10 +132,11 @@ impl RoundTaskReady {
                     tokio::select! {
                         top_known_anchor = top_known_anchor_recv.next() => {
                             //  exit if ready to produce point: collator synced enough
-                            let exit = top_known_anchor >= not_silent_since;
+                            let silence_upper_bound = TopKnownAnchor::silence_upper_bound(top_known_anchor);
+                            let exit = consensus_round > silence_upper_bound;
                             tracing::info!(
                                 top_known_anchor = top_known_anchor.0,
-                                not_silent_since = not_silent_since.0,
+                                silence_upper_bound = silence_upper_bound.0,
                                 exit = exit,
                                 "collator feedback in silent mode"
                             );
