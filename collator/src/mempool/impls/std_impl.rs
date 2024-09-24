@@ -33,7 +33,7 @@ pub struct MempoolAdapterStdImpl {
 
     externals_rx: InputBuffer,
     externals_tx: mpsc::UnboundedSender<Bytes>,
-    top_known_block_round: OuterRound<Collator>,
+    top_known_anchor: RoundWatch<TopKnownAnchor>,
 
     anchor_added: Arc<Notify>,
 }
@@ -46,10 +46,10 @@ impl MempoolAdapterStdImpl {
 
         Self {
             anchors,
-            store: MempoolAdapterStore::new(mempool_storage.clone(), OuterRound::default()),
+            store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
             externals_tx,
             externals_rx: InputBuffer::new(externals_rx),
-            top_known_block_round: OuterRound::default(),
+            top_known_anchor: RoundWatch::default(),
             anchor_added: Arc::new(Notify::new()),
         }
     }
@@ -77,7 +77,7 @@ impl MempoolAdapterStdImpl {
             &self.store,
             self.externals_rx.clone(),
             sender,
-            &self.top_known_block_round,
+            &self.top_known_anchor,
             mempool_start_round,
         );
 
@@ -292,7 +292,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     }
 
     async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
-        self.top_known_block_round.set_max_raw(anchor_id);
+        self.top_known_anchor.set_max_raw(anchor_id);
         Ok(())
     }
 

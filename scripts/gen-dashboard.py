@@ -1363,7 +1363,7 @@ def mempool_rounds() -> RowPanel:
             "Engine ahead of last anchor trigger: leaders finish 3 rounds in a row",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_committed_ahead_collated",
+            "tycho_mempool_rounds_committed_ahead_top_known",
             "Committed ahead of top known block: confirm block duration",
         ),
         create_gauge_panel(

@@ -122,7 +122,7 @@ fn make_network(
         let peer_info = peer_info.clone();
         let run_guard = run_guard.clone();
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let collator_round = anchor_consumer.collator_round().clone();
+        let top_known_anchor = anchor_consumer.top_known_anchor().clone();
         let commit_round = anchor_consumer.commit_round().clone();
         anchor_consumer.add(peer_id, committed_rx);
         let handle = std::thread::Builder::new()
@@ -174,7 +174,7 @@ fn make_network(
                             ),
                             InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             committed_tx.clone(),
-                            &collator_round,
+                            &top_known_anchor,
                             None,
                         );
                         engine.init_with_genesis(&all_peers);

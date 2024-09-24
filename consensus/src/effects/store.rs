@@ -11,14 +11,14 @@ use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
 use crate::effects::AltFormat;
-use crate::engine::outer_round::{Collator, Commit, Consensus, OuterRound, OuterRoundRecv};
+use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::MempoolConfig;
 use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
     pub inner: MempoolStorage,
-    commit_finished: OuterRound<Commit>,
+    commit_finished: RoundWatch<Commit>,
 }
 
 #[derive(Clone)]
@@ -45,7 +45,7 @@ trait MempoolStoreImpl: Send + Sync {
 }
 
 impl MempoolAdapterStore {
-    pub fn new(inner: MempoolStorage, commit_finished: OuterRound<Commit>) -> Self {
+    pub fn new(inner: MempoolStorage, commit_finished: RoundWatch<Commit>) -> Self {
         MempoolAdapterStore {
             inner,
             commit_finished,
@@ -88,14 +88,14 @@ impl MempoolAdapterStore {
 impl MempoolStore {
     pub fn new(
         mempool_adapter_store: &MempoolAdapterStore,
-        consensus_round: OuterRoundRecv<Consensus>,
-        collator_round: OuterRoundRecv<Collator>,
+        consensus_round: RoundWatcher<Consensus>,
+        top_known_anchor: RoundWatcher<TopKnownAnchor>,
     ) -> Self {
         Self::clean_task(
             mempool_adapter_store.inner.clone(),
             consensus_round,
             mempool_adapter_store.commit_finished.receiver(),
-            collator_round,
+            top_known_anchor,
         );
 
         Self(Arc::new(mempool_adapter_store.inner.clone()))
@@ -154,11 +154,11 @@ impl MempoolStore {
 
     fn clean_task(
         inner: MempoolStorage,
-        mut consensus_round: OuterRoundRecv<Consensus>,
-        mut committed_round: OuterRoundRecv<Commit>,
-        mut collator_round: OuterRoundRecv<Collator>,
+        mut consensus_round: RoundWatcher<Consensus>,
+        mut committed_round: RoundWatcher<Commit>,
+        mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
     ) {
-        fn least_to_keep(consensus: Round, committed: Round, collated: Round) -> Round {
+        fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
             // enough to handle acceptable collator lag
             let behind_consensus = (consensus.0)
                 // before silent mode
@@ -177,7 +177,7 @@ impl MempoolStore {
                         .max(MempoolConfig::DEDUPLICATE_ROUNDS as u32), // unique
                 );
             // oldest unique data to collate (including latest collated round)
-            let behind_collated = (collated.0)
+            let behind_collated = (top_known_anchor.0)
                 .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
                 .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
             Round(
@@ -192,8 +192,8 @@ impl MempoolStore {
         tokio::spawn(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
-            let mut collated = collator_round.get();
-            let mut prev_least_to_keep = least_to_keep(consensus, committed, collated);
+            let mut top_known = top_known_anchor.get();
+            let mut prev_least_to_keep = least_to_keep(consensus, committed, top_known);
             loop {
                 tokio::select! {
                     new_consensus = consensus_round.next() => {
@@ -202,17 +202,17 @@ impl MempoolStore {
                             .set(consensus.0);
                     },
                     new_committed = committed_round.next() => committed = new_committed,
-                    new_collated = collator_round.next() => collated = new_collated,
+                    new_top_known = top_known_anchor.next() => top_known = new_top_known,
                 }
 
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_collated")
-                    .set((consensus.0 as f64) - (collated.0 as f64));
+                    .set((consensus.0 as f64) - (top_known.0 as f64));
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
                     .set((consensus.0 as f64) - (committed.0 as f64));
-                metrics::gauge!("tycho_mempool_rounds_committed_ahead_collated")
-                    .set((committed.0 as f64) - (collated.0 as f64));
+                metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
+                    .set((committed.0 as f64) - (top_known.0 as f64));
 
-                let new_least_to_keep = least_to_keep(consensus, committed, collated);
+                let new_least_to_keep = least_to_keep(consensus, committed, top_known);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
                     .set((consensus.0 as f64) - (new_least_to_keep.0 as f64));
 

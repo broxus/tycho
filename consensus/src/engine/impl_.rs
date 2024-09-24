@@ -15,8 +15,8 @@ use crate::effects::{
     AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolAdapterStore, MempoolStore,
 };
 use crate::engine::input_buffer::InputBuffer;
-use crate::engine::outer_round::{Collator, Consensus, OuterRound};
 use crate::engine::round_task::RoundTaskReady;
+use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolConfig;
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{Point, PointInfo, Round};
@@ -24,7 +24,7 @@ use crate::models::{Point, PointInfo, Round};
 pub struct Engine {
     dag: Dag,
     committed_info_tx: mpsc::UnboundedSender<(PointInfo, Vec<PointInfo>)>,
-    consensus_round: OuterRound<Consensus>,
+    consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
 }
@@ -41,12 +41,12 @@ impl Engine {
         mempool_adapter_store: &MempoolAdapterStore,
         input_buffer: InputBuffer,
         committed_info_tx: mpsc::UnboundedSender<(PointInfo, Vec<PointInfo>)>,
-        collator_round: &OuterRound<Collator>,
+        top_known_anchor: &RoundWatch<TopKnownAnchor>,
         genesis_round: Option<u32>,
     ) -> Self {
         MempoolConfig::set_genesis_round(Round(genesis_round.unwrap_or_default()));
 
-        let consensus_round = OuterRound::default();
+        let consensus_round = RoundWatch::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
@@ -63,14 +63,14 @@ impl Engine {
         let store = MempoolStore::new(
             mempool_adapter_store,
             consensus_round.receiver(),
-            collator_round.receiver(),
+            top_known_anchor.receiver(),
         );
         let round_task = RoundTaskReady::new(
             &dispatcher,
             peer_schedule,
             store,
             &consensus_round,
-            collator_round.clone(),
+            top_known_anchor.clone(),
             responder,
             input_buffer,
         );
