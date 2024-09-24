@@ -1,4 +1,3 @@
-pub use point_flags::*;
+pub use point_status::*;
 
-// TODO: Move into a mempool storage module
-mod point_flags;
+mod point_status;

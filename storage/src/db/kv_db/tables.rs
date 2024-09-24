@@ -563,21 +563,24 @@ impl ColumnFamilyOptions<Caches> for PointsInfo {
 
 /// Stores mempool point flags
 /// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
-/// - Value: [`crate::models::PointFlags`]
-pub struct PointsFlags;
+/// - Value: [`crate::models::PointStatus`]
+pub struct PointsStatus;
 
-impl PointsFlags {}
+impl PointsStatus {}
 
-impl ColumnFamily for PointsFlags {
-    const NAME: &'static str = "points_flags";
+impl ColumnFamily for PointsStatus {
+    const NAME: &'static str = "points_status";
 }
 
-impl ColumnFamilyOptions<Caches> for PointsFlags {
+impl ColumnFamilyOptions<Caches> for PointsStatus {
     fn options(opts: &mut Options, caches: &mut Caches) {
         optimize_for_point_lookup(opts, caches);
         opts.set_disable_auto_compactions(true);
 
-        opts.set_merge_operator_associative("points_flags_merge", crate::models::PointFlags::merge);
+        opts.set_merge_operator_associative(
+            "points_status_merge",
+            crate::models::PointStatus::merge,
+        );
     }
 }
 

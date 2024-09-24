@@ -7,6 +7,7 @@ use futures_util::FutureExt;
 use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::{DagRound, WAVE_ROUNDS};
@@ -74,6 +75,7 @@ impl Dag {
                 .or_insert(top.new_next(peer_schedule))
                 .clone();
         }
+        metrics::gauge!("tycho_mempool_rounds_dag_length").set(self.rounds.len() as u32);
         top
     }
 
@@ -95,9 +97,11 @@ impl Dag {
 
     /// result is in historical order
     fn commit_up_to(&mut self, up_to: DagRound) -> Vec<(PointInfo, Vec<PointInfo>)> {
+        // may run for long several times in a row and commit nothing, because of missed points
+        let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
+
         // Note that it's always engine round in production, but may differ in local tests
         let engine_round = up_to.round().prev();
-        metrics::gauge!("tycho_mempool_rounds_dag_length").set(self.rounds.len() as u32);
 
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:

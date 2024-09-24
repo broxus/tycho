@@ -260,7 +260,7 @@ impl Verifier {
         dag_round: &DagRound, // r+0
     ) -> bool {
         // existence of proofs in leader points is a part of point's well-form-ness check
-        (match &dag_round.anchor_stage() {
+        match &dag_round.anchor_stage() {
             // no one may link to self
             None => {
                 point.data().anchor_proof != Link::ToSelf
@@ -271,7 +271,7 @@ impl Verifier {
                 (stage.leader == point.data().author)
                     == (point.anchor_link(stage.role) == &Link::ToSelf)
             }
-        }) || point.round() == MempoolConfig::genesis_round()
+        }
     }
 
     /// the only method that scans the DAG deeper than 2 rounds

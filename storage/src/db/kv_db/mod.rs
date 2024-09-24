@@ -111,7 +111,7 @@ weedb::tables! {
     pub struct MempoolTables<Caches> {
         pub points: tables::Points,
         pub points_info: tables:: PointsInfo,
-        pub points_flags: tables::PointsFlags,
+        pub points_status: tables::PointsStatus,
     }
 }
 

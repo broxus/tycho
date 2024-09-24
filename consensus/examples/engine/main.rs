@@ -10,7 +10,7 @@ use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
-use tycho_consensus::prelude::{Engine, InputBuffer};
+use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
@@ -123,6 +123,7 @@ fn make_network(
         let run_guard = run_guard.clone();
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let collator_round = anchor_consumer.collator_round().clone();
+        let commit_round = anchor_consumer.commit_round().clone();
         anchor_consumer.add(peer_id, committed_rx);
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
@@ -167,10 +168,13 @@ fn make_network(
                             dht_client.network(),
                             &peer_resolver,
                             &overlay_service,
-                            mock_storage.mempool_storage(),
+                            &MempoolAdapterStore::new(
+                                mock_storage.mempool_storage().clone(),
+                                commit_round,
+                            ),
+                            InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             committed_tx.clone(),
                             &collator_round,
-                            InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             None,
                         );
                         engine.init_with_genesis(&all_peers);

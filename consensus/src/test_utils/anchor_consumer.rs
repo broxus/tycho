@@ -10,13 +10,13 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
-use crate::engine::outer_round::{Collator, OuterRound};
+use crate::engine::outer_round::{Collator, Commit, OuterRound};
 use crate::engine::MempoolConfig;
-use crate::models::{Point, PointId, PointInfo, Round};
+use crate::models::{PointId, PointInfo, Round};
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<(PointInfo, Vec<Point>)>>,
+    streams: StreamMap<PeerId, UnboundedReceiverStream<(PointInfo, Vec<PointInfo>)>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
@@ -24,6 +24,10 @@ pub struct AnchorConsumer {
     // simulates feedback from collator, as if anchor committed by all peers
     // is immediately confirmed by a top known block
     collator_round: OuterRound<Collator>,
+    // Simulates mempool adapter that commits right after collator feedback (may occur in practice
+    // if local collation is a bit lagging and the top known block is received from network)
+    // Just because it does not require much code and keeps sender alive to avoid panic
+    commit_round: OuterRound<Commit>,
     common_anchor_count: Arc<AtomicUsize>,
 }
 
@@ -31,7 +35,7 @@ impl AnchorConsumer {
     pub fn add(
         &mut self,
         committer: PeerId,
-        committed: UnboundedReceiver<(PointInfo, Vec<Point>)>,
+        committed: UnboundedReceiver<(PointInfo, Vec<PointInfo>)>,
     ) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
@@ -39,6 +43,10 @@ impl AnchorConsumer {
 
     pub fn collator_round(&self) -> &OuterRound<Collator> {
         &self.collator_round
+    }
+
+    pub fn commit_round(&self) -> &OuterRound<Commit> {
+        &self.commit_round
     }
 
     pub async fn drain(mut self) {
@@ -49,6 +57,7 @@ impl AnchorConsumer {
                 .await
                 .expect("committed anchor reader must be alive");
             self.collator_round.set_max(anchor.round());
+            self.commit_round.set_max(anchor.round());
         }
     }
 
@@ -177,6 +186,7 @@ impl AnchorConsumer {
             tracing::trace!("History hashmap len: {}", self.history.len());
             if let Some(top_common_anchor) = common_anchors.last() {
                 self.collator_round.set_max_raw(*top_common_anchor);
+                self.commit_round.set_max_raw(*top_common_anchor);
                 tracing::info!(
                     "all nodes committed anchors for rounds {:?}",
                     common_anchors

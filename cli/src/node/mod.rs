@@ -316,7 +316,7 @@ impl Node {
         let zerostate = global_config.zerostate;
 
         let rpc_mempool_adapter = RpcMempoolAdapter {
-            inner: Arc::new(MempoolAdapterStdImpl::new()),
+            inner: Arc::new(MempoolAdapterStdImpl::new(storage.mempool_storage())),
         };
 
         let blockchain_rpc_service = BlockchainRpcService::builder()
@@ -436,7 +436,6 @@ impl Node {
             self.dht_client.network(),
             &self.peer_resolver,
             &self.overlay_service,
-            self.storage.mempool_storage(),
             get_validator_peer_ids(&mc_state)?,
             last_block_id.seqno == 0,
             mempool_start_round,

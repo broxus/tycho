@@ -294,7 +294,7 @@ impl RoundTaskReady {
         tokio::spawn(async move {
             if let Err(err) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = effects.span().enter();
-                panic!("Failed to verify own point: {err:?} {:?}", point.id().alt())
+                panic!("Failed to verify own point: {err:?} {:?}", point)
             }
             let (_, do_not_certify_tx) = oneshot::channel();
             let dag_point = Verifier::validate(
@@ -311,7 +311,7 @@ impl RoundTaskReady {
                 panic!(
                     "Failed to validate own point: {} {:?}",
                     dag_point.alt(),
-                    point.id()
+                    point
                 )
             };
         })

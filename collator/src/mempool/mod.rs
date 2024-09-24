@@ -1,3 +1,5 @@
+mod deduplicator;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,10 +8,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_network::PeerId;
 
-pub use self::external_message_cache::ExternalMessageCache;
 pub use self::impls::*;
-
-mod external_message_cache;
 
 mod impls {
     pub use self::std_impl::MempoolAdapterStdImpl;

@@ -480,8 +480,7 @@ impl Effects<DownloadContext> {
     fn meter_start(&self, point_id: &PointId) {
         metrics::counter!("tycho_mempool_download_task_count").increment(1);
 
-        // need to keep max value unless recorder cleans the metric, so gauge!().set() does not fit
-        metrics::counter!("tycho_mempool_download_depth_rounds")
-            .absolute(self.download_max_depth(point_id.round) as _);
+        metrics::gauge!("tycho_mempool_download_depth_rounds")
+            .set(self.download_max_depth(point_id.round));
     }
 }

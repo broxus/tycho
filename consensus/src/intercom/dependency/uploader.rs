@@ -101,8 +101,8 @@ impl Uploader {
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> Option<SearchStatus> {
-        let flags = store.get_flags(point_id.round, &point_id.digest);
-        let result = if flags.is_trusted || flags.is_certified {
+        let status = store.get_status(point_id.round, &point_id.digest)?;
+        let result = if status.is_trusted || status.is_certified {
             Some(SearchStatus::Found)
         } else {
             None
@@ -110,8 +110,8 @@ impl Uploader {
         tracing::debug!(
             parent: effects.span(),
             from = display("store"),
-            trusted = flags.is_trusted,
-            certified = flags.is_certified,
+            trusted = status.is_trusted,
+            certified = status.is_certified,
             peer = display(peer_id.alt()),
             author = display(point_id.author.alt()),
             round = point_id.round.0,
