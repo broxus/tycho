@@ -11,7 +11,7 @@ use tycho_util::FastDashMap;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
-use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointInfo, Round};
@@ -60,10 +60,15 @@ impl DagRound {
             (peers_len, guard.local_keys(round))
         };
         let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
-        let peer_count = if round == MempoolConfig::genesis_round() {
-            PeerCount::GENESIS
-        } else {
-            PeerCount::try_from(peers_len).unwrap_or_else(|e| panic!("{e} for {round:?}"))
+        let peer_count = match round.cmp(&MempoolConfig::genesis_round()) {
+            cmp::Ordering::Less => panic!(
+                "Coding error: DAG round {} not allowed before genesis",
+                round.0
+            ),
+            cmp::Ordering::Equal => PeerCount::GENESIS,
+            cmp::Ordering::Greater => {
+                PeerCount::try_from(peers_len).unwrap_or_else(|e| panic!("{e} for {round:?}"))
+            }
         };
         Self(Arc::new(DagRoundInner {
             round,
@@ -287,5 +292,19 @@ impl DagRound {
             }
         }
         None
+    }
+}
+
+impl AltFormat for DagRound {}
+impl std::fmt::Debug for AltFmt<'_, DagRound> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        write!(f, "{}[", inner.round().0)?;
+        inner
+            .select(|(peer, loc)| write!(f, "{}{:?}", peer.alt(), loc.alt()).err())
+            .next()
+            .map_or(Ok(()), Err)?;
+        write!(f, "]")?;
+        Ok(())
     }
 }

@@ -4,6 +4,7 @@ use rand::{Rng, SeedableRng};
 use tycho_network::PeerId;
 
 use crate::dag::WAVE_ROUNDS;
+use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Round};
 
@@ -19,7 +20,10 @@ pub struct AnchorStage {
 
 impl AnchorStage {
     pub fn of(round: Round, peer_schedule: &PeerSchedule) -> Option<Self> {
-        let anchor_candidate_round = (round.0 / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
+        // Genesis point appears as a Proof in anchor chain during commit,
+        // so it has to be at a round with Proof role
+        let anchor_candidate_round =
+            ((round.0 / WAVE_ROUNDS) * WAVE_ROUNDS).max(MempoolConfig::genesis_round().0);
 
         let (ordered_peers, current_peers) = {
             let guard = peer_schedule.atomic();
@@ -37,18 +41,19 @@ impl AnchorStage {
         if !current_peers.contains(&leader) {
             return None;
         };
+        #[allow(clippy::match_same_arms)]
         let role = match round.0 % WAVE_ROUNDS {
-            // 0 is a leaderless support round (that actually follows every leader point chain)
-            // 1 is an anchor candidate (surprisingly, nothing special about this point)
-            0 | 1 => None,
-            2 => Some(AnchorStageRole::Proof),
-            3 => Some(AnchorStageRole::Trigger),
+            0 => None, // anchor candidate (surprisingly, nothing special about this point)
+            1 => Some(AnchorStageRole::Proof),
+            2 => Some(AnchorStageRole::Trigger),
+            3 => None, // leaderless support round (that actually follows every leader point chain)
             _ => unreachable!(),
         };
         role.map(|role| Self {
             role,
             leader,
-            is_used: AtomicBool::new(false),
+            // genesis is a corner case, exclude it from commit chain with explicit "true"
+            is_used: AtomicBool::new(round == MempoolConfig::genesis_round()),
         })
     }
 }

@@ -22,11 +22,11 @@ impl MempoolConfig {
     /// Time is non-decreasing due to its inheritance from anchor candidate in every point.
     pub const CLOCK_SKEW: UnixTime = UnixTime::from_millis(5 * 1000);
 
-    /// hard limit (in rounds) on anchor history length
-    /// includes anchor candidate round, though it is committed at the next attempt
-    pub const COMMIT_DEPTH: u8 = 21;
+    /// hard limit (in rounds) on anchor history length, must be divisible by 4 (i.e. commit wave length)
+    pub const COMMIT_DEPTH: u8 = 20;
 
     pub fn set_genesis_round(round: Round) {
+        // Must be (divisible by 4)+1, ie 1,5,9 etc., see `crate::dag::AnchorStage::of()`
         let aligned = ((round.0 + 2) / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
         assert!(
             aligned > Round::BOTTOM.0,
@@ -51,7 +51,7 @@ impl MempoolConfig {
     ///   before local mempool enters silent mode (stops to produce points).
     /// * max amount of rounds (behind peer's last commit, defined by an anchor trigger in points)
     ///   a peer must respond with valid points if it directly referenced them
-    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 21 } else { 210 };
+    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 20 } else { 210 };
 
     // == Configs above must be globally same for consensus to run
     // ========
@@ -59,7 +59,7 @@ impl MempoolConfig {
     // == though misconfiguration may make the node unusable or banned
 
     /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
-    /// to extend [`Dag`](crate::dag::Dag) without downloading points for locally skipped rounds
+    /// to extend [`Dag`](crate::dag::DagFront) without downloading points for locally skipped rounds
     pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 105;
 
     /// see [`LogFlavor`]

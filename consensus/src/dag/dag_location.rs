@@ -3,8 +3,10 @@ use std::collections::{btree_map, BTreeMap};
 use std::sync::{Arc, OnceLock};
 
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::FutureExt;
 
 use crate::dag::dag_point_future::DagPointFuture;
+use crate::effects::{AltFmt, AltFormat};
 use crate::engine::MempoolConfig;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
 
@@ -172,5 +174,20 @@ impl Signable {
     }
     fn is_completed(&self) -> bool {
         self.signed.get().is_some()
+    }
+}
+
+impl AltFormat for DagLocation {}
+impl std::fmt::Debug for AltFmt<'_, DagLocation> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let loc = AltFormat::unpack(self);
+        for (digest, promise) in loc.versions() {
+            write!(f, "#{}-", digest.alt())?;
+            match promise.clone().now_or_never() {
+                None => write!(f, "None, ")?,
+                Some(point) => write!(f, "{}, ", point.alt())?,
+            };
+        }
+        Ok(())
     }
 }
