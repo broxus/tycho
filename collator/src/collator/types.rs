@@ -13,7 +13,7 @@ use everscale_types::models::{
     SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::queue::QueueKey;
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
@@ -74,15 +74,15 @@ impl PrevData {
         //  Collator::unpack_last_state()
 
         let prev_blocks_ids: Vec<_> = prev_states.iter().map(|s| *s.block_id()).collect();
-        let pure_prev_state_root = prev_states[0].root_cell();
-        let pure_prev_states = prev_states.clone();
+        let pure_prev_state_root = prev_states[0].root_cell().clone();
+        let pure_prev_states = prev_states;
 
         let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
-        let observable_root = usage_tree.track(pure_prev_state_root);
+        let observable_root = usage_tree.track(&pure_prev_state_root);
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
-            prev_states[0].ref_mc_state_handle().tracker(),
+            pure_prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
@@ -91,6 +91,7 @@ impl PrevData {
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let gas_used_from_last_anchor = observable_states[0].state().overload_history;
         let underload_history = observable_states[0].state().underload_history;
+
         let processed_upto_info = pure_prev_states[0].state().processed_upto.load()?;
 
         let prev_data = Self {
@@ -100,7 +101,7 @@ impl PrevData {
             blocks_ids: prev_blocks_ids,
 
             pure_states: pure_prev_states,
-            pure_state_root: pure_prev_state_root.clone(),
+            pure_state_root: pure_prev_state_root,
 
             gen_chain_time,
             gen_lt,
@@ -158,8 +159,8 @@ impl PrevData {
         Ok(prev_ref)
     }
 
-    pub fn pure_states(&self) -> &Vec<ShardStateStuff> {
-        &self.pure_states
+    pub fn ref_mc_state_handle(&self) -> &RefMcStateHandle {
+        self.observable_states[0].ref_mc_state_handle()
     }
 
     pub fn pure_state_root(&self) -> &Cell {

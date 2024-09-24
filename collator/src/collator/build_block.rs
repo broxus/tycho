@@ -236,7 +236,7 @@ impl CollatorStdImpl {
                 new_observable_state.libraries = global_libraries.clone();
             }
 
-            // TODO: update smc on hard fork
+            // TODO: update config smc on hard fork
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
@@ -380,6 +380,8 @@ impl CollatorStdImpl {
                 validator_info: extra.validator_info,
 
                 processed_upto: collation_data.processed_upto.clone(),
+
+                ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
             })
         });
 
