@@ -12,7 +12,7 @@ use crate::effects::{
     AltFormat, CollectorContext, Effects, EngineContext, MempoolStore, ValidateContext,
 };
 use crate::engine::input_buffer::InputBuffer;
-use crate::engine::outer_round::{Collator, Consensus, OuterRound};
+use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
@@ -24,7 +24,7 @@ pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
     pub store: MempoolStore,
     pub responder: Responder,
-    collator_round: OuterRound<Collator>,
+    top_known_anchor: RoundWatch<TopKnownAnchor>,
     input_buffer: InputBuffer,
     pub broadcast_filter: BroadcastFilter,
     pub downloader: Downloader,
@@ -44,8 +44,8 @@ impl RoundTaskReady {
         dispatcher: &Dispatcher,
         peer_schedule: PeerSchedule,
         store: MempoolStore,
-        consensus_round: &OuterRound<Consensus>,
-        collator_round: OuterRound<Collator>,
+        consensus_round: &RoundWatch<Consensus>,
+        top_known_anchor: RoundWatch<TopKnownAnchor>,
         responder: Responder,
         input_buffer: InputBuffer,
     ) -> Self {
@@ -63,7 +63,7 @@ impl RoundTaskReady {
                 peer_schedule,
                 store,
                 responder,
-                collator_round,
+                top_known_anchor,
                 input_buffer,
                 broadcast_filter,
                 downloader,
@@ -116,15 +116,15 @@ impl RoundTaskReady {
             (current_dag_round.round().0) // latest reliably detected consensus round
                 .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32),
         );
-        let mut collator_round_recv = self.state.collator_round.receiver();
-        let collator_round = collator_round_recv.get();
+        let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
+        let top_known_anchor = top_known_anchor_recv.get();
         #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
-        let wait_collator_ready = if true || collator_round >= not_silent_since {
+        let wait_collator_ready = if true || top_known_anchor >= not_silent_since {
             future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
         } else {
             tracing::info!(
                 parent: round_effects.span(),
-                collator_round = collator_round.0,
+                top_known_anchor = top_known_anchor.0,
                 not_silent_since = not_silent_since.0,
                 "enter silent mode by collator feedback",
             );
@@ -133,11 +133,11 @@ impl RoundTaskReady {
             future::Either::Left(tokio::spawn(async move {
                 loop {
                     tokio::select! {
-                        collator_round = collator_round_recv.next() => {
+                        top_known_anchor = top_known_anchor_recv.next() => {
                             //  exit if ready to produce point: collator synced enough
-                            let exit = collator_round >= not_silent_since;
+                            let exit = top_known_anchor >= not_silent_since;
                             tracing::info!(
-                                collator_round = collator_round.0,
+                                top_known_anchor = top_known_anchor.0,
                                 not_silent_since = not_silent_since.0,
                                 exit = exit,
                                 "collator feedback in silent mode"

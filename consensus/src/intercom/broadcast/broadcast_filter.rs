@@ -11,7 +11,7 @@ use super::dto::ConsensusEvent;
 use crate::dag::{DagRound, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
-use crate::engine::outer_round::{Consensus, OuterRound};
+use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -25,7 +25,7 @@ pub struct BroadcastFilter {
 impl BroadcastFilter {
     pub fn new(
         peer_schedule: &PeerSchedule,
-        consensus_round: &OuterRound<Consensus>,
+        consensus_round: &RoundWatch<Consensus>,
         output: mpsc::UnboundedSender<ConsensusEvent>,
     ) -> Self {
         Self {
@@ -91,7 +91,7 @@ impl BroadcastFilter {
 type SimpleDagLocations = BTreeMap<PeerId, BTreeMap<Digest, Point>>;
 struct BroadcastFilterInner {
     peer_schedule: PeerSchedule,
-    consensus_round: OuterRound<Consensus>,
+    consensus_round: RoundWatch<Consensus>,
     output: mpsc::UnboundedSender<ConsensusEvent>,
     // defend from spam from future rounds:
     // should keep rounds greater than current dag round

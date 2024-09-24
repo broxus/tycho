@@ -10,7 +10,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
-use crate::engine::outer_round::{Collator, Commit, OuterRound};
+use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolConfig;
 use crate::models::{PointId, PointInfo, Round};
 
@@ -23,11 +23,11 @@ pub struct AnchorConsumer {
     history: FastHashMap<Round, Vec<PointId>>,
     // simulates feedback from collator, as if anchor committed by all peers
     // is immediately confirmed by a top known block
-    collator_round: OuterRound<Collator>,
+    top_known_anchor: RoundWatch<TopKnownAnchor>,
     // Simulates mempool adapter that commits right after collator feedback (may occur in practice
     // if local collation is a bit lagging and the top known block is received from network)
     // Just because it does not require much code and keeps sender alive to avoid panic
-    commit_round: OuterRound<Commit>,
+    commit_round: RoundWatch<Commit>,
     common_anchor_count: Arc<AtomicUsize>,
 }
 
@@ -41,11 +41,11 @@ impl AnchorConsumer {
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
 
-    pub fn collator_round(&self) -> &OuterRound<Collator> {
-        &self.collator_round
+    pub fn top_known_anchor(&self) -> &RoundWatch<TopKnownAnchor> {
+        &self.top_known_anchor
     }
 
-    pub fn commit_round(&self) -> &OuterRound<Commit> {
+    pub fn commit_round(&self) -> &RoundWatch<Commit> {
         &self.commit_round
     }
 
@@ -56,7 +56,7 @@ impl AnchorConsumer {
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
-            self.collator_round.set_max(anchor.round());
+            self.top_known_anchor.set_max(anchor.round());
             self.commit_round.set_max(anchor.round());
         }
     }
@@ -185,7 +185,7 @@ impl AnchorConsumer {
             tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
             tracing::trace!("History hashmap len: {}", self.history.len());
             if let Some(top_common_anchor) = common_anchors.last() {
-                self.collator_round.set_max_raw(*top_common_anchor);
+                self.top_known_anchor.set_max_raw(*top_common_anchor);
                 self.commit_round.set_max_raw(*top_common_anchor);
                 tracing::info!(
                     "all nodes committed anchors for rounds {:?}",

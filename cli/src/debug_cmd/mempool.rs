@@ -212,7 +212,7 @@ impl Mempool {
             ),
             input_buffer,
             committed_tx,
-            anchor_consumer.collator_round(),
+            anchor_consumer.top_known_anchor(),
             mempool_start_round,
         );
 

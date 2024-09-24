@@ -24,8 +24,8 @@ pub trait Source: Clone {}
 /// Collator signals mempool to exit silent mode immediately and keep producing new points.
 /// Also used to clean storage.
 #[derive(Clone)]
-pub struct Collator;
-impl Source for Collator {}
+pub struct TopKnownAnchor;
+impl Source for TopKnownAnchor {}
 
 /// Allows a node to drive consensus by collected dependencies with
 /// [`Collector`](crate::intercom::Collector)
@@ -58,11 +58,11 @@ pub struct Commit;
 impl Source for Commit {}
 
 #[derive(Clone)]
-pub struct OuterRound<T: Source> {
+pub struct RoundWatch<T: Source> {
     tx: watch::Sender<Round>,
     _phantom_data: PhantomData<T>,
 }
-impl<T: Source> Default for OuterRound<T> {
+impl<T: Source> Default for RoundWatch<T> {
     fn default() -> Self {
         Self {
             tx: watch::Sender::new(Round::BOTTOM),
@@ -71,10 +71,10 @@ impl<T: Source> Default for OuterRound<T> {
     }
 }
 
-impl<T: Source> OuterRound<T> {
+impl<T: Source> RoundWatch<T> {
     /// **warning** do not use prior [`Self::receiver`], as the latter may skip updates;
     ///
-    /// either use only on sender side, or prefer [`OuterRoundRecv::get`]
+    /// either use only on sender side, or prefer [`RoundWatcher::get`]
     pub fn get(&self) -> Round {
         *self.tx.borrow()
     }
@@ -94,8 +94,8 @@ impl<T: Source> OuterRound<T> {
     }
 
     // not available to collator or adapter
-    pub fn receiver(&self) -> OuterRoundRecv<T> {
-        OuterRoundRecv {
+    pub fn receiver(&self) -> RoundWatcher<T> {
+        RoundWatcher {
             rx: self.tx.subscribe(),
             _phantom_data: Default::default(),
         }
@@ -103,12 +103,12 @@ impl<T: Source> OuterRound<T> {
 }
 
 // no `Clone` and not available to collator or adapter
-pub struct OuterRoundRecv<T: Source> {
+pub struct RoundWatcher<T: Source> {
     rx: watch::Receiver<Round>,
     _phantom_data: PhantomData<T>,
 }
 
-impl<T: Source> OuterRoundRecv<T> {
+impl<T: Source> RoundWatcher<T> {
     /// the only way to inspect the value upon creation, as [`Self::next`] will not return it
     pub fn get(&self) -> Round {
         *self.rx.borrow()
