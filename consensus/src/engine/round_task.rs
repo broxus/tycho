@@ -57,7 +57,7 @@ impl RoundTaskReady {
                 this.clear_cache().await;
             }
         });
-        let downloader = Downloader::new(dispatcher, &peer_schedule);
+        let downloader = Downloader::new(dispatcher, &peer_schedule, consensus_round.receiver());
         Self {
             state: RoundTaskState {
                 peer_schedule,

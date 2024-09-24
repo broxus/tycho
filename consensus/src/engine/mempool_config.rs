@@ -74,8 +74,8 @@ impl MempoolConfig {
     pub const PAYLOAD_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
     /// amount of random peers to request at each attempt; does not include mandatory peers;
-    /// value increases exponentially with each attempt, until 2F successfully responded `None`
-    /// or a verifiable point is found (ill-formed or incorrectly signed points do not count)
+    /// value increases with each attempt, until 2F successfully responded `None`
+    /// or a verifiable point is found (incorrectly signed points do not count)
     pub const DOWNLOAD_PEERS: u8 = 2;
 
     /// [`Downloader`](crate::intercom::Downloader) makes responses in groups after previous

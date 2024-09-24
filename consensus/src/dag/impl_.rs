@@ -476,6 +476,7 @@ mod test {
     use crate::dag::dag_location::DagLocation;
     use crate::dag::Dag;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
+    use crate::engine::round_watch::{Consensus, RoundWatch};
     use crate::models::{AnchorStageRole, PointInfo, Round};
     use crate::test_utils;
 
@@ -484,6 +485,7 @@ mod test {
     #[tokio::test]
     async fn test_commit_with_gap() {
         let stub_store = MempoolStore::no_read_stub();
+        let stub_consensus_round = RoundWatch::<Consensus>::default();
 
         crate::engine::MempoolConfig::set_genesis_round(Round(1));
 
@@ -494,7 +496,7 @@ mod test {
         });
 
         let (mut dag, peer_schedule, stub_downloader) =
-            test_utils::make_dag(&peers, &genesis, &stub_store);
+            test_utils::make_dag(&peers, &genesis, &stub_store, &stub_consensus_round);
 
         let effects = Effects::<ChainedRoundsContext>::new(genesis.round());
 
