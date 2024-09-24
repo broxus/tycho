@@ -1,3 +1,4 @@
+use std::cmp;
 use std::sync::{Arc, Weak};
 
 use everscale_crypto::ed25519::KeyPair;
@@ -218,7 +219,7 @@ impl DagRound {
     pub fn restore_exact(
         &self,
         info: &PointInfo,
-        status: &PointStatus,
+        status: PointStatus,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -273,7 +274,7 @@ impl DagRound {
         }
         while let Some(dag_round) = visited.prev().upgrade() {
             match dag_round.round().cmp(&round) {
-                core::cmp::Ordering::Less => panic!(
+                cmp::Ordering::Less => panic!(
                     "Coding error: linked list of dag rounds cannot contain gaps, \
                     found {} to be prev for {}, scanned for {} from {}",
                     dag_round.round().0,
@@ -281,8 +282,8 @@ impl DagRound {
                     round.0,
                     self.round().0
                 ),
-                core::cmp::Ordering::Equal => return Some(dag_round),
-                core::cmp::Ordering::Greater => visited = dag_round,
+                cmp::Ordering::Equal => return Some(dag_round),
+                cmp::Ordering::Greater => visited = dag_round,
             }
         }
         None

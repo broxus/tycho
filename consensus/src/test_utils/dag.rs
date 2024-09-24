@@ -156,10 +156,13 @@ pub async fn populate_dag<const PEER_COUNT: usize>(
         for point in points.values() {
             Verifier::verify(point, peer_schedule).expect("well-formed point");
             let (_, certified_tx) = oneshot::channel();
-            let effects = Effects::<ValidateContext>::new(&effects, point);
+            let info = PointInfo::from(point);
+            let effects = Effects::<ValidateContext>::new(&effects, &info);
             Verifier::validate(
-                point.clone(),
+                info,
+                point.prev_proof(),
                 dag_round.downgrade(),
+                false, // no matter
                 downloader.clone(),
                 store.clone(),
                 certified_tx,

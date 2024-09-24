@@ -227,7 +227,7 @@ impl Engine {
             };
             let inclusion_state = point_dag_round.restore_exact(
                 &info,
-                &status,
+                status,
                 &self.round_task.state.downloader,
                 &self.round_task.state.store,
                 &round_effects,
