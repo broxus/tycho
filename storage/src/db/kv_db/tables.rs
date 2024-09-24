@@ -563,7 +563,7 @@ impl ColumnFamilyOptions<Caches> for PointsInfo {
 
 /// Stores mempool point flags
 /// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
-/// - Value: [`crate::models::PointStatus`]
+/// - Value: [`crate::point_status::PointStatus`]
 pub struct PointsStatus;
 
 impl PointsStatus {}
@@ -579,7 +579,7 @@ impl ColumnFamilyOptions<Caches> for PointsStatus {
 
         opts.set_merge_operator_associative(
             "points_status_merge",
-            crate::models::PointStatus::merge,
+            crate::point_status::PointStatus::merge,
         );
     }
 }
