@@ -12,11 +12,11 @@ use tycho_util::FastHashMap;
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolConfig;
-use crate::models::{PointId, PointInfo, Round};
+use crate::models::{CommitResult, PointId, Round};
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<(PointInfo, Vec<PointInfo>)>>,
+    streams: StreamMap<PeerId, UnboundedReceiverStream<CommitResult>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
@@ -32,11 +32,7 @@ pub struct AnchorConsumer {
 }
 
 impl AnchorConsumer {
-    pub fn add(
-        &mut self,
-        committer: PeerId,
-        committed: UnboundedReceiver<(PointInfo, Vec<PointInfo>)>,
-    ) {
+    pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<CommitResult>) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
@@ -51,13 +47,18 @@ impl AnchorConsumer {
 
     pub async fn drain(mut self) {
         loop {
-            let (_, (anchor, _)) = self
+            let (_, commit_result) = self
                 .streams
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
-            self.top_known_anchor.set_max(anchor.round());
-            self.commit_round.set_max(anchor.round());
+            match commit_result {
+                CommitResult::UnrecoverableGap => {}
+                CommitResult::Next(anchor_data) => {
+                    self.top_known_anchor.set_max(anchor_data.anchor.round());
+                    self.commit_round.set_max(anchor_data.anchor.round());
+                }
+            }
         }
     }
 
@@ -68,15 +69,25 @@ impl AnchorConsumer {
     pub async fn check(mut self) {
         let mut next_expected_history_round = None;
         loop {
-            let (peer_id, (anchor, history)) = self
+            let (peer_id, commit_result) = self
                 .streams
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
+
+            let (anchor, history) = match commit_result {
+                CommitResult::UnrecoverableGap => {
+                    tracing::warn!("unrecoverable gap for {}", peer_id.alt());
+                    continue;
+                }
+                CommitResult::Next(data) => (data.anchor, data.history),
+            };
+
             let anchor_id = anchor.id();
 
             if next_expected_history_round.is_none() {
-                next_expected_history_round = Some(MempoolConfig::genesis_round());
+                // Genesis point is excluded from commit, points only reference it
+                next_expected_history_round = Some(MempoolConfig::genesis_round().next());
             }
 
             let anchor_round = anchor.round();

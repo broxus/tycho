@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true, features = ["rand", "blake3", "rayon"] }

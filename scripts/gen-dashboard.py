@@ -1381,20 +1381,20 @@ def mempool_rounds() -> RowPanel:
 def mempool_point_rates() -> RowPanel:
     metrics = [
         create_counter_panel(
-            "tycho_mempool_externals_count_total",
+            "tycho_mempool_msgs_unique_count",
             "Adapter: unique externals count",
         ),
         create_counter_panel(
-            "tycho_mempool_externals_bytes_total",
+            "tycho_mempool_msgs_unique_bytes",
             "Adapter: unique externals size",
             unit_format=UNITS.BYTES,
         ),
         create_counter_panel(
-            "tycho_mempool_duplicates_count_total",
+            "tycho_mempool_msgs_duplicates_count",
             "Adapter: removed duplicate externals count",
         ),
         create_counter_panel(
-            "tycho_mempool_duplicates_bytes_total",
+            "tycho_mempool_msgs_duplicates_bytes",
             "Adapter: removed duplicate externals size",
             unit_format=UNITS.BYTES,
         ),

@@ -3373,6 +3373,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "backon",
+ "blake3",
  "bytes",
  "everscale-crypto",
  "everscale-types",

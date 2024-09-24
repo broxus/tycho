@@ -19,11 +19,11 @@ use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolConfig;
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{Point, PointInfo, Round};
+use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
 
 pub struct Engine {
     dag: Dag,
-    committed_info_tx: mpsc::UnboundedSender<(PointInfo, Vec<PointInfo>)>,
+    committed_info_tx: mpsc::UnboundedSender<CommitResult>,
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
@@ -40,7 +40,7 @@ impl Engine {
         overlay_service: &OverlayService,
         mempool_adapter_store: &MempoolAdapterStore,
         input_buffer: InputBuffer,
-        committed_info_tx: mpsc::UnboundedSender<(PointInfo, Vec<PointInfo>)>,
+        committed_info_tx: mpsc::UnboundedSender<CommitResult>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
         genesis_round: Option<u32>,
     ) -> Self {
@@ -352,10 +352,10 @@ impl Engine {
 
                     round_effects.log_committed(&committed);
 
-                    for anchor_history in committed {
-                        round_effects.commit_metrics(&anchor_history.0);
+                    for (anchor, history) in committed {
+                        round_effects.commit_metrics(&anchor);
                         committed_info_tx
-                            .send(anchor_history) // not recoverable
+                            .send(CommitResult::Next(AnchorData { anchor, history })) // not recoverable
                             .expect("Failed to send anchor history info to mpsc channel");
                     }
 
