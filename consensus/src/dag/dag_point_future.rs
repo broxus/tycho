@@ -8,7 +8,7 @@ use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
 use tycho_network::PeerId;
-use tycho_storage::PointFlags;
+use tycho_storage::PointStatus;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::sync::OnceTake;
 
@@ -61,14 +61,14 @@ impl DagPointFuture {
     /// locally created points are assumed to be valid, checked prior insertion if needed;
     /// for points of others - there are all other methods
     pub fn new_local_trusted(point: &Point, state: &InclusionState, store: &MempoolStore) -> Self {
-        let flags = PointFlags {
+        let status = PointStatus {
             is_ill_formed: false,
             is_validated: false,
             is_valid: true,
             is_trusted: true,
             ..Default::default()
         };
-        store.insert_point(point, &flags);
+        store.insert_point(point, &status);
         let dag_point = DagPoint::Trusted(ValidPoint::new(point));
         state.init(&dag_point); // only after persisted
         Self(DagPointFutureType::Ready(future::ready(dag_point)))
@@ -85,11 +85,11 @@ impl DagPointFuture {
             let state = state.clone();
             let store = store.clone();
             move || {
-                let flags = PointFlags {
+                let status = PointStatus {
                     is_ill_formed: true,
                     ..Default::default()
                 };
-                store.insert_point(&point, &flags);
+                store.insert_point(&point, &status);
                 let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
                 state.init(&dag_point);
                 dag_point
@@ -125,7 +125,7 @@ impl DagPointFuture {
             let stored_fut = tokio::task::spawn_blocking({
                 let verified = point.clone();
                 let store = store.clone();
-                move || store.insert_point(&verified, &PointFlags::default())
+                move || store.insert_point(&verified, &PointStatus::default())
             });
             let validated_fut = Verifier::validate(
                 point,
@@ -141,7 +141,7 @@ impl DagPointFuture {
                 (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                 (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
-            let flags = PointFlags {
+            let status = PointStatus {
                 is_ill_formed: matches!(dag_point, DagPoint::IllFormed(_)),
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
@@ -150,10 +150,10 @@ impl DagPointFuture {
                 ..Default::default()
             };
             tokio::task::spawn_blocking(move || {
-                store.set_flags(point_id.round, &point_id.digest, &flags);
+                store.set_status(point_id.round, &point_id.digest, &status);
             })
             .await
-            .expect("db set point flags");
+            .expect("db set point status");
             state.init(&dag_point);
             dag_point
         };
@@ -166,26 +166,26 @@ impl DagPointFuture {
     pub fn new_restore(
         point_dag_round: &DagRound,
         info: &PointInfo,
-        flags: &PointFlags,
+        status: &PointStatus,
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> Self {
-        let ready_dag_point = if flags.is_trusted | flags.is_certified {
+        let ready_dag_point = if status.is_trusted | status.is_certified {
             Some(DagPoint::Trusted(ValidPoint::new(info.clone())))
-        } else if flags.is_valid {
+        } else if status.is_valid {
             Some(DagPoint::Suspicious(ValidPoint::new(info.clone())))
-        } else if flags.is_ill_formed {
+        } else if status.is_ill_formed {
             Some(DagPoint::IllFormed(Arc::new(info.id())))
-        } else if flags.is_validated {
+        } else if status.is_validated {
             Some(DagPoint::Invalid(info.clone()))
         } else {
             None
         };
         if let Some(dag_point) = ready_dag_point {
             if let Some(valid) = dag_point.valid() {
-                if flags.is_committed {
+                if status.committed_at_round.is_some() {
                     valid.is_committed.store(true, Ordering::Relaxed);
                 }
             }
@@ -209,7 +209,7 @@ impl DagPointFuture {
             })
             .await
             .expect("db get point")
-            .expect("point with info and flags was not loaded");
+            .expect("point with info and status was not loaded");
             let effects = Effects::<ValidateContext>::new(&effects_clone, &point);
             let dag_point = Verifier::validate(
                 point,
@@ -220,7 +220,7 @@ impl DagPointFuture {
                 effects,
             )
             .await;
-            let flags = PointFlags {
+            let status = PointStatus {
                 is_ill_formed: matches!(dag_point, DagPoint::IllFormed(_)),
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
@@ -229,10 +229,10 @@ impl DagPointFuture {
                 ..Default::default()
             };
             tokio::task::spawn_blocking(move || {
-                store.set_flags(point_id.round, &point_id.digest, &flags);
+                store.set_status(point_id.round, &point_id.digest, &status);
             })
             .await
-            .expect("db set point flags");
+            .expect("db set point status");
             state.init(&dag_point); // only after persisted
             dag_point
         };
@@ -271,17 +271,15 @@ impl DagPointFuture {
             let stored_valid = tokio::task::spawn_blocking({
                 let store = store.clone();
                 let point_id = point_id.clone();
-                move || {
-                    let flags = store.get_flags(point_id.round, &point_id.digest);
-                    if flags.is_valid || flags.is_certified {
+                move || match store.get_status(point_id.round, &point_id.digest) {
+                    Some(status) if status.is_valid || status.is_certified => {
                         store.get_info(point_id.round, &point_id.digest)
-                    } else {
-                        None
                     }
+                    _ => None,
                 }
             })
             .await
-            .expect("db get point info flags");
+            .expect("db get point info status");
 
             let stored_verified = match stored_valid {
                 Some(info) => return DagPoint::Trusted(ValidPoint::new(info)),
@@ -310,11 +308,11 @@ impl DagPointFuture {
                         DownloadResult::IllFormed(point) => {
                             tokio::task::spawn_blocking({
                                 let store = store.clone();
-                                let flags = PointFlags {
+                                let status = PointStatus {
                                     is_ill_formed: true,
                                     ..Default::default()
                                 };
-                                move || store.insert_point(&point, &flags)
+                                move || store.insert_point(&point, &status)
                             })
                             .await
                             .expect("db store ill-formed download");
@@ -325,7 +323,7 @@ impl DagPointFuture {
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();
                         let store = store.clone();
-                        move || store.insert_point(&verified, &PointFlags::default())
+                        move || store.insert_point(&verified, &PointStatus::default())
                     }));
                     (verified, stored_fut)
                 }
@@ -351,7 +349,7 @@ impl DagPointFuture {
                 (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                 (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
-            let flags = PointFlags {
+            let status = PointStatus {
                 is_ill_formed: matches!(dag_point, DagPoint::IllFormed(_)),
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
@@ -360,10 +358,10 @@ impl DagPointFuture {
                 ..Default::default()
             };
             tokio::task::spawn_blocking(move || {
-                store.set_flags(point_id.round, &point_id.digest, &flags);
+                store.set_status(point_id.round, &point_id.digest, &status);
             })
             .await
-            .expect("db set point flags");
+            .expect("db set point status");
 
             state.init(&dag_point);
             dag_point
@@ -400,7 +398,7 @@ impl DagPointFuture {
         {
             // FIXME limit by validation depth
             if let Some(oneshot) = certified.take() {
-                // TODO store flag when taken or follow only in-mem recursion?
+                // TODO store status when taken or follow only in-mem recursion?
                 // receiver is dropped upon completion
                 _ = oneshot.send(());
             }

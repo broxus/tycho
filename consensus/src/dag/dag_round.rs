@@ -4,7 +4,7 @@ use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tycho_network::PeerId;
-use tycho_storage::PointFlags;
+use tycho_storage::PointStatus;
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
@@ -218,7 +218,7 @@ impl DagRound {
     pub fn restore_exact(
         &self,
         info: &PointInfo,
-        flags: &PointFlags,
+        status: &PointStatus,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -233,7 +233,7 @@ impl DagRound {
         self.edit(&info.data().author, |loc| {
             let result_state = loc.state().clone();
             loc.get_or_init(digest, |state| {
-                DagPointFuture::new_restore(self, info, flags, state, downloader, store, effects)
+                DagPointFuture::new_restore(self, info, status, state, downloader, store, effects)
             })
             .clone()
             .map(|_| result_state)

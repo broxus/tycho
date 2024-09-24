@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 use everscale_crypto::ed25519;
 use tokio::sync::mpsc;
-use tycho_consensus::prelude::{Engine, InputBuffer};
+use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
 use tycho_consensus::test_utils::AnchorConsumer;
 use tycho_core::global_config::GlobalConfig;
 use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
@@ -206,10 +206,13 @@ impl Mempool {
             self.dht_client.network(),
             &self.peer_resolver,
             &self.overlay_service,
-            self.storage.mempool_storage(),
+            &MempoolAdapterStore::new(
+                self.storage.mempool_storage().clone(),
+                anchor_consumer.commit_round().clone(),
+            ),
+            input_buffer,
             committed_tx,
             anchor_consumer.collator_round(),
-            input_buffer,
             mempool_start_round,
         );
 

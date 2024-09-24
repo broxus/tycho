@@ -1490,6 +1490,10 @@ def mempool_engine() -> RowPanel:
             "tycho_mempool_commit_anchor_latency_time",
             "Engine committed anchor: time latency (min over batch)",
         ),
+        create_heatmap_panel(
+            "tycho_mempool_adapter_parse_anchor_history_time",
+            "Adapter: parse anchor history into cells",
+        ),
     ]
     return create_row("Mempool engine", metrics)
 
@@ -1604,20 +1608,20 @@ def mempool_intercom() -> RowPanel:
 def mempool_storage() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_mempool_store_clean_time",
-            "Clean task",
+            "tycho_mempool_store_expand_anchor_history_time",
+            "Adapter: expand anchor history into payload with DB",
         ),
         create_heatmap_panel(
-            "tycho_mempool_store_expand_anchor_history_time",
-            "Expand anchor history",
+            "tycho_mempool_store_set_committed_status_time",
+            "Adapter: set anchor history as committed in DB",
         ),
         create_heatmap_panel(
             "tycho_mempool_store_insert_point_time",
-            "Insert point with info and optional flags",
+            "Insert point with info and status",
         ),
         create_heatmap_panel(
-            "tycho_mempool_store_set_flags_time",
-            "Set flags",
+            "tycho_mempool_store_set_status_time",
+            "Set status",
         ),
         create_counter_panel(
             expr_sum_increase(
@@ -1630,14 +1634,12 @@ def mempool_storage() -> RowPanel:
             "Get point",
         ),
         create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_store_get_flags_count", range_selector="$__interval"
-            ),
-            "Get flags count (total at moment)",
+            expr_sum_increase("tycho_mempool_store_get_status_count", range_selector="$__interval"),
+            "Get status count (total at moment)",
         ),
         create_heatmap_panel(
-            "tycho_mempool_store_get_flags_time",
-            "Get flags",
+            "tycho_mempool_store_get_status_time",
+            "Get status",
         ),
         create_counter_panel(
             expr_sum_increase(
@@ -1648,6 +1650,10 @@ def mempool_storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_mempool_store_get_info_time",
             "Get info",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_clean_time",
+            "Clean task",
         ),
     ]
     return create_row("Mempool storage", metrics)

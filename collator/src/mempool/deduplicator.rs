@@ -5,7 +5,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::mempool::MempoolAnchorId;
 
-pub struct ExternalMessageCache {
+pub struct Deduplicator {
     // must keep latest round for every hash, until threshold passes
     hash_max_round: FastHashMap<HashBytes, u32>,
     // must remove outdated (threshold elapsed) from the low end of an ordered map,
@@ -15,7 +15,7 @@ pub struct ExternalMessageCache {
     round_threshold: MempoolAnchorId,
 }
 
-impl ExternalMessageCache {
+impl Deduplicator {
     pub fn new(round_threshold: u16) -> Self {
         Self {
             hash_max_round: FastHashMap::default(),

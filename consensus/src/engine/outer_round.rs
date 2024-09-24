@@ -45,6 +45,11 @@ impl Source for Collator {}
 pub struct Consensus;
 impl Source for Consensus {}
 
+/// Commit procedure is separated into info part in dag and storage part later in adapter.
+/// Commit is not finished, until payload data is read from storage, so it may be cleaned.
+/// Mempool Adapter may decide to skip reading some out of interest data,
+/// but it will mark stored data with committed status anyway.
+///
 /// ### Channel-style usage
 /// Allows to clean storage with its own pace, repeating it as soon as both:
 /// previous task completed and a new anchor was committed.

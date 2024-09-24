@@ -1,6 +1,4 @@
-use std::ops::Neg;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
@@ -10,23 +8,23 @@ use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
-use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Dag, DagRound, InclusionState, Verifier};
-use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
+use crate::effects::{
+    AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolAdapterStore, MempoolStore,
+};
 use crate::engine::input_buffer::InputBuffer;
-use crate::engine::outer_round::{Collator, Commit, Consensus, OuterRound};
+use crate::engine::outer_round::{Collator, Consensus, OuterRound};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{Point, PointInfo, Round, UnixTime};
+use crate::models::{Point, PointInfo, Round};
 
 pub struct Engine {
     dag: Dag,
-    committed: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
+    committed_info_tx: mpsc::UnboundedSender<(PointInfo, Vec<PointInfo>)>,
     consensus_round: OuterRound<Consensus>,
-    commit_round: OuterRound<Commit>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
 }
@@ -40,16 +38,15 @@ impl Engine {
         network: &Network,
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
-        mempool_storage: &MempoolStorage,
-        committed: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
-        collator_round: &OuterRound<Collator>,
+        mempool_adapter_store: &MempoolAdapterStore,
         input_buffer: InputBuffer,
+        committed_info_tx: mpsc::UnboundedSender<(PointInfo, Vec<PointInfo>)>,
+        collator_round: &OuterRound<Collator>,
         genesis_round: Option<u32>,
     ) -> Self {
         MempoolConfig::set_genesis_round(Round(genesis_round.unwrap_or_default()));
 
         let consensus_round = OuterRound::default();
-        let commit_round = OuterRound::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
@@ -64,9 +61,8 @@ impl Engine {
         let peer_schedule = PeerSchedule::new(key_pair, private_overlay);
 
         let store = MempoolStore::new(
-            mempool_storage.clone(),
+            mempool_adapter_store,
             consensus_round.receiver(),
-            commit_round.receiver(),
             collator_round.receiver(),
         );
         let round_task = RoundTaskReady::new(
@@ -86,9 +82,8 @@ impl Engine {
         });
         Self {
             dag: Dag::default(),
-            committed,
+            committed_info_tx,
             consensus_round,
-            commit_round,
             round_task,
             effects,
         }
@@ -159,17 +154,18 @@ impl Engine {
             &round_effects,
         );
 
-        let info_flags = tokio::task::spawn_blocking({
+        let info_status = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
             move || store.load_rounds(first_round, last_round)
         })
         .instrument(round_effects.span().clone())
         .await
-        .expect("load last info and flags from db");
+        .expect("load last info and status from db");
 
         let _span_guard = round_effects.span().enter();
         assert!(
-            info_flags.first().map(|(i, _)| i.round()) <= info_flags.last().map(|(i, _)| i.round()),
+            info_status.first().map(|(i, _)| i.round())
+                <= info_status.last().map(|(i, _)| i.round()),
             "wrong order of data from db on init"
         );
 
@@ -191,7 +187,7 @@ impl Engine {
             };
             match local_id {
                 None => None,
-                Some(local_id) => info_flags
+                Some(local_id) => info_status
                     .iter()
                     .rev()
                     .filter(|(info, _)| info.data().author == local_id)
@@ -216,7 +212,7 @@ impl Engine {
         let mut point_dag_round = dag_round.clone();
 
         let includes = FuturesUnordered::new();
-        for (info, flags) in info_flags {
+        for (info, status) in info_status {
             if info.round() > start_round {
                 // if info.round() > start_info.round():
                 // * either consensus is on the same start_round(+1) and keeps broadcasting points
@@ -231,7 +227,7 @@ impl Engine {
             };
             let inclusion_state = point_dag_round.restore_exact(
                 &info,
-                &flags,
+                &status,
                 &self.round_task.state.downloader,
                 &self.round_task.state.store,
                 &round_effects,
@@ -271,15 +267,6 @@ impl Engine {
 
     pub async fn run(mut self) -> ! {
         let mut start_point = self.pre_run().await;
-        let (committed_info_tx, committed_info_rx) =
-            mpsc::unbounded_channel::<(PointInfo, Vec<PointInfo>)>();
-
-        tokio::spawn({
-            let store = self.round_task.state.store.clone();
-            let committed_full_rx = self.committed;
-            let commit_round = self.commit_round;
-            Self::expand_commit(store, committed_info_rx, committed_full_rx, commit_round)
-        });
 
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
@@ -361,26 +348,22 @@ impl Engine {
 
             let commit_run = tokio::task::spawn_blocking({
                 let mut dag = self.dag;
-                let committed_info_tx = committed_info_tx.clone();
+                let committed_info_tx = self.committed_info_tx.clone();
                 let round_effects = round_effects.clone();
                 move || {
-                    let task_start = Instant::now();
                     let _guard = round_effects.span().enter();
 
                     let committed = dag.commit();
 
-                    round_effects.commit_metrics(&committed);
                     round_effects.log_committed(&committed);
 
-                    if !committed.is_empty() {
-                        for points in committed {
-                            committed_info_tx
-                                .send(points) // not recoverable
-                                .expect("Failed to send anchor history info to mpsc channel");
-                        }
-                        metrics::histogram!("tycho_mempool_engine_commit_time")
-                            .record(task_start.elapsed());
+                    for anchor_history in committed {
+                        round_effects.commit_metrics(&anchor_history.0);
+                        committed_info_tx
+                            .send(anchor_history) // not recoverable
+                            .expect("Failed to send anchor history info to mpsc channel");
                     }
+
                     dag
                 }
             });
@@ -396,46 +379,12 @@ impl Engine {
             }
         }
     }
-
-    async fn expand_commit(
-        store: MempoolStore,
-        mut collapsed: mpsc::UnboundedReceiver<(PointInfo, Vec<PointInfo>)>,
-        expanded: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
-        commit_round: OuterRound<Commit>,
-    ) -> ! {
-        while let Some((anchor, history)) = collapsed.recv().await {
-            let store = store.clone();
-            let task = tokio::task::spawn_blocking(move || store.expand_anchor_history(&history));
-            let history = task.await.expect("expand anchor history task failed");
-            let round = anchor.round();
-            expanded
-                .send((anchor, history))
-                .expect("Failed to send anchor history to mpsc channel");
-            commit_round.set_max(round);
-        }
-        tracing::warn!("engine commit info channel closed");
-        futures_util::future::pending().await
-    }
 }
 
 impl Effects<EngineContext> {
-    fn commit_metrics(&self, committed: &[(PointInfo, Vec<PointInfo>)]) {
-        metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
-
-        if let Some((first_anchor, _)) = committed.first() {
-            metrics::gauge!("tycho_mempool_commit_latency_rounds")
-                .set(self.depth(first_anchor.round()));
-        }
-        if let Some((last_anchor, _)) = committed.last() {
-            let now = UnixTime::now().as_u64();
-            let anchor_time = last_anchor.data().time.as_u64();
-            let latency = if now >= anchor_time {
-                Duration::from_millis(now - anchor_time).as_secs_f64()
-            } else {
-                Duration::from_millis(anchor_time - now).as_secs_f64().neg()
-            };
-            metrics::histogram!("tycho_mempool_commit_anchor_latency_time").record(latency);
-        }
+    fn commit_metrics(&self, anchor: &PointInfo) {
+        metrics::counter!("tycho_mempool_commit_anchors").increment(1);
+        metrics::gauge!("tycho_mempool_commit_latency_rounds").set(self.depth(anchor.round()));
     }
 
     fn log_committed(&self, committed: &[(PointInfo, Vec<PointInfo>)]) {
