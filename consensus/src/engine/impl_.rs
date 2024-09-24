@@ -1,3 +1,4 @@
+use std::mem;
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
@@ -6,11 +7,12 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt};
 use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Dag, DagRound, InclusionState, Verifier};
+use crate::dag::{Committer, DagFront, DagRound, InclusionState, Verifier};
 use crate::effects::{
     AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolAdapterStore, MempoolStore,
 };
@@ -22,7 +24,8 @@ use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
 
 pub struct Engine {
-    dag: Dag,
+    dag: DagFront,
+    committer_run: JoinHandle<Committer>,
     committed_info_tx: mpsc::UnboundedSender<CommitResult>,
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
@@ -80,8 +83,30 @@ impl Engine {
                 peer_schedule.run_updater().await;
             }
         });
+
+        if genesis_round.is_some() {
+            // note subscribers are created earlier
+            top_known_anchor.set_max(MempoolConfig::genesis_round());
+        }
+
+        let committer_run = tokio::spawn({
+            let mut top_known_anchor = top_known_anchor.receiver();
+            let mut consensus_round = consensus_round.receiver();
+            async move {
+                // wait both initialized with non-default value to use latest values
+                if genesis_round.is_none() {
+                    // wait if not set locally
+                    _ = top_known_anchor.next().await;
+                }
+                _ = consensus_round.next().await;
+
+                Committer::default()
+            }
+        });
+
         Self {
-            dag: Dag::default(),
+            dag: DagFront::default(),
+            committer_run,
             committed_info_tx,
             consensus_round,
             round_task,
@@ -125,6 +150,7 @@ impl Engine {
 
         let next_dag_round = genesis_round.new_next(&self.round_task.state.peer_schedule);
 
+        // stores into db with right flags
         let _ = genesis_round.insert_exact_sign(
             &genesis,
             next_dag_round.key_pair(),
@@ -192,17 +218,63 @@ impl Engine {
             }
         };
 
+        // init dag and committer with current bounds, ready to load related stored data
+
         let start_round = start_info.as_ref().map_or(last_round, |info| info.round());
         // top known block's anchor is not known yet, will shorten dag length later
         self.dag.init(DagRound::new_bottom(
             Consensus::history_bottom(last_round),
             &self.round_task.state.peer_schedule,
         ));
-        self.dag.fill_to_top(
-            start_round,
-            &self.round_task.state.peer_schedule,
-            &round_effects,
-        );
+        // commiter must contain the same rounds as front dag
+        let mut buf = (self.dag).fill_to_top(start_round, &self.round_task.state.peer_schedule);
+        buf.extend_from_slice(self.dag.as_slice());
+
+        let committer_after_watches =
+            mem::replace(&mut self.committer_run, tokio::spawn(future::pending()));
+        let committer_init = tokio::spawn({
+            let store = self.round_task.state.store.clone();
+            let peer_schedule = self.round_task.state.peer_schedule.clone();
+            let downloader = self.round_task.state.downloader.clone();
+            let top_known_anchor = self.round_task.state.top_known_anchor.clone();
+            let consensus_round = self.consensus_round.clone();
+            let round_effects = round_effects.clone();
+
+            async move {
+                let mut committer = match committer_after_watches.await {
+                    Ok(committer) => committer,
+                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                    Err(e) => panic!("default committer after rounds init: {e:?}"),
+                };
+                committer.extend_from_ahead(&buf, &peer_schedule);
+
+                // watches contain non-default values as committer future is resolved
+                // max(): keep in-mem dag as short as possible
+                let bottom = TopKnownAnchor::adapter_history_bottom(top_known_anchor.get())
+                    .max(Consensus::history_bottom(consensus_round.get()));
+
+                committer.set_bottom(bottom);
+
+                if bottom < last_round {
+                    // init commit data with up-to-date data, if such is stored
+                    let info_status = tokio::task::spawn_blocking({
+                        let store = store.clone();
+                        move || store.load_rounds(bottom, last_round)
+                    })
+                    .instrument(round_effects.span().clone())
+                    .await
+                    .expect("load last info and status from db");
+
+                    committer.init_at_start(info_status, &downloader, &store, &round_effects);
+                }
+
+                committer
+            }
+        });
+        mem::replace(&mut self.committer_run, committer_init).abort();
+
+        // restore last known front dag round
+
         let dag_round = self.dag.top();
         let mut point_dag_round = dag_round.clone();
 
@@ -263,12 +335,18 @@ impl Engine {
     pub async fn run(mut self) -> ! {
         let mut start_point = self.pre_run().await;
 
+        // may be sparse when engine jumped over large amount of rounds
+        // TODO new struct in `dag::commit` mod to:
+        //  * keep Vec<Vec<DagRound>> for less allocation compared to a flattened Vec<DagRound>
+        //  * discard outdated rounds as soon as possible
+        //  * somewhat simplify logic of existing Committer parts by moving it to a new part
+        let mut rounds_buffer = Vec::new();
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             let (prev_round_ok, current_dag_round, round_effects) = {
                 // do not repeat the `get()` - it can give non-reproducible result
                 let consensus_round = self.consensus_round.get();
-                let top_dag_round = self.dag.top();
+                let top_dag_round = self.dag.top().clone();
                 assert!(
                     consensus_round >= top_dag_round.round(),
                     "consensus round {} cannot be less than top dag round {}",
@@ -298,21 +376,21 @@ impl Engine {
                     self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
                     let round_effects =
                         Effects::<EngineContext>::new(&self.effects, consensus_round);
-                    let current_dag_round = self.dag.fill_to_top(
-                        consensus_round,
-                        &self.round_task.state.peer_schedule,
-                        &round_effects,
+                    rounds_buffer.append(
+                        &mut self
+                            .dag
+                            .fill_to_top(consensus_round, &self.round_task.state.peer_schedule),
                     );
-                    (prev_round_ok, current_dag_round, round_effects)
+                    (prev_round_ok, self.dag.top().clone(), round_effects)
                 }
             };
             metrics::gauge!("tycho_mempool_engine_current_round").set(current_dag_round.round().0);
 
-            let next_dag_round = self.dag.fill_to_top(
+            rounds_buffer.append(&mut self.dag.fill_to_top(
                 current_dag_round.round().next(),
                 &self.round_task.state.peer_schedule,
-                &round_effects,
-            );
+            ));
+            let next_dag_round = self.dag.top().clone();
 
             let (collector_signal_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry);
 
@@ -329,6 +407,9 @@ impl Engine {
                 ),
             };
 
+            let peer_schedule = self.round_task.state.peer_schedule.clone();
+            let top_known_anchor = self.round_task.state.top_known_anchor.get();
+
             let round_task_run = self
                 .round_task
                 .run(
@@ -341,33 +422,57 @@ impl Engine {
                 )
                 .until_ready();
 
-            let commit_run = tokio::task::spawn_blocking({
-                let mut dag = self.dag;
+            // commit may take longer than a round if it ends with a jump to catch up with consensus
+            if self.committer_run.is_finished() {
+                let mut committer = match self.committer_run.now_or_never() {
+                    Some(Ok(committer)) => committer,
+                    Some(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                    Some(Err(e)) => panic!("committer task: {e:?}"),
+                    None => unreachable!("committer task is finished and can be taken only once"),
+                };
+
+                rounds_buffer.extend_from_slice(self.dag.as_slice());
+
+                let moved_rounds_buf = mem::take(&mut rounds_buffer);
+
+                // max(): keep in-mem dag as short as possible; each commit shortens it even more;
+                // this bottom is applied only in case of a gap in mempool history
+                let bottom_round = TopKnownAnchor::adapter_history_bottom(top_known_anchor)
+                    .max(Consensus::history_bottom(current_dag_round.round()));
+
                 let committed_info_tx = self.committed_info_tx.clone();
                 let round_effects = round_effects.clone();
-                move || {
+
+                self.committer_run = tokio::task::spawn_blocking(move || {
                     let _guard = round_effects.span().enter();
 
-                    let committed = dag.commit();
+                    if !committer.set_bottom(bottom_round) {
+                        committed_info_tx
+                            .send(CommitResult::UnrecoverableGap) // not recoverable
+                            .expect("Failed to send anchor history info to mpsc channel");
+                    };
+
+                    committer.extend_from_ahead(&moved_rounds_buf, &peer_schedule);
+
+                    let committed = committer.commit();
 
                     round_effects.log_committed(&committed);
 
-                    for (anchor, history) in committed {
-                        round_effects.commit_metrics(&anchor);
+                    for data in committed {
+                        round_effects.commit_metrics(&data.anchor);
                         committed_info_tx
-                            .send(CommitResult::Next(AnchorData { anchor, history })) // not recoverable
+                            .send(CommitResult::Next(data)) // not recoverable
                             .expect("Failed to send anchor history info to mpsc channel");
                     }
 
-                    dag
-                }
-            });
+                    committer
+                });
+            }
 
-            match tokio::try_join!(round_task_run, commit_run) {
-                Ok(((round_task, next_round), dag)) => {
+            match round_task_run.await {
+                Ok((round_task, next_round)) => {
                     self.round_task = round_task;
                     self.consensus_round.set_max(next_round);
-                    self.dag = dag;
                 }
                 Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                 Err(e) => panic!("mempool engine failed: {e:?}"),
@@ -382,19 +487,20 @@ impl Effects<EngineContext> {
         metrics::gauge!("tycho_mempool_commit_latency_rounds").set(self.depth(anchor.round()));
     }
 
-    fn log_committed(&self, committed: &[(PointInfo, Vec<PointInfo>)]) {
+    fn log_committed(&self, committed: &[AnchorData]) {
         if !committed.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
             let committed = committed
                 .iter()
-                .map(|(anchor, history)| {
-                    let history = history
+                .map(|data| {
+                    let history = data
+                        .history
                         .iter()
                         .map(|point| format!("{:?}", point.id().alt()))
                         .join(", ");
                     format!(
                         "anchor {:?} time {} : [ {history} ]",
-                        anchor.id().alt(),
-                        anchor.data().time
+                        data.anchor.id().alt(),
+                        data.anchor.data().time
                     )
                 })
                 .join("  ;  ");

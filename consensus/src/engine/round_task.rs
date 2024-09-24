@@ -23,7 +23,7 @@ pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
     pub store: MempoolStore,
     pub responder: Responder,
-    top_known_anchor: RoundWatch<TopKnownAnchor>,
+    pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     input_buffer: InputBuffer,
     pub broadcast_filter: BroadcastFilter,
     pub downloader: Downloader,

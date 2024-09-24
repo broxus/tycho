@@ -12,8 +12,8 @@ use tokio::sync::oneshot;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{AnchorStage, Dag, DagRound, Verifier};
-use crate::effects::{ChainedRoundsContext, Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::dag::{AnchorStage, DagFront, DagRound, Verifier};
+use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
@@ -28,7 +28,7 @@ pub fn make_dag<const PEER_COUNT: usize>(
     genesis: &Point,
     store: &MempoolStore,
     consensus_round: &RoundWatch<Consensus>,
-) -> (Dag, PeerSchedule, Downloader) {
+) -> (DagFront, PeerSchedule, Downloader) {
     let network = Network::builder()
         .with_random_private_key()
         .with_service_name("mempool-stub-network-service")
@@ -69,128 +69,105 @@ pub fn make_dag<const PEER_COUNT: usize>(
 
     let _ = genesis_round.insert_exact_sign(genesis, next_dag_round.key_pair(), store);
 
-    let mut dag = Dag::default();
+    let mut dag = DagFront::default();
 
     dag.init(genesis_round.clone());
 
     (dag, peer_schedule, stub_downloader)
 }
 
-#[allow(clippy::too_many_arguments)] // ok in test
-pub async fn populate_dag<const PEER_COUNT: usize>(
+#[allow(clippy::too_many_arguments, reason = "ok in test")]
+pub async fn populate_points<const PEER_COUNT: usize>(
+    dag_round: &DagRound,
     peers: &[(PeerId, KeyPair); PEER_COUNT],
     peer_schedule: &PeerSchedule,
     downloader: &Downloader,
     store: &MempoolStore,
-    effects: &Effects<ChainedRoundsContext>,
-    genesis: &Point,
+    effects: &Effects<EngineContext>,
     msg_count: usize,
     msg_bytes: usize,
-    dag_rounds: &mut BTreeMap<Round, DagRound>,
 ) {
-    let mut prev_points = BTreeMap::default();
-    let mut last_candidate = PointInfo::from(genesis);
-    let mut last_proof = genesis.id();
-    let mut last_trigger = genesis.id();
-    prev_points.insert(genesis.data().author, genesis.digest().clone());
-    for dag_round in dag_rounds.values().skip(1) {
-        if let Some(AnchorStage {
-            role: AnchorStageRole::Proof,
-            leader,
-            ..
-        }) = dag_round.anchor_stage()
-        {
-            let prev_round = dag_round.prev().upgrade().expect("strong dag round ref");
-            last_candidate = prev_round
-                .view(leader, |loc| {
-                    loc.versions()
-                        .first_key_value()
-                        .and_then(|(_, candidate)| candidate.clone().now_or_never())
-                        .and_then(|candidate| candidate.into_valid())
-                        .expect("ready and valid anchor candidate dag point future")
-                        .info
-                })
-                .expect("populated anchor candidate");
-        }
+    let prev_dag_round = dag_round.prev().upgrade().expect("prev DAG round exists");
+    let prev_points = prev_dag_round
+        .select(|(_, loc)| {
+            loc.versions()
+                .values()
+                .map(|a| a.clone().now_or_never().expect("must be ready"))
+                .map(|p| p.into_valid().expect("must be trusted"))
+                .map(|p| p.info)
+                .next()
+        })
+        .collect::<Vec<_>>();
+    let last_proof = prev_points
+        .iter()
+        .map(|point| point.anchor_id(AnchorStageRole::Proof))
+        .max_by_key(|anchor_id| anchor_id.round)
+        .expect("last proof must exist");
+    let last_trigger = prev_points
+        .iter()
+        .map(|point| point.anchor_id(AnchorStageRole::Trigger))
+        .max_by_key(|anchor_id| anchor_id.round)
+        .expect("last trigger must exist");
+    let time = prev_points
+        .iter()
+        .map(|point| point.data().time)
+        .next() // all values are the same as in genesis
+        .expect("prev time must exist");
+    let includes = prev_points
+        .iter()
+        .map(|point| (point.data().author, point.digest().clone()))
+        .collect::<BTreeMap<_, _>>();
 
-        let mut points = FastHashMap::default();
-        for idx in 0..PEER_COUNT {
-            let point = point::<PEER_COUNT>(
-                dag_round.round(),
-                idx,
-                peers,
-                &prev_points,
-                dag_round.anchor_stage(),
-                &last_candidate,
-                &last_proof,
-                &last_trigger,
-                msg_count,
-                msg_bytes,
-            );
-            points.insert(point.data().author, point);
-        }
-        match dag_round.anchor_stage() {
-            Some(AnchorStage {
-                role: AnchorStageRole::Proof,
-                leader,
-                ..
-            }) => {
-                last_proof = points
-                    .get(leader)
-                    .expect("anchor proof in passed includes")
-                    .id();
-            }
-            Some(AnchorStage {
-                role: AnchorStageRole::Trigger,
-                leader,
-                ..
-            }) => {
-                last_trigger = points
-                    .get(leader)
-                    .expect("anchor trigger in passed includes")
-                    .id();
-            }
-            None => {}
-        }
-        let effects = Effects::<EngineContext>::new(effects, dag_round.round());
-        for point in points.values() {
-            Verifier::verify(point, peer_schedule).expect("well-formed point");
-            let (_, certified_tx) = oneshot::channel();
-            let info = PointInfo::from(point);
-            let effects = Effects::<ValidateContext>::new(&effects, &info);
-            Verifier::validate(
-                info,
-                point.prev_proof(),
-                dag_round.downgrade(),
-                false, // no matter
-                downloader.clone(),
-                store.clone(),
-                certified_tx,
-                effects,
-            )
-            .await
-            .trusted()
-            .expect("trusted point");
-        }
+    let mut points = FastHashMap::default();
+    for idx in 0..PEER_COUNT {
+        let point = point::<PEER_COUNT>(
+            dag_round.round(),
+            idx,
+            peers,
+            &includes,
+            time,
+            dag_round.anchor_stage(),
+            &last_proof,
+            &last_trigger,
+            msg_count,
+            msg_bytes,
+        );
+        points.insert(point.data().author, point);
+    }
 
-        for point in points.values() {
-            _ = dag_round.insert_exact_sign(point, Some(&peers[0].1), store);
-        }
-        prev_points = points
-            .into_iter()
-            .map(|(author, point)| (author, point.digest().clone()))
-            .collect();
+    for point in points.values() {
+        Verifier::verify(point, peer_schedule).expect("well-formed point");
+        let (_, certified_tx) = oneshot::channel();
+        let info = PointInfo::from(point);
+        let effects = Effects::<ValidateContext>::new(effects, &info);
+        Verifier::validate(
+            info,
+            point.prev_proof(),
+            dag_round.downgrade(),
+            false, // no matter
+            downloader.clone(),
+            store.clone(),
+            certified_tx,
+            effects,
+        )
+        .await
+        .trusted()
+        .expect("trusted point");
+    }
+
+    for point in points.values() {
+        _ = dag_round.insert_exact_sign(point, Some(&peers[0].1), store);
     }
 }
 
-#[allow(clippy::too_many_arguments)] // ok in test
-pub fn point<const PEER_COUNT: usize>(
+#[allow(clippy::too_many_arguments, reason = "ok in test")]
+fn point<const PEER_COUNT: usize>(
     round: Round,
     idx: usize,
     peers: &[(PeerId, KeyPair); PEER_COUNT],
-    prev_points: &BTreeMap<PeerId, Digest>,
+    includes: &BTreeMap<PeerId, Digest>,
+    time: UnixTime,
     anchor_stage: Option<&AnchorStage>,
-    last_candidate: &PointInfo,
     last_proof: &PointId,
     last_trigger: &PointId,
     msg_count: usize,
@@ -198,12 +175,12 @@ pub fn point<const PEER_COUNT: usize>(
 ) -> Point {
     assert!(idx < PEER_COUNT, "peer index out of range");
     assert!(
-        prev_points.len() == 1 || prev_points.len() == PEER_COUNT,
+        includes.len() == 1 || includes.len() == PEER_COUNT,
         "unexpected point count"
     );
     let peer_count = PeerCount::try_from(PEER_COUNT).expect("enough peers in non-genesis round");
 
-    let evidence = match prev_points.get(&peers[idx].0) {
+    let evidence = match includes.get(&peers[idx].0) {
         Some(prev_point) => {
             let mut evidence = BTreeMap::default();
             for i in &rand_arr::<PEER_COUNT>()[..(peer_count.majority_of_others() + 1)] {
@@ -242,12 +219,12 @@ pub fn point<const PEER_COUNT: usize>(
 
     Point::new(&peers[idx].1, round, evidence, payload, PointData {
         author: peers[idx].0,
-        time: last_candidate.data().time.max(UnixTime::now()),
-        includes: prev_points.clone(),
+        time,
+        includes: includes.clone(),
         witness: Default::default(),
         anchor_trigger,
         anchor_proof,
-        anchor_time: last_candidate.data().time,
+        anchor_time: time,
     })
 }
 

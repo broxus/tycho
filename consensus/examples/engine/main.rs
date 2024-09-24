@@ -10,7 +10,7 @@ use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
-use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
+use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore, MempoolConfig};
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
@@ -113,6 +113,8 @@ fn make_network(
 
     let mut handles = vec![];
 
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+
     for (((secret_key, key_pair), bind_address), peer_id) in keys
         .into_iter()
         .zip(bind_addresses.into_iter())
@@ -124,6 +126,7 @@ fn make_network(
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let top_known_anchor = anchor_consumer.top_known_anchor().clone();
         let commit_round = anchor_consumer.commit_round().clone();
+        let started = started.clone();
         anchor_consumer.add(peer_id, committed_rx);
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
@@ -178,6 +181,7 @@ fn make_network(
                             None,
                         );
                         engine.init_with_genesis(&all_peers);
+                        started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(
                             engine.run().map(|_| Err::<(), ()>(())),
@@ -189,6 +193,7 @@ fn make_network(
         handles.push(handle);
     }
 
+    let node_count = cli.nodes.get() as u32;
     let handle = std::thread::Builder::new()
         .name("anchor-consumer".to_string())
         .spawn(move || {
@@ -197,6 +202,14 @@ fn make_network(
                 .build()
                 .expect("new tokio runtime")
                 .block_on(async {
+                    _ = started
+                        .acquire_many(node_count)
+                        .await
+                        .expect("wait nodes start");
+                    anchor_consumer
+                        .top_known_anchor()
+                        // may be uninit until engine started
+                        .set_max(MempoolConfig::genesis_round());
                     tokio::try_join!(
                         anchor_consumer.check().map(|_| Err::<(), ()>(())),
                         run_guard.until_any_dropped()

@@ -93,6 +93,7 @@ impl Signature {
     }
 }
 
+// TODO impl Display (as u32), Add & Sub (saturating), make u32 private + getter, refactor usage
 #[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Round(pub u32);
 

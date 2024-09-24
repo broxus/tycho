@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use tycho_network::PeerId;
 
 use crate::dag::DagRound;
-use crate::engine::{InputBuffer, MempoolConfig};
+use crate::engine::InputBuffer;
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
     Through, UnixTime,
@@ -31,8 +31,7 @@ impl Producer {
             // it's not necessary to resend external messages from previous round
             // if at least 1F+1 peers (one reliable) signed previous point;
             // also notice that payload elems are deduplicated in mempool adapter
-            current_round.round().0 - last.round.0 < MempoolConfig::COMMIT_DEPTH as u32
-                && last.evidence.len() >= last.signers.reliable_minority()
+            last.evidence.len() >= last.signers.reliable_minority()
         }));
         let last_own_point = last_own_point
             // previous round's point needs 2F signatures from peers scheduled for current round
