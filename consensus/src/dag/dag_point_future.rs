@@ -51,7 +51,7 @@ enum DagPointFutureType {
         task: Shared<JoinTask<DagPoint>>,
         // this could be a `Notify`, but both sender and receiver must be used only once
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
-        dependents: mpsc::UnboundedSender<PeerId>,
+        dependers_tx: mpsc::UnboundedSender<PeerId>,
         verified: Arc<OnceTake<oneshot::Sender<Point>>>,
     },
     Ready(future::Ready<DagPoint>),
@@ -253,7 +253,7 @@ impl DagPointFuture {
     ) -> Self {
         let downloader = downloader.clone();
         let state = state.clone();
-        let (dependents_tx, dependents_rx) = mpsc::unbounded_channel();
+        let (dependers_tx, dependents_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let (certified_tx, certified_rx) = oneshot::channel();
         let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
@@ -369,15 +369,15 @@ impl DagPointFuture {
         DagPointFuture(DagPointFutureType::Load {
             task: Shared::new(JoinTask::new(task.instrument(span))),
             certified: once_certified_tx,
-            dependents: dependents_tx,
+            dependers_tx,
             verified: Arc::new(OnceTake::new(broadcast_tx)),
         })
     }
 
-    pub fn add_depender(&self, dependent: &PeerId) {
-        if let DagPointFutureType::Load { dependents, .. } = &self.0 {
+    pub fn add_depender(&self, depender: &PeerId) {
+        if let DagPointFutureType::Load { dependers_tx, .. } = &self.0 {
             // receiver is dropped upon completion
-            _ = dependents.send(*dependent);
+            _ = dependers_tx.send(*depender);
         }
     }
 

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::iter;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -17,6 +18,7 @@ use tycho_util::FastHashMap;
 
 use crate::dag::{Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
+use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
@@ -37,6 +39,34 @@ struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
     limiter: Mutex<Limiter>,
+    consensus_round: RoundWatcher<Consensus>,
+}
+
+trait DownloadType: Send + 'static {
+    fn next_peers(attempt: u8, available_peers: usize) -> usize;
+}
+
+/// Exponential increase of peers to query
+struct ExponentialQuery;
+impl DownloadType for ExponentialQuery {
+    fn next_peers(attempt: u8, available_peers: usize) -> usize {
+        // result increases exponentially
+        (MempoolConfig::DOWNLOAD_PEERS as usize)
+            .saturating_mul((MempoolConfig::DOWNLOAD_PEERS as usize).saturating_pow(attempt as u32))
+            .min(available_peers)
+    }
+}
+
+/// Linear increase of peers to query
+struct LinearQuery;
+impl DownloadType for LinearQuery {
+    fn next_peers(attempt: u8, available_peers: usize) -> usize {
+        (MempoolConfig::DOWNLOAD_PEERS as usize)
+            .saturating_add(
+                (MempoolConfig::DOWNLOAD_PEERS as usize).saturating_mul(attempt as usize),
+            )
+            .min(available_peers)
+    }
 }
 
 #[derive(Default)]
@@ -102,12 +132,17 @@ struct PeerStatus {
 }
 
 impl Downloader {
-    pub fn new(dispatcher: &Dispatcher, peer_schedule: &PeerSchedule) -> Self {
+    pub fn new(
+        dispatcher: &Dispatcher,
+        peer_schedule: &PeerSchedule,
+        consensus_round: RoundWatcher<Consensus>,
+    ) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
                 limiter: Default::default(),
+                consensus_round,
             }),
         }
     }
@@ -115,7 +150,7 @@ impl Downloader {
     pub async fn run(
         &self,
         point_id: &PointId,
-        dependers: mpsc::UnboundedReceiver<PeerId>,
+        dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
     ) -> DownloadResult {
@@ -129,9 +164,20 @@ impl Downloader {
                 Err(err) => panic!("downloader limiter: {err}"),
             }
         }
-        let result = self
-            .run_task(point_id, dependers, verified_broadcast, effects)
-            .await;
+
+        let consensus_round = self.inner.consensus_round.get().0;
+        let result = if point_id.round.0
+            >= consensus_round.saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
+        {
+            // for validation
+            self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, effects)
+                .await
+        } else {
+            // for sync
+            self.run_task::<LinearQuery>(point_id, dependers_rx, verified_broadcast, effects)
+                .await
+        };
+
         {
             let mut limiter = self.inner.limiter.lock();
             limiter.exit();
@@ -139,10 +185,10 @@ impl Downloader {
         result
     }
 
-    async fn run_task(
+    async fn run_task<T: DownloadType>(
         &self,
         point_id: &PointId,
-        dependers: mpsc::UnboundedReceiver<PeerId>,
+        dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
     ) -> DownloadResult {
@@ -179,12 +225,12 @@ impl Downloader {
 
         let mut task = DownloadTask {
             parent: self.clone(),
+            _phantom: PhantomData,
             request: Dispatcher::point_by_id_request(point_id),
             point_id: point_id.clone(),
             peer_count,
             reliably_not_found: 0, // this node is +1 to 2F
             unreliable_peers: 0,   // should not reach 1F+1
-            dependers,
             updates,
             undone_peers,
             downloading: FuturesUnordered::new(),
@@ -192,18 +238,19 @@ impl Downloader {
             interval: tokio::time::interval(MempoolConfig::DOWNLOAD_INTERVAL),
         };
         let downloaded = task
-            .run(verified_broadcast)
+            .run(dependers_rx, verified_broadcast)
             .instrument(effects.span().clone())
             .await;
 
-        DownloadContext::meter_task(&task);
+        DownloadContext::meter_task::<T>(&task);
 
         downloaded
     }
 }
 
-struct DownloadTask {
+struct DownloadTask<T> {
     parent: Downloader,
+    _phantom: PhantomData<T>,
 
     request: QueryKind,
     point_id: PointId,
@@ -212,8 +259,6 @@ struct DownloadTask {
     reliably_not_found: u8, // count only responses considered reliable
     unreliable_peers: u8,   // count only responses considered unreliable
 
-    /// populated by waiting validation tasks
-    dependers: mpsc::UnboundedReceiver<PeerId>,
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
@@ -224,11 +269,12 @@ struct DownloadTask {
     interval: Interval,
 }
 
-impl DownloadTask {
+impl<T: DownloadType> DownloadTask<T> {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
     pub async fn run(
         &mut self,
+        mut dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         mut verified_broadcast: oneshot::Receiver<Point>,
     ) -> DownloadResult {
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
@@ -239,7 +285,7 @@ impl DownloadTask {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 Ok(point) = &mut verified_broadcast => break DownloadResult::Verified(point),
-                Some(depender) = self.dependers.recv() => self.add_depender(&depender),
+                Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update),
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
@@ -259,20 +305,12 @@ impl DownloadTask {
     }
 
     fn add_depender(&mut self, peer_id: &PeerId) {
-        let is_suitable = match self.undone_peers.get_mut(peer_id) {
+        match self.undone_peers.get_mut(peer_id) {
             Some(status) if !status.is_depender => {
                 status.is_depender = true;
-                !status.is_in_flight
-                    && status.state == PeerState::Resolved
-                    // do not re-download immediately if already requested
-                    && status.failed_queries == 0
             }
-            _ => false, // either already marked or requested and removed, no panic
+            _ => {} // either already marked or requested and removed, no panic
         };
-        if is_suitable {
-            // request immediately just once
-            self.download_one(peer_id);
-        }
     }
 
     fn download_random(&mut self) {
@@ -296,13 +334,9 @@ impl DownloadTask {
             .collect::<Vec<_>>();
         filtered.sort_unstable_by(|(_, ord_l), (_, ord_r)| ord_l.cmp(ord_r));
 
-        let count = (MempoolConfig::DOWNLOAD_PEERS as usize)
-            .saturating_mul(
-                (MempoolConfig::DOWNLOAD_PEERS as usize).saturating_pow(self.attempt as u32),
-            )
-            .min(filtered.len());
+        let count = T::next_peers(self.attempt, filtered.len());
 
-        for (peer_id, _) in filtered.iter().take(count) {
+        for (peer_id, _) in &filtered[..count] {
             self.download_one(peer_id);
         }
 
@@ -444,18 +478,9 @@ impl DownloadTask {
     fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
         match result {
             Ok((peer_id, new)) => {
-                let mut is_suitable = false;
                 self.undone_peers.entry(peer_id).and_modify(|status| {
-                    is_suitable = !status.is_in_flight
-                        && status.is_depender
-                        && status.failed_queries == 0
-                        && status.state == PeerState::Unknown
-                        && new == PeerState::Resolved;
                     status.state = new;
                 });
-                if is_suitable {
-                    self.download_one(&peer_id);
-                }
             }
             Err(err @ RecvError::Lagged(_)) => {
                 tracing::error!(error = display(err), "peer updates");
@@ -467,7 +492,7 @@ impl DownloadTask {
     }
 }
 impl DownloadContext {
-    fn meter_task(task: &DownloadTask) {
+    fn meter_task<T>(task: &DownloadTask<T>) {
         metrics::counter!("tycho_mempool_download_not_found_responses")
             .increment(task.reliably_not_found as _);
         metrics::counter!("tycho_mempool_download_aborted_on_exit_count")

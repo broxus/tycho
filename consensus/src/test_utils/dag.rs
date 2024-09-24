@@ -14,6 +14,7 @@ use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, Dag, DagRound, Verifier};
 use crate::effects::{ChainedRoundsContext, Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
@@ -26,6 +27,7 @@ pub fn make_dag<const PEER_COUNT: usize>(
     peers: &[(PeerId, KeyPair); PEER_COUNT],
     genesis: &Point,
     store: &MempoolStore,
+    consensus_round: &RoundWatch<Consensus>,
 ) -> (Dag, PeerSchedule, Downloader) {
     let network = Network::builder()
         .with_random_private_key()
@@ -40,7 +42,7 @@ pub fn make_dag<const PEER_COUNT: usize>(
 
     let peer_schedule = PeerSchedule::new(Arc::new(peers[0].1), private_overlay);
 
-    let stub_downloader = Downloader::new(&dispatcher, &peer_schedule);
+    let stub_downloader = Downloader::new(&dispatcher, &peer_schedule, consensus_round.receiver());
 
     {
         let mut guard = peer_schedule.write();
