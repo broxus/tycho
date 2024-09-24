@@ -13,14 +13,6 @@ impl<T> OnceTake<T> {
             has_value: AtomicBool::new(true),
         }
     }
-
-    pub fn empty() -> Self {
-        Self {
-            value: MaybeUninit::uninit(),
-            has_value: AtomicBool::new(false),
-        }
-    }
-
     pub fn take(&self) -> Option<T> {
         if self.has_value.swap(false, Ordering::Relaxed) {
             // SAFETY: `self.value` is initialized and contains a valid `T`.

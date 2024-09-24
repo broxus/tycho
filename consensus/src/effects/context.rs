@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::Span;
 
 use crate::effects::AltFormat;
-use crate::models::{Digest, Point, PointId, Round};
+use crate::models::{Digest, PointId, PointInfo, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
 pub trait EffectsContext {}
@@ -123,7 +123,7 @@ pub struct ValidateContext {
 }
 impl EffectsContext for ValidateContext {}
 impl Effects<ValidateContext> {
-    pub fn new<CTX>(parent: &Effects<CTX>, point: &Point) -> Self
+    pub fn new<CTX>(parent: &Effects<CTX>, info: &PointInfo) -> Self
     where
         CTX: EffectsContext,
         for<'a> &'a CTX: Into<ValidateContext>,
@@ -131,9 +131,9 @@ impl Effects<ValidateContext> {
         parent.new_child(parent.ctx().into(), || {
             tracing::error_span!(
                 "validate",
-                author = display(point.data().author.alt()),
-                round = point.round().0,
-                digest = display(point.digest().alt()),
+                author = display(info.data().author.alt()),
+                round = info.round().0,
+                digest = display(info.digest().alt()),
             )
         })
     }

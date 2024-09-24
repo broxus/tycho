@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tycho_network::PeerId;
+use tycho_storage::point_status::PointStatus;
 
 use crate::models::point::{Digest, PointId};
 use crate::models::{PointInfo, Round};
@@ -67,6 +68,14 @@ impl DagPoint {
         }
     }
 
+    fn well_formed(&self) -> Option<&PointInfo> {
+        match self {
+            Self::Trusted(valid) | Self::Suspicious(valid) => Some(&valid.info),
+            Self::Invalid(info) => Some(info),
+            _ => None,
+        }
+    }
+
     pub fn author(&self) -> PeerId {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.data().author,
@@ -88,6 +97,15 @@ impl DagPoint {
             Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.digest(),
             Self::Invalid(info) => info.digest(),
             Self::IllFormed(id) | Self::NotFound(id) => &id.digest,
+        }
+    }
+
+    pub fn basic_status(&self) -> PointStatus {
+        PointStatus {
+            is_ill_formed: self.well_formed().is_none(),
+            is_valid: self.valid().is_some(),
+            is_trusted: self.trusted().is_some(),
+            ..Default::default()
         }
     }
 }
