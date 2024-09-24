@@ -8,7 +8,7 @@ use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
 use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
-use tycho_storage::Storage;
+use tycho_storage::{ArchiveId, Storage};
 
 use crate::error::ServerResult;
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
@@ -243,8 +243,10 @@ impl proto::ControlServer for ControlServer {
     ) -> ServerResult<proto::ArchiveInfoResponse> {
         let blocks = self.inner.storage.block_storage();
 
-        let Some(id) = blocks.get_archive_id(req.mc_seqno) else {
-            return Ok(proto::ArchiveInfoResponse::NotFound);
+        let id = match blocks.get_archive_id(req.mc_seqno) {
+            ArchiveId::Found(id) => id,
+            ArchiveId::TooNew => return Ok(proto::ArchiveInfoResponse::TooNew),
+            ArchiveId::NotFound => return Ok(proto::ArchiveInfoResponse::NotFound),
         };
 
         let Some(size) = blocks.get_archive_size(id)? else {

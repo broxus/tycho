@@ -8,7 +8,7 @@ use everscale_types::models::BlockId;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
+use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
@@ -483,20 +483,24 @@ impl<B> Inner<B> {
         match node_state.load_last_mc_block_id() {
             Some(last_applied_mc_block) => {
                 if mc_seqno > last_applied_mc_block.seqno {
-                    return overlay::Response::Ok(ArchiveInfo::NotFound);
+                    return overlay::Response::Ok(ArchiveInfo::TooNew);
                 }
 
                 let block_storage = self.storage().block_storage();
 
                 let id = block_storage.get_archive_id(mc_seqno);
-                let size_res = id.map_or(Ok(None), |id| block_storage.get_archive_size(id));
+                let size_res = match id {
+                    ArchiveId::Found(id) => block_storage.get_archive_size(id),
+                    ArchiveId::TooNew | ArchiveId::NotFound => Ok(None),
+                };
 
                 overlay::Response::Ok(match (id, size_res) {
-                    (Some(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
+                    (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
                         id: id as u64,
                         size: NonZeroU64::new(size as _).unwrap(),
                         chunk_size: block_storage.archive_chunk_size(),
                     },
+                    (ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
                     _ => ArchiveInfo::NotFound,
                 })
             }

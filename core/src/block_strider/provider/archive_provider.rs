@@ -12,8 +12,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_block_util::block::BlockIdRelation;
-use tycho_storage::{NewBlockMeta, Storage};
-use tycho_util::time::now_sec;
+use tycho_storage::Storage;
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive};
@@ -89,7 +88,7 @@ impl ArchiveBlockProvider {
             }
 
             match self.get_next_archive(next_block_seqno).await {
-                Ok(archive) => {
+                Ok(Some(archive)) => {
                     // Duplicate the last known archive
                     if let Some(last) = this.last_known_archive.load_full() {
                         this.prev_known_archive.store(Some(last));
@@ -97,6 +96,10 @@ impl ArchiveBlockProvider {
 
                     // Update the last known archive
                     this.last_known_archive.store(Some(Arc::new(archive)));
+                }
+                Ok(None) => {
+                    tracing::info!("archive block provider finished");
+                    return None;
                 }
                 Err(e) => return Some(Err(e)),
             }
@@ -112,11 +115,6 @@ impl ArchiveBlockProvider {
             .check_proof(&block, &proof, &diff, true)
             .await
         {
-            // Stop using archives if the block is recent enough
-            Ok(meta) if is_block_recent(&meta) => {
-                tracing::info!(%block_id, "archive block provider finished");
-                None
-            }
             Ok(_) => Some(Ok(block.clone())),
             Err(e) => Some(Err(e)),
         }
@@ -159,13 +157,16 @@ impl ArchiveBlockProvider {
         Some(Ok(block.clone()))
     }
 
-    async fn get_next_archive(&self, next_block_seqno: u32) -> Result<Archive> {
+    async fn get_next_archive(&self, next_block_seqno: u32) -> Result<Option<Archive>> {
         let mut guard = self.inner.next_archive.lock().await;
 
         loop {
             match &mut *guard {
                 Some(next) => {
-                    let archive_data = next.wait_for_archive().await?;
+                    let archive_data = match next.wait_for_archive().await? {
+                        Some(archive_data) => archive_data,
+                        None => return Ok(None),
+                    };
 
                     // Reset the guard
                     //
@@ -192,7 +193,7 @@ impl ArchiveBlockProvider {
                         *guard = Some(self.make_next_archive_task(*seqno + 1));
                     }
 
-                    return Ok(archive);
+                    return Ok(Some(archive));
                 }
                 None => *guard = Some(self.make_next_archive_task(next_block_seqno)),
             }
@@ -220,7 +221,7 @@ impl ArchiveBlockProvider {
                         break;
                     }
                     Err(e) => {
-                        tracing::error!(seqno, "failed to preload archive {e:?}");
+                        tracing::error!(seqno, "failed to preload archive {e}");
                         tokio::time::sleep(INTERVAL).await;
                     }
                 }
@@ -232,10 +233,6 @@ impl ArchiveBlockProvider {
             abort_handle: handle.abort_handle(),
         }
     }
-}
-
-fn is_block_recent(meta: &NewBlockMeta) -> bool {
-    meta.gen_utime + 600 > now_sec()
 }
 
 struct Inner {
@@ -286,17 +283,22 @@ struct ArchiveDownloader {
 }
 
 impl ArchiveDownloader {
-    async fn try_download(&self, seqno: u32) -> Result<ArchiveData> {
-        let pending = self.client.find_archive(seqno).await?;
+    async fn try_download(&self, seqno: u32) -> Result<Option<ArchiveData>> {
+        let Some(pending) = self.client.find_archive(seqno).await? else {
+            return Ok(None);
+        };
+
         let archive_id = pending.id;
 
         let writer = self.get_archive_writer(&pending)?;
         let writer = self.client.download_archive(pending, writer).await?;
 
-        Ok(match writer {
+        let archive_data = match writer {
             ArchiveWriter::File(_) => ArchiveData::File { id: archive_id },
             ArchiveWriter::Bytes(data) => ArchiveData::Bytes(data.into_inner().freeze()),
-        })
+        };
+
+        Ok(Some(archive_data))
     }
 
     fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
@@ -313,12 +315,14 @@ impl ArchiveDownloader {
 }
 
 struct NextArchive {
-    rx: Option<oneshot::Receiver<ArchiveData>>,
+    rx: Option<oneshot::Receiver<Option<ArchiveData>>>,
     abort_handle: AbortHandle,
 }
 
 impl NextArchive {
-    pub async fn wait_for_archive(&mut self) -> Result<ArchiveData, oneshot::error::RecvError> {
+    pub async fn wait_for_archive(
+        &mut self,
+    ) -> Result<Option<ArchiveData>, oneshot::error::RecvError> {
         let result = self.rx.as_mut().expect("should not wait twice").await;
         self.rx = None;
         result

@@ -385,7 +385,7 @@ impl BlockchainRpcClient {
         )))
     }
 
-    pub async fn find_archive(&self, mc_seqno: u32) -> std::result::Result<PendingArchive, Error> {
+    pub async fn find_archive(&self, mc_seqno: u32) -> Result<Option<PendingArchive>, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
         let neighbours = self
             .overlay_client()
@@ -396,6 +396,12 @@ impl BlockchainRpcClient {
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {
             let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+
+            // Real neighbours count
+            let neighbour_count = neighbours.len();
+
+            // Number of ArchiveInfo::TooNew responses
+            let mut new_archive_count = 0usize;
 
             let mut futures = FuturesUnordered::new();
             for neighbour in neighbours {
@@ -425,11 +431,23 @@ impl BlockchainRpcClient {
                             neighbour: handle.accept(),
                         }
                     }
+                    ArchiveInfo::TooNew => {
+                        new_archive_count += 1;
+
+                        handle.accept();
+                        continue;
+                    }
                     ArchiveInfo::NotFound => {
                         handle.accept();
                         continue;
                     }
                 }
+            }
+
+            // Stop using archives when enough neighbors
+            // have responded ArchiveInfo::TooNew
+            if new_archive_count >= neighbour_count {
+                return Ok(None);
             }
 
             return match err {
@@ -448,7 +466,7 @@ impl BlockchainRpcClient {
             "found archive",
         );
 
-        Ok(pending_archive)
+        Ok(Some(pending_archive))
     }
 
     #[tracing::instrument(skip_all, fields(

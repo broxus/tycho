@@ -72,6 +72,8 @@ pub enum ArchiveInfo {
         size: NonZeroU64,
         chunk_size: NonZeroU32,
     },
+    #[tl(id = "blockchain.archiveInfo.tooNew")]
+    TooNew,
     #[tl(id = "blockchain.archiveInfo.notFound")]
     NotFound,
 }
