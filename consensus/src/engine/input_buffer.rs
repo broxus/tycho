@@ -147,8 +147,8 @@ impl InputBufferData {
         let len = self.data.len();
 
         // because reallocation on adding elements doubles the capacity
-        if self.data.capacity() >= len * 4 {
-            self.data.shrink_to(len / 2);
+        if self.data.capacity() >= len.saturating_mul(4) {
+            self.data.shrink_to(len.saturating_mul(2));
         }
     }
 }

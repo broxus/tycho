@@ -1,16 +1,15 @@
 use std::collections::{btree_map, hash_map, BTreeMap};
 
-use everscale_types::cell::HashBytes;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::mempool::MempoolAnchorId;
 
 pub struct Deduplicator {
     // must keep latest round for every hash, until threshold passes
-    hash_max_round: FastHashMap<HashBytes, u32>,
+    hash_max_round: FastHashMap<[u8; 32], u32>,
     // must remove outdated (threshold elapsed) from the low end of an ordered map,
     // and also remove hashes from the other map
-    round_to_hashes: BTreeMap<u32, FastHashSet<HashBytes>>,
+    round_to_hashes: BTreeMap<u32, FastHashSet<[u8; 32]>>,
     // inclusive amount of rounds to keep; every insert of a hash resets its threshold to 0
     round_threshold: MempoolAnchorId,
 }
@@ -24,7 +23,7 @@ impl Deduplicator {
         }
     }
 
-    pub fn check_unique(&mut self, anchor_round: MempoolAnchorId, hash: &HashBytes) -> bool {
+    pub fn check_unique(&mut self, anchor_round: MempoolAnchorId, hash: &[u8; 32]) -> bool {
         if self
             .round_to_hashes
             .entry(anchor_round)
@@ -96,32 +95,33 @@ mod tests {
 
     #[test]
     pub fn dedup_externals_test() {
-        let mut cache = ExternalMessageCache::new(100);
+        let mut cache = Deduplicator::new(100);
         let start_round = 0;
+        let first = [u8::MIN; 32];
+        let second = [u8::MAX; 32];
         assert!(
-            cache.check_unique(start_round, &HashBytes::ZERO),
+            cache.check_unique(start_round, &first),
             "first insert must be unique"
         );
-        let other = HashBytes::from_slice(&[u8::MAX; 32]);
         assert!(
-            cache.check_unique(start_round, &other),
+            cache.check_unique(start_round, &second),
             "first insert must be unique"
         );
         for round_id in start_round..=301 {
             if round_id < 150 {
                 assert!(
-                    !cache.check_unique(round_id, &HashBytes::ZERO),
+                    !cache.check_unique(round_id, &first),
                     "duplicate insert must not be unique"
                 );
             }
 
             assert!(
-                !cache.check_unique(round_id, &other),
+                !cache.check_unique(round_id, &second),
                 "duplicate insert must not be unique"
             );
 
             assert!(
-                !cache.check_unique(round_id, &HashBytes::ZERO),
+                !cache.check_unique(round_id, &first),
                 "duplicate insert must not be unique"
             );
 

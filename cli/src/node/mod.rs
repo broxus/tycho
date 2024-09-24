@@ -437,7 +437,6 @@ impl Node {
             &self.peer_resolver,
             &self.overlay_service,
             get_validator_peer_ids(&mc_state)?,
-            last_block_id.seqno == 0,
             mempool_start_round,
         );
 
