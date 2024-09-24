@@ -7,12 +7,10 @@ use weedb::rocksdb;
 
 pub use self::config::*;
 pub use self::db::*;
-pub use self::models::*;
 pub use self::store::*;
 
 mod config;
 mod db;
-mod models;
 mod store;
 
 mod util {

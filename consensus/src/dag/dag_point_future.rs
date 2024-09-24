@@ -8,7 +8,7 @@ use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
 use tycho_network::PeerId;
-use tycho_storage::PointStatus;
+use tycho_storage::point_status::PointStatus;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::sync::OnceTake;
 

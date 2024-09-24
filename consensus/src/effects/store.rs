@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use ahash::HashMapExt;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use itertools::Itertools;
-use tycho_storage::{MempoolStorage, PointStatus};
+use tycho_storage::point_status::PointStatus;
+use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
@@ -23,23 +25,23 @@ pub struct MempoolAdapterStore {
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(&self, point: &Point, status: &PointStatus);
+    fn insert_point(&self, point: &Point, status: &PointStatus) -> Result<()>;
 
-    fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus);
+    fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) -> Result<()>;
 
-    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]);
+    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()>;
 
-    fn get_point(&self, round: Round, digest: &Digest) -> Option<Point>;
+    fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
 
-    fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo>;
+    fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>>;
 
-    fn get_status(&self, round: Round, digest: &Digest) -> Option<PointStatus>;
+    fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatus>>;
 
-    fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Bytes>;
+    fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>>;
 
-    fn latest_round(&self) -> Round;
+    fn latest_round(&self) -> Result<Round>;
 
-    fn load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointStatus)>;
+    fn load_rounds(&self, first: Round, last: Round) -> Result<Vec<(PointInfo, PointStatus)>>;
 }
 
 impl MempoolAdapterStore {
@@ -51,14 +53,35 @@ impl MempoolAdapterStore {
     }
 
     pub fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) {
-        self.inner.set_committed(anchor, history);
+        self.inner
+            .set_committed(anchor, history)
+            .with_context(|| {
+                format!(
+                    "anchor {:?} history points {} rounds [{}..{}]",
+                    anchor.id().alt(),
+                    history.first().map(|p| p.round().0).unwrap_or_default(),
+                    history.last().map(|p| p.round().0).unwrap_or_default(),
+                    history.len()
+                )
+            })
+            .expect("DB set committed");
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
         self.commit_finished.set_max(anchor.round());
     }
 
     pub fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Bytes> {
-        self.inner.expand_anchor_history(history)
+        self.inner
+            .expand_anchor_history(history)
+            .with_context(|| {
+                format!(
+                    "history points {} rounds [{}..{}]",
+                    history.first().map(|p| p.round().0).unwrap_or_default(),
+                    history.last().map(|p| p.round().0).unwrap_or_default(),
+                    history.len()
+                )
+            })
+            .expect("DB expand anchor history")
     }
 }
 
@@ -84,31 +107,49 @@ impl MempoolStore {
     }
 
     pub fn insert_point(&self, point: &Point, status: &PointStatus) {
-        self.0.insert_point(point, status);
+        self.0
+            .insert_point(point, status)
+            .with_context(|| format!("id {:?} {status:?}", point.id().alt()))
+            .expect("DB insert point full");
     }
 
     pub fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) {
-        self.0.set_status(round, digest, status);
+        self.0
+            .set_status(round, digest, status)
+            .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
+            .expect("DB set point status");
     }
 
     pub fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
-        self.0.get_point(round, digest)
+        self.0
+            .get_point(round, digest)
+            .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
+            .expect("DB get point full")
     }
 
     pub fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
-        self.0.get_info(round, digest)
+        self.0
+            .get_info(round, digest)
+            .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
+            .expect("DB get point info")
     }
 
     pub fn get_status(&self, round: Round, digest: &Digest) -> Option<PointStatus> {
-        self.0.get_status(round, digest)
+        self.0
+            .get_status(round, digest)
+            .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
+            .expect("DB get point status")
     }
 
     pub fn latest_round(&self) -> Round {
-        self.0.latest_round()
+        self.0.latest_round().expect("DB latest round")
     }
 
     pub fn load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointStatus)> {
-        self.0.load_rounds(first, last)
+        self.0
+            .load_rounds(first, last)
+            .with_context(|| format!("first {} last {}", first.0, last.0))
+            .expect("DB load rounds")
     }
 
     fn clean_task(
@@ -197,7 +238,7 @@ impl MempoolStore {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_time");
         let zero = [0_u8; MempoolStorage::KEY_LEN];
         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
-        fill_prefix(least_to_keep, &mut up_to_exclusive);
+        MempoolStorage::fill_prefix(least_to_keep.0, &mut up_to_exclusive);
 
         let db = inner.db.rocksdb();
         let points_cf = inner.db.points.cf();
@@ -214,50 +255,30 @@ impl MempoolStore {
         batch.delete_range_cf(&info_cf, zero.as_slice(), up_to_exclusive.as_slice());
         batch.delete_range_cf(&points_cf, zero.as_slice(), up_to_exclusive.as_slice());
 
-        db.write(batch).expect("batch delete range of mempool data");
+        match db.write(batch) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("delete range of mempool data failed: {e}");
+                return;
+            }
+        }
 
-        let none = Option::<[u8; MempoolStorage::KEY_LEN]>::None;
+        let none = None::<[u8; MempoolStorage::KEY_LEN]>;
         db.compact_range_cf(&status_cf, none, Some(up_to_exclusive.as_slice()));
         db.compact_range_cf(&info_cf, none, Some(up_to_exclusive.as_slice()));
         db.compact_range_cf(&points_cf, none, Some(up_to_exclusive.as_slice()));
     }
 }
 
-fn format_key(bytes: &[u8]) -> String {
-    if bytes.len() >= 4 {
-        let mut round_bytes = [0_u8; 4];
-        round_bytes.copy_from_slice(&bytes[..4]);
-        let round = u32::from_be_bytes(round_bytes);
-        let digest = bytes
-            .iter()
-            .skip(4)
-            .take(MempoolStorage::KEY_LEN - 4)
-            .map(|b| format!("{b:02x?}"))
-            .join("");
-        format!("round {round} digest {digest} total bytes: {}", bytes.len())
-    } else {
-        let smth = bytes.iter().map(|b| format!("{b:02x?}")).join("");
-        format!("unknown short bytes {smth}")
-    }
-}
-
-fn fill_key(round: Round, digest: &Digest, key: &mut [u8; MempoolStorage::KEY_LEN]) {
-    fill_prefix(round, key);
-    key[4..].copy_from_slice(&digest.inner()[..]);
-}
-fn fill_prefix(round: Round, key: &mut [u8; MempoolStorage::KEY_LEN]) {
-    key[..4].copy_from_slice(&round.0.to_be_bytes()[..]);
-}
-
 impl MempoolStoreImpl for MempoolStorage {
-    fn insert_point(&self, point: &Point, status: &PointStatus) {
+    fn insert_point(&self, point: &Point, status: &PointStatus) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        fill_key(point.round(), point.digest(), &mut key);
+        MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
 
         let info = bincode::serialize(&PointInfo::serializable_from(point))
-            .expect("serialize db point info equivalent from point");
-        let point = bincode::serialize(point).expect("serialize db point");
+            .context("serialize db point info equivalent from point")?;
+        let point = bincode::serialize(point)?;
 
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
@@ -272,23 +293,21 @@ impl MempoolStoreImpl for MempoolStorage {
         batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
         batch.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
 
-        db.write(batch)
-            .expect("db batch insert point, info, status");
+        Ok(db.write(batch)?)
     }
 
-    fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) {
+    fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_status_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        fill_key(round, digest, &mut key);
+        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
 
         let db = self.db.rocksdb();
         let status_cf = self.db.points_status.cf();
 
-        let result = db.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
-        result.expect("db merge point status");
+        Ok(db.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice())?)
     }
 
-    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) {
+    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_committed_status_time");
 
         let mut buf = [0_u8; MempoolStorage::KEY_LEN];
@@ -304,57 +323,64 @@ impl MempoolStoreImpl for MempoolStorage {
         .encode();
 
         for info in history {
-            fill_key(info.round(), info.digest(), &mut buf);
+            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
             batch.merge_cf(&status_cf, buf.as_slice(), status_encoded.as_slice());
         }
 
-        db.write(batch).expect("db write batch of committed status");
+        Ok(db.write(batch)?)
     }
 
-    fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
+    fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>> {
         metrics::counter!("tycho_mempool_store_get_point_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        fill_key(round, digest, &mut key);
+        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
 
-        let table = &self.db.points;
-        let found = table.get(key.as_slice()).expect("db get point");
-
-        found.map(|a| bincode::deserialize(&a).expect("deserialize db point"))
+        let points = &self.db.points;
+        points
+            .get(key.as_slice())
+            .context("db get")?
+            .map(|a| bincode::deserialize(&a).context("deserialize db point"))
+            .transpose()
     }
 
-    fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
+    fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>> {
         metrics::counter!("tycho_mempool_store_get_info_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_info_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        fill_key(round, digest, &mut key);
+        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
 
         let table = &self.db.points_info;
-        let found = table.get(key.as_slice()).expect("db get point info");
-
-        found.map(|a| bincode::deserialize(&a).expect("deserialize db point info"))
+        table
+            .get(key.as_slice())
+            .context("db get")?
+            .map(|a| bincode::deserialize(&a).context("deserialize point info"))
+            .transpose()
     }
 
-    fn get_status(&self, round: Round, digest: &Digest) -> Option<PointStatus> {
+    fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatus>> {
         metrics::counter!("tycho_mempool_store_get_status_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_status_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        fill_key(round, digest, &mut key);
+        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
 
         let table = &self.db.points_status;
-
-        let found = table.get(key.as_slice()).expect("db get point status");
-        found.as_deref().map(PointStatus::decode)
+        table
+            .get(key.as_slice())
+            .context("db get point status")?
+            .as_deref()
+            .map(PointStatus::decode)
+            .transpose()
     }
 
-    fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Bytes> {
+    fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>> {
         let _call_duration =
             HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
         let mut buf = [0_u8; MempoolStorage::KEY_LEN];
         let mut keys = history
             .iter()
             .map(|info| {
-                fill_key(info.round(), info.digest(), &mut buf);
+                MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
                 buf.to_vec().into_boxed_slice()
             })
             .collect::<FastHashSet<_>>();
@@ -362,12 +388,14 @@ impl MempoolStoreImpl for MempoolStorage {
 
         let mut opt = ReadOptions::default();
 
-        let first = history.first().expect("anchor history must not be empty");
-        fill_prefix(first.round(), &mut buf);
+        let first = history
+            .first()
+            .context("anchor history must not be empty")?;
+        MempoolStorage::fill_prefix(first.round().0, &mut buf);
         opt.set_iterate_lower_bound(buf);
 
-        let last = history.last().expect("anchor history must not be empty");
-        fill_prefix(last.round().next(), &mut buf);
+        let last = history.last().context("anchor history must not be empty")?;
+        MempoolStorage::fill_prefix(last.round().next().0, &mut buf);
         opt.set_iterate_upper_bound(buf);
 
         let db = self.db.rocksdb();
@@ -379,10 +407,10 @@ impl MempoolStoreImpl for MempoolStorage {
 
         let mut total_payload_items = 0;
         while iter.valid() {
-            let key = iter.key().expect("history iter invalidated on key");
+            let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
-                let bytes = iter.value().expect("history iter invalidated on value");
-                let point = bincode::deserialize::<Point>(bytes).expect("deserialize point");
+                let bytes = iter.value().context("history iter invalidated on value")?;
+                let point = bincode::deserialize::<Point>(bytes).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
                 if let Some(prev_duplicate) = found.insert(key.to_vec().into_boxed_slice(), point) {
@@ -394,29 +422,32 @@ impl MempoolStoreImpl for MempoolStorage {
             }
             iter.next();
         }
-        iter.status().expect("anchor history iter is not ok");
+        iter.status().context("anchor history iter is not ok")?;
         drop(iter);
 
-        assert!(
+        anyhow::ensure!(
             keys.is_empty(),
             "some history points were not found id db:\n {}",
-            keys.iter().map(|key| format_key(key)).join(",\n")
+            keys.iter()
+                .map(|key| MempoolStorage::format_key(key))
+                .join(",\n")
         );
-        assert_eq!(found.len(), history.len(), "stored point key collision");
+        anyhow::ensure!(found.len() == history.len(), "stored point key collision");
 
         let mut result = Vec::with_capacity(total_payload_items);
         for info in history {
-            fill_key(info.round(), info.digest(), &mut buf);
+            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
             let point = found
                 .remove(buf.as_slice())
-                .expect("key was searched in db but was not found");
+                .with_context(|| MempoolStorage::format_key(&buf))
+                .context("key was searched in db but was not found")?;
             result.extend_from_slice(point.payload());
         }
 
-        result
+        Ok(result)
     }
 
-    fn latest_round(&self) -> Round {
+    fn latest_round(&self) -> Result<Round> {
         let db = self.db.rocksdb();
         let status_cf = self.db.points_status.cf();
 
@@ -425,19 +456,24 @@ impl MempoolStoreImpl for MempoolStorage {
 
         let last_key = iter
             .key()
-            .expect("db is empty, at least last genesis must be supplied");
-        let mut round = [0_u8; 4];
-        round.copy_from_slice(&last_key[..4]);
+            .context("db is empty, at least last genesis must be supplied")?;
+        iter.status().context("iter is not ok")?;
 
-        Round(u32::from_be_bytes(round))
+        let mut bytes = [0_u8; 4];
+        bytes.copy_from_slice(&last_key[..4]);
+
+        let round = u32::from_be_bytes(bytes);
+        anyhow::ensure!(round > 0, "key with zero round");
+
+        Ok(Round(round))
     }
 
-    fn load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointStatus)> {
+    fn load_rounds(&self, first: Round, last: Round) -> Result<Vec<(PointInfo, PointStatus)>> {
         fn opts(first: Round, last: Round, buf: &mut [u8; MempoolStorage::KEY_LEN]) -> ReadOptions {
             let mut opt = ReadOptions::default();
-            fill_prefix(first, buf);
+            MempoolStorage::fill_prefix(first.0, buf);
             opt.set_iterate_lower_bound(&buf[..]);
-            fill_prefix(last.next(), buf);
+            MempoolStorage::fill_prefix(last.next().0, buf);
             opt.set_iterate_upper_bound(&buf[..]);
             opt
         }
@@ -458,12 +494,11 @@ impl MempoolStoreImpl for MempoolStorage {
             };
             statuses.insert(
                 Vec::from(key).into_boxed_slice(),
-                PointStatus::decode(bytes),
+                PointStatus::decode(bytes).with_context(|| MempoolStorage::format_key(key))?,
             );
             iter.next();
         }
-        iter.status()
-            .expect("load rounds: point status iter is not ok");
+        iter.status().context("point status iter is not ok")?;
         drop(iter);
 
         let opt = opts(first, last, &mut buf);
@@ -475,58 +510,65 @@ impl MempoolStoreImpl for MempoolStorage {
             let Some((key, info)) = iter.item() else {
                 break;
             };
-            let info = bincode::deserialize::<PointInfo>(info).expect("db deserialize point info");
+            let info =
+                bincode::deserialize::<PointInfo>(info).context("db deserialize point info")?;
             if let Some(status) = statuses.remove(key) {
                 result.push((info, status));
             } else {
-                panic!("point stored without status: {:?}", info.id().alt())
+                anyhow::bail!("point stored without status: {:?}", info.id().alt())
             }
             iter.next();
         }
+        iter.status().context("point info iter is not ok")?;
+        drop(iter);
 
-        iter.status()
-            .expect("load rounds: point info iter is not ok");
         if !statuses.is_empty() {
             let keys = statuses
                 .keys()
-                .map(|key| format_key(key))
+                .map(|key| MempoolStorage::format_key(key))
                 .collect::<Vec<_>>();
-            panic!("point info stored without point status: {keys:?}");
+            anyhow::bail!("point info stored without point status: {keys:?}");
         }
 
-        result
+        Ok(result)
     }
 }
 
 #[cfg(feature = "test")]
 impl MempoolStoreImpl for () {
-    fn insert_point(&self, _: &Point, _: &PointStatus) {}
-
-    fn set_status(&self, _: Round, _: &Digest, _: &PointStatus) {}
-
-    fn set_committed(&self, _: &PointInfo, _: &[PointInfo]) {}
-
-    fn get_point(&self, _: Round, _: &Digest) -> Option<Point> {
-        panic!("should not be used in tests")
+    fn insert_point(&self, _: &Point, _: &PointStatus) -> Result<()> {
+        Ok(())
     }
 
-    fn get_info(&self, _: Round, _: &Digest) -> Option<PointInfo> {
-        panic!("should not be used in tests")
+    fn set_status(&self, _: Round, _: &Digest, _: &PointStatus) -> Result<()> {
+        Ok(())
     }
 
-    fn get_status(&self, _: Round, _: &Digest) -> Option<PointStatus> {
-        panic!("should not be used in tests")
+    fn set_committed(&self, _: &PointInfo, _: &[PointInfo]) -> Result<()> {
+        Ok(())
     }
 
-    fn expand_anchor_history(&self, _: &[PointInfo]) -> Vec<Bytes> {
-        panic!("should not be used in tests")
+    fn get_point(&self, _: Round, _: &Digest) -> Result<Option<Point>> {
+        anyhow::bail!("should not be used in tests")
     }
 
-    fn latest_round(&self) -> Round {
-        panic!("should not be used in tests")
+    fn get_info(&self, _: Round, _: &Digest) -> Result<Option<PointInfo>> {
+        anyhow::bail!("should not be used in tests")
     }
 
-    fn load_rounds(&self, _: Round, _: Round) -> Vec<(PointInfo, PointStatus)> {
-        panic!("should not be used in tests")
+    fn get_status(&self, _: Round, _: &Digest) -> Result<Option<PointStatus>> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn expand_anchor_history(&self, _: &[PointInfo]) -> Result<Vec<Bytes>> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn latest_round(&self) -> Result<Round> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn load_rounds(&self, _: Round, _: Round) -> Result<Vec<(PointInfo, PointStatus)>> {
+        anyhow::bail!("should not be used in tests")
     }
 }
