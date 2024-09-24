@@ -169,12 +169,6 @@ impl Engine {
             "wrong order of data from db on init"
         );
 
-        let bottom_round = MempoolConfig::genesis_round().max(Round(
-            last_round
-                .0
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as _),
-        ));
-
         let start_info = {
             let maybe_unfinished_round = last_round.prev();
             let local_id = {
@@ -199,8 +193,9 @@ impl Engine {
         };
 
         let start_round = start_info.as_ref().map_or(last_round, |info| info.round());
+        // top known block's anchor is not known yet, will shorten dag length later
         self.dag.init(DagRound::new_bottom(
-            bottom_round,
+            Consensus::history_bottom(last_round),
             &self.round_task.state.peer_schedule,
         ));
         self.dag.fill_to_top(

@@ -158,32 +158,13 @@ impl MempoolStore {
         mut committed_round: RoundWatcher<Commit>,
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
     ) {
-        fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
-            // enough to handle acceptable collator lag
-            let behind_consensus = (consensus.0)
-                // before silent mode
-                .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32)
-                // before top known block in silent mode
-                .saturating_sub(MempoolConfig::ACCEPTABLE_COLLATOR_LAG as u32)
-                // oldest data to collate as unique
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
-                .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32); // as unique
-
-            // oldest data to collate that is validatable and unique
-            let behind_committed = (committed.0)
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
-                .saturating_sub(
-                    (MempoolConfig::MAX_ANCHOR_DISTANCE as u32) // validatable by other peers
-                        .max(MempoolConfig::DEDUPLICATE_ROUNDS as u32), // unique
-                );
-            // oldest unique data to collate (including latest collated round)
-            let behind_collated = (top_known_anchor.0)
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
-                .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
+        fn least_to_keep(consensus: Round, committed: Round) -> Round {
             Round(
-                (MempoolConfig::genesis_round().0)
-                    .max(behind_consensus)
-                    .max(behind_committed.min(behind_collated))
+                // do not clean history that it can be requested by other peers
+                Consensus::history_bottom(consensus)
+                    // do not clean history until commit is finished (to reproduce after restart)
+                    .min(Commit::stored_history_bottom(committed))
+                    .0 // clean history no matter if top known anchor is far behind
                     .saturating_div(MempoolConfig::CLEAN_ROCKS_PERIOD as u32)
                     .saturating_mul(MempoolConfig::CLEAN_ROCKS_PERIOD as u32),
             )
@@ -192,8 +173,8 @@ impl MempoolStore {
         tokio::spawn(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
-            let mut top_known = top_known_anchor.get();
-            let mut prev_least_to_keep = least_to_keep(consensus, committed, top_known);
+            let mut top_known = top_known_anchor.get(); // for metrics only
+            let mut prev_least_to_keep = least_to_keep(consensus, committed);
             loop {
                 tokio::select! {
                     new_consensus = consensus_round.next() => {
@@ -205,14 +186,14 @@ impl MempoolStore {
                     new_top_known = top_known_anchor.next() => top_known = new_top_known,
                 }
 
-                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_collated")
+                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_top_known")
                     .set((consensus.0 as f64) - (top_known.0 as f64));
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
                     .set((consensus.0 as f64) - (committed.0 as f64));
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
                     .set((committed.0 as f64) - (top_known.0 as f64));
 
-                let new_least_to_keep = least_to_keep(consensus, committed, top_known);
+                let new_least_to_keep = least_to_keep(consensus, committed);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
                     .set((consensus.0 as f64) - (new_least_to_keep.0 as f64));
 

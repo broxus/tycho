@@ -1347,7 +1347,7 @@ def mempool_rounds() -> RowPanel:
             "Consensus: round determined by Broadcast Filter",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_consensus_ahead_collated",
+            "tycho_mempool_rounds_consensus_ahead_top_known",
             "Consensus ahead of top known block: silent mode trigger",
         ),
         create_gauge_panel(
