@@ -9,7 +9,7 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::{serde_helpers, FastHashMap};
 
@@ -232,6 +232,8 @@ pub struct McData {
     pub validator_info: ValidatorInfo,
 
     pub processed_upto: ProcessedUptoInfoStuff,
+
+    pub ref_mc_state_handle: RefMcStateHandle,
 }
 
 impl McData {
@@ -264,6 +266,8 @@ impl McData {
             validator_info: extra.validator_info,
 
             processed_upto: state.processed_upto.load()?.try_into()?,
+
+            ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
         }))
     }
 
