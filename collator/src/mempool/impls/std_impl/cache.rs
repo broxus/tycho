@@ -9,7 +9,7 @@ use crate::tracing_targets;
 
 #[derive(Default)]
 pub struct Cache {
-    anchors: RwLock<IndexMap<MempoolAnchorId, Arc<MempoolAnchor>>>,
+    anchors: RwLock<IndexMap<MempoolAnchorId, Arc<MempoolAnchor>, ahash::RandomState>>,
     anchor_added: Notify,
 }
 
