@@ -16,39 +16,69 @@ pub struct PointStatus {
     pub is_valid: bool,      // a point may be validated as invalid but certified afterward
     pub is_trusted: bool,    // locally decided as not equivocated (cannot change decision later)
     pub is_certified: bool,  // some points won't be marked because they are already validated
-    pub anchor_chain_role: AnchorChainRole,
+    pub anchor_chain_role: Option<AnchorChainRole>,
     pub committed_at_round: Option<u32>, // not committed are stored with impossible zero round
 }
 
-#[repr(u8)]
-enum FlagsMask {
-    IllFormed = 0b_1 << 7,
-    Validated = 0b_1 << 6,
-    Valid = 0b_1 << 5,
-    Trusted = 0b_1 << 4,
-    Certified = 0b_1 << 3,
-    AnchorChainRole = 0b_11,
-}
-
-#[derive(Copy, Clone, Debug, Default)]
-#[repr(u8)]
+#[derive(Copy, Clone, Debug)]
 pub enum AnchorChainRole {
-    #[default]
-    None = 0b_00, // not unique
-    Trigger = 0b_01, // acceptable to be non-unique in a round; has AnchorRole::ToSelf in Point
-    Anchor = 0b_10,  // unique per round as referenced by Proof; doesn't have AnchorRole in Point
-    Proof = 0b_11,   // unique per round as referenced by Trigger or later Anchor that has a Proof
+    Trigger, // not necessarily unique; contained in some point field
+    Anchor,  // unique; not contained in point
+    Proof,   // unique; contained in some point field
 }
 
-impl AnchorChainRole {
-    fn from_flags(value: u8) -> Result<Self> {
-        match FlagsMask::AnchorChainRole as u8 & value {
-            0b_00 => Ok(Self::None),
-            0b_01 => Ok(Self::Trigger),
-            0b_10 => Ok(Self::Anchor),
-            0b_11 => Ok(Self::Proof),
-            _ => anyhow::bail!("invalid AnchorChain role flag mask"),
+bitflags::bitflags! {
+    struct Flags : u8 {
+        const IllFormed = 0b_1 << 7;
+        const Validated = 0b_1 << 6;
+        const Valid = 0b_1 << 5;
+        const Trusted = 0b_1 << 4;
+        const Certified = 0b_1 << 3;
+        const AnchorChainRoleUnique = 0b_1 << 1;
+        const AnchorChainRoleInPoint = 0b_1 << 0;
+    }
+}
+
+impl From<Flags> for PointStatus {
+    fn from(flags: Flags) -> Self {
+        Self {
+            is_ill_formed: flags.contains(Flags::IllFormed),
+            is_validated: flags.contains(Flags::Validated),
+            is_valid: flags.contains(Flags::Valid),
+            is_trusted: flags.contains(Flags::Trusted),
+            is_certified: flags.contains(Flags::Certified),
+            anchor_chain_role: match (
+                flags.contains(Flags::AnchorChainRoleUnique),
+                flags.contains(Flags::AnchorChainRoleInPoint),
+            ) {
+                (false, false) => None,
+                (false, true) => Some(AnchorChainRole::Trigger),
+                (true, false) => Some(AnchorChainRole::Anchor),
+                (true, true) => Some(AnchorChainRole::Proof),
+            },
+            committed_at_round: None,
         }
+    }
+}
+
+impl From<&PointStatus> for Flags {
+    fn from(status: &PointStatus) -> Self {
+        let mut flags = Flags::empty();
+        flags.set(Flags::IllFormed, status.is_ill_formed);
+        flags.set(Flags::Validated, status.is_validated);
+        flags.set(Flags::Valid, status.is_valid);
+        flags.set(Flags::Trusted, status.is_trusted);
+        flags.set(Flags::Certified, status.is_certified);
+        if let Some(role) = status.anchor_chain_role {
+            flags.insert(match role {
+                AnchorChainRole::Trigger => Flags::AnchorChainRoleInPoint,
+                AnchorChainRole::Anchor => Flags::AnchorChainRoleUnique,
+                AnchorChainRole::Proof => {
+                    Flags::AnchorChainRoleInPoint | Flags::AnchorChainRoleUnique
+                }
+            });
+        }
+        flags
     }
 }
 
@@ -59,22 +89,8 @@ impl PointStatus {
     pub fn encode(&self) -> [u8; Self::BYTES] {
         let mut result = Self::DEFAULT;
 
-        if self.is_ill_formed {
-            result[0] |= FlagsMask::IllFormed as u8;
-        }
-        if self.is_validated {
-            result[0] |= FlagsMask::Validated as u8;
-        }
-        if self.is_valid {
-            result[0] |= FlagsMask::Valid as u8;
-        }
-        if self.is_trusted {
-            result[0] |= FlagsMask::Trusted as u8;
-        }
-        if self.is_certified {
-            result[0] |= FlagsMask::Certified as u8;
-        }
-        result[0] |= self.anchor_chain_role as u8;
+        result[0] = Flags::from(self).bits();
+
         if let Some(at) = self.committed_at_round {
             result[1..].copy_from_slice(&at.to_be_bytes()[..]);
         }
@@ -89,23 +105,16 @@ impl PointStatus {
                 stored.len()
             );
         }
-        let flags = stored[0];
+        let mut status = PointStatus::from(Flags::from_bits_retain(stored[0]));
+
         let mut committed_at = [0_u8; Self::BYTES - 1];
         committed_at.copy_from_slice(&stored[1..]);
         let committed_at = u32::from_be_bytes(committed_at);
-        Ok(PointStatus {
-            is_ill_formed: (FlagsMask::IllFormed as u8 & flags) > 0,
-            is_validated: (FlagsMask::Validated as u8 & flags) > 0,
-            is_valid: (FlagsMask::Valid as u8 & flags) > 0,
-            is_trusted: (FlagsMask::Trusted as u8 & flags) > 0,
-            is_certified: (FlagsMask::Certified as u8 & flags) > 0,
-            anchor_chain_role: AnchorChainRole::from_flags(flags)?,
-            committed_at_round: if committed_at == 0 {
-                None
-            } else {
-                Some(committed_at)
-            },
-        })
+        if committed_at != 0 {
+            status.committed_at_round = Some(committed_at);
+        }
+
+        Ok(status)
     }
 
     pub(crate) fn merge(
