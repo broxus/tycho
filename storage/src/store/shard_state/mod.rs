@@ -126,8 +126,6 @@ impl ShardStateStorage {
                 block_handle_storage.store_handle(&handle);
             }
 
-            // Ensure that pending operation guard is dropped after the batch is written
-            // drop(pending_op);
             Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
         .await??;
@@ -194,6 +192,7 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
         loop {
+            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time");
             let (key, value) = match iter.item() {
                 Some(item) => item,
                 None => match iter.status() {
@@ -214,7 +213,7 @@ impl ShardStateStorage {
             }
 
             alloc.reset();
-            let mut batch = weedb::rocksdb::WriteBatch::default();
+            let mut batch = rocksdb::WriteBatch::default();
             {
                 let _guard = self.gc_lock.lock().await;
                 let total = self
@@ -223,15 +222,19 @@ impl ShardStateStorage {
                 batch.delete_cf(&shard_states_cf.bound(), key);
                 raw.write_opt(batch, cells_write_options)?;
 
-                // Ensure that pending operation guard is dropped after the batch is written
-                // drop(pending_op);
-
                 removed_cells += total;
                 tracing::debug!(removed_cells = total, %block_id);
             }
 
             removed_states += 1;
             iter.next();
+
+            metrics::counter!("tycho_storage_state_gc_count").increment(1);
+            metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
+            if block_id.is_masterchain() {
+                metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
+            }
+            tracing::debug!(removed_states, removed_cells, %block_id, "removed state");
         }
 
         // Done
