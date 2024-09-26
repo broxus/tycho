@@ -312,35 +312,43 @@ impl Inner {
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             rpc_storage.sync_min_tx_lt().await?;
 
-            let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
-                let state_info = state.as_ref();
-                Ok(CachedAccounts {
-                    accounts: state_info.load_accounts()?.dict().clone(),
-                    mc_ref_hanlde: state.ref_mc_state_handle().clone(),
-                    gen_utime: state_info.gen_utime,
-                })
-            };
+            let node_instance_id = self.storage.node_state().load_instance_id();
+            let rpc_instance_id = rpc_storage.load_instance_id();
 
-            let shards = mc_state.shards()?.clone();
+            if node_instance_id != rpc_instance_id {
+                let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
+                    let state_info = state.as_ref();
+                    Ok(CachedAccounts {
+                        accounts: state_info.load_accounts()?.dict().clone(),
+                        mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+                        gen_utime: state_info.gen_utime,
+                    })
+                };
 
-            // Reset masterchain accounts and fill the cache
-            *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
-            rpc_storage
-                .reset_accounts(mc_state, self.config.shard_split_depth)
-                .await?;
+                let shards = mc_state.shards()?.clone();
 
-            for item in shards.latest_blocks() {
-                let block_id = item?;
-                let state = shard_states.load_state(&block_id).await?;
-
-                // Reset shard accounts and fill the cache
-                self.sc_accounts
-                    .write()
-                    .insert(block_id.shard, make_cached_accounts(&state)?);
-
+                // Reset masterchain accounts and fill the cache
+                *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
                 rpc_storage
-                    .reset_accounts(state, self.config.shard_split_depth)
+                    .reset_accounts(mc_state, self.config.shard_split_depth)
                     .await?;
+
+                for item in shards.latest_blocks() {
+                    let block_id = item?;
+                    let state = shard_states.load_state(&block_id).await?;
+
+                    // Reset shard accounts and fill the cache
+                    self.sc_accounts
+                        .write()
+                        .insert(block_id.shard, make_cached_accounts(&state)?);
+
+                    rpc_storage
+                        .reset_accounts(state, self.config.shard_split_depth)
+                        .await?;
+                }
+
+                // Rewrite RPC instance id
+                rpc_storage.store_instance_id(node_instance_id);
             }
         }
 
