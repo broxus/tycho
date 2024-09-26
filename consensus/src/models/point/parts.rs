@@ -3,9 +3,10 @@ use std::ops::{Add, Sub};
 
 use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
 
 impl Display for Digest {
@@ -35,33 +36,8 @@ impl Digest {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, TlWrite, TlRead, PartialEq)]
 pub struct Signature([u8; 64]);
-
-impl Serialize for Signature {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_bytes(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Signature {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let bytes = <&[u8]>::deserialize(deserializer)?;
-        if bytes.len() != 64 {
-            Err(serde::de::Error::invalid_length(bytes.len(), &"64"))
-        } else {
-            let mut target = [0_u8; 64];
-            target.copy_from_slice(bytes);
-            Ok(Signature(target))
-        }
-    }
-}
 
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -94,7 +70,7 @@ impl Signature {
 }
 
 // TODO impl Display (as u32), Add & Sub (saturating), make u32 private + getter, refactor usage
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TlRead, TlWrite)]
 pub struct Round(pub u32);
 
 impl Round {
@@ -114,7 +90,7 @@ impl Round {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Copy, Clone, TlRead, TlWrite, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct UnixTime(u64);
 
 impl UnixTime {

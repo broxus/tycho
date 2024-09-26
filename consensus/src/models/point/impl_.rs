@@ -7,39 +7,23 @@ use everscale_crypto::ed25519::KeyPair;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::models::point::body::PointBody;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
-#[derive(Clone)]
+#[derive(Clone, TlWrite, TlRead)]
 pub struct Point(Arc<PointInner>);
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead,  Debug)]
+#[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
 struct PointInner {
     // hash of everything except signature
     digest: Digest,
     // author's signature for the digest
     signature: Signature,
     body: PointBody,
-}
-
-impl Serialize for Point {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.as_ref().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Point {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Point(Arc::new(PointInner::deserialize(deserializer)?)))
-    }
 }
 
 impl Debug for Point {

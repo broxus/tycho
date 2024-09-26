@@ -2,16 +2,16 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
+use tl_proto::{TlRead, TlWrite};
 use crate::models::{
     AnchorStageRole, Digest, Link, Point, PointData, PointDataRef, PointId, Round,
 };
 
-#[derive(Clone)]
+#[derive(Clone, TlRead, TlWrite)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct PointInfo(Arc<PointInfoInner>);
 
-#[derive(Serialize, Deserialize)]
+#[derive(TlWrite, TlRead)]
 #[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
     round: Round,
@@ -19,32 +19,12 @@ struct PointInfoInner {
     data: PointData,
 }
 
-#[derive(Serialize)]
+#[derive(TlWrite)]
 /// Note: fields and their order must be the same with [`PointInfoInner`]
 pub struct PointInfoRef<'a> {
     round: Round,
     digest: &'a Digest,
     data: PointDataRef<'a>,
-}
-
-impl Serialize for PointInfo {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.as_ref().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for PointInfo {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(PointInfo(Arc::new(PointInfoInner::deserialize(
-            deserializer,
-        )?)))
-    }
 }
 
 impl Debug for PointInfo {

@@ -1,11 +1,11 @@
 use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
-
+use tl_proto::{TlRead, TlWrite};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, TlWrite, TlRead)]
 pub enum PointByIdResponse {
     Defined(Option<Point>),
     TryLater,
@@ -15,14 +15,15 @@ pub enum PointByIdResponse {
 /// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.
 pub struct BroadcastResponse;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
 pub enum SignatureRejectedReason {
     TooOldRound,
     NoDagRound,
     CannotSign,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
+#[tl]
 pub enum SignatureResponse {
     Signature(Signature),
     /// peer dropped its state or just reached point's round

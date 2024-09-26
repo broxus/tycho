@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use itertools::Itertools;
+use tl_proto::{TlRead, TlWrite};
 use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
@@ -13,7 +14,7 @@ use weedb::rocksdb::{ReadOptions, WaitForCompactOptions, WriteBatch};
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::MempoolConfig;
-use crate::models::{Digest, Point, PointInfo, Round};
+use crate::models::{Digest, Point, PointInfo, PointInfoRef, Round};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
@@ -238,9 +239,17 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
 
-        let info = bincode::serialize(&PointInfo::serializable_from(point))
-            .context("serialize db point info equivalent from point")?;
-        let point = bincode::serialize(point)?;
+        let value = PointInfo::serializable_from(point);
+        let mut info = BytesMut::with_capacity(value.max_size_hint());
+        value.write_to(&mut info);
+
+        // let info = bincode::serialize(&value)
+        //     .context("serialize db point info equivalent from point")?;
+
+        // new
+        let mut point_bytes = BytesMut::with_capacity(point.max_size_hint());
+        point.write_to(&mut point_bytes);
+        // let point = bincode::serialize(point)?;
 
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
@@ -251,8 +260,8 @@ impl MempoolStoreImpl for MempoolStorage {
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
-        batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
-        batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
+        batch.put_cf(&points_cf, key.as_slice(), point_bytes.freeze());
+        batch.put_cf(&info_cf, key.as_slice(), info.freeze());
         batch.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
 
         Ok(db.write(batch)?)
@@ -302,7 +311,7 @@ impl MempoolStoreImpl for MempoolStorage {
         points
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| bincode::deserialize(&a).context("deserialize db point"))
+            .map(|a| <Point>::read_from(&a, &mut 0).context("deserialize db point"))
             .transpose()
     }
 
@@ -316,7 +325,10 @@ impl MempoolStoreImpl for MempoolStorage {
         table
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| bincode::deserialize(&a).context("deserialize point info"))
+            .map(|a| {
+                <PointInfo>::read_from(&a, &mut 0).context("deserialize point info")
+                // bincode::deserialize(&a).context("deserialize point info")
+            })
             .transpose()
     }
 
@@ -372,7 +384,8 @@ impl MempoolStoreImpl for MempoolStorage {
             let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point = bincode::deserialize::<Point>(bytes).context("deserialize point")?;
+                let point = <Point>::read_from(&bytes, &mut 0).context("deserialize point")?;
+                // let point = bincode::deserialize::<Point>(bytes).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
                 if let Some(prev_duplicate) = found.insert(key.to_vec().into_boxed_slice(), point) {
@@ -472,8 +485,9 @@ impl MempoolStoreImpl for MempoolStorage {
             let Some((key, info)) = iter.item() else {
                 break;
             };
-            let info =
-                bincode::deserialize::<PointInfo>(info).context("db deserialize point info")?;
+            let info = <PointInfo>::read_from(info, &mut 0).context("db deserialize point info")?;
+            // let info =
+            //     bincode::deserialize::<PointInfo>(info).context("db deserialize point info")?;
             if let Some(status) = statuses.remove(key) {
                 result.push((info, status));
             } else {

@@ -1,8 +1,10 @@
+use std::ops::Deref;
 use std::sync::LazyLock;
 
 use anyhow::anyhow;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::{Response, ServiceRequest, Version};
 
 use crate::engine::MempoolConfig;
@@ -27,25 +29,33 @@ static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
 // broadcast uses simple send_message with () return value
 impl From<&Point> for tycho_network::Request {
     fn from(value: &Point) -> Self {
+        let mut data = BytesMut::with_capacity(value.max_size_hint());
+        value.write_to(&mut data);
         tycho_network::Request {
             version: Version::V1,
-            body: Bytes::from(bincode::serialize(value).expect("shouldn't happen")),
+            body: data.freeze(),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum MPQuery {
+    #[tl(id = "mpquery.broadcast")]
     Broadcast(Point),
+    #[tl(id = "mpquery.pointById")]
     PointById(PointId),
+    #[tl(id = "mpquery.signature")]
     Signature(Round),
 }
 
 impl From<&MPQuery> for tycho_network::Request {
     fn from(value: &MPQuery) -> Self {
+        let mut data = BytesMut::new();
+        value.write_to(&mut data);
         tycho_network::Request {
             version: Version::V1,
-            body: Bytes::from(bincode::serialize(value).expect("shouldn't happen")),
+            body: data.freeze(),
         }
     }
 }
@@ -57,11 +67,12 @@ impl TryFrom<&ServiceRequest> for MPQuery {
         if request.body.len() > *LARGEST_DATA_BYTES {
             anyhow::bail!("too large request: {} bytes", request.body.len())
         }
-        Ok(bincode::deserialize::<MPQuery>(&request.body)?)
+        let data = <MPQuery>::read_from(&request.body, &mut 0)?;
+        Ok(data)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
 pub enum MPResponse {
     Broadcast,
     PointById(PointByIdResponse),

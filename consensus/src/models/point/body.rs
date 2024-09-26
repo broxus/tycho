@@ -1,18 +1,21 @@
 use std::cmp;
 use std::collections::BTreeMap;
 
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use bytes::{Bytes, BytesMut};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
+use crate::models::proto::evidence_btree_map;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(Clone))]
+#[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBody {
     pub round: Round, // let it be @ r+0
     pub data: PointData,
+    #[tl(with = "evidence_btree_map")]
     /// signatures for own point from previous round (if one exists, else empty map):
     /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
@@ -22,8 +25,9 @@ pub struct PointBody {
 
 impl PointBody {
     pub fn make_digest(&self) -> Digest {
-        let bytes = bincode::serialize(self).expect("serialize point body");
-        Digest::new(bytes.as_slice())
+        let mut data = BytesMut::with_capacity(self.max_size_hint());
+        self.write_to(&mut data);
+        Digest::new(data.freeze().as_ref())
     }
 
     pub fn is_well_formed(&self) -> bool {
