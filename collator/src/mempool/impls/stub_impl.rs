@@ -161,7 +161,6 @@ impl MempoolAdapterStubImpl {
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStubImpl {
     async fn on_new_mc_state(&self, mc_block_id: &BlockId) -> Result<()> {
-        // TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "STUB: New masterchain state (block_id: {}) processing enqueued to mempool",

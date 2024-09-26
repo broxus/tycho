@@ -180,7 +180,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             });
             let mc_read_to = ranges_to.entry(mc_shard_id).or_insert_with(|| {
                 ranges_updated = true;
-                QueueKey::max_for_lt(0) // TODO: `min_for_lt` ?
+                QueueKey::max_for_lt(0)
             });
 
             // try update masterchain range read_to border
@@ -209,7 +209,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 });
                 let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
                     ranges_updated = true;
-                    QueueKey::max_for_lt(0) // TODO: `min_for_lt` ?
+                    QueueKey::max_for_lt(0)
                 });
 
                 // try update shardchain read_to

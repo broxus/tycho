@@ -809,7 +809,6 @@ fn execute_ticktock_transaction(
     let (total_fees, executor_output) = TickTockTransactionExecutor::new(tick_tock)
         .execute_with_libs_and_params(None, shard_account, min_lt, params, config)?;
 
-    // TODO replace with batch set
     let tx_lt = shard_account.last_trans_lt;
     account_stuff.add_transaction(tx_lt, total_fees, executor_output.transaction.clone());
 
@@ -896,7 +895,7 @@ pub(super) fn update_internals_processed_upto(
             },
             read_to_msg: match read_to_opt {
                 Some(Force(to_key) | IfHigher(to_key)) => to_key,
-                _ => QueueKey::max_for_lt(0), // TODO: `min_for_lt` ?
+                _ => QueueKey::max_for_lt(0),
             },
         })
     };

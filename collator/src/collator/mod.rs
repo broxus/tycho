@@ -660,7 +660,6 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        // TODO: Check if the result mc_data is properly updated on masterchain block
         let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
 
         enum GetNewShardStateStuff {

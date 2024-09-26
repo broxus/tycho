@@ -1019,7 +1019,6 @@ impl CollatorStdImpl {
         } else {
             collation_data.value_flow.created.tokens =
                 mc_data.config.get_block_creation_reward(false)?;
-            // TODO: should check if it is good to cast `prefix_len` from u16 to u8
             collation_data.value_flow.created.tokens >>=
                 collation_data.block_id_short.shard.prefix_len() as u8;
         }
@@ -1236,7 +1235,7 @@ impl CollatorStdImpl {
             .execute_ticktock_transaction(account_stuff, tick_tock)
             .await?;
 
-        // TODO: It does nothing for ticktock, so commented for now
+        // NOTE: It does nothing for ticktock, so commented for now
         // new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
 
         collation_data.execute_count_all += 1;

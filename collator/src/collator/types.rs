@@ -55,8 +55,6 @@ pub(super) struct PrevData {
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
     gas_used_from_last_anchor: u64,
-    // TODO: remove if we do not need this
-    _underload_history: u64,
 
     processed_upto: ProcessedUptoInfoStuff,
 
@@ -90,7 +88,6 @@ impl PrevData {
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let gas_used_from_last_anchor = observable_states[0].state().overload_history;
-        let underload_history = observable_states[0].state().underload_history;
 
         let processed_upto_info = pure_prev_states[0].state().processed_upto.load()?;
 
@@ -107,7 +104,6 @@ impl PrevData {
             gen_lt,
             total_validator_fees,
             gas_used_from_last_anchor,
-            _underload_history: underload_history,
 
             processed_upto: processed_upto_info.try_into()?,
 
