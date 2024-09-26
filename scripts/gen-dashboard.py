@@ -751,6 +751,15 @@ def storage() -> RowPanel:
         create_counter_panel(
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
+        create_counter_panel(
+            "tycho_storage_state_gc_count", "number of deleted states during gc"
+        ),
+        create_counter_panel(
+            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_state_gc_time", "time spent to gc single root"
+        ),
         create_heatmap_panel(
             "tycho_storage_load_block_data_time", "Time to load block data"
         ),
