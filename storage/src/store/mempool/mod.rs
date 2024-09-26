@@ -1,5 +1,8 @@
 pub mod point_status;
 
+use tycho_util::metrics::HistogramGuard;
+use weedb::rocksdb::WriteBatch;
+
 use crate::MempoolDb;
 
 #[derive(Clone)]
@@ -42,5 +45,34 @@ impl MempoolStorage {
             }
             format!("unknown short bytes {smth}")
         }
+    }
+
+    /// delete all stored data up to provided value (exclusive)
+    pub fn clean(&self, up_to_exclusive: &[u8; Self::KEY_LEN]) -> anyhow::Result<()> {
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_time");
+        let zero = [0_u8; Self::KEY_LEN];
+        let none = None::<[u8; Self::KEY_LEN]>;
+
+        let status_cf = self.db.tables().points_status.cf();
+        let info_cf = self.db.tables().points_info.cf();
+        let points_cf = self.db.tables().points.cf();
+        let rocksdb = self.db.rocksdb();
+
+        // in case we'll return to `db.delete_file_in_range_cf()`:
+        // * at first delete status, as their absense prevents incorrect access to points data
+        // * then delete info, as it leaves points usable only for upload
+        // * at last delete points safely
+
+        let mut batch = WriteBatch::default();
+        batch.delete_range_cf(&status_cf, &zero, up_to_exclusive);
+        batch.delete_range_cf(&info_cf, &zero, up_to_exclusive);
+        batch.delete_range_cf(&points_cf, &zero, up_to_exclusive);
+        rocksdb.write(batch)?;
+
+        rocksdb.compact_range_cf(&status_cf, none, Some(up_to_exclusive));
+        rocksdb.compact_range_cf(&info_cf, none, Some(up_to_exclusive));
+        rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
+
+        Ok(())
     }
 }

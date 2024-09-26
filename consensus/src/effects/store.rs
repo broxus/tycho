@@ -8,7 +8,7 @@ use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::{ReadOptions, WriteBatch};
+use weedb::rocksdb::{ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -42,6 +42,8 @@ trait MempoolStoreImpl: Send + Sync {
     fn latest_round(&self) -> Result<Round>;
 
     fn load_rounds(&self, first: Round, last: Round) -> Result<Vec<(PointInfo, PointStatus)>>;
+
+    fn drop_all_data_before_start(&self) -> Result<()>;
 }
 
 impl MempoolAdapterStore {
@@ -152,6 +154,12 @@ impl MempoolStore {
             .expect("DB load rounds")
     }
 
+    pub fn drop_all_data_before_start(&self) {
+        self.0
+            .drop_all_data_before_start()
+            .expect("DB drop all data");
+    }
+
     fn clean_task(
         inner: MempoolStorage,
         mut consensus_round: RoundWatcher<Consensus>,
@@ -199,8 +207,17 @@ impl MempoolStore {
 
                 if new_least_to_keep > prev_least_to_keep {
                     let inner = inner.clone();
-                    let task =
-                        tokio::task::spawn_blocking(move || Self::clean(&inner, new_least_to_keep));
+                    let task = tokio::task::spawn_blocking(move || {
+                        let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
+                        MempoolStorage::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
+
+                        match inner.clean(&up_to_exclusive) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                tracing::error!("delete range of mempool data failed: {e}");
+                            }
+                        }
+                    });
                     match task.await {
                         Ok(()) => prev_least_to_keep = new_least_to_keep,
                         Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
@@ -212,42 +229,6 @@ impl MempoolStore {
                 }
             }
         });
-    }
-
-    /// delete all stored data up to provided value (exclusive)
-    fn clean(inner: &MempoolStorage, least_to_keep: Round) {
-        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_time");
-        let zero = [0_u8; MempoolStorage::KEY_LEN];
-        let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_prefix(least_to_keep.0, &mut up_to_exclusive);
-
-        let db = inner.db.rocksdb();
-        let points_cf = inner.db.points.cf();
-        let info_cf = inner.db.points_info.cf();
-        let status_cf = inner.db.points_status.cf();
-
-        // in case we'll return to `db.delete_file_in_range_cf()`:
-        // * at first delete status, as their absense prevents incorrect access to points data
-        // * then delete info, as it leaves points usable only for upload
-        // * at last delete points safely
-
-        let mut batch = WriteBatch::default();
-        batch.delete_range_cf(&status_cf, zero.as_slice(), up_to_exclusive.as_slice());
-        batch.delete_range_cf(&info_cf, zero.as_slice(), up_to_exclusive.as_slice());
-        batch.delete_range_cf(&points_cf, zero.as_slice(), up_to_exclusive.as_slice());
-
-        match db.write(batch) {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!("delete range of mempool data failed: {e}");
-                return;
-            }
-        }
-
-        let none = None::<[u8; MempoolStorage::KEY_LEN]>;
-        db.compact_range_cf(&status_cf, none, Some(up_to_exclusive.as_slice()));
-        db.compact_range_cf(&info_cf, none, Some(up_to_exclusive.as_slice()));
-        db.compact_range_cf(&points_cf, none, Some(up_to_exclusive.as_slice()));
     }
 }
 
@@ -513,6 +494,15 @@ impl MempoolStoreImpl for MempoolStorage {
 
         Ok(result)
     }
+
+    fn drop_all_data_before_start(&self) -> Result<()> {
+        self.clean(&[u8::MAX; Self::KEY_LEN])?;
+        // no reads/writes yet possible, and should finish prior other ops
+        let mut opt = WaitForCompactOptions::default();
+        opt.set_flush(true);
+        self.db.rocksdb().wait_for_compact(&opt)?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "test")]
@@ -551,5 +541,9 @@ impl MempoolStoreImpl for () {
 
     fn load_rounds(&self, _: Round, _: Round) -> Result<Vec<(PointInfo, PointStatus)>> {
         anyhow::bail!("should not be used in tests")
+    }
+
+    fn drop_all_data_before_start(&self) -> Result<()> {
+        Ok(())
     }
 }

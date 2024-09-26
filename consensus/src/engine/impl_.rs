@@ -84,11 +84,6 @@ impl Engine {
             }
         });
 
-        if genesis_round.is_some() {
-            // note subscribers are created earlier
-            top_known_anchor.set_max(MempoolConfig::genesis_round());
-        }
-
         let committer_run = tokio::spawn({
             let mut top_known_anchor = top_known_anchor.receiver();
             let mut consensus_round = consensus_round.receiver();
@@ -114,7 +109,23 @@ impl Engine {
         }
     }
 
-    pub fn init_with_genesis(&mut self, current_peers: &[PeerId]) {
+    pub async fn init_with_genesis(&mut self, current_peers: &[PeerId]) {
+        let clean_task = tokio::task::spawn_blocking({
+            let store = self.round_task.state.store.clone();
+            move || store.drop_all_data_before_start()
+        });
+        match clean_task.await {
+            Ok(()) => {}
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("failed to clean db on genesis {e:?}"),
+        };
+
+        // note subscribers are created earlier in constructor
+        self.round_task
+            .state
+            .top_known_anchor
+            .set_max(MempoolConfig::genesis_round());
+
         let genesis = crate::test_utils::genesis();
         // check only genesis round as it is widely used in point validation.
         // if some nodes use distinct genesis data, their first points will be rejected

@@ -180,7 +180,7 @@ fn make_network(
                             &top_known_anchor,
                             None,
                         );
-                        engine.init_with_genesis(&all_peers);
+                        engine.init_with_genesis(&all_peers).await;
                         started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(

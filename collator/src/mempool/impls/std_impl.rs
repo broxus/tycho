@@ -72,10 +72,10 @@ impl MempoolAdapterStdImpl {
             mempool_start_round,
         );
 
-        if mempool_start_round.is_some() {
-            engine.init_with_genesis(&peers);
-        }
         tokio::spawn(async move {
+            if mempool_start_round.is_some() {
+                engine.init_with_genesis(&peers).await;
+            }
             engine.run().await;
         });
 
