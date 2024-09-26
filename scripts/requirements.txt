@@ -1,2 +1,2 @@
-git+https://github.com/broxus/grafana-builder.git@0b5591e856ddde7685f8ed046235d72f5998b7b9#egg=dashboard-builder
+git+https://github.com/broxus/grafana-builder.git@376e405ac6620a76598dcdf81e7b6ff10aa702eb#egg=dashboard-builder
 grafanalib==0.7.1

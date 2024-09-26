@@ -173,6 +173,7 @@ def create_heatmap_panel(
         color=heatmap_color_warm(),
         tooltip=Tooltip(),
         label_selectors=labels,
+        rate_interval="10s" #todo: update this if scrape interval changes
     )
 
 
