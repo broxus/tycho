@@ -4,7 +4,7 @@ use std::time::Instant;
 use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt, TryFutureExt};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tracing::Instrument;
 
 use crate::dag::{DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
@@ -25,6 +25,7 @@ pub struct RoundTaskState {
     pub responder: Responder,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     input_buffer: InputBuffer,
+    dispatcher: Dispatcher,
     pub broadcast_filter: BroadcastFilter,
     pub downloader: Downloader,
 }
@@ -34,7 +35,7 @@ pub struct RoundTaskReady {
     // contains all collected signatures, even if they are insufficient to produce valid point;
     // may reference own point older than from a last round, as its payload may be not resend
     last_own_point: Option<Arc<LastOwnPoint>>,
-    broadcaster: Broadcaster,
+    prev_broadcast: Option<AbortHandle>,
     pub collector: Collector,
 }
 
@@ -64,12 +65,13 @@ impl RoundTaskReady {
                 responder,
                 top_known_anchor,
                 input_buffer,
+                dispatcher: dispatcher.clone(),
                 broadcast_filter,
                 downloader,
             },
-            broadcaster: Broadcaster::new(dispatcher),
             collector: Collector::new(bcast_rx),
             last_own_point: None,
+            prev_broadcast: None,
         }
     }
 
@@ -210,8 +212,9 @@ impl RoundTaskReady {
         let broadcaster_run = tokio::spawn({
             let own_point_round = next_dag_round.prev().clone();
             let round_effects = round_effects.clone();
-            let mut broadcaster = self.broadcaster;
             let peer_schedule = self.state.peer_schedule.clone();
+            let prev_bcast = self.prev_broadcast;
+            let dispatcher = self.state.dispatcher.clone();
             let downloader = self.state.downloader.clone();
             let store = self.state.store.clone();
             async move {
@@ -227,22 +230,25 @@ impl RoundTaskReady {
                         store,
                         round_effects.clone(),
                     );
-                    let new_last_own_point = broadcaster
-                        .run(
-                            &round_effects,
-                            &own_point,
-                            &peer_schedule,
-                            bcaster_ready_tx,
-                            collector_signal_rx,
-                        )
-                        .await;
+                    let mut broadcaster = Broadcaster::new(
+                        dispatcher,
+                        own_point,
+                        peer_schedule,
+                        bcaster_ready_tx,
+                        collector_signal_rx,
+                        &round_effects,
+                    );
+                    let new_last_own_point = broadcaster.run().await;
+                    prev_bcast.inspect(|task| task.abort());
+                    let new_prev_bcast = tokio::spawn(broadcaster.run_continue()).abort_handle();
                     // join the check, just not to miss it; it must have completed already
                     self_check.await.expect("verify own produced point");
-                    (broadcaster, Some(new_last_own_point))
+                    Some((new_prev_bcast, new_last_own_point))
                 } else {
                     // drop(collector_signal_rx); // goes out of scope
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
-                    (broadcaster, None)
+                    prev_bcast.inspect(|task| task.abort());
+                    None
                 }
             }
         });
@@ -326,24 +332,26 @@ impl RoundTaskReady {
 pub struct RoundTaskRunning {
     state: RoundTaskState,
     last_own_point: Option<Arc<LastOwnPoint>>,
-    broadcaster_run: JoinHandle<(Broadcaster, Option<LastOwnPoint>)>,
+    broadcaster_run: JoinHandle<Option<(AbortHandle, Arc<LastOwnPoint>)>>,
     collector_run: JoinHandle<(Collector, Round)>,
 }
 
 impl RoundTaskRunning {
-    pub async fn until_ready(mut self) -> Result<(RoundTaskReady, Round), JoinError> {
+    pub async fn until_ready(self) -> Result<(RoundTaskReady, Round), JoinError> {
         match tokio::try_join!(self.collector_run, self.broadcaster_run) {
-            Ok(((collector, next_round), (broadcaster, new_last_own_point))) => {
-                // do not reset to None, Producer decides whether to use old value or not
-                if let Some(new_last_own_point) = new_last_own_point {
-                    // value is returned from the task without Arc for the sake of code clarity
-                    self.last_own_point = Some(Arc::new(new_last_own_point));
-                }
+            Ok(((collector, next_round), bcast_result)) => {
+                let (prev_broadcast, last_own_point) = match bcast_result {
+                    None => (None, self.last_own_point),
+                    Some((new_prev_bcast, new_last_own_point)) => {
+                        (Some(new_prev_bcast), Some(new_last_own_point))
+                    }
+                };
                 let ready = RoundTaskReady {
                     state: self.state,
                     collector,
-                    broadcaster,
-                    last_own_point: self.last_own_point,
+                    // do not reset to None, Producer decides whether to use old value or not
+                    last_own_point, // replaces prev point only when there is new one
+                    prev_broadcast, // continue prev broadcast for one adjacent round
                 };
                 Ok((ready, next_round))
             }

@@ -13,11 +13,11 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcasterContext, Effects, EngineContext};
+use crate::engine::MempoolConfig;
 use crate::intercom::broadcast::collector::CollectorSignal;
-use crate::intercom::broadcast::utils::QueryResponses;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, Signature};
+use crate::models::{PeerCount, Point, Signature};
 
 #[derive(Copy, Clone, Debug)]
 pub enum BroadcasterSignal {
@@ -26,83 +26,8 @@ pub enum BroadcasterSignal {
 }
 
 pub struct Broadcaster {
-    dispatcher: Dispatcher,
-    // do not throw away unfinished broadcasts from previous round
-    bcast_outdated: Option<QueryResponses<BroadcastResponse>>,
-}
-
-impl Broadcaster {
-    pub fn new(dispatcher: &Dispatcher) -> Self {
-        Self {
-            dispatcher: dispatcher.clone(),
-            // will be replaced with `None` during task execution
-            bcast_outdated: Some(QueryResponses::default()),
-        }
-    }
-    pub async fn run(
-        &mut self,
-        round_effects: &Effects<EngineContext>,
-        point: &Point,
-        peer_schedule: &PeerSchedule,
-        bcaster_signal: oneshot::Sender<BroadcasterSignal>,
-        collector_signal: watch::Receiver<CollectorSignal>,
-    ) -> LastOwnPoint {
-        let (signers, mut bcast_peers, peer_updates) = {
-            let guard = peer_schedule.read();
-            // `atomic` can be updated only under write lock, so view under read lock is consistent
-            let signers = peer_schedule
-                .atomic()
-                .peers_for(point.round().next())
-                .clone();
-            let bcast_peers = guard.data.broadcast_receivers().clone();
-            (signers, bcast_peers, guard.updates())
-        };
-        let signers_count =
-            PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
-
-        let bcast_outdated = mem::take(&mut self.bcast_outdated).expect("cannot be unset");
-        bcast_peers.retain(|peer| !bcast_outdated.contains(peer));
-
-        let mut task = BroadcasterTask {
-            effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
-            dispatcher: self.dispatcher.clone(),
-            point_digest: *point.digest(),
-            bcaster_signal: Some(bcaster_signal),
-            collector_signal,
-
-            peer_updates,
-            signers,
-            signers_count,
-            removed_peers: Default::default(),
-            rejections: Default::default(),
-            signatures: Default::default(),
-
-            bcast_request: Dispatcher::broadcast_request(point),
-            bcast_current: QueryResponses::default(),
-            bcast_outdated,
-
-            sig_request: Dispatcher::signature_request(point.round()),
-            sig_peers: FastHashSet::default(),
-            sig_current: FuturesUnordered::default(),
-        };
-        task.run(bcast_peers).await;
-        // preserve only broadcasts from the last round and drop older ones as hung up
-        self.bcast_outdated = Some(task.bcast_current);
-        metrics::counter!("tycho_mempool_collected_signatures_count")
-            .increment(task.signatures.len() as _);
-        LastOwnPoint {
-            digest: *point.digest(),
-            evidence: task.signatures.into_iter().collect(),
-            round: point.round(),
-            signers: signers_count,
-        }
-    }
-}
-
-struct BroadcasterTask {
     effects: Effects<BroadcasterContext>,
     dispatcher: Dispatcher,
-    point_digest: Digest,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
     collector_signal: watch::Receiver<CollectorSignal>,
@@ -117,17 +42,65 @@ struct BroadcasterTask {
     signatures: FastHashMap<PeerId, Signature>,
 
     bcast_request: Request,
-    bcast_current: QueryResponses<BroadcastResponse>,
-    bcast_outdated: QueryResponses<BroadcastResponse>,
+    bcast_peers: FastHashSet<PeerId>,
+    bcast_futures: FuturesUnordered<BoxFuture<'static, (PeerId, Result<BroadcastResponse>)>>,
 
     sig_request: Request,
     sig_peers: FastHashSet<PeerId>,
-    sig_current: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
+    sig_futures: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
+
+    point: Point,
 }
 
-impl BroadcasterTask {
+impl Broadcaster {
+    pub fn new(
+        dispatcher: Dispatcher,
+        point: Point,
+        peer_schedule: PeerSchedule,
+        bcaster_signal: oneshot::Sender<BroadcasterSignal>,
+        collector_signal: watch::Receiver<CollectorSignal>,
+        round_effects: &Effects<EngineContext>,
+    ) -> Self {
+        let (signers, bcast_peers, peer_updates) = {
+            let guard = peer_schedule.read();
+            // `atomic` can be updated only under write lock, so view under read lock is consistent
+            let signers = peer_schedule
+                .atomic()
+                .peers_for(point.round().next())
+                .clone();
+            let bcast_peers = guard.data.broadcast_receivers().clone();
+            (signers, bcast_peers, guard.updates())
+        };
+        let signers_count =
+            PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
+
+        Self {
+            effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
+            dispatcher,
+            bcaster_signal: Some(bcaster_signal),
+            collector_signal,
+
+            peer_updates,
+            signers,
+            signers_count,
+            removed_peers: Default::default(),
+            rejections: Default::default(),
+            signatures: Default::default(),
+
+            bcast_request: Dispatcher::broadcast_request(&point),
+            bcast_peers,
+            bcast_futures: FuturesUnordered::default(),
+
+            sig_request: Dispatcher::signature_request(point.round()),
+            sig_peers: FastHashSet::default(),
+            sig_futures: FuturesUnordered::default(),
+
+            point,
+        }
+    }
+
     /// returns evidence for broadcast point
-    async fn run(&mut self, bcast_peers: FastHashSet<PeerId>) {
+    pub async fn run(&mut self) -> Arc<LastOwnPoint> {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -146,11 +119,10 @@ impl BroadcasterTask {
         // * successfully signed our point and dequeued
         tracing::debug!(
             parent: self.effects.span(),
-            current_peers = bcast_peers.len(),
-            outdated_peers = self.bcast_outdated.len(),
+            current_peers = self.bcast_peers.len(),
             "start",
         );
-        for peer in bcast_peers {
+        for peer in mem::take(&mut self.bcast_peers) {
             self.broadcast(&peer);
         }
         loop {
@@ -167,21 +139,57 @@ impl BroadcasterTask {
                 update = self.peer_updates.recv() => {
                     self.match_peer_updates(update);
                 }
-                // outdated unfinished broadcasts are small and postpone current broadcasts
-                Some((peer, _)) = self.bcast_outdated.next() => {
-                    self.broadcast(&peer);
-                }
                 // either request signature immediately or postpone until retry
-                Some((peer_id, result)) = self.bcast_current.next() => {
+                Some((peer_id, result)) = self.bcast_futures.next() => {
                     self.match_broadcast_result(&peer_id, result);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, result)) = self.sig_current.next() => {
+                Some((peer_id, result)) = self.sig_futures.next() => {
                     self.match_signature_result(&peer_id, result);
                 },
                 else => {
                     let _guard = self.effects.span().enter();
-                    panic!("unhandled match arm in Broadcaster tokio::select");
+                    panic!("unhandled match arm in Broadcaster::run tokio::select");
+                }
+            }
+        }
+        metrics::counter!("tycho_mempool_collected_signatures_count")
+            .increment(self.signatures.len() as _);
+        Arc::new(LastOwnPoint {
+            digest: *self.point.digest(),
+            evidence: mem::take(&mut self.signatures).into_iter().collect(),
+            round: self.point.round(),
+            signers: self.signers_count,
+        })
+    }
+
+    pub async fn run_continue(mut self) {
+        let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
+        retry_interval.reset_immediately();
+
+        loop {
+            tokio::select! {
+                biased; // mandatory priority: signals lifecycle, updates, data lifecycle
+                // rare event essential for up-to-date retries
+                update = self.peer_updates.recv() => {
+                    self.match_peer_updates(update);
+                }
+                _ = retry_interval.tick() => {
+                    for peer in mem::take(&mut self.sig_peers) {
+                        self.request_signature(&peer);
+                    }
+                }
+                // either request signature immediately or postpone until retry
+                Some((peer_id, result)) = self.bcast_futures.next() => {
+                    self.match_broadcast_result(&peer_id, result);
+                },
+                // most frequent arm that provides data to decide if retry or fail or finish
+                Some((peer_id, result)) = self.sig_futures.next() => {
+                    self.match_signature_result(&peer_id, result);
+                },
+                else => {
+                    let _guard = self.effects.span().enter();
+                    panic!("unhandled match arm in Broadcaster::run_continue tokio::select");
                 }
             }
         }
@@ -272,7 +280,7 @@ impl BroadcasterTask {
                 match response {
                     SignatureResponse::Signature(signature) => {
                         if self.signers.contains(peer_id) {
-                            if signature.verifies(peer_id, &self.point_digest) {
+                            if signature.verifies(peer_id, self.point.digest()) {
                                 self.signatures.insert(*peer_id, signature);
                             } else {
                                 // any invalid signature lowers our chances
@@ -294,9 +302,8 @@ impl BroadcasterTask {
     }
 
     fn broadcast(&mut self, peer_id: &PeerId) {
-        if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
-            self.bcast_current.push(
-                peer_id,
+        if !self.removed_peers.contains(peer_id) {
+            self.bcast_futures.push(
                 self.dispatcher
                     .query_broadcast(peer_id, &self.bcast_request),
             );
@@ -315,8 +322,8 @@ impl BroadcasterTask {
     }
 
     fn request_signature(&mut self, peer_id: &PeerId) {
-        if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
-            self.sig_current
+        if !self.removed_peers.contains(peer_id) {
+            self.sig_futures
                 .push(self.dispatcher.query_signature(peer_id, &self.sig_request));
             tracing::trace!(
                 parent: self.effects.span(),
@@ -345,6 +352,7 @@ impl BroadcasterTask {
                     PeerState::Resolved => {
                         self.removed_peers.remove(&peer_id);
                         self.rejections.remove(&peer_id);
+                        // let peer determine current consensus round
                         self.broadcast(&peer_id);
                     }
                     PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
