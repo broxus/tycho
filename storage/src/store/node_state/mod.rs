@@ -12,11 +12,20 @@ pub struct NodeStateStorage {
 
 impl NodeStateStorage {
     pub fn new(db: BaseDb) -> Self {
-        Self {
+        let this = Self {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
             init_mc_block_id: (Default::default(), INIT_MC_BLOCK_ID),
+        };
+
+        let state = &this.db.state;
+        if state.get(INSTANCE_ID).unwrap().is_none() {
+            state
+                .insert(INSTANCE_ID, rand::random::<InstanceId>())
+                .unwrap();
         }
+
+        this
     }
 
     pub fn store_last_mc_block_id(&self, id: &BlockId) {
@@ -55,14 +64,9 @@ impl NodeStateStorage {
         Some(value)
     }
 
-    pub fn store_instance_id(&self, id: InstanceId) {
-        let node_states = &self.db.state;
-        node_states.insert(INSTANCE_ID, id).unwrap();
-    }
-
-    pub fn load_instance_id(&self) -> Option<InstanceId> {
-        let id = self.db.state.get(INSTANCE_ID).unwrap()?;
-        Some(InstanceId::from_slice(id.as_ref()))
+    pub fn load_instance_id(&self) -> InstanceId {
+        let id = self.db.state.get(INSTANCE_ID).unwrap().unwrap();
+        InstanceId::from_slice(id.as_ref())
     }
 }
 
@@ -70,3 +74,4 @@ type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);
 
 const LAST_MC_BLOCK_ID: &[u8] = b"last_mc_block";
 const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
+const INSTANCE_ID: &[u8] = b"instance_id";

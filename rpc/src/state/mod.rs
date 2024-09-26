@@ -312,14 +312,8 @@ impl Inner {
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             rpc_storage.sync_min_tx_lt().await?;
 
-            let node_state_storage = self.storage.node_state();
-            let node_instance_id = node_state_storage
-                .load_instance_id()
-                .ok_or(anyhow::anyhow!("node instance_id not found"))?;
-
-            let rpc_instance_id = rpc_storage
-                .load_instance_id()
-                .ok_or(anyhow::anyhow!("rpc instance_id not found"))?;
+            let node_instance_id = self.storage.node_state().load_instance_id();
+            let rpc_instance_id = rpc_storage.load_instance_id();
 
             if node_instance_id != rpc_instance_id {
                 let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {

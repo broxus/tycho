@@ -24,11 +24,20 @@ pub struct RpcStorage {
 
 impl RpcStorage {
     pub fn new(db: RpcDb) -> Self {
-        Self {
+        let this = Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
             snapshot: Default::default(),
+        };
+
+        let state = &this.db.state;
+        if state.get(INSTANCE_ID).unwrap().is_none() {
+            state
+                .insert(INSTANCE_ID, rand::random::<InstanceId>())
+                .unwrap();
         }
+
+        this
     }
 
     pub fn db(&self) -> &RpcDb {
@@ -42,6 +51,16 @@ impl RpcStorage {
     pub fn update_snapshot(&self) {
         let snapshot = Arc::new(self.db.owned_snapshot());
         self.snapshot.store(Some(snapshot));
+    }
+
+    pub fn store_instance_id(&self, id: InstanceId) {
+        let rpc_states = &self.db.state;
+        rpc_states.insert(INSTANCE_ID, id).unwrap();
+    }
+
+    pub fn load_instance_id(&self) -> InstanceId {
+        let id = self.db.state.get(INSTANCE_ID).unwrap().unwrap();
+        InstanceId::from_slice(id.as_ref())
     }
 
     pub fn get_accounts_by_code_hash(
@@ -673,16 +692,6 @@ impl RpcStorage {
         .await?
     }
 
-    pub fn store_instance_id(&self, id: InstanceId) {
-        let rpc_states = &self.db.state;
-        rpc_states.insert(INSTANCE_ID, id).unwrap();
-    }
-
-    pub fn load_instance_id(&self) -> Option<InstanceId> {
-        let id = self.db.state.get(INSTANCE_ID).unwrap()?;
-        Some(InstanceId::from_slice(id.as_ref()))
-    }
-
     fn update_code_hash(
         db: &RpcDb,
         workchain: i8,
@@ -1029,3 +1038,4 @@ const fn extract_tag(shard: &ShardIdent) -> u64 {
 
 const TX_MIN_LT: &[u8] = b"tx_min_lt";
 const TX_GC_RUNNING: &[u8] = b"tx_gc_running";
+const INSTANCE_ID: &[u8] = b"instance_id";

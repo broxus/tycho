@@ -139,20 +139,8 @@ impl StorageBuilder {
 
         let temp_archive_storage = TempArchiveStorage::new(&file_db)?;
         let node_state_storage = NodeStateStorage::new(base_db.clone());
-        if node_state_storage.load_instance_id().is_none() {
-            let instance_id = util::InstanceId::new();
-            node_state_storage.store_instance_id(instance_id);
-        }
 
         let rpc_state = rpc_db.map(RpcStorage::new);
-        if let Some(rpc_state) = rpc_state.as_ref() {
-            if rpc_state.load_instance_id().is_none() {
-                let instance_id = node_state_storage
-                    .load_instance_id()
-                    .expect("shouldn't happen");
-                rpc_state.store_instance_id(instance_id);
-            }
-        }
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
 
