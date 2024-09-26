@@ -26,6 +26,7 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 parking_lot_core = { workspace = true }
 quick_cache = { workspace = true }
+rand = { workspace = true }
 rlimit = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }

@@ -54,6 +54,16 @@ impl NodeStateStorage {
         *cache.lock() = Some(value);
         Some(value)
     }
+
+    pub fn store_instance_id(&self, id: InstanceId) {
+        let node_states = &self.db.state;
+        node_states.insert(INSTANCE_ID, id).unwrap();
+    }
+
+    pub fn load_instance_id(&self) -> Option<InstanceId> {
+        let id = self.db.state.get(INSTANCE_ID).unwrap()?;
+        Some(InstanceId::from_slice(id.as_ref()))
+    }
 }
 
 type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);

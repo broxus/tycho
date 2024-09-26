@@ -14,6 +14,7 @@ use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
+use crate::util::*;
 
 pub struct RpcStorage {
     db: RpcDb,
@@ -670,6 +671,16 @@ impl RpcStorage {
             Ok(())
         })
         .await?
+    }
+
+    pub fn store_instance_id(&self, id: InstanceId) {
+        let rpc_states = &self.db.state;
+        rpc_states.insert(INSTANCE_ID, id).unwrap();
+    }
+
+    pub fn load_instance_id(&self) -> Option<InstanceId> {
+        let id = self.db.state.get(INSTANCE_ID).unwrap()?;
+        Some(InstanceId::from_slice(id.as_ref()))
     }
 
     fn update_code_hash(
