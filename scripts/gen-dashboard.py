@@ -751,6 +751,15 @@ def storage() -> RowPanel:
         create_counter_panel(
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
+        create_counter_panel(
+            "tycho_storage_state_gc_count", "number of deleted states during gc"
+        ),
+        create_counter_panel(
+            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_state_gc_time", "time spent to gc single root"
+        ),
         create_heatmap_panel(
             "tycho_storage_load_block_data_time", "Time to load block data"
         ),
@@ -1237,7 +1246,7 @@ def collator_misc_operations_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_collator_handle_validated_master_block_time",
-            "Handle validated master block"
+            "Handle validated master block",
         ),
         create_heatmap_panel(
             "tycho_collator_commit_queue_diffs_time",
@@ -1287,7 +1296,8 @@ def collator_commit_block_metrics() -> RowPanel:
 def collator_state_adapter_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_state_adapter_prepare_block_proof_time", "Prepare block proof"
+            "tycho_collator_state_adapter_prepare_block_proof_time",
+            "Prepare block proof",
         ),
         create_heatmap_panel(
             "tycho_collator_state_adapter_save_block_proof_time", "Save block proof"
@@ -1295,12 +1305,8 @@ def collator_state_adapter_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_state_store_state_root_time", "Store state root"
         ),
-        create_heatmap_panel(
-            "tycho_collator_state_load_state_time", "Load state"
-        ),
-        create_heatmap_panel(
-            "tycho_collator_state_load_block_time", "Load block"
-        ),
+        create_heatmap_panel("tycho_collator_state_load_state_time", "Load state"),
+        create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel(
             "tycho_collator_state_load_queue_diff_time", "Load queue diff"
         ),
@@ -1660,7 +1666,9 @@ def mempool_storage() -> RowPanel:
             "Get point",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_store_get_status_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_store_get_status_count", range_selector="$__interval"
+            ),
             "Get status count (total at moment)",
         ),
         create_heatmap_panel(

@@ -58,6 +58,20 @@ impl GcSubscriber {
         let (states_gc_trigger, states_gc_rx) = watch::channel(None::<ManualGcTrigger>);
         let states_gc = tokio::spawn(Self::states_gc(tick_rx, states_gc_rx, storage.clone()));
 
+        let last_know_master_block_seqno = storage.node_state().load_last_mc_block_id();
+        if let Some(last_know_master_block_seqno) = last_know_master_block_seqno {
+            tracing::info!(
+                ?last_know_master_block_seqno,
+                "starting GC subscriber with the last known master block"
+            );
+            metrics::gauge!("tycho_core_last_mc_block_seqno")
+                .set(last_know_master_block_seqno.seqno as f64);
+            tick_tx.send_replace(Some(Tick {
+                last_key_block_seqno,
+                mc_block_id: last_know_master_block_seqno,
+            }));
+        }
+
         Self {
             inner: Arc::new(Inner {
                 tick_tx,
@@ -313,7 +327,7 @@ impl GcSubscriber {
             tracing::warn!("manager disabled");
             return;
         };
-        tracing::info!("manager started");
+        tracing::info!(?config, "manager started");
         defer! {
             tracing::info!("manager stopped");
         }
@@ -326,11 +340,15 @@ impl GcSubscriber {
 
         while let Some(source) = wait_with_sleep(&mut tick_rx, &mut manual_rx, sleep_until).await {
             sleep_until = None;
+            if let GcSource::Manual = source {
+                tracing::info!("manual states gc triggered");
+            }
 
             let Some(tick) = *tick_rx.borrow_and_update() else {
+                tracing::debug!("No tick available, continuing");
                 continue;
             };
-            tracing::debug!(?tick);
+            tracing::debug!(?tick, "states gc tick");
 
             let now = Instant::now();
 
@@ -339,8 +357,10 @@ impl GcSubscriber {
                 // NOTE: Interval is ignored for manual triggers
                 GcSource::Manual => {
                     let Some(trigger) = *manual_rx.borrow_and_update() else {
+                        tracing::debug!("No manual trigger available, continuing");
                         continue;
                     };
+                    tracing::info!(seqno = tick.adjust(trigger), "Manual GC triggered");
                     tick.adjust(trigger)
                 }
                 GcSource::Schedule => {
@@ -349,24 +369,37 @@ impl GcSubscriber {
                         let next_gc = last + config.interval;
                         if next_gc > now {
                             sleep_until = Some(next_gc);
+                            let sleep_duration = next_gc - now;
+                            tracing::debug!(
+                                duration = sleep_duration.as_secs_f64(),
+                                "Sleeping until next GC"
+                            );
                             continue;
                         }
                     } else if let Some(offset) = random_offset.take() {
                         sleep_until = Some(now + offset);
+                        let sleep_duration = offset;
+                        tracing::debug!(
+                            duration = sleep_duration.as_secs_f64(),
+                            "Sleeping with random offset"
+                        );
                         continue;
                     }
 
+                    tracing::info!(seqno = tick.mc_block_id.seqno, "Scheduled GC");
                     tick.mc_block_id.seqno
                 }
             };
 
             if target_seqno == 0 {
+                tracing::warn!("Target seqno is 0, skipping GC");
                 continue;
             }
 
             last_triggered_at = Some(now);
+            tracing::info!("Starting GC for target seqno: {}", target_seqno);
 
-            let _hist = HistogramGuard::begin("tycho_gc_states_time");
+            let hist = HistogramGuard::begin("tycho_gc_states_time");
             if let Err(e) = storage
                 .shard_state_storage()
                 .remove_outdated_states(target_seqno)
@@ -375,7 +408,12 @@ impl GcSubscriber {
                 tracing::error!("failed to remove outdated states: {e:?}");
             }
 
-            metrics::gauge!("tycho_gc_states_seqno").set(target_seqno as f64);
+            let took = hist.finish();
+            tracing::info!(
+                duration = took.as_secs_f64(),
+                "Completed GC for target seqno: {}",
+                target_seqno
+            );
         }
     }
 }
