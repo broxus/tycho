@@ -11,148 +11,117 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "**.rs"
+      - ".github**"
+
 env:
   CARGO_TERM_COLOR: always
+
 jobs:
-  test:
-    name: Test Suite
-    runs-on: [self-hosted, linux]
-    needs: rustfmt
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: Install latest nextest release
-        uses: taiki-e/install-action@nextest
-      - name: Test with latest nextest release
-        uses: actions-rs/cargo@v1
-        env:
-          RUST_LOG: warn
-        with:
-          command: nextest
-          args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control
-  integration-test:
-    name: Integration Test Suite
-    runs-on: [self-hosted, linux]
-    needs: test
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: setup just
-        uses: extractions/setup-just@v2
-      - name: prepare test env
-        run: |
-          just prepare_integration_tests
-      - name: Install latest nextest release
-        uses: taiki-e/install-action@nextest
-      - name: Test with latest nextest release
-        uses: actions-rs/cargo@v1
-        env:
-          RUST_LOG: warn
-        with:
-          command: nextest
-          args: run --package tycho-core --cargo-profile=release_check --test archives heavy_archives -- --ignored
   rustfmt:
     name: Rustfmt
     runs-on: [self-hosted, linux]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          profile: minimal
-          override: true
           components: rustfmt
+      - uses: extractions/setup-just@v2
       - name: Check formatting
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
-  metrics:
-    name: Metrics
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      - name: setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: check dashboard
-        run: python scripts/check-metrics.py
-  cli-builds: # replace later with clippy
-    name: tycho-cli check
-    runs-on: [self-hosted, linux]
-    needs: rustfmt
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: Build CLI
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: -p tycho-cli
+        run: just check_format
 
   clippy:
     name: Clippy
     needs: rustfmt
     runs-on: [self-hosted, linux]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
       - name: Install Clang
         run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
-          override: true
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - uses: extractions/setup-just@v2
       - name: Clippy check
-        uses: actions-rs/cargo@v1
+        run: just lint
+
+  test:
+    name: Test with codecov
+    runs-on: [self-hosted, linux]
+    needs: rustfmt
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          command: clippy
-          args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -- -D warnings # change to --workspace later
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: extractions/setup-just@v2
+      - name: Run tests
+        env:
+          RUSTC_WRAPPER: scripts/coverage.py
+          RUST_LOG: warn
+        run: just test_cov
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: github.repository == 'broxus/tycho'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: codecov.json
+          fail_ci_if_error: true
+
+  integration-test:
+    name: Integration Test Suite
+    runs-on: [self-hosted, linux]
+    needs: test
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: extractions/setup-just@v2
+      - name: Run integration tests
+        env:
+          RUST_LOG: warn
+        run: just run_integration_tests
+
+  cli-builds:
+    name: tycho-cli check
+    runs-on: [self-hosted, linux]
+    needs: rustfmt
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: extractions/setup-just@v2
+      - name: Build CLI
+        run: just build
+
+  metrics:
+    name: Metrics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: extractions/setup-just@v2
+      - name: Check dashboard
+        run: just check_dashboard
 
   check-protos:
     name: Check protos
@@ -161,18 +130,13 @@ jobs:
       (github.event_name == 'push' && contains(join(github.event.commits.*.added, github.event.commits.*.modified), '.proto'))
     runs-on: [self-hosted, linux]
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install protobuf
         run: sudo apt update && sudo apt-get -y install protobuf-compiler
-      - name: Generate Rust code from .proto files
-        run: cargo run -p tycho-gen-protos
+      - uses: extractions/setup-just@v2
+      - name: Update RPC proto
+        run: just update_rpc_proto
       - name: Check for uncommitted changes
         run: git diff --exit-code
 
@@ -181,21 +145,11 @@ jobs:
   #   needs: clippy
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v2
+  #     - uses: actions/checkout@v3
   #     - name: Install Clang
   #       run: sudo apt-get update && sudo apt-get install -y clang
-  #     - name: Install Rust toolchain
-  #       uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #         profile: minimal
-  #         override: true
+  #     - uses: dtolnay/rust-toolchain@stable
   #     - uses: Swatinem/rust-cache@v2
+  #     - uses: extractions/setup-just@v2
   #     - name: Check documentation
-  #       env:
-  #         RUSTDOCFLAGS: -D warnings
-  #       uses: actions-rs/cargo@v1
-  #       with:
-  #         command: doc
-  #         args: --no-deps --document-private-items --all-features --workspace
+  #       run: just docs
