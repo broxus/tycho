@@ -150,7 +150,7 @@ impl PeerSchedule {
         self.0.atomic.store(Arc::new(inner));
     }
 
-    pub async fn run_updater(self) -> ! {
+    pub async fn run_updater(self) {
         tracing::info!("starting peer schedule updates");
         let (local_id, mut rx) = {
             let mut guard = self.write();
@@ -199,7 +199,10 @@ impl PeerSchedule {
                     );
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    panic!("peer info updates channel closed, cannot maintain node connectivity")
+                    tracing::error!(
+                        "peer info updates channel closed, cannot maintain node connectivity"
+                    );
+                    break;
                 }
                 Err(broadcast::error::RecvError::Lagged(amount)) => {
                     tracing::error!(

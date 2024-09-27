@@ -136,8 +136,23 @@ impl Broadcaster {
                     }
                 }
                 // rare event essential for up-to-date retries
-                update = self.peer_updates.recv() => {
-                    self.match_peer_updates(update);
+                result = self.peer_updates.recv() => {
+                    match result {
+                        Ok((peer_id, new_state)) => {
+                            self.match_peer_updates(peer_id, new_state);
+                        }
+                        Err(err @ RecvError::Lagged(_)) => {
+                            tracing::error!(
+                                parent: self.effects.span(),
+                                error = display(err),
+                                "peer state update"
+                            );
+                        }
+                        Err(err @ RecvError::Closed) => {
+                            tracing::error!("peer state update {err}");
+                            break
+                        }
+                    }
                 }
                 // either request signature immediately or postpone until retry
                 Some((peer_id, result)) = self.bcast_futures.next() => {
@@ -355,36 +370,20 @@ impl Broadcaster {
         }
     }
 
-    fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
-        match result {
-            Ok((peer_id, new_state)) => {
-                tracing::info!(
-                    parent: self.effects.span(),
-                    peer = display(peer_id.alt()),
-                    new_state = debug(new_state),
-                    "peer state update",
-                );
-                match new_state {
-                    PeerState::Resolved => {
-                        self.removed_peers.remove(&peer_id);
-                        self.rejections.remove(&peer_id);
-                        // let peer determine current consensus round
-                        self.broadcast(&peer_id);
-                    }
-                    PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
-                }
+    fn match_peer_updates(&mut self, peer_id: PeerId, new_state: PeerState) {
+        tracing::info!(
+            parent: self.effects.span(),
+            peer = display(peer_id.alt()),
+            new_state = debug(new_state),
+            "peer state update",
+        );
+        match new_state {
+            PeerState::Resolved => {
+                self.removed_peers.remove(&peer_id);
+                self.rejections.remove(&peer_id);
+                self.broadcast(&peer_id);
             }
-            Err(err @ RecvError::Lagged(_)) => {
-                tracing::error!(
-                    parent: self.effects.span(),
-                    error = display(err),
-                    "peer state update"
-                );
-            }
-            Err(err @ RecvError::Closed) => {
-                let _span = self.effects.span().enter();
-                panic!("peer state update {err}");
-            }
+            PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
         }
     }
 }

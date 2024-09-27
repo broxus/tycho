@@ -193,7 +193,10 @@ impl CollectorTask {
                             return Err(round)
                         }
                     },
-                    None => panic!("channel from Broadcast Filter closed"),
+                    None => {
+                        tracing::error!("channel from Broadcast Filter closed");
+                        future::pending::<()>().await;
+                    },
                 },
                 // frequent event that does not cause completion by itself
                 Some(state) = self.includes.next() => {

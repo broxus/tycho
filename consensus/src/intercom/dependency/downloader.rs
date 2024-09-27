@@ -287,7 +287,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 Ok(point) = &mut verified_broadcast => break DownloadResult::Verified(point),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
-                update = self.updates.recv() => self.match_peer_updates(update),
+                update = self.updates.recv() => self.match_peer_updates(update).await,
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
                         Some(found) => break found,
@@ -476,7 +476,7 @@ impl<T: DownloadType> DownloadTask<T> {
         }
     }
 
-    fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
+    async fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
         match result {
             Ok((peer_id, new)) => {
                 self.undone_peers.entry(peer_id).and_modify(|status| {
@@ -487,7 +487,8 @@ impl<T: DownloadType> DownloadTask<T> {
                 tracing::error!(error = display(err), "peer updates");
             }
             Err(err @ RecvError::Closed) => {
-                panic!("peer updates {err}")
+                tracing::error!("peer updates {err}");
+                futures_util::future::pending::<()>().await;
             }
         }
     }
