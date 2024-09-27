@@ -1,9 +1,7 @@
-use std::ops::Deref;
 use std::sync::LazyLock;
 
 use anyhow::anyhow;
-use bytes::{Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
+use bytes::{BytesMut};
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{Response, ServiceRequest, Version};
 
@@ -21,9 +19,7 @@ static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
 
     let boc = vec![0_u8; EXT_IN_BOC_MIN];
     let payload = vec![boc; 1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN];
-    let payload_size = bincode::serialized_size(&payload).expect("cannot happen");
-
-    u16::MAX as usize + payload_size as usize
+    u16::MAX as usize + payload.max_size_hint()
 });
 
 // broadcast uses simple send_message with () return value
@@ -41,11 +37,11 @@ impl From<&Point> for tycho_network::Request {
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum MPQuery {
-    #[tl(id = "mpquery.broadcast")]
+    #[tl(id = "core.mpquery.broadcast")]
     Broadcast(Point),
-    #[tl(id = "mpquery.pointById")]
+    #[tl(id = "core.mpquery.pointById")]
     PointById(PointId),
-    #[tl(id = "mpquery.signature")]
+    #[tl(id = "core.mpquery.signature")]
     Signature(Round),
 }
 
@@ -73,9 +69,13 @@ impl TryFrom<&ServiceRequest> for MPQuery {
 }
 
 #[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, scheme="proto.tl")]
 pub enum MPResponse {
+    #[tl(id = "core.mpresponse.broadcast")]
     Broadcast,
+    #[tl(id = "core.mpresponse.pointById")]
     PointById(PointByIdResponse),
+    #[tl(id = "core.mpresponse.signature")]
     Signature(SignatureResponse),
 }
 
@@ -83,7 +83,9 @@ impl TryFrom<&MPResponse> for Response {
     type Error = anyhow::Error;
 
     fn try_from(value: &MPResponse) -> Result<Self, Self::Error> {
-        let body = Bytes::from(bincode::serialize(value)?);
+        let mut data = BytesMut::with_capacity(value.max_size_hint());
+        value.write_to(&mut data);
+        let body = data.freeze();
         Ok(Response {
             version: Version::default(),
             body,
@@ -98,7 +100,8 @@ impl TryFrom<&Response> for MPResponse {
         if response.body.len() > *LARGEST_DATA_BYTES {
             anyhow::bail!("too large response: {} bytes", response.body.len())
         }
-        match bincode::deserialize::<MPResponse>(&response.body) {
+
+        match <MPResponse>::read_from(&response.body, &mut 0) {
             Ok(response) => Ok(response),
             Err(e) => Err(anyhow!("failed to deserialize: {e:?}")),
         }

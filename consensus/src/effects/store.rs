@@ -14,7 +14,7 @@ use weedb::rocksdb::{ReadOptions, WaitForCompactOptions, WriteBatch};
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::MempoolConfig;
-use crate::models::{Digest, Point, PointInfo, PointInfoRef, Round};
+use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
@@ -243,13 +243,9 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut info = BytesMut::with_capacity(value.max_size_hint());
         value.write_to(&mut info);
 
-        // let info = bincode::serialize(&value)
-        //     .context("serialize db point info equivalent from point")?;
-
         // new
         let mut point_bytes = BytesMut::with_capacity(point.max_size_hint());
         point.write_to(&mut point_bytes);
-        // let point = bincode::serialize(point)?;
 
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
@@ -327,7 +323,6 @@ impl MempoolStoreImpl for MempoolStorage {
             .context("db get")?
             .map(|a| {
                 <PointInfo>::read_from(&a, &mut 0).context("deserialize point info")
-                // bincode::deserialize(&a).context("deserialize point info")
             })
             .transpose()
     }
@@ -384,8 +379,7 @@ impl MempoolStoreImpl for MempoolStorage {
             let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point = <Point>::read_from(&bytes, &mut 0).context("deserialize point")?;
-                // let point = bincode::deserialize::<Point>(bytes).context("deserialize point")?;
+                let point = <Point>::read_from(bytes, &mut 0).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
                 if let Some(prev_duplicate) = found.insert(key.to_vec().into_boxed_slice(), point) {
@@ -486,8 +480,6 @@ impl MempoolStoreImpl for MempoolStorage {
                 break;
             };
             let info = <PointInfo>::read_from(info, &mut 0).context("db deserialize point info")?;
-            // let info =
-            //     bincode::deserialize::<PointInfo>(info).context("db deserialize point info")?;
             if let Some(status) = statuses.remove(key) {
                 result.push((info, status));
             } else {

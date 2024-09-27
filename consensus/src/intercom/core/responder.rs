@@ -140,11 +140,11 @@ impl EngineContext {
             MPResponse::Signature(
                 SignatureResponse::Signature(_) | SignatureResponse::Rejected(_),
             ) => metrics::histogram!("tycho_mempool_signature_query_responder_data_time"),
-            MPResponse::PointById(PointByIdResponse::Defined(Some(_))) => {
+            MPResponse::PointById(PointByIdResponse::Defined(_)) => {
                 metrics::histogram!("tycho_mempool_download_query_responder_some_time")
             }
             MPResponse::PointById(
-                PointByIdResponse::Defined(None) | PointByIdResponse::TryLater,
+                PointByIdResponse::DefinedNone | PointByIdResponse::TryLater,
             ) => metrics::histogram!("tycho_mempool_download_query_responder_none_time"),
         };
         histogram.record(elapsed);

@@ -1,7 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tl_proto::{TlRead, TlWrite};
 use crate::models::{
     AnchorStageRole, Digest, Link, Point, PointData, PointDataRef, PointId, Round,

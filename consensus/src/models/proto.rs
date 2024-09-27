@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
-use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tl_proto::{TlRead, TlWrite};
-use crate::models::{PointData, PointId};
+use crate::models::{PointData};
 
 impl PointData {
     /// Computes the hash of the serialized diff.

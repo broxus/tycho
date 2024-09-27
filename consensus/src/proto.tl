@@ -66,8 +66,39 @@ link.through.witness    x:int256 = link.Through;
 link.through.includes   x:int256 = link.Through;
 
 
-mpquery.broadcast       consensus.pointInner        = MPQuery;
-mpquery.pointById       consensus.pointId           = MPQuery;
-mpquery.signature       int32                       = MPQuery;
+core.mpquery.broadcast       consensus.pointInner        = core.MPQuery;
+core.mpquery.pointById       consensus.pointId           = core.MPQuery;
+core.mpquery.signature       int32                       = core.MPQuery;
+
+
+/*
+* Representation of PointByIdResponse
+*/
+intercom.pointByIdResponse.defined          x:consensus.pointInner       = intercom.PointByIdResponse;
+intercom.pointByIdResponse.definedNone                                   = intercom.PointByIdResponse;
+intercom.pointByIdResponse.tryLater                                     = intercom.PointByIdResponse;
+
+
+/*
+* Representation of SignatureResponse
+*/
+intercom.signatureResponse.signature        x:bytes     = intercom.SignatureResponse;
+intercom.signatureResponse.noPoint                      = intercom.SignatureResponse;
+intercom.signatureResponse.tryLater                     = intercom.SignatureResponse;
+intercom.signatureResponse.rejected                     = intercom.SignatureResponse;
+
+/*
+*
+*/
+intercom.signatureRejectedReason.tooOldRound            = intercom.SignatureRejectedReason;
+intercom.signatureRejectedReason.noDagRound             = intercom.SignatureRejectedReason;
+intercom.signatureRejectedReason.cannotSign             = intercom.SignatureRejectedReason;
+
+/*
+*
+*/
+core.mpresponse.broadcast                                           = core.MPResponse;
+core.mpresponse.pointById       x:intercom.PointByIdResponse        = core.MPResponse;
+core.mpresponse.signature       x:intercom.SignatureResponse        = core.MPResponse;
 
 

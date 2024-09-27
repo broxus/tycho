@@ -41,10 +41,13 @@ pub struct PointData {
 }
 
 #[derive(TlWrite)]
+#[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 /// Note: fields and their order must be the same with [`PointData`]
 pub struct PointDataRef<'a> {
     author: &'a PeerId,
+    #[tl(with = "points_btree_map")]
     includes: &'a BTreeMap<PeerId, Digest>,
+    #[tl(with = "points_btree_map")]
     witness: &'a BTreeMap<PeerId, Digest>,
     anchor_trigger: &'a Link,
     anchor_proof: &'a Link,

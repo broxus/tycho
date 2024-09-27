@@ -6,7 +6,6 @@ use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
@@ -180,7 +179,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Instant;
 
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
     use everscale_crypto::ed25519::SecretKey;
     use rand::{thread_rng, RngCore};
     use tycho_util::sync::rayon_run;
@@ -268,17 +267,20 @@ mod tests {
             body: point_body.clone(),
         }));
         let info = PointInfo::from(&point);
-        let ser_info = bincode::serialize(&info).expect("serialize point");
-        let ser_ref =
-            bincode::serialize(&PointInfo::serializable_from(&point)).expect("serialize point");
+        let mut data = BytesMut::with_capacity(info.max_size_hint());
+        info.write_to(&mut data);
+        let ref_info = PointInfo::serializable_from(&point);
+        let mut ref_data = BytesMut::with_capacity(info.max_size_hint());
+        ref_info.write_to(&mut ref_data);
+
 
         assert_eq!(
             info,
-            bincode::deserialize::<PointInfo>(&ser_ref).expect("deserialize point info from ref"),
+            <PointInfo>::read_from(&ref_data, &mut 0).expect("deserialize point info from ref"),
         );
         assert_eq!(
-            Digest::new(&ser_info),
-            Digest::new(&ser_ref),
+            Digest::new(data.freeze().as_ref()),
+            Digest::new(ref_data.freeze().as_ref()),
             "compare serialized bytes"
         );
     }
@@ -347,11 +349,14 @@ mod tests {
         }));
 
         let timer = Instant::now();
-        let body = bincode::serialize(&point_body).expect("shouldn't happen");
+        let mut data = BytesMut::with_capacity(point_body.max_size_hint());
+        point_body.write_to(&mut data);
         let bincode_elapsed = timer.elapsed();
 
+        let bytes = data.freeze();
+
         let timer = Instant::now();
-        let digest = Digest::new(body.as_slice());
+        let digest = Digest::new(bytes.as_ref());
         let sha_elapsed = timer.elapsed();
         assert_eq!(&digest, point.digest(), "point digest");
 
@@ -362,7 +367,7 @@ mod tests {
 
         println!(
             "bincode {} bytes of point with {} bytes payload took {}",
-            body.len(),
+            bytes.len(),
             point_body
                 .payload
                 .iter()

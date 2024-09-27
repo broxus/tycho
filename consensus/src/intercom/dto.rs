@@ -1,13 +1,17 @@
 use std::fmt::{Display, Formatter};
 
-use serde::{Deserialize, Serialize};
 use tl_proto::{TlRead, TlWrite};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
 #[derive(Debug, TlWrite, TlRead)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum PointByIdResponse {
-    Defined(Option<Point>),
+    #[tl(id = "intercom.pointByIdResponse.defined")]
+    Defined(Point),
+    #[tl(id = "intercom.pointByIdResponse.definedNone")]
+    DefinedNone,
+    #[tl(id = "intercom.pointByIdResponse.tryLater")]
     TryLater,
 }
 
@@ -16,23 +20,33 @@ pub enum PointByIdResponse {
 pub struct BroadcastResponse;
 
 #[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum SignatureRejectedReason {
+    #[tl(id = "intercom.signatureRejectedReason.tooOldRound")]
     TooOldRound,
+    #[tl(id = "intercom.signatureRejectedReason.noDagRound")]
     NoDagRound,
+    #[tl(id = "intercom.signatureRejectedReason.cannotSign")]
     CannotSign,
 }
 
 #[derive(TlWrite, TlRead, Debug)]
-#[tl]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum SignatureResponse {
+    #[tl(id = "intercom.signatureResponse.signature")]
     Signature(Signature),
+    #[tl(id = "intercom.signatureResponse.noPoint")]
     /// peer dropped its state or just reached point's round
     NoPoint,
     // TimeOut (still verifying or disconnect) is also a reason to retry
+
+    #[tl(id = "intercom.signatureResponse.tryLater")]
     /// * signer did not reach the point's round yet - lighter weight broadcast retry loop;
     /// * signer still validates the point;
     /// * clock skew: signer's wall time lags the time from point's body
     TryLater,
+
+    #[tl(id = "intercom.signatureResponse.rejected")]
     /// * malformed point
     /// * equivocation
     /// * invalid dependency

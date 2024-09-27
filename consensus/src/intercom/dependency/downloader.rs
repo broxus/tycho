@@ -372,7 +372,8 @@ impl<T: DownloadType> DownloadTask<T> {
     ) -> Option<DownloadResult> {
         let defined_response =
             match result {
-                Ok(PointByIdResponse::Defined(response)) => response,
+                Ok(PointByIdResponse::Defined(response)) => Some(response),
+                Ok(PointByIdResponse::DefinedNone) => None,
                 Ok(PointByIdResponse::TryLater) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
                         panic!("Coding error: peer not in map {}", peer_id.alt())

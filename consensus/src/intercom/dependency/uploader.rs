@@ -32,11 +32,15 @@ impl Uploader {
             .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, effects))
             .or(Self::from_store(peer_id, point_id, store, effects));
         match status {
-            Some(SearchStatus::None) | None => PointByIdResponse::Defined(None),
+            Some(SearchStatus::None) | None => PointByIdResponse::DefinedNone,
             // Fixme return serialized as bytes from DB!
             // TODO add error logs if not found in DB while must have been
             Some(SearchStatus::Found) => {
-                PointByIdResponse::Defined(store.get_point(point_id.round, &point_id.digest))
+                match store.get_point(point_id.round, &point_id.digest) {
+                    None => PointByIdResponse::DefinedNone,
+                    Some(point) => PointByIdResponse::Defined(point)
+                }
+
             }
             Some(SearchStatus::TryLater) => PointByIdResponse::TryLater,
         }
