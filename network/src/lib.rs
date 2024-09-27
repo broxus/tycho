@@ -12,9 +12,9 @@ pub use network::{
 pub use quinn;
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, BoxCloneService,
-    BoxService, Direction, DisconnectReason, InboundRequestMeta, PeerAffinity, PeerEvent, PeerId,
-    PeerInfo, Request, Response, RpcQuery, Service, ServiceDatagramFn, ServiceExt,
-    ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
+    BoxService, Direction, DisconnectReason, InboundRequestMeta, PeerAffinity, PeerEvent,
+    PeerEventData, PeerId, PeerInfo, Request, Response, RpcQuery, Service, ServiceDatagramFn,
+    ServiceExt, ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
 };
 
 pub use self::overlay::{
