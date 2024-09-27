@@ -988,7 +988,7 @@ impl ActivePeersInner {
                     tracing::debug!(%peer_id, "closing old connection to mitigate simultaneous dial");
                     let old_connection = entry.insert(new_connection.clone());
                     old_connection.close();
-                    self.send_event(PeerEvent::LostPeer(*peer_id, DisconnectReason::Requested));
+                    self.send_event(PeerEvent::lost_peer(*peer_id, DisconnectReason::Requested));
                 } else {
                     tracing::debug!(%peer_id, "closing new connection to mitigate simultaneous dial");
                     new_connection.close();
@@ -1002,7 +1002,7 @@ impl ActivePeersInner {
             }
         }
 
-        self.send_event(PeerEvent::NewPeer(*peer_id));
+        self.send_event(PeerEvent::new_peer(*peer_id));
 
         if added {
             metrics::gauge!(METRIC_ACTIVE_PEERS).increment(1);
@@ -1014,7 +1014,7 @@ impl ActivePeersInner {
         if let Some((_, connection)) = self.connections.remove(peer_id) {
             connection.close();
             self.connections_len.fetch_sub(1, Ordering::Release);
-            self.send_event(PeerEvent::LostPeer(*peer_id, reason));
+            self.send_event(PeerEvent::lost_peer(*peer_id, reason));
 
             metrics::gauge!(METRIC_ACTIVE_PEERS).decrement(1);
         }
@@ -1027,7 +1027,7 @@ impl ActivePeersInner {
         {
             connection.close();
             self.connections_len.fetch_sub(1, Ordering::Release);
-            self.send_event(PeerEvent::LostPeer(*peer_id, reason));
+            self.send_event(PeerEvent::lost_peer(*peer_id, reason));
 
             metrics::gauge!(METRIC_ACTIVE_PEERS).decrement(1);
         }

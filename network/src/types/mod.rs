@@ -1,5 +1,5 @@
 pub use self::address::Address;
-pub use self::peer_event::{DisconnectReason, PeerEvent};
+pub use self::peer_event::{DisconnectReason, PeerEvent, PeerEventData};
 pub use self::peer_id::PeerId;
 pub use self::peer_info::{PeerAffinity, PeerInfo};
 pub use self::request::{

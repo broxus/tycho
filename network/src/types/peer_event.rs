@@ -3,9 +3,31 @@ use serde::{Deserialize, Serialize};
 use crate::types::PeerId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PeerEvent {
-    NewPeer(PeerId),
-    LostPeer(PeerId, DisconnectReason),
+pub struct PeerEvent {
+    pub peer_id: PeerId,
+    pub data: PeerEventData,
+}
+
+impl PeerEvent {
+    pub(crate) fn new_peer(peer_id: PeerId) -> Self {
+        Self {
+            peer_id,
+            data: PeerEventData::New,
+        }
+    }
+
+    pub(crate) fn lost_peer(peer_id: PeerId, reason: DisconnectReason) -> Self {
+        Self {
+            peer_id,
+            data: PeerEventData::Lost(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeerEventData {
+    New,
+    Lost(DisconnectReason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
