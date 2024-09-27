@@ -72,3 +72,11 @@ impl Peer {
         Ok(())
     }
 }
+
+impl std::fmt::Debug for Peer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Peer")
+            .field(&self.connection.peer_id())
+            .finish()
+    }
+}

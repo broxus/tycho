@@ -67,8 +67,8 @@ pub(crate) struct ConnectionManager {
     service: BoxCloneService<ServiceRequest, Response>,
 }
 
-type CallbackTx = oneshot::Sender<Result<PeerId, Arc<anyhow::Error>>>;
-type CallbackRx = oneshot::Receiver<Result<PeerId, Arc<anyhow::Error>>>;
+type CallbackTx = oneshot::Sender<Result<Connection, Arc<anyhow::Error>>>;
+type CallbackRx = oneshot::Receiver<Result<Connection, Arc<anyhow::Error>>>;
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
@@ -207,7 +207,7 @@ impl ConnectionManager {
         self.pending_dials
             .retain(|peer_id, oneshot| match oneshot.try_recv() {
                 Ok(Ok(returned_peer_id)) => {
-                    debug_assert_eq!(peer_id, &returned_peer_id);
+                    debug_assert_eq!(peer_id, returned_peer_id.peer_id());
                     self.dial_backoff_states.remove(peer_id);
                     false
                 }
@@ -496,19 +496,18 @@ impl ConnectionManager {
         // SAFETY: `drop_result` is set to `false`.
         match unsafe { ManuallyDrop::take(&mut res.connecting_result) } {
             Ok(connection) => {
-                let peer_id = *connection.peer_id();
                 tracing::debug!(
                     local_id = %self.endpoint.peer_id(),
-                    %peer_id,
+                    peer_id = %connection.peer_id(),
                     remote_addr = %res.target_address,
                     "new connection",
                 );
-                self.add_peer(connection);
 
-                self.delayed_callbacks.execute_resolved(&res.target_peer_id);
+                let connection = self.add_peer(connection);
+                self.delayed_callbacks.execute_resolved(&connection);
 
                 for callback in callbacks {
-                    _ = callback.send(Ok(peer_id));
+                    _ = callback.send(Ok(connection.clone()));
                 }
             }
             Err(e) => {
@@ -546,25 +545,30 @@ impl ConnectionManager {
         }
     }
 
-    fn add_peer(&mut self, connection: Connection) {
-        if let Some(connection) = self.active_peers.add(self.endpoint.peer_id(), connection) {
-            let origin = connection.origin();
+    fn add_peer(&mut self, connection: Connection) -> Connection {
+        match self.active_peers.add(self.endpoint.peer_id(), connection) {
+            AddedPeer::New(connection) => {
+                let origin = connection.origin();
 
-            let handler = InboundRequestHandler::new(
-                self.config.clone(),
-                connection,
-                self.service.clone(),
-                self.active_peers.clone(),
-            );
+                let handler = InboundRequestHandler::new(
+                    self.config.clone(),
+                    connection.clone(),
+                    self.service.clone(),
+                    self.active_peers.clone(),
+                );
 
-            metrics::counter!(match origin {
-                Direction::Outbound => METRIC_CONNECTIONS_OUT_TOTAL,
-                Direction::Inbound => METRIC_CONNECTIONS_IN_TOTAL,
-            })
-            .increment(1);
+                metrics::counter!(match origin {
+                    Direction::Outbound => METRIC_CONNECTIONS_OUT_TOTAL,
+                    Direction::Inbound => METRIC_CONNECTIONS_IN_TOTAL,
+                })
+                .increment(1);
 
-            metrics::gauge!(METRIC_CONNECTIONS_ACTIVE).increment(1);
-            self.connection_handlers.spawn(handler.start());
+                metrics::gauge!(METRIC_CONNECTIONS_ACTIVE).increment(1);
+                self.connection_handlers.spawn(handler.start());
+
+                connection
+            }
+            AddedPeer::Existing(connection) => connection,
         }
     }
 
@@ -614,9 +618,9 @@ impl ConnectionManager {
             }
         }
 
-        if self.active_peers.contains(peer_id) {
+        if let Some(connection) = self.active_peers.get(peer_id) {
             tracing::debug!("peer is already connected");
-            _ = callback.send(Ok(*peer_id));
+            _ = callback.send(Ok(connection));
             return;
         }
 
@@ -776,8 +780,8 @@ impl DelayedCallbacksQueue {
         Some(res.into_inner())
     }
 
-    fn execute_resolved(&mut self, peer_id: &PeerId) {
-        let Some(items) = self.callbacks.remove(peer_id) else {
+    fn execute_resolved(&mut self, connection: &Connection) {
+        let Some(items) = self.callbacks.remove(connection.peer_id()) else {
             return;
         };
 
@@ -788,14 +792,14 @@ impl DelayedCallbacksQueue {
             batches_executed += 1;
             callbacks_executed += delayed.callbacks.len();
 
-            let key = delayed.execute_with_ok(peer_id);
+            let key = delayed.execute_with_ok(connection);
 
             // NOTE: Delay key must exist in the queue.
             self.expirations.remove(&key);
         }
 
         tracing::debug!(
-            %peer_id,
+            peer_id = %connection.peer_id(),
             batches_executed,
             callbacks_executed,
             "executed all delayed callbacks",
@@ -849,9 +853,9 @@ struct DelayedCallbacks {
 }
 
 impl DelayedCallbacks {
-    fn execute_with_ok(self, peer_id: &PeerId) -> delay_queue::Key {
+    fn execute_with_ok(self, connection: &Connection) -> delay_queue::Key {
         for callback in self.callbacks {
-            _ = callback.send(Ok(*peer_id));
+            _ = callback.send(Ok(connection.clone()));
         }
         self.delay_key
     }
@@ -895,7 +899,7 @@ impl DialBackoffState {
 }
 
 #[derive(Clone)]
-pub struct ActivePeers(Arc<ActivePeersInner>);
+pub(crate) struct ActivePeers(Arc<ActivePeersInner>);
 
 impl ActivePeers {
     pub fn new(channel_size: usize) -> Self {
@@ -910,7 +914,7 @@ impl ActivePeers {
         self.0.contains(peer_id)
     }
 
-    pub fn add(&self, local_id: &PeerId, new_connection: Connection) -> Option<Connection> {
+    pub fn add(&self, local_id: &PeerId, new_connection: Connection) -> AddedPeer {
         self.0.add(local_id, new_connection)
     }
 
@@ -937,19 +941,6 @@ impl ActivePeers {
 
     pub fn len(&self) -> usize {
         self.0.len()
-    }
-
-    pub fn downgrade(this: &Self) -> WeakActivePeers {
-        WeakActivePeers(Arc::downgrade(&this.0))
-    }
-}
-
-#[derive(Clone)]
-pub struct WeakActivePeers(Weak<ActivePeersInner>);
-
-impl WeakActivePeers {
-    pub fn upgrade(&self) -> Option<ActivePeers> {
-        self.0.upgrade().map(ActivePeers)
     }
 }
 
@@ -980,7 +971,7 @@ impl ActivePeersInner {
     }
 
     #[must_use]
-    fn add(&self, local_id: &PeerId, new_connection: Connection) -> Option<Connection> {
+    fn add(&self, local_id: &PeerId, new_connection: Connection) -> AddedPeer {
         use dashmap::mapref::entry::Entry;
 
         let mut added = false;
@@ -1001,7 +992,7 @@ impl ActivePeersInner {
                 } else {
                     tracing::debug!(%peer_id, "closing new connection to mitigate simultaneous dial");
                     new_connection.close();
-                    return None;
+                    return AddedPeer::Existing(entry.get().clone());
                 }
             }
             Entry::Vacant(entry) => {
@@ -1016,7 +1007,7 @@ impl ActivePeersInner {
         if added {
             metrics::gauge!(METRIC_ACTIVE_PEERS).increment(1);
         }
-        Some(new_connection)
+        AddedPeer::New(new_connection)
     }
 
     fn remove(&self, peer_id: &PeerId, reason: DisconnectReason) {
@@ -1057,6 +1048,11 @@ impl ActivePeersInner {
     fn len(&self) -> usize {
         self.connections_len.load(Ordering::Acquire)
     }
+}
+
+pub(crate) enum AddedPeer {
+    New(Connection),
+    Existing(Connection),
 }
 
 fn simultaneous_dial_tie_breaking(

@@ -3,7 +3,7 @@ use std::future::Future;
 use anyhow::Result;
 
 use crate::network::{Network, Peer};
-use crate::types::{PeerEvent, PeerId, Request, Response};
+use crate::types::{PeerId, Request, Response};
 
 pub trait NetworkExt {
     fn query(
@@ -34,54 +34,31 @@ async fn on_connected_peer<T, F>(
 where
     for<'a> F: PeerTask<'a, T>,
 {
-    use tokio::sync::broadcast::error::RecvError;
-
-    let mut peer_events = network.subscribe()?;
-
-    // Interact if already connected
-    if let Some(peer) = network.peer(peer_id) {
-        return f.call(&peer, request).await;
-    }
-
-    match network.known_peers().get(peer_id) {
-        // Initiate a connection of it is a known peer
-        Some(peer_info) => {
-            // TODO: try multiple addresses
-            let address = peer_info
-                .iter_addresses()
-                .next()
-                .cloned()
-                .expect("address list must have at least one item");
-
-            network.connect(address, peer_id).await?;
-        }
-        // Error otherwise
-        None => anyhow::bail!("trying to interact with an unknown peer: {peer_id}"),
-    }
-
-    loop {
-        match peer_events.recv().await {
-            Ok(PeerEvent::NewPeer(new_peer_id)) if new_peer_id == peer_id => {
-                if let Some(peer) = network.peer(peer_id) {
-                    return f.call(&peer, request).await;
-                }
-            }
-            Ok(_) => {}
-            Err(RecvError::Closed) => anyhow::bail!("network subscription closed"),
-            Err(RecvError::Lagged(_)) => {
-                peer_events = peer_events.resubscribe();
-
-                if let Some(peer) = network.peer(peer_id) {
-                    return f.call(&peer, request).await;
-                }
-            }
+    let peer = 'peer: {
+        // Interact if already connected
+        if let Some(peer) = network.peer(peer_id) {
+            break 'peer peer;
         }
 
-        anyhow::ensure!(
-            network.known_peers().contains(peer_id),
-            "waiting for a connection to an unknown peer: {peer_id}",
-        );
-    }
+        // Try to connect
+        match network.known_peers().get(peer_id) {
+            // Initiate a connection of it is a known peer
+            Some(peer_info) => {
+                // TODO: try multiple addresses
+                let address = peer_info
+                    .iter_addresses()
+                    .next()
+                    .cloned()
+                    .expect("address list must have at least one item");
+
+                network.connect(address, peer_id).await?
+            }
+            // Error otherwise
+            None => anyhow::bail!("trying to interact with an unknown peer: {peer_id}"),
+        }
+    };
+
+    f.call(&peer, request).await
 }
 
 trait PeerTask<'a, T> {
