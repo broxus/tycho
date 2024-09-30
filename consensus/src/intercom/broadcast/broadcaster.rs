@@ -16,8 +16,8 @@ use crate::effects::{AltFormat, BroadcasterContext, Effects, EngineContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::broadcast::utils::QueryResponses;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
-use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
-use crate::models::{Digest, PeerCount, Point, Signature};
+use crate::intercom::{Dispatcher, PeerSchedule};
+use crate::models::{Digest, PeerCount, Point, Round, Signature};
 
 #[derive(Copy, Clone, Debug)]
 pub enum BroadcasterSignal {
@@ -77,11 +77,11 @@ impl Broadcaster {
             rejections: Default::default(),
             signatures: Default::default(),
 
-            bcast_request: Dispatcher::broadcast_request(point),
+            bcast_request: point.clone(),
             bcast_current: QueryResponses::default(),
             bcast_outdated,
 
-            sig_request: Dispatcher::signature_request(point.round()),
+            sig_request: point.round(),
             sig_peers: FastHashSet::default(),
             sig_current: FuturesUnordered::default(),
         };
@@ -116,11 +116,11 @@ struct BroadcasterTask {
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
 
-    bcast_request: QueryKind,
+    bcast_request: Point,
     bcast_current: QueryResponses<BroadcastResponse>,
     bcast_outdated: QueryResponses<BroadcastResponse>,
 
-    sig_request: QueryKind,
+    sig_request: Round,
     sig_peers: FastHashSet<PeerId>,
     sig_current: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
 }
@@ -296,7 +296,7 @@ impl BroadcasterTask {
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.bcast_current
-                .push(peer_id, self.dispatcher.query(peer_id, &self.bcast_request));
+                .push(peer_id, self.dispatcher.query_broadcast(peer_id, self.bcast_request.clone()));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),
@@ -314,7 +314,7 @@ impl BroadcasterTask {
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.sig_current
-                .push(self.dispatcher.query(peer_id, &self.sig_request));
+                .push(self.dispatcher.query_signature(peer_id, self.sig_request));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),

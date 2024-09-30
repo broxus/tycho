@@ -1,10 +1,16 @@
-use anyhow::Result;
+use anyhow::{Error, Result};
+use bytes::{Buf, Bytes};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-use tycho_network::{Network, PeerId, PrivateOverlay};
+use tl_proto::{TlError, TlPacket, TlRead, TlWrite};
+use tycho_network::{try_handle_prefix, Network, PeerId, PrivateOverlay, Request, Response};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::intercom::core::dto::{MPQuery, MPResponse, OwnedMPResponse};
+use crate::intercom::core::dto::{
+    BroadcastMpResponse, BroadcastQuery, PointMpResponse, PointQuery, SignatureMpResponse,
+    SignatureQuery,
+};
+use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
 #[derive(Clone)]
@@ -20,73 +26,121 @@ impl Dispatcher {
             network: network.clone(),
         }
     }
-
-    pub fn broadcast_request(point: &Point) -> QueryKind {
-        QueryKind::Broadcast((&MPQuery::Broadcast(point.clone())).into())
-    }
-
-    pub fn signature_request(round: Round) -> QueryKind {
-        QueryKind::Signature((&MPQuery::Signature(round)).into())
-    }
-
-    pub fn point_by_id_request(id: &PointId) -> QueryKind {
-        QueryKind::PointById((&MPQuery::PointById(id.clone())).into())
-    }
-
-    pub fn query<T>(
+    pub fn query_broadcast(
         &self,
         peer_id: &PeerId,
-        request: &QueryKind,
-    ) -> BoxFuture<'static, (PeerId, Result<T>)>
-    where
-        T: TryFrom<OwnedMPResponse, Error = anyhow::Error>,
-    {
+        point: Point,
+    ) -> BoxFuture<'static, (PeerId, Result<BroadcastResponse>)> {
         let peer_id = *peer_id;
-        let metric = request.metric();
-        let request = request.data().clone();
+        let metric = HistogramGuard::begin("tycho_mempool_broadcast_query_dispatcher_time");
+        let request = BroadcastQuery(point);
         let overlay = self.overlay.clone();
         let network = self.network.clone();
-        async move {
+
+        let future = async move {
             let _task_duration = metric;
-            overlay
-                .query(&network, &peer_id, request)
-                .map(move |response| {
-                    let response = response
-                        .and_then(|r| OwnedMPResponse::try_from(&r))
-                        .and_then(T::try_from);
-                    (peer_id, response)
-                })
+            let response = match overlay
+                .query(&network, &peer_id, Request::from_tl(request))
                 .await
-        }
-        .boxed()
-    }
-}
+            {
+                Ok(response) => response,
+                Err(e) => return (peer_id, Err(e)),
+            };
 
-pub enum QueryKind {
-    Broadcast(tycho_network::Request),
-    Signature(tycho_network::Request),
-    PointById(tycho_network::Request),
-}
+            let (constructor, _) = match try_handle_prefix(&response.body) {
+                Ok(data) => data,
+                Err(e) => return (peer_id, Err(e.into())),
+            };
 
-impl QueryKind {
-    fn data(&self) -> &tycho_network::Request {
-        match self {
-            QueryKind::Broadcast(data)
-            | QueryKind::Signature(data)
-            | QueryKind::PointById(data) => data,
-        }
+            if constructor != BroadcastMpResponse::TL_ID {
+                tracing::error!(received = constructor, tl_id = %BroadcastMpResponse::TL_ID, "Wrong constructor tag for broadcast response");
+                return (peer_id, Err(TlError::InvalidData.into()));
+            }
+
+            (peer_id, Ok(BroadcastResponse))
+        };
+        Box::pin(future)
     }
-    fn metric(&self) -> HistogramGuard {
-        match self {
-            QueryKind::Broadcast(_) => {
-                HistogramGuard::begin("tycho_mempool_broadcast_query_dispatcher_time")
+
+    pub fn query_point(
+        &self,
+        peer_id: &PeerId,
+        point: PointId,
+    ) -> BoxFuture<'static, (PeerId, Result<PointByIdResponse<Point>>)> {
+        let peer_id = *peer_id;
+        let metric = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
+        let request = PointQuery(point);
+        let overlay = self.overlay.clone();
+        let network = self.network.clone();
+
+        let future = async move {
+            let _task_duration = metric;
+            let response = match overlay
+                .query(&network, &peer_id, Request::from_tl(request))
+                .await
+            {
+                Ok(response) => response,
+                Err(e) => return (peer_id, Err(e)),
+            };
+
+            let (constructor, body) = match try_handle_prefix(&response.body) {
+                Ok(data) => data,
+                Err(e) => return (peer_id, Err(e.into())),
+            };
+
+            if constructor != PointMpResponse::<Point>::TL_ID {
+                tracing::error!(received = constructor, tl_id = %PointMpResponse::<Point>::TL_ID, "Wrong constructor tag for point response");
+                return (peer_id, Err(TlError::InvalidData.into()));
             }
-            QueryKind::Signature(_) => {
-                HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time")
+
+            let response = match PointByIdResponse::<Point>::read_from(body, &mut 0) {
+                Ok(data) => data,
+                Err(e) => return (peer_id, Err(e.into())),
+            };
+
+            (peer_id, Ok(response))
+        };
+        Box::pin(future)
+    }
+
+    pub fn query_signature(
+        &self,
+        peer_id: &PeerId,
+        round: Round,
+    ) -> BoxFuture<'static, (PeerId, Result<SignatureResponse>)> {
+        let peer_id = *peer_id;
+        let metric = HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time");
+        let request = SignatureQuery(round);
+        let overlay = self.overlay.clone();
+        let network = self.network.clone();
+
+        let future = async move {
+            let _task_duration = metric;
+            let response = match overlay
+                .query(&network, &peer_id, Request::from_tl(request))
+                .await
+            {
+                Ok(response) => response,
+                Err(e) => return (peer_id, Err(e)),
+            };
+
+            let (constructor, body) = match try_handle_prefix(&response.body) {
+                Ok(data) => data,
+                Err(e) => return (peer_id, Err(e.into())),
+            };
+
+            if constructor != SignatureMpResponse::TL_ID {
+                tracing::error!(received = constructor, tl_id = %SignatureMpResponse::TL_ID, "Wrong constructor tag for signature response");
+                return (peer_id, Err(TlError::InvalidData.into()));
             }
-            QueryKind::PointById(_) => {
-                HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time")
-            }
-        }
+
+            let response = match SignatureMpResponse::read_from(body, &mut 0) {
+                Ok(data) => data,
+                Err(e) => return (peer_id, Err(e.into())),
+            };
+
+            (peer_id, Ok(response.0))
+        };
+        Box::pin(future)
     }
 }

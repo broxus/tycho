@@ -1,5 +1,4 @@
 use bytes::Buf;
-
 pub use self::router::{Routable, Router, RouterBuilder};
 #[cfg(test)]
 pub use self::test::make_peer_info_stub;
@@ -54,7 +53,10 @@ where
     public_key.verify(data, signature)
 }
 
-pub fn try_handle_prefix(req: &ServiceRequest) -> Result<(u32, &[u8]), tl_proto::TlError> {
+pub fn try_handle_prefix<T>(req: &T) -> Result<(u32, &[u8]), tl_proto::TlError>
+where
+    T: AsRef<[u8]>,
+{
     let body = req.as_ref();
     if body.len() < 4 {
         return Err(tl_proto::TlError::UnexpectedEof);

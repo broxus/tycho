@@ -6,7 +6,7 @@ use crate::models::proto::points_btree_map;
 
 use crate::models::point::{Digest, Round, UnixTime};
 
-#[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]
+#[derive(Clone, Copy, TlRead, TlWrite, PartialEq, Debug)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
 pub struct PointId {
     pub author: PeerId,

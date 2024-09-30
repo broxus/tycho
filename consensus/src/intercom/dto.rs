@@ -1,34 +1,89 @@
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use bytes::Bytes;
-use tl_proto::{RawBytes, TlRead, TlWrite};
+use tl_proto::{RawBytes, TlError, TlPacket, TlRead, TlResult, TlWrite};
+use tokio::io::AsyncReadExt;
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
-#[derive(Debug, TlWrite, TlRead, Clone)]
-#[tl(boxed, scheme = "proto.tl")]
-pub enum PointByIdResponse<'tl> {
-    #[tl(id = "intercom.pointByIdResponse.defined")]
-    Defined(RawBytes<'tl, tl_proto::Boxed>),
-    #[tl(id = "intercom.pointByIdResponse.definedNone")]
+#[derive(Debug, Clone)]
+pub enum PointByIdResponse<T> {
+    Defined(T),
     DefinedNone,
-    #[tl(id = "intercom.pointByIdResponse.tryLater")]
     TryLater,
 }
 
-#[derive(Debug, TlWrite, TlRead)]
-#[tl(boxed, scheme = "proto.tl")]
-pub enum OwnedPointByIdResponse {
-    #[tl(id = "intercom.pointByIdResponse.defined")]
-    Defined(Point),
-    #[tl(id = "intercom.pointByIdResponse.definedNone")]
-    DefinedNone,
-    #[tl(id = "intercom.pointByIdResponse.tryLater")]
-    TryLater,
+impl<T> PointByIdResponse<T> {
+    const DEFINED_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.defined", scheme = "proto.tl");
+    const DEFINED_NONE_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.definedNone", scheme = "proto.tl");
+    const TRY_LATER_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.tryLater", scheme = "proto.tl");
+}
+
+impl<T: AsRef<[u8]>> TlWrite for PointByIdResponse<T> {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + match self {
+            Self::Defined(t) => t.as_ref().len(),
+            Self::DefinedNone | Self::TryLater => 0,
+        }
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: TlPacket
+    {
+        match self {
+            Self::Defined(t) => {
+                packet.write_u32(Self::DEFINED_TL_ID);
+                packet.write_raw_slice(t.as_ref());
+            }
+            Self::DefinedNone => packet.write_u32(Self::DEFINED_NONE_TL_ID),
+            Self::TryLater => packet.write_u32(Self::TRY_LATER_TL_ID)
+        }
+    }
+}
+
+impl TlWrite for PointByIdResponse<Point> {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + match self {
+            Self::Defined(t) => t.max_size_hint(),
+            Self::DefinedNone | Self::TryLater => 0,
+        }
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: TlPacket
+    {
+        match self {
+            Self::Defined(t) => {
+                packet.write_u32(Self::DEFINED_TL_ID);
+                t.write_to(packet);
+            }
+            Self::DefinedNone => packet.write_u32(Self::DEFINED_NONE_TL_ID),
+            Self::TryLater => packet.write_u32(Self::TRY_LATER_TL_ID)
+        }
+    }
+}
+
+impl<'a> TlRead<'a>for PointByIdResponse<Point> {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
+        let id = u32::read_from(packet, offset)?;
+        match id {
+            Self::DEFINED_TL_ID=> Ok(PointByIdResponse::Defined(Point::read_from(packet, offset)?)),
+            Self::DEFINED_NONE_TL_ID => Ok(PointByIdResponse::DefinedNone),
+            Self::TRY_LATER_TL_ID => Ok(PointByIdResponse::TryLater),
+            _ => Err(TlError::InvalidData)
+        }
+    }
 }
 
 
-/// Denotes that broadcasts should be done via network query, not send message.
-/// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.
+
 pub struct BroadcastResponse;
 
 #[derive(TlWrite, TlRead, Debug)]

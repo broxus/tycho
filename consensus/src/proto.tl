@@ -67,7 +67,7 @@ link.through.includes   x:int256 = link.Through;
 
 
 core.mpquery.broadcast       consensus.pointInner        = core.MPQuery;
-core.mpquery.pointById       consensus.pointId           = core.MPQuery;
+core.mpquery.point           consensus.pointId           = core.MPQuery;
 core.mpquery.signature       int32                       = core.MPQuery;
 
 
@@ -98,7 +98,7 @@ intercom.signatureRejectedReason.cannotSign             = intercom.SignatureReje
 *
 */
 core.mpresponse.broadcast                                           = core.MPResponse;
-core.mpresponse.pointById       x:intercom.PointByIdResponse        = core.MPResponse;
+core.mpresponse.point           x:intercom.PointByIdResponse        = core.MPResponse;
 core.mpresponse.signature       x:intercom.SignatureResponse        = core.MPResponse;
 
 

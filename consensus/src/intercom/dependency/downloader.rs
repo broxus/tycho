@@ -20,8 +20,8 @@ use crate::dag::{Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::MempoolConfig;
-use crate::intercom::dto::{OwnedPointByIdResponse, PeerState, PointByIdResponse};
-use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
+use crate::intercom::dto::{PeerState, PointByIdResponse};
+use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId, Round};
 
 #[derive(Clone)]
@@ -226,8 +226,8 @@ impl Downloader {
         let mut task = DownloadTask {
             parent: self.clone(),
             _phantom: PhantomData,
-            request: Dispatcher::point_by_id_request(point_id),
-            point_id: point_id.clone(),
+            //request: Dispatcher::point_by_id_request(point_id),
+            point_id: *point_id,
             peer_count,
             reliably_not_found: 0, // this node is +1 to 2F
             unreliable_peers: 0,   // should not reach 1F+1
@@ -252,7 +252,7 @@ struct DownloadTask<T> {
     parent: Downloader,
     _phantom: PhantomData<T>,
 
-    request: QueryKind,
+    //request: PointId,
     point_id: PointId,
 
     peer_count: PeerCount,
@@ -262,7 +262,7 @@ struct DownloadTask<T> {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
-    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<OwnedPointByIdResponse>)>>,
+    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse<Point>>)>>,
 
     attempt: u8,
     /// skip time-driven attempt if an attempt was init by empty task queue
@@ -360,7 +360,7 @@ impl<T: DownloadType> DownloadTask<T> {
             self.parent
                 .inner
                 .dispatcher
-                .query::<OwnedPointByIdResponse>(peer_id, &self.request)
+                .query_point(peer_id, self.point_id)
                 .boxed(),
         );
     }
@@ -368,13 +368,13 @@ impl<T: DownloadType> DownloadTask<T> {
     fn verify(
         &mut self,
         peer_id: &PeerId,
-        result: anyhow::Result<OwnedPointByIdResponse>,
+        result: anyhow::Result<PointByIdResponse<Point>>,
     ) -> Option<DownloadResult> {
         let defined_response =
             match result {
-                Ok(OwnedPointByIdResponse::Defined(response)) => Some(response),
-                Ok(OwnedPointByIdResponse::DefinedNone) => None,
-                Ok(OwnedPointByIdResponse::TryLater) => {
+                Ok(PointByIdResponse::Defined(point)) => Some(point),
+                Ok(PointByIdResponse::DefinedNone) => None,
+                Ok(PointByIdResponse::TryLater) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
                         panic!("Coding error: peer not in map {}", peer_id.alt())
                     });

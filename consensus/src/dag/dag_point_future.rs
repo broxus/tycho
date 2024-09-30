@@ -299,7 +299,7 @@ impl DagPointFuture {
                 let point_id = point_id.clone();
                 move || match store.get_status(point_id.round, &point_id.digest) {
                     Some(status) if status.is_valid || status.is_certified => {
-                        store.get_info(point_id.round, &point_id.digest)
+                        store.get_info(point_id.round, point_id.digest)
                     }
                     _ => None,
                 }

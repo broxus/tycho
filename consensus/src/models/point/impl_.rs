@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use everscale_crypto::ed25519::KeyPair;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
@@ -13,8 +13,15 @@ use crate::models::point::body::PointBody;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
 #[derive(Clone, TlWrite, TlRead)]
-
 pub struct Point(Arc<PointInner>);
+
+// impl AsRef<[u8]> for Point {
+//     fn as_ref(&self) -> &[u8] {
+//         let mut data = BytesMut::with_capacity(self.max_size_hint());
+//         self.write_to(&mut data);
+//         data.as_ref()
+//     }
+// }
 
 #[derive(TlWrite, TlRead,  Debug)]
 #[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]

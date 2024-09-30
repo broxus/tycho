@@ -132,16 +132,16 @@ impl MempoolStore {
             .expect("DB get point full")
     }
 
-    pub fn get_point_raw(&self, round: Round, digest: &Digest) -> Option<DBPinnableSlice> {
+    pub fn get_point_raw(&self, round: Round, digest: Digest) -> Option<DBPinnableSlice> {
         self.0
-            .get_point_raw(round, digest)
+            .get_point_raw(round, &digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
             .expect("DB get point full")
     }
 
-    pub fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
+    pub fn get_info(&self, round: Round, digest: Digest) -> Option<PointInfo> {
         self.0
-            .get_info(round, digest)
+            .get_info(round, &digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
             .expect("DB get point info")
     }
@@ -549,6 +549,10 @@ impl MempoolStoreImpl for () {
 
     fn get_point(&self, _: Round, _: &Digest) -> Result<Option<Point>> {
         anyhow::bail!("should not be used in tests")
+    }
+
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>> {
+       Ok(None)
     }
 
     fn get_info(&self, _: Round, _: &Digest) -> Result<Option<PointInfo>> {
