@@ -1338,7 +1338,7 @@ impl CollatorStdImpl {
         collation_data_builder
             .value_flow
             .fees_collected
-            .checked_add(&shard_fees.fees)?;
+            .try_add_assign(&shard_fees.fees)?;
         collation_data_builder.value_flow.fees_imported = shard_fees.fees;
 
         Ok(())
