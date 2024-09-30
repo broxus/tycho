@@ -74,9 +74,9 @@ core.mpquery.signature       int32                       = core.MPQuery;
 /*
 * Representation of PointByIdResponse
 */
-intercom.pointByIdResponse.defined          x:consensus.pointInner       = intercom.PointByIdResponse;
-intercom.pointByIdResponse.definedNone                                   = intercom.PointByIdResponse;
-intercom.pointByIdResponse.tryLater                                     = intercom.PointByIdResponse;
+intercom.pointByIdResponse.defined          x:bytes      = intercom.PointByIdResponse;
+intercom.pointByIdResponse.definedNone                   = intercom.PointByIdResponse;
+intercom.pointByIdResponse.tryLater                     = intercom.PointByIdResponse;
 
 
 /*

@@ -1,4 +1,5 @@
 use futures_util::FutureExt;
+use tl_proto::RawBytes;
 use tycho_network::PeerId;
 
 use crate::dag::DagRound;
@@ -16,13 +17,13 @@ enum SearchStatus {
 }
 
 impl Uploader {
-    pub fn find(
-        peer_id: &PeerId,
-        point_id: &PointId,
-        top_dag_round: &DagRound,
-        store: &MempoolStore,
-        effects: &Effects<EngineContext>,
-    ) -> PointByIdResponse {
+    pub fn find<'a>(
+        peer_id: &'a PeerId,
+        point_id: &'a PointId,
+        top_dag_round: &'a DagRound,
+        store: &'a MempoolStore,
+        effects: &'a Effects<EngineContext>,
+    ) -> PointByIdResponse<'a> {
         if point_id.round > top_dag_round.round() {
             // TODO add logs
             return PointByIdResponse::TryLater;
@@ -36,11 +37,10 @@ impl Uploader {
             // Fixme return serialized as bytes from DB!
             // TODO add error logs if not found in DB while must have been
             Some(SearchStatus::Found) => {
-                match store.get_point(point_id.round, &point_id.digest) {
+                match store.get_point_raw(point_id.round, &point_id.digest) {
                     None => PointByIdResponse::DefinedNone,
-                    Some(point) => PointByIdResponse::Defined(point)
+                    Some(point) => PointByIdResponse::Defined(RawBytes::new(point.as_ref())),
                 }
-
             }
             Some(SearchStatus::TryLater) => PointByIdResponse::TryLater,
         }

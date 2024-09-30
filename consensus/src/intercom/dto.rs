@@ -1,12 +1,23 @@
 use std::fmt::{Display, Formatter};
-
-use tl_proto::{TlRead, TlWrite};
+use bytes::Bytes;
+use tl_proto::{RawBytes, TlRead, TlWrite};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
+#[derive(Debug, TlWrite, TlRead, Clone)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum PointByIdResponse<'tl> {
+    #[tl(id = "intercom.pointByIdResponse.defined")]
+    Defined(RawBytes<'tl, tl_proto::Boxed>),
+    #[tl(id = "intercom.pointByIdResponse.definedNone")]
+    DefinedNone,
+    #[tl(id = "intercom.pointByIdResponse.tryLater")]
+    TryLater,
+}
+
 #[derive(Debug, TlWrite, TlRead)]
 #[tl(boxed, scheme = "proto.tl")]
-pub enum PointByIdResponse {
+pub enum OwnedPointByIdResponse {
     #[tl(id = "intercom.pointByIdResponse.defined")]
     Defined(Point),
     #[tl(id = "intercom.pointByIdResponse.definedNone")]
@@ -14,6 +25,7 @@ pub enum PointByIdResponse {
     #[tl(id = "intercom.pointByIdResponse.tryLater")]
     TryLater,
 }
+
 
 /// Denotes that broadcasts should be done via network query, not send message.
 /// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.

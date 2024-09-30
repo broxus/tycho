@@ -9,7 +9,7 @@ use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::{ReadOptions, WaitForCompactOptions, WriteBatch};
+use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -33,6 +33,8 @@ trait MempoolStoreImpl: Send + Sync {
     fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()>;
 
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
+
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>>;
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>>;
 
@@ -126,6 +128,13 @@ impl MempoolStore {
     pub fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
         self.0
             .get_point(round, digest)
+            .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
+            .expect("DB get point full")
+    }
+
+    pub fn get_point_raw(&self, round: Round, digest: &Digest) -> Option<DBPinnableSlice> {
+        self.0
+            .get_point_raw(round, digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
             .expect("DB get point full")
     }
@@ -309,6 +318,19 @@ impl MempoolStoreImpl for MempoolStorage {
             .context("db get")?
             .map(|a| <Point>::read_from(&a, &mut 0).context("deserialize db point"))
             .transpose()
+    }
+
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>> {
+        metrics::counter!("tycho_mempool_store_get_point_raw_count").increment(1);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_raw_time");
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+
+        let points = &self.db.points;
+        let point = points
+            .get(key.as_slice())
+            .context("db get")?;
+        Ok(point)
     }
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>> {

@@ -6,7 +6,7 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_network::{Response, ServiceRequest, Version};
 
 use crate::engine::MempoolConfig;
-use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
+use crate::intercom::dto::{BroadcastResponse, OwnedPointByIdResponse, PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
 // 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
@@ -70,16 +70,28 @@ impl TryFrom<&ServiceRequest> for MPQuery {
 
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, scheme="proto.tl")]
-pub enum MPResponse {
+pub enum MPResponse<'tl> {
     #[tl(id = "core.mpresponse.broadcast")]
     Broadcast,
     #[tl(id = "core.mpresponse.pointById")]
-    PointById(PointByIdResponse),
+    PointById(PointByIdResponse<'tl>),
     #[tl(id = "core.mpresponse.signature")]
     Signature(SignatureResponse),
 }
 
-impl TryFrom<&MPResponse> for Response {
+
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, scheme="proto.tl")]
+pub enum OwnedMPResponse {
+    #[tl(id = "core.mpresponse.broadcast")]
+    Broadcast,
+    #[tl(id = "core.mpresponse.pointById")]
+    PointById(OwnedPointByIdResponse),
+    #[tl(id = "core.mpresponse.signature")]
+    Signature(SignatureResponse),
+}
+
+impl<'a> TryFrom<&'a MPResponse<'a>> for Response {
     type Error = anyhow::Error;
 
     fn try_from(value: &MPResponse) -> Result<Self, Self::Error> {
@@ -93,7 +105,7 @@ impl TryFrom<&MPResponse> for Response {
     }
 }
 
-impl TryFrom<&Response> for MPResponse {
+impl<'a> TryFrom<&Response> for OwnedMPResponse {
     type Error = anyhow::Error;
 
     fn try_from(response: &Response) -> Result<Self, Self::Error> {
@@ -101,41 +113,41 @@ impl TryFrom<&Response> for MPResponse {
             anyhow::bail!("too large response: {} bytes", response.body.len())
         }
 
-        match <MPResponse>::read_from(&response.body, &mut 0) {
+        match <OwnedMPResponse>::read_from(&response.body, &mut 0) {
             Ok(response) => Ok(response),
             Err(e) => Err(anyhow!("failed to deserialize: {e:?}")),
         }
     }
 }
 
-impl TryFrom<MPResponse> for PointByIdResponse {
+impl TryFrom<OwnedMPResponse> for OwnedPointByIdResponse {
     type Error = anyhow::Error;
 
-    fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: OwnedMPResponse) -> Result<Self, Self::Error> {
         match response {
-            MPResponse::PointById(response) => Ok(response),
+            OwnedMPResponse::PointById(response) => Ok(response),
             _ => Err(anyhow!("wrapper mismatch, expected PointById")),
         }
     }
 }
 
-impl TryFrom<MPResponse> for SignatureResponse {
+impl TryFrom<OwnedMPResponse> for SignatureResponse {
     type Error = anyhow::Error;
 
-    fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: OwnedMPResponse) -> Result<Self, Self::Error> {
         match response {
-            MPResponse::Signature(response) => Ok(response),
+            OwnedMPResponse::Signature(response) => Ok(response),
             _ => Err(anyhow!("wrapper mismatch, expected Signature")),
         }
     }
 }
 
-impl TryFrom<MPResponse> for BroadcastResponse {
+impl TryFrom<OwnedMPResponse> for BroadcastResponse {
     type Error = anyhow::Error;
 
-    fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: OwnedMPResponse) -> Result<Self, Self::Error> {
         match response {
-            MPResponse::Broadcast => Ok(BroadcastResponse),
+            OwnedMPResponse::Broadcast => Ok(BroadcastResponse),
             _ => Err(anyhow!("wrapper mismatch, expected Broadcast")),
         }
     }

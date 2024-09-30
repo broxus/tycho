@@ -4,7 +4,7 @@ use futures_util::FutureExt;
 use tycho_network::{Network, PeerId, PrivateOverlay};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::intercom::core::dto::{MPQuery, MPResponse};
+use crate::intercom::core::dto::{MPQuery, MPResponse, OwnedMPResponse};
 use crate::models::{Point, PointId, Round};
 
 #[derive(Clone)]
@@ -39,7 +39,7 @@ impl Dispatcher {
         request: &QueryKind,
     ) -> BoxFuture<'static, (PeerId, Result<T>)>
     where
-        T: TryFrom<MPResponse, Error = anyhow::Error>,
+        T: TryFrom<OwnedMPResponse, Error = anyhow::Error>,
     {
         let peer_id = *peer_id;
         let metric = request.metric();
@@ -52,7 +52,7 @@ impl Dispatcher {
                 .query(&network, &peer_id, request)
                 .map(move |response| {
                     let response = response
-                        .and_then(|r| MPResponse::try_from(&r))
+                        .and_then(|r| OwnedMPResponse::try_from(&r))
                         .and_then(T::try_from);
                     (peer_id, response)
                 })

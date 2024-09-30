@@ -54,7 +54,7 @@ impl Service<ServiceRequest> for Responder {
 
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        future::ready(self.handle_query(&req))
+        future::ready(self.handle_query(req))
     }
 
     #[inline]
@@ -97,19 +97,30 @@ impl Responder {
                 };
                 MPResponse::Broadcast
             }
-            MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
-                None => PointByIdResponse::TryLater,
-                Some(inner) => match &inner.top_dag_round {
+            MPQuery::PointById(point_id) => {
+                let response = match inner {
                     None => PointByIdResponse::TryLater,
-                    Some(top_dag_round) => Uploader::find(
-                        &peer_id,
-                        &point_id,
-                        top_dag_round,
-                        &inner.store,
-                        &inner.effects,
-                    ),
-                },
-            }),
+                    Some(inner) => {
+                        let inner = inner.clone();
+                        let round = &inner.top_dag_round;
+                        let result = match round {
+                            None => PointByIdResponse::TryLater,
+                            Some(top_dag_round) => {
+                                let result = Uploader::find(
+                                    &peer_id,
+                                    &point_id,
+                                    top_dag_round,
+                                    &inner.store,
+                                    &inner.effects,
+                                );
+                                result
+                            }
+                        };
+                        result
+                    }
+                };
+                MPResponse::PointById(response)
+            },
             MPQuery::Signature(round) => MPResponse::Signature(match inner {
                 None => SignatureResponse::TryLater,
                 Some(inner) => match &inner.top_dag_round {
@@ -126,6 +137,8 @@ impl Responder {
 
         Some(response)
     }
+
+
 }
 
 impl EngineContext {

@@ -13,6 +13,7 @@ use crate::models::point::body::PointBody;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
 #[derive(Clone, TlWrite, TlRead)]
+
 pub struct Point(Arc<PointInner>);
 
 #[derive(TlWrite, TlRead,  Debug)]

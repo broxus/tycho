@@ -20,7 +20,7 @@ use crate::dag::{Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::MempoolConfig;
-use crate::intercom::dto::{PeerState, PointByIdResponse};
+use crate::intercom::dto::{OwnedPointByIdResponse, PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
 use crate::models::{PeerCount, Point, PointId, Round};
 
@@ -262,7 +262,7 @@ struct DownloadTask<T> {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
-    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse>)>>,
+    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<OwnedPointByIdResponse>)>>,
 
     attempt: u8,
     /// skip time-driven attempt if an attempt was init by empty task queue
@@ -360,7 +360,7 @@ impl<T: DownloadType> DownloadTask<T> {
             self.parent
                 .inner
                 .dispatcher
-                .query::<PointByIdResponse>(peer_id, &self.request)
+                .query::<OwnedPointByIdResponse>(peer_id, &self.request)
                 .boxed(),
         );
     }
@@ -368,13 +368,13 @@ impl<T: DownloadType> DownloadTask<T> {
     fn verify(
         &mut self,
         peer_id: &PeerId,
-        result: anyhow::Result<PointByIdResponse>,
+        result: anyhow::Result<OwnedPointByIdResponse>,
     ) -> Option<DownloadResult> {
         let defined_response =
             match result {
-                Ok(PointByIdResponse::Defined(response)) => Some(response),
-                Ok(PointByIdResponse::DefinedNone) => None,
-                Ok(PointByIdResponse::TryLater) => {
+                Ok(OwnedPointByIdResponse::Defined(response)) => Some(response),
+                Ok(OwnedPointByIdResponse::DefinedNone) => None,
+                Ok(OwnedPointByIdResponse::TryLater) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
                         panic!("Coding error: peer not in map {}", peer_id.alt())
                     });
