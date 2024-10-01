@@ -307,6 +307,7 @@ impl CollatorStdImpl {
 
         // init working state
         let working_state = Self::init_working_state(
+            &self.next_block_info,
             &self.config,
             self.state_node_adapter.clone(),
             mc_data,
@@ -435,6 +436,7 @@ impl CollatorStdImpl {
         if import_init_anchors {
             let prev_shard_data = working_state.prev_shard_data_ref();
             tracing::debug!(target: tracing_targets::COLLATOR,
+                next_block_id = %self.next_block_info,
                 "importing anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
                 processed_to_anchor_id, processed_to_msgs_offset,
                 prev_shard_data.gen_chain_time(),
@@ -515,9 +517,11 @@ impl CollatorStdImpl {
 
             // reload prev data, reinit working state, drop msgs buffer
             tracing::debug!(target: tracing_targets::COLLATOR,
+                new_next_block_id = %self.next_block_info,
                 "reset working state and msgs buffer",
             );
             let working_state = Self::init_working_state(
+                &self.next_block_info,
                 &self.config,
                 self.state_node_adapter.clone(),
                 mc_data,
@@ -563,6 +567,7 @@ impl CollatorStdImpl {
                 if !anchors_info.is_empty() {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         elapsed = timer.elapsed().as_millis(),
+                        new_next_block_id = %self.next_block_info,
                         "imported anchors on resume: {:?}",
                         anchors_info.as_slice(),
                     );
@@ -580,8 +585,9 @@ impl CollatorStdImpl {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
     async fn init_working_state(
+        next_block_id_short: &BlockIdShort,
         config: &CollationConfig,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mc_data: Arc<McData>,
