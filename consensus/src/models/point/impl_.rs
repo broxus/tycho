@@ -15,13 +15,6 @@ use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Ro
 #[derive(Clone, TlWrite, TlRead)]
 pub struct Point(Arc<PointInner>);
 
-// impl AsRef<[u8]> for Point {
-//     fn as_ref(&self) -> &[u8] {
-//         let mut data = BytesMut::with_capacity(self.max_size_hint());
-//         self.write_to(&mut data);
-//         data.as_ref()
-//     }
-// }
 
 #[derive(TlWrite, TlRead,  Debug)]
 #[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
@@ -52,6 +45,7 @@ impl PointInner {
 }
 
 impl Point {
+    pub const TL_ID: u32 = tl_proto::id!("consensus.pointInner", scheme = "proto.tl");
     pub fn new(
         local_keypair: &KeyPair,
         round: Round,
@@ -374,7 +368,7 @@ mod tests {
         assert_eq!(&sig, point.signature(), "point signature");
 
         println!(
-            "bincode {} bytes of point with {} bytes payload took {}",
+            "tl {} bytes of point with {} bytes payload took {}",
             bytes.len(),
             point_body
                 .payload

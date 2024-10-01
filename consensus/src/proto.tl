@@ -66,9 +66,9 @@ link.through.witness    x:int256 = link.Through;
 link.through.includes   x:int256 = link.Through;
 
 
-core.mpquery.broadcast       consensus.pointInner        = core.MPQuery;
-core.mpquery.point           consensus.pointId           = core.MPQuery;
-core.mpquery.signature       int32                       = core.MPQuery;
+core.broadcastQuery       x:consensus.pointInner        = core.BroadcastQuery;
+core.pointQuery           x:consensus.pointId           = core.PointQuery;
+core.signatureQuery       x:int32                       = core.SignatureQuery;
 
 
 /*

@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
-
+use tycho_network::PeerId;
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse,
 };
@@ -22,16 +22,57 @@ static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
 
 
 
-#[derive(TlWrite, TlRead, Debug)]
-#[tl(boxed, id = "core.mpquery.broadcast", scheme = "proto.tl")]
+#[derive(Debug)]
+//#[tl(boxed, id = "core.broadcastQuery", scheme = "proto.tl")]
 pub struct BroadcastQuery(pub Point);
 
+impl BroadcastQuery {
+    pub const TL_ID: u32 = tl_proto::id!("core.broadcastQuery", scheme = "proto.tl");
+}
+
+impl TlWrite for BroadcastQuery {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + self.0.max_size_hint()
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: TlPacket
+    {
+        tracing::info!(id = %Self::TL_ID, "Writing id to package");
+        packet.write_u32(Self::TL_ID);
+        self.0.write_to(packet);
+    }
+}
+
+impl<'a> TlRead<'a> for BroadcastQuery {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
+        let constructor = u32::read_from(packet, offset)?;
+        if constructor != Self::TL_ID {
+            tracing::info!("wrong constructor {} {} {}", constructor, Self::TL_ID, Point::TL_ID);
+            return Err(TlError::UnknownConstructor);
+        }
+
+        let len = packet.len() - *offset;
+        if len > *LARGEST_DATA_BYTES {
+            tracing::error!("too large request: {} bytes", len);
+            return Err(TlError::InvalidData)
+        }
+
+        Point::read_from(packet, offset).map(Self)
+    }
+}
+
 #[derive(TlWrite, TlRead, Debug)]
-#[tl(boxed, id = "core.mpquery.point", scheme = "proto.tl")]
+#[tl(boxed, id = "core.pointQuery", scheme = "proto.tl")]
 pub struct PointQuery(pub PointId);
 
 #[derive(TlWrite, TlRead, Debug)]
-#[tl(boxed, id = "core.mpquery.signature", scheme = "proto.tl")]
+#[tl(boxed, id = "core.signatureQuery", scheme = "proto.tl")]
 pub struct SignatureQuery(pub Round);
 
 
@@ -83,4 +124,3 @@ where
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "core.mpresponse.point", scheme = "proto.tl")]
 pub struct SignatureMpResponse(pub SignatureResponse);
-
