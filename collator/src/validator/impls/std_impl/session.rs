@@ -509,7 +509,6 @@ impl Inner {
                 }
             };
 
-            // TODO: Check if there is any contention on the `signature_fut`
             let signature = tokio::select! {
                 signature = signature_fut => signature,
                 signature = recv_fut => signature,
@@ -580,7 +579,6 @@ impl SessionState {
 
         let data = Block::build_data_for_sign(&block.block_id);
 
-        // TODO: Store expanded public key with the signature?
         let validator_info = self.validators.get(peer_id).expect("peer info out of sync");
         if !validator_info
             .public_key

@@ -146,15 +146,10 @@ where
         ))
         .await?;
 
-        // TODO: remove accepted block from cache
-        // STUB: do nothing, currently we remove block from cache when it sent to state node
-
         Ok(())
     }
 
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
-        // TODO: should use received block info to cancel and prevent it collation
-
         let processed_upto = state.state().processed_upto.load()?;
 
         metrics_report_last_applied_block_and_anchor(state, &processed_upto);
@@ -326,8 +321,6 @@ where
 
         // start other async processes
 
-        // TODO: Move outside of the start method?
-
         // schedule to check collation sessions and force refresh
         // if not initialized (when started from zerostate)
         schedule_async_action(
@@ -439,8 +432,7 @@ where
             return Ok(());
         }
 
-        let _histogram =
-            HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
+        let _histogram = HistogramGuard::begin("tycho_collator_commit_queue_diffs_time");
 
         let mut top_blocks: Vec<_> = top_shard_blocks_info
             .iter()
@@ -634,7 +626,7 @@ where
         );
 
         let _histogram =
-            HistogramGuard::begin("tycho_collator_process_collated_block_candidate_time");
+            HistogramGuard::begin("tycho_collator_handle_collated_block_candidate_time");
 
         let block_id = *collation_result.candidate.block.id();
 
@@ -836,11 +828,13 @@ where
     /// 4. Refresh collation sessions according to master block
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
     pub async fn handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
-        let block_id = *state.block_id();
-
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start processing block from bc",
         );
+
+        let block_id = *state.block_id();
+
+        let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
 
         if block_id.is_masterchain() {
             if let Some(from_mc_block_seqno) = self.from_mc_block_seqno {
@@ -974,6 +968,8 @@ where
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "Start sync to applied mc block",
         );
+
+        let _histogram = HistogramGuard::begin("tycho_collator_sync_to_applied_mc_block_time");
 
         let first_applied_mc_block_key = BlockIdShort {
             shard: ShardIdent::MASTERCHAIN,
@@ -1327,22 +1323,6 @@ where
 
         let _histogram = HistogramGuard::begin("tycho_collator_refresh_collation_sessions_time");
 
-        // TODO: Possibly we have already updated collation sessions for this master block,
-        //      because we may have collated it by ourselves before receiving it from the blockchain
-        //      or because we have received it from the blockchain before we collated it
-        //
-        //      It may be a situation when we have received new master block from the blockchain
-        //      before we have collated it by ourselves, we can stop current block collations,
-        //      update working state in active collators and then continue to collate.
-        //      But this can produce a significant overhead for the little bit slower node
-        //      because some 2/3f+1 nodes will always be little bit faster.
-        //      So we should reset active collators only when master block from the blockchain is
-        //      notably ahead of last collated by ourselves
-        //
-        //      So we will:
-        //      1. Check if we should process master block from the blockchain in `process_block_from_bc`
-        //      2. Skip refreshing sessions if this master was processed by any chance
-
         // do not re-process this master block if it is lower then last processed or equal to it
         // but process a new version of block with the same seqno
         if !self.check_should_process_and_update_last_processed_mc_block(&mc_data.block_id) {
@@ -1663,8 +1643,6 @@ where
         mpool_adapter: Arc<dyn MempoolAdapter>,
         mc_block_id: &BlockId,
     ) -> Result<()> {
-        // TODO: in current implementation CollationProcessor should not notify mempool
-        //      about one master block more than once, but better to handle repeated request here or at mempool
         mpool_adapter.on_new_mc_state(mc_block_id).await
     }
 
@@ -1814,8 +1792,6 @@ where
         next_mc_block_chain_time: u64,
         trigger_block_id_opt: Option<BlockId>,
     ) -> Result<()> {
-        // TODO: make real implementation
-
         let _histogram = HistogramGuard::begin("tycho_collator_enqueue_mc_block_collation_time");
 
         // get masterchain collator if exists
@@ -1894,7 +1870,7 @@ where
             "Start processing block validation result...",
         );
 
-        let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
+        let _histogram = HistogramGuard::begin("tycho_collator_handle_validated_master_block_time");
 
         // update block validation status
         let updated = self
@@ -1924,7 +1900,7 @@ where
             block_id.as_short_id(),
         );
 
-        let histogram = HistogramGuard::begin("tycho_collator_process_valid_master_block_time");
+        let histogram = HistogramGuard::begin("tycho_collator_commit_valid_master_block_time");
         let histogram_extract =
             HistogramGuard::begin("tycho_collator_extract_master_block_subgraph_time");
         let mut extract_elapsed = Default::default();
@@ -1961,6 +1937,9 @@ where
                         "send_blocks_to_sync timings",
                     );
                 }
+
+                let _histogram =
+                    HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
 
                 self.commit_block_queue_diff(
                     &master_block.block_id,

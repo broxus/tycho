@@ -51,8 +51,6 @@ pub trait MempoolEventListener: Send + Sync {
 #[async_trait]
 pub trait MempoolAdapter: Send + Sync + 'static {
     /// Schedule task to process new master block state (may perform gc or nodes rotation).
-    ///
-    /// TODO: Replace `mc_block_id` with some kind of context if more data is needed.
     async fn on_new_mc_state(&self, mc_block_id: &BlockId) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use error::CollatorError;
-use everscale_types::cell::HashBytes;
+use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::*;
 use futures_util::future::Future;
 use mq_iterator_adapter::QueueIteratorAdapter;
@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
-use tycho_util::metrics::HistogramGuardWithLabels;
+use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
@@ -200,6 +200,7 @@ pub struct CollatorStdImpl {
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
     delayed_working_state: DelayedWorkingState,
+    store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
     anchors_cache: AnchorsCache,
     stats: CollatorStats,
     timer: std::time::Instant,
@@ -249,6 +250,7 @@ impl CollatorStdImpl {
                     Err(_) => anyhow::bail!("collator init cancelled"),
                 }
             }),
+            store_new_state_tasks: Default::default(),
             anchors_cache: Default::default(),
             stats: Default::default(),
             timer: std::time::Instant::now(),
@@ -305,6 +307,7 @@ impl CollatorStdImpl {
 
         // init working state
         let working_state = Self::init_working_state(
+            &self.next_block_info,
             &self.config,
             self.state_node_adapter.clone(),
             mc_data,
@@ -431,16 +434,18 @@ impl CollatorStdImpl {
         };
 
         if import_init_anchors {
+            let prev_shard_data = working_state.prev_shard_data_ref();
             tracing::debug!(target: tracing_targets::COLLATOR,
+                next_block_id = %self.next_block_info,
                 "importing anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
                 processed_to_anchor_id, processed_to_msgs_offset,
-                working_state.prev_shard_data.gen_chain_time(),
+                prev_shard_data.gen_chain_time(),
             );
 
             Self::import_init_anchors(
                 processed_to_anchor_id,
                 processed_to_msgs_offset,
-                working_state.prev_shard_data.gen_chain_time(),
+                prev_shard_data.gen_chain_time(),
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
@@ -456,8 +461,22 @@ impl CollatorStdImpl {
         &mut self,
         mc_data: Arc<McData>,
         reset: bool,
-        prev_blocks_ids: Vec<BlockId>,
+        new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        let histogram =
+            HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
+
+        // previously wait when all state store tasks finished
+        if !self.store_new_state_tasks.is_empty() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "awaiting when all state store tasks finished...",
+            );
+            for task in self.store_new_state_tasks.drain(..) {
+                task.await?;
+            }
+        }
+
         let working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
@@ -467,6 +486,13 @@ impl CollatorStdImpl {
 
                 if working_state.has_unprocessed_messages == Some(false) {
                     working_state.has_unprocessed_messages = None;
+                }
+
+                // and only for shard collator
+                // reload prev states from storage to drop usage tree
+                if !self.shard_id.is_masterchain() && working_state.next_block_id_short.seqno != 0 {
+                    Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
+                        .await?;
                 }
             }
 
@@ -480,24 +506,26 @@ impl CollatorStdImpl {
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
 
-            self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
+            self.next_block_info = Self::calc_next_block_id_short(&new_prev_blocks_ids);
 
             tracing::info!(target: tracing_targets::COLLATOR,
                 mc_data_block_id = %mc_data.block_id.as_short_id(),
-                prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
+                new_prev_blocks_ids = %DisplayBlockIdsIntoIter(&new_prev_blocks_ids),
                 new_next_block_id = %self.next_block_info,
                 "resume collation with reset",
             );
 
             // reload prev data, reinit working state, drop msgs buffer
             tracing::debug!(target: tracing_targets::COLLATOR,
+                new_next_block_id = %self.next_block_info,
                 "reset working state and msgs buffer",
             );
             let working_state = Self::init_working_state(
+                &self.next_block_info,
                 &self.config,
                 self.state_node_adapter.clone(),
                 mc_data,
-                prev_blocks_ids,
+                new_prev_blocks_ids,
             )
             .await?;
 
@@ -539,6 +567,7 @@ impl CollatorStdImpl {
                 if !anchors_info.is_empty() {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         elapsed = timer.elapsed().as_millis(),
+                        new_next_block_id = %self.next_block_info,
                         "imported anchors on resume: {:?}",
                         anchors_info.as_slice(),
                     );
@@ -547,6 +576,7 @@ impl CollatorStdImpl {
 
             working_state
         };
+        drop(histogram);
 
         if self.shard_id.is_masterchain() {
             self.try_collate_next_master_block_impl(working_state).await
@@ -555,8 +585,9 @@ impl CollatorStdImpl {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
     async fn init_working_state(
+        next_block_id_short: &BlockIdShort,
         config: &CollationConfig,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mc_data: Arc<McData>,
@@ -573,24 +604,111 @@ impl CollatorStdImpl {
         // build and validate working state
         tracing::debug!(target: tracing_targets::COLLATOR, "building working state...");
 
-        Self::build_and_validate_working_state(config, mc_data, prev_states, prev_queue_diff_hashes)
+        Self::build_and_validate_init_working_state(
+            config,
+            mc_data,
+            prev_states,
+            prev_queue_diff_hashes,
+        )
+    }
+
+    async fn reload_prev_data(
+        working_state: &mut WorkingState,
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
+    ) -> Result<()> {
+        // drop prev shard data and usage tree
+        let prev_queue_diff_hashes;
+        let prev_blocks_ids;
+        {
+            working_state.usage_tree.take();
+
+            let prev_shard_data = working_state.prev_shard_data.take().unwrap();
+            prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
+            prev_blocks_ids = prev_shard_data.blocks_ids().clone();
+        }
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
+            "loading prev states...",
+        );
+        let prev_states =
+            Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await?;
+
+        // update working state
+        tracing::debug!(target: tracing_targets::COLLATOR, "updating working state...");
+
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+
+        // set new prev shard data and usage tree
+        working_state.prev_shard_data = Some(prev_shard_data);
+        working_state.usage_tree = Some(usage_tree);
+
+        Ok(())
     }
 
     /// Build working state update that would be applied before next collation
-    fn prepare_working_state_update(
-        delayed_working_state: &mut DelayedWorkingState,
-        new_state_stuff: JoinTask<Result<ShardStateStuff>>,
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_working_state_update(
+        &mut self,
+        block_id: BlockId,
+        new_observable_state: Box<ShardStateUnsplit>,
+        new_state_root: Cell,
+        store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
         mc_data: Option<Arc<McData>>,
         has_unprocessed_messages: bool,
         prev_working_state: Box<WorkingState>,
         msgs_buffer: MessagesBuffer,
     ) -> Result<()> {
-        // TODO: Check if the result mc_data is properly updated on masterchain block
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        let _histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_prepare_working_state_update_time",
+            &labels,
+        );
+
         let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
 
-        delayed_working_state.future = Some(Box::pin(async move {
-            let new_state_stuff = new_state_stuff.await?;
+        enum GetNewShardStateStuff {
+            ReloadFromStorage(JoinTask<Result<bool>>),
+            BuildFromNewObservable(ShardStateStuff),
+        }
+
+        let get_new_state_stuff = {
+            _ = prev_working_state.usage_tree;
+
+            let prev_shard_data = prev_working_state.prev_shard_data.unwrap();
+
+            if block_id.is_masterchain() {
+                GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
+            } else {
+                // append new store task
+                self.store_new_state_tasks.push(store_new_state_task);
+
+                // build state stuff from new observable state after collation
+                GetNewShardStateStuff::BuildFromNewObservable(ShardStateStuff::from_state_and_root(
+                    &block_id,
+                    new_observable_state,
+                    new_state_root,
+                    prev_shard_data.ref_mc_state_handle().tracker(),
+                )?)
+            }
+        };
+
+        // NOTE: here prev_shard_data and usage_tree extracted and dropped
+
+        let state_node_adapter = self.state_node_adapter.clone();
+
+        self.delayed_working_state.future = Some(Box::pin(async move {
+            let new_state_stuff = match get_new_state_stuff {
+                GetNewShardStateStuff::BuildFromNewObservable(state_stuff) => state_stuff,
+                GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
+                    store_new_state_task.await?;
+                    let load_task = JoinTask::new({
+                        async move { state_node_adapter.load_state(&block_id).await }
+                    });
+                    load_task.await?
+                }
+            };
 
             let prev_states = vec![new_state_stuff];
             let prev_queue_diff_hashes = vec![new_queue_diff_hash];
@@ -602,8 +720,9 @@ impl CollatorStdImpl {
             Ok(Box::new(WorkingState {
                 next_block_id_short,
                 mc_data,
-                prev_shard_data,
-                usage_tree,
+                gas_used_from_last_anchor: prev_shard_data.gas_used_from_last_anchor(),
+                prev_shard_data: Some(prev_shard_data),
+                usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
                 msgs_buffer: Some(msgs_buffer),
             }))
@@ -612,8 +731,7 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Load required initial states and prev queue diff hash:
-    /// master state + list of previous shard states
+    /// Load required prev states and prev queue diff hashes
     async fn load_states_and_diffs(
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         prev_blocks_ids: Vec<BlockId>,
@@ -623,23 +741,11 @@ impl CollatorStdImpl {
             let state_node_adapter = state_node_adapter.clone();
             let prev_blocks_ids = prev_blocks_ids.clone();
             let span = tracing::Span::current();
-            async move {
-                let mut prev_states = vec![];
-                for prev_block_id in prev_blocks_ids {
-                    // request state for prev block and wait for response
-                    let state = state_node_adapter.load_state(&prev_block_id).await?;
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "loaded prev shard state for prev_block_id {}",
-                        prev_block_id.as_short_id(),
-                    );
-                    prev_states.push(state);
-                }
-                Ok(prev_states)
-            }
-            .instrument(span)
+            async move { Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await }
+                .instrument(span)
         });
 
-        let prev_hash_fut: JoinTask<Result<Vec<HashBytes>>> = JoinTask::new({
+        let prev_hashes_fut: JoinTask<Result<Vec<HashBytes>>> = JoinTask::new({
             let span = tracing::Span::current();
             async move {
                 let mut prev_hashes = vec![];
@@ -659,9 +765,25 @@ impl CollatorStdImpl {
         });
 
         let (prev_states, prev_hash) =
-            futures_util::future::join(load_state_fut, prev_hash_fut).await;
+            futures_util::future::join(load_state_fut, prev_hashes_fut).await;
 
         Ok((prev_states?, prev_hash?))
+    }
+
+    async fn load_prev_states(
+        state_node_adapter: &dyn StateNodeAdapter,
+        prev_blocks_ids: &[BlockId],
+    ) -> Result<Vec<ShardStateStuff>> {
+        let mut prev_states = vec![];
+        for prev_block_id in prev_blocks_ids {
+            let state = state_node_adapter.load_state(prev_block_id).await?;
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "loaded prev shard state for prev_block_id {}",
+                prev_block_id.as_short_id(),
+            );
+            prev_states.push(state);
+        }
+        Ok(prev_states)
     }
 
     /// Build working state structure:
@@ -670,7 +792,7 @@ impl CollatorStdImpl {
     /// * usage tree that tracks data access to state cells
     ///
     /// Perform some validations on state
-    fn build_and_validate_working_state(
+    fn build_and_validate_init_working_state(
         config: &CollationConfig,
         mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
@@ -685,8 +807,9 @@ impl CollatorStdImpl {
         Ok(Box::new(WorkingState {
             next_block_id_short,
             mc_data,
-            prev_shard_data,
-            usage_tree,
+            gas_used_from_last_anchor: prev_shard_data.gas_used_from_last_anchor(),
+            prev_shard_data: Some(prev_shard_data),
+            usage_tree: Some(usage_tree),
             has_unprocessed_messages: None,
             msgs_buffer: Some(MessagesBuffer::new(
                 next_block_id_short.shard,
@@ -700,6 +823,7 @@ impl CollatorStdImpl {
         working_state: &WorkingState,
     ) -> Result<Option<LastProcessedAnchorInfo>> {
         let working_state_shard_id = working_state.next_block_id_short.shard;
+        let prev_shard_data = working_state.prev_shard_data_ref();
 
         // try get from mc data
         let mut info_opt = None;
@@ -723,7 +847,7 @@ impl CollatorStdImpl {
                     }
                 }
                 // get from mc data if prev shard block is eq to top
-                let sc_prev_seqno = working_state.prev_shard_data.blocks_ids()[0].seqno;
+                let sc_prev_seqno = prev_shard_data.blocks_ids()[0].seqno;
                 if sc_prev_seqno == top_sc_block_seqno_from_mc_data {
                     info_opt = Some((
                         processed_to,
@@ -736,16 +860,15 @@ impl CollatorStdImpl {
 
         // try get from prev data
         let info_opt = match info_opt {
-            None => working_state
-                .prev_shard_data
+            None => prev_shard_data
                 .processed_upto()
                 .externals
                 .as_ref()
                 .map(|upto| {
                     (
                         upto.processed_to,
-                        working_state.prev_shard_data.gen_chain_time(),
-                        working_state.prev_shard_data.blocks_ids()[0], // TODO: consider split/merge logic
+                        prev_shard_data.gen_chain_time(),
+                        prev_shard_data.blocks_ids()[0], // TODO: consider split/merge logic
                     )
                 }),
             val => val,
@@ -908,13 +1031,10 @@ impl CollatorStdImpl {
             return Ok(has_messages);
         }
 
+        let prev_shard_data = working_state.prev_shard_data_ref();
+
         // when processing offset is > 0 we have uprocessed messages in buffer
-        if working_state
-            .prev_shard_data
-            .processed_upto()
-            .processed_offset
-            > 0
-        {
+        if prev_shard_data.processed_upto().processed_offset > 0 {
             working_state.has_unprocessed_messages = Some(true);
             return Ok(true);
         }
@@ -935,7 +1055,7 @@ impl CollatorStdImpl {
             msgs_buffer.current_iterator_positions.clone().unwrap(),
         );
 
-        let mut current_processed_upto = working_state.prev_shard_data.processed_upto().clone();
+        let mut current_processed_upto = prev_shard_data.processed_upto().clone();
         mq_iterator_adapter
             .try_init_next_range_iterator(&mut current_processed_upto, working_state)
             .await?;
@@ -986,8 +1106,7 @@ impl CollatorStdImpl {
         );
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-
-        let _histogram = HistogramGuardWithLabels::begin(
+        let histogram = HistogramGuardWithLabels::begin(
             "tycho_collator_try_collate_next_master_block_time",
             &labels,
         );
@@ -1001,6 +1120,7 @@ impl CollatorStdImpl {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed messages from previous block, will collate next block",
             );
+            drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
             // otherwise import next anchor and return it notify to manager
@@ -1017,6 +1137,9 @@ impl CollatorStdImpl {
             .map_err(|e| {
                 anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
             })?;
+
+            working_state.gas_used_from_last_anchor = 0;
+
             if has_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals for master",
@@ -1056,9 +1179,8 @@ impl CollatorStdImpl {
         );
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-
-        let collation_prepare_histogram = HistogramGuardWithLabels::begin(
-            "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
+        let histogram = HistogramGuardWithLabels::begin(
+            "tycho_collator_try_collate_next_shard_block_time",
             &labels,
         );
 
@@ -1096,7 +1218,7 @@ impl CollatorStdImpl {
             uncommitted_chain_length >= self.config.max_uncommitted_chain_length;
 
         // should import anchor after fixed gas used by shard blocks in uncommitted blocks chain
-        let gas_used_from_last_anchor = working_state.prev_shard_data.gas_used_from_last_anchor();
+        let gas_used_from_last_anchor = working_state.gas_used_from_last_anchor;
         let force_import_anchor_by_used_gas = uncommitted_chain_length > 0
             && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
@@ -1131,22 +1253,24 @@ impl CollatorStdImpl {
             .map_err(|e| {
                 anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
             })?;
+
+            working_state.gas_used_from_last_anchor = 0;
+
             has_externals = next_anchor_has_externals;
             if has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",
                 );
             }
-            working_state.prev_shard_data.clear_gas_used();
+
             Some((next_anchor, next_anchor_has_externals))
         } else {
             None
         };
 
-        drop(collation_prepare_histogram);
-
         // collate block if has internals or externals
         if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
+            drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
             // here just imported anchor has no externals

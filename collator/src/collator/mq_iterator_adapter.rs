@@ -108,6 +108,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     ) -> Result<bool> {
         let timer = std::time::Instant::now();
 
+        let prev_shard_data = working_state.prev_shard_data_ref();
+
         // get current ranges
         let mut ranges_from = FastHashMap::default();
         let mut ranges_to = FastHashMap::default();
@@ -178,12 +180,12 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             });
             let mc_read_to = ranges_to.entry(mc_shard_id).or_insert_with(|| {
                 ranges_updated = true;
-                QueueKey::max_for_lt(0) // TODO: `min_for_lt` ?
+                QueueKey::max_for_lt(0)
             });
 
             // try update masterchain range read_to border
             let new_mc_read_to_lt = if self.shard_id.is_masterchain() {
-                working_state.prev_shard_data.gen_lt()
+                prev_shard_data.gen_lt()
             } else {
                 working_state.mc_data.gen_lt
             };
@@ -207,13 +209,13 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 });
                 let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
                     ranges_updated = true;
-                    QueueKey::max_for_lt(0) // TODO: `min_for_lt` ?
+                    QueueKey::max_for_lt(0)
                 });
 
                 // try update shardchain read_to
                 let new_sc_read_to_lt = if self.shard_id == shard_id {
                     // get new read_to LT from PrevData
-                    working_state.prev_shard_data.gen_lt()
+                    prev_shard_data.gen_lt()
                 } else {
                     // get new read_to LT from ShardDescription
                     shard_descr.end_lt

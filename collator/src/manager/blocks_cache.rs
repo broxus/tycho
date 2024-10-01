@@ -70,8 +70,6 @@ impl BlocksCache {
 
     /// Find shard block in cache and then get containing master block id if link exists
     pub fn find_containing_mc_block(&self, shard_block_id: &BlockId) -> Option<(BlockId, bool)> {
-        // TODO: handle when master block link exist but there is not block itself
-
         let mc_block_key = {
             let guard = self.shards.get(&shard_block_id.shard)?;
             guard

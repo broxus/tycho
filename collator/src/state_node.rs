@@ -53,13 +53,14 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff>;
-    /// Store shard state root in the storage and make a new `ShardStateStuff` from it.
+    /// Store shard state root in the storage.
+    /// Returns `true` when state was updated in storage.
     async fn store_state_root(
         &self,
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
-    ) -> Result<ShardStateStuff>;
+    ) -> Result<bool>;
     /// Return block by it's id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block handle by it's id from node local state
@@ -117,6 +118,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
         let state = self
@@ -132,7 +135,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<bool> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
         let (handle, _) = self
@@ -140,20 +145,18 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .block_handle_storage()
             .create_or_load_handle(block_id, meta);
 
-        self.storage
+        let updated = self
+            .storage
             .shard_state_storage()
             .store_state_root(&handle, state_root)
             .await?;
 
-        let state = self
-            .storage
-            .shard_state_storage()
-            .load_state(block_id)
-            .await?;
-        Ok(state)
+        Ok(updated)
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_block_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
@@ -200,9 +203,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_collator_adapter_handle_state_time");
+        let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {}", state.block_id().as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
 
         let mut to_split = Vec::new();
@@ -235,17 +238,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
             match has_block {
                 false => {
-                    let _histogram =
-                        HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_ext_time");
-
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {}", block_id);
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block state handled external: {}", block_id);
                     self.listener.on_block_accepted_external(state).await?;
                 }
                 true => {
-                    let _histogram =
-                        HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
-
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {}", block_id);
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block state handled: {}", block_id);
                     self.listener.on_block_accepted(state).await?;
                 }
             }
@@ -261,6 +258,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_queue_diff_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load queue diff: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
@@ -311,11 +310,12 @@ impl StateNodeAdapterStdImpl {
     }
 
     async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_collator_save_block_proof_time");
-
         let PreparedProof { proof, block_info } =
             prepare_block_proof(&block.block_stuff_aug.data, &block.signatures)
                 .context("failed to prepare block proof")?;
+
+        let _histogram =
+            HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
 
         let block_proof_stuff = BlockProofStuff::from_proof(proof);
 
@@ -364,7 +364,7 @@ fn prepare_block_proof(
     block_stuff: &BlockStuff,
     signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<PreparedProof> {
-    let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
+    let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
 
     let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
     let tracked_cell = usage_tree.track(block_stuff.root_cell());

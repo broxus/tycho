@@ -25,8 +25,6 @@ pub fn calc_split_merge_actions(
     from_current_shards: &[ShardIdent],
     to_new_shards: Vec<&ShardIdent>,
 ) -> Result<Vec<SplitMergeAction>> {
-    // TODO: not the best code, possibly needs refactoring
-
     let full_shard_id = ShardIdent::new_full(0);
     let mut planned_actions = VecDeque::new();
     if from_current_shards.is_empty() {

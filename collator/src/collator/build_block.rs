@@ -7,7 +7,6 @@ use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use humantime::format_duration;
-use tokio::time::Instant;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
@@ -29,6 +28,7 @@ pub struct FinalizedBlock {
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
+    pub new_observable_state: Box<ShardStateUnsplit>,
 }
 
 impl CollatorStdImpl {
@@ -48,7 +48,7 @@ impl CollatorStdImpl {
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
 
         let mc_data = working_state.mc_data.as_ref();
-        let prev_shard_data = &working_state.prev_shard_data;
+        let prev_shard_data = working_state.prev_shard_data_ref();
 
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = executor.executor_params().state_libs.clone();
@@ -198,6 +198,11 @@ impl CollatorStdImpl {
                 labels,
             );
 
+            // compute total gas used from last anchor
+            let gas_used_from_last_anchor = working_state
+                .gas_used_from_last_anchor
+                .saturating_add(collation_data.block_limit.gas_used as _);
+
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
                 global_id: mc_data.global_id,
@@ -211,8 +216,7 @@ impl CollatorStdImpl {
                 processed_upto: Lazy::new(&collation_data.processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
-                overload_history: prev_shard_data.gas_used_from_last_anchor()
-                    + collation_data.block_limit.gas_used as u64,
+                overload_history: gas_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: prev_shard_data.total_validator_fees().clone(),
@@ -232,7 +236,7 @@ impl CollatorStdImpl {
                 new_observable_state.libraries = global_libraries.clone();
             }
 
-            // TODO: update smc on hard fork
+            // TODO: update config smc on hard fork
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
@@ -240,13 +244,13 @@ impl CollatorStdImpl {
 
             // calc merkle update
             let merkle_update = create_merkle_update(
+                &shard,
                 prev_shard_data.pure_state_root(),
                 &new_state_root,
-                &working_state.usage_tree,
+                working_state.usage_tree.as_ref().unwrap(),
             )?;
 
             build_state_update_elapsed = histogram.finish();
-
             (merkle_update, new_observable_state)
         };
 
@@ -376,6 +380,8 @@ impl CollatorStdImpl {
                 validator_info: extra.validator_info,
 
                 processed_upto: collation_data.processed_upto.clone(),
+
+                ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
             })
         });
 
@@ -422,6 +428,7 @@ impl CollatorStdImpl {
             block_candidate,
             mc_data,
             new_state_root,
+            new_observable_state,
         })
     }
 
@@ -430,7 +437,7 @@ impl CollatorStdImpl {
         config_params: Option<BlockchainConfig>,
         working_state: &WorkingState,
     ) -> Result<(McStateExtra, u32)> {
-        let prev_shard_data = &working_state.prev_shard_data;
+        let prev_shard_data = working_state.prev_shard_data_ref();
         let prev_state = &prev_shard_data.observable_states()[0];
 
         // 1. update config params and detect key block
@@ -598,7 +605,7 @@ impl CollatorStdImpl {
                     shard_accounts.set_any(
                         &updated_account.account_addr,
                         &DepthBalanceInfo {
-                            split_depth: 0, // TODO: fix
+                            split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
                             balance: account.balance.clone(),
                         },
                         &updated_account.shard_account,
@@ -731,17 +738,20 @@ struct ProcessedAccounts {
 }
 
 fn create_merkle_update(
+    shard_id: &ShardIdent,
     old_state_root: &Cell,
     new_state_root: &Cell,
     usage_tree: &UsageTree,
 ) -> Result<MerkleUpdate> {
-    let started_at = Instant::now();
+    let labels = [("workchain", shard_id.workchain().to_string())];
+    let histogram =
+        HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time", &labels);
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
     let state_update = merkle_update_builder.build()?;
 
-    let elapsed = started_at.elapsed();
+    let elapsed = histogram.finish();
 
     tracing::debug!(
         target: tracing_targets::COLLATOR,
@@ -749,6 +759,5 @@ fn create_merkle_update(
         "merkle update created"
     );
 
-    metrics::histogram!("tycho_collator_create_merkle_update_time").record(elapsed);
     Ok(state_update)
 }

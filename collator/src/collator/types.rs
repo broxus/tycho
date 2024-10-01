@@ -13,7 +13,7 @@ use everscale_types::models::{
     SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::queue::QueueKey;
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
@@ -24,13 +24,18 @@ use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
-    pub prev_shard_data: PrevData,
-    pub usage_tree: UsageTree,
+    pub gas_used_from_last_anchor: u64,
+    pub prev_shard_data: Option<PrevData>,
+    pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
     pub msgs_buffer: Option<MessagesBuffer>,
 }
 
 impl WorkingState {
+    pub fn prev_shard_data_ref(&self) -> &PrevData {
+        self.prev_shard_data.as_ref().unwrap()
+    }
+
     pub fn take_msgs_buffer(mut self: Box<Self>) -> (Box<Self>, MessagesBuffer) {
         let msgs_buffer = self.msgs_buffer.take().unwrap();
         (self, msgs_buffer)
@@ -50,11 +55,10 @@ pub(super) struct PrevData {
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
     gas_used_from_last_anchor: u64,
-    // TODO: remove if we do not need this
-    _underload_history: u64,
 
     processed_upto: ProcessedUptoInfoStuff,
-    prev_queue_diff_hash: Option<HashBytes>,
+
+    prev_queue_diff_hashes: Vec<HashBytes>,
 }
 
 impl PrevData {
@@ -68,15 +72,15 @@ impl PrevData {
         //  Collator::unpack_last_state()
 
         let prev_blocks_ids: Vec<_> = prev_states.iter().map(|s| *s.block_id()).collect();
-        let pure_prev_state_root = prev_states[0].root_cell();
-        let pure_prev_states = prev_states.clone();
+        let pure_prev_state_root = prev_states[0].root_cell().clone();
+        let pure_prev_states = prev_states;
 
         let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
-        let observable_root = usage_tree.track(pure_prev_state_root);
+        let observable_root = usage_tree.track(&pure_prev_state_root);
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
-            prev_states[0].ref_mc_state_handle().tracker(),
+            pure_prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
@@ -84,7 +88,7 @@ impl PrevData {
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let gas_used_from_last_anchor = observable_states[0].state().overload_history;
-        let underload_history = observable_states[0].state().underload_history;
+
         let processed_upto_info = pure_prev_states[0].state().processed_upto.load()?;
 
         let prev_data = Self {
@@ -94,16 +98,16 @@ impl PrevData {
             blocks_ids: prev_blocks_ids,
 
             pure_states: pure_prev_states,
-            pure_state_root: pure_prev_state_root.clone(),
+            pure_state_root: pure_prev_state_root,
 
             gen_chain_time,
             gen_lt,
             total_validator_fees,
             gas_used_from_last_anchor,
-            _underload_history: underload_history,
 
             processed_upto: processed_upto_info.try_into()?,
-            prev_queue_diff_hash: prev_queue_diff_hashes.first().copied(),
+
+            prev_queue_diff_hashes,
         };
 
         Ok((prev_data, usage_tree))
@@ -151,6 +155,10 @@ impl PrevData {
         Ok(prev_ref)
     }
 
+    pub fn ref_mc_state_handle(&self) -> &RefMcStateHandle {
+        self.observable_states[0].ref_mc_state_handle()
+    }
+
     pub fn pure_state_root(&self) -> &Cell {
         &self.pure_state_root
     }
@@ -167,10 +175,6 @@ impl PrevData {
         self.gas_used_from_last_anchor
     }
 
-    pub fn clear_gas_used(&mut self) {
-        self.gas_used_from_last_anchor = 0;
-    }
-
     pub fn total_validator_fees(&self) -> &CurrencyCollection {
         &self.total_validator_fees
     }
@@ -178,8 +182,9 @@ impl PrevData {
     pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
         &self.processed_upto
     }
-    pub fn prev_queue_diff_hash(&self) -> &Option<HashBytes> {
-        &self.prev_queue_diff_hash
+
+    pub fn prev_queue_diff_hashes(&self) -> &Vec<HashBytes> {
+        &self.prev_queue_diff_hashes
     }
 }
 
