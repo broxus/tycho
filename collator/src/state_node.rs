@@ -377,10 +377,15 @@ fn prepare_block_proof(
     block_info.load_prev_ref()?;
     block_info.prev_vert_ref.as_ref().map(|x| x.load());
     block_info.master_ref.as_ref().map(|x| x.load());
-    let extra = block.load_extra().unwrap();
 
     let _state_update = block.load_state_update();
-    extra.load_custom()?;
+
+    if let Some(custom) = block.load_extra()?.load_custom()? {
+        if let Some(config) = &custom.config {
+            config.get_current_validator_set()?;
+            config.get::<ConfigParam28>()?;
+        }
+    }
 
     let merkle_proof = MerkleProof::create(block_stuff.root_cell().as_ref(), usage_tree).build()?;
 
