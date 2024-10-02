@@ -1099,10 +1099,7 @@ impl CollatorStdImpl {
             .await?;
         }
 
-        // FIXME: Minter only mints extra currencies, so this will not work
-        // TODO: Add `is_zero` to `CurrencyCollection` (but it might be heavy,
-        // since we must check all dict items)
-        if !collator_data.value_flow.minted.tokens.is_zero() {
+        if !collator_data.value_flow.minted.other.is_empty() {
             self.create_special_transaction(
                 &config.get_minter_address()?,
                 collator_data.value_flow.minted.clone(),
