@@ -15,8 +15,7 @@ use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Ro
 #[derive(Clone, TlWrite, TlRead)]
 pub struct Point(Arc<PointInner>);
 
-
-#[derive(TlWrite, TlRead,  Debug)]
+#[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
 struct PointInner {
     // hash of everything except signature
@@ -40,7 +39,6 @@ impl PointInner {
     fn is_integrity_ok(&self) -> bool {
         self.signature
             .verifies(&self.body.data.author, &self.digest)
-            && self.digest == self.body.make_digest()
     }
 }
 
@@ -190,8 +188,8 @@ mod tests {
     use crate::models::{PointInfo, Through, UnixTime};
 
     const PEERS: usize = 100;
-    const MSG_COUNT: usize = 120;
-    const MSG_BYTES: usize = 64 * 100;
+    const MSG_COUNT: usize = 48;
+    const MSG_BYTES: usize = 16266; // 64 * 100;
 
     fn new_key_pair() -> KeyPair {
         let mut secret_bytes: [u8; 32] = [0; 32];
@@ -274,7 +272,6 @@ mod tests {
         let ref_info = PointInfo::serializable_from(&point);
         let mut ref_data = BytesMut::with_capacity(info.max_size_hint());
         ref_info.write_to(&mut ref_data);
-
 
         assert_eq!(
             info,
@@ -381,6 +378,36 @@ mod tests {
         println!(
             "total {}",
             humantime::format_duration(bincode_elapsed + sha_elapsed + sig_elapsed)
+        );
+    }
+
+    #[test]
+    pub fn massive_point_serde() {
+        let point_key_pair = new_key_pair();
+        let timer = Instant::now();
+        let mut point_payload = MSG_COUNT * MSG_BYTES;
+        let mut byte_size = 0;
+
+        let point_body = point_body(&point_key_pair);
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
+        const POINTS_LEN: u32 = 100;
+        for i in 0..POINTS_LEN {
+            let point = point.clone();
+            let mut data = BytesMut::with_capacity(1 << 20);
+            point.write_to(&mut data);
+            byte_size = data.len();
+            // data.freeze();
+        }
+
+        let elapsed = timer.elapsed();
+        println!(
+            "tl write of {POINTS_LEN} point os size {byte_size} bytes of point with {point_payload} bytes payload took {}",
+            humantime::format_duration(elapsed)
         );
     }
 }

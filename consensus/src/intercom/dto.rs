@@ -13,9 +13,9 @@ pub enum PointByIdResponse<T> {
 }
 
 impl<T> PointByIdResponse<T> {
-    const DEFINED_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.defined", scheme = "proto.tl");
-    const DEFINED_NONE_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.definedNone", scheme = "proto.tl");
-    const TRY_LATER_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.tryLater", scheme = "proto.tl");
+    pub(crate) const DEFINED_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.defined", scheme = "proto.tl");
+    pub(crate) const DEFINED_NONE_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.definedNone", scheme = "proto.tl");
+    pub(crate) const TRY_LATER_TL_ID: u32 = tl_proto::id!("intercom.pointByIdResponse.tryLater", scheme = "proto.tl");
 }
 
 impl<T: AsRef<[u8]>> TlWrite for PointByIdResponse<T> {

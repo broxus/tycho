@@ -1,11 +1,12 @@
 use std::sync::LazyLock;
 
+use blake3::Hash;
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 use tycho_network::PeerId;
+
 use crate::engine::MempoolConfig;
-use crate::intercom::dto::{PointByIdResponse, SignatureResponse,
-};
-use crate::models::{Point, PointId, Round};
+use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
+use crate::models::{Digest, Point, PointId, Round};
 
 // 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
 // as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
@@ -20,14 +21,36 @@ static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
     u16::MAX as usize + payload.max_size_hint()
 });
 
-
-
 #[derive(Debug)]
-//#[tl(boxed, id = "core.broadcastQuery", scheme = "proto.tl")]
 pub struct BroadcastQuery(pub Point);
 
 impl BroadcastQuery {
-    pub const TL_ID: u32 = tl_proto::id!("core.broadcastQuery", scheme = "proto.tl");
+    pub(crate) const TL_ID: u32 = tl_proto::id!("core.broadcastQuery", scheme = "proto.tl");
+}
+
+impl<'a> TlRead<'a> for BroadcastQuery {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
+        if u32::read_from(packet, offset)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+
+        let size = *packet.len();
+        if *LARGEST_DATA_BYTES > size - 4usize {
+            tracing::error!(size = %size, "Point max size exceeded");
+            return Err(TlError::InvalidData)
+        }
+
+        //skip 4+4 bytes of BroadcastQuery tag and Point tag
+        if !verify_hash(&packet[8..]) {
+            tracing::error!("Point hash is invalid");
+            return Err(TlError::InvalidData);
+        }
+
+        Point::read_from(packet, offset).map(Self)
+
+    }
 }
 
 impl TlWrite for BroadcastQuery {
@@ -41,31 +64,11 @@ impl TlWrite for BroadcastQuery {
     where
         P: TlPacket
     {
-        tracing::info!(id = %Self::TL_ID, "Writing id to package");
         packet.write_u32(Self::TL_ID);
         self.0.write_to(packet);
     }
 }
 
-impl<'a> TlRead<'a> for BroadcastQuery {
-    type Repr = tl_proto::Boxed;
-
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
-        let constructor = u32::read_from(packet, offset)?;
-        if constructor != Self::TL_ID {
-            tracing::info!("wrong constructor {} {} {}", constructor, Self::TL_ID, Point::TL_ID);
-            return Err(TlError::UnknownConstructor);
-        }
-
-        let len = packet.len() - *offset;
-        if len > *LARGEST_DATA_BYTES {
-            tracing::error!("too large request: {} bytes", len);
-            return Err(TlError::InvalidData)
-        }
-
-        Point::read_from(packet, offset).map(Self)
-    }
-}
 
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "core.pointQuery", scheme = "proto.tl")]
@@ -75,8 +78,6 @@ pub struct PointQuery(pub PointId);
 #[tl(boxed, id = "core.signatureQuery", scheme = "proto.tl")]
 pub struct SignatureQuery(pub Round);
 
-
-
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "core.mpresponse.broadcast", scheme = "proto.tl")]
 pub struct BroadcastMpResponse;
@@ -85,12 +86,12 @@ pub struct BroadcastMpResponse;
 pub struct PointMpResponse<T>(pub PointByIdResponse<T>);
 
 impl<T> PointMpResponse<T> {
-   pub const TL_ID: u32 = tl_proto::id!("core.mpresponse.point", scheme = "proto.tl");
+    pub const TL_ID: u32 = tl_proto::id!("core.mpresponse.point", scheme = "proto.tl");
 }
 
 impl<T> TlWrite for PointMpResponse<T>
 where
-    PointByIdResponse<T>: TlWrite
+    PointByIdResponse<T>: TlWrite,
 {
     type Repr = tl_proto::Boxed;
 
@@ -100,7 +101,7 @@ where
 
     fn write_to<P>(&self, packet: &mut P)
     where
-        P: TlPacket
+        P: TlPacket,
     {
         packet.write_u32(Self::TL_ID);
         self.0.write_to(packet);
@@ -117,8 +118,46 @@ where
         if u32::read_from(packet, offset)? != Self::TL_ID {
             return Err(TlError::UnknownConstructor);
         }
+
+        let size = *packet.len();
+        if *LARGEST_DATA_BYTES > size - 4usize {
+            tracing::error!(size = %size, "Point max size exceeded");
+            return Err(TlError::InvalidData)
+        }
+
+        let point_by_id_response_tag = {
+            let mut prefix = [0_u8; 4];
+            prefix.copy_from_slice(&packet[0..4]);
+            u32::from_be_bytes(prefix)
+        };
+
+        match point_by_id_response_tag {
+            PointByIdResponse::<T>::DEFINED_TL_ID => {
+                //skip 4 bytes of Point tag prefix
+                if !verify_hash(&packet[8..]) {
+                    tracing::error!("Point hash is invalid");
+                    return Err(TlError::InvalidData);
+                }
+            }
+            PointByIdResponse::<T>::DEFINED_NONE_TL_ID => (),
+            PointByIdResponse::<T>::TRY_LATER_TL_ID => (),
+            _ => {
+                tracing::error!(tag = %point_by_id_response_tag, "Unknown PointByIdResponse tag id");
+                return Err(TlError::UnknownConstructor);
+            }
+        }
+
         PointByIdResponse::<T>::read_from(packet, offset).map(Self)
     }
+}
+
+pub fn verify_hash(data: &[u8]) -> bool {
+    let hash_slice = &data[0..32];
+    // skip 64 bytes of signature
+    let point_bytes = &data[96..];
+    let mut present_hash_bytes = [0_u8; 32];
+    present_hash_bytes.copy_from_slice(hash_slice);
+    Hash::from_bytes(present_hash_bytes) == blake3::hash(point_bytes)
 }
 
 #[derive(TlWrite, TlRead, Debug)]
