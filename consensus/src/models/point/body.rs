@@ -4,15 +4,16 @@ use std::collections::BTreeMap;
 use bytes::{Bytes, BytesMut};
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
-use crate::models::proto::evidence_btree_map;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
+use crate::models::proto::evidence_btree_map;
 
 #[derive(TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(Clone))]
 #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBody {
+    pub payload: Vec<Bytes>,
     pub round: Round, // let it be @ r+0
     pub data: PointData,
     #[tl(with = "evidence_btree_map")]
@@ -20,6 +21,12 @@ pub struct PointBody {
     /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     pub evidence: BTreeMap<PeerId, Signature>,
+}
+
+#[derive(TlWrite, TlRead, Debug)]
+#[cfg_attr(test, derive(Clone))]
+#[tl(boxed, id = "consensus.shortPointBody", scheme = "proto.tl")]
+pub struct ShortPointBody {
     pub payload: Vec<Bytes>,
 }
 

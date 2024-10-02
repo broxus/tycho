@@ -14,7 +14,7 @@ use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteB
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::MempoolConfig;
-use crate::models::{Digest, Point, PointInfo, Round};
+use crate::models::{Digest, Point, PointInfo, Round, ShortPoint};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
@@ -327,9 +327,7 @@ impl MempoolStoreImpl for MempoolStorage {
         MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
 
         let points = &self.db.points;
-        let point = points
-            .get(key.as_slice())
-            .context("db get")?;
+        let point = points.get(key.as_slice()).context("db get")?;
         Ok(point)
     }
 
@@ -343,9 +341,7 @@ impl MempoolStoreImpl for MempoolStorage {
         table
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| {
-                <PointInfo>::read_from(&a, &mut 0).context("deserialize point info")
-            })
+            .map(|a| <PointInfo>::read_from(&a, &mut 0).context("deserialize point info"))
             .transpose()
     }
 
@@ -401,11 +397,17 @@ impl MempoolStoreImpl for MempoolStorage {
             let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point = <Point>::read_from(bytes, &mut 0).context("deserialize point")?;
+                let point = <ShortPoint>::read_from(bytes, &mut 0).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
-                if let Some(prev_duplicate) = found.insert(key.to_vec().into_boxed_slice(), point) {
-                    panic!("iter read non-unique point {:?}", prev_duplicate.id())
+                if found
+                    .insert(key.to_vec().into_boxed_slice(), point)
+                    .is_some()
+                {
+                    // we panic thus we don't care about performance
+                    let full_point =
+                        <Point>::read_from(bytes, &mut 0).context("deserialize point")?;
+                    panic!("iter read non-unique point {:?}", full_point.id())
                 }
             }
             if keys.is_empty() {
@@ -552,7 +554,7 @@ impl MempoolStoreImpl for () {
     }
 
     fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>> {
-       Ok(None)
+        Ok(None)
     }
 
     fn get_info(&self, _: Round, _: &Digest) -> Result<Option<PointInfo>> {

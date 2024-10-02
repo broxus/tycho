@@ -226,7 +226,7 @@ impl Downloader {
         let mut task = DownloadTask {
             parent: self.clone(),
             _phantom: PhantomData,
-            //request: Dispatcher::point_by_id_request(point_id),
+            // request: Dispatcher::point_by_id_request(point_id),
             point_id: *point_id,
             peer_count,
             reliably_not_found: 0, // this node is +1 to 2F
@@ -252,7 +252,7 @@ struct DownloadTask<T> {
     parent: Downloader,
     _phantom: PhantomData<T>,
 
-    //request: PointId,
+    // request: PointId,
     point_id: PointId,
 
     peer_count: PeerCount,
@@ -262,7 +262,8 @@ struct DownloadTask<T> {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
-    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse<Point>>)>>,
+    downloading:
+        FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse<Point>>)>>,
 
     attempt: u8,
     /// skip time-driven attempt if an attempt was init by empty task queue

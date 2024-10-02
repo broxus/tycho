@@ -39,17 +39,16 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         let size = *packet.len();
         if *LARGEST_DATA_BYTES > size - 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
-            return Err(TlError::InvalidData)
+            return Err(TlError::InvalidData);
         }
 
-        //skip 4+4 bytes of BroadcastQuery tag and Point tag
+        // skip 4+4 bytes of BroadcastQuery tag and Point tag
         if !verify_hash(&packet[8..]) {
             tracing::error!("Point hash is invalid");
             return Err(TlError::InvalidData);
         }
 
         Point::read_from(packet, offset).map(Self)
-
     }
 }
 
@@ -62,13 +61,12 @@ impl TlWrite for BroadcastQuery {
 
     fn write_to<P>(&self, packet: &mut P)
     where
-        P: TlPacket
+        P: TlPacket,
     {
         packet.write_u32(Self::TL_ID);
         self.0.write_to(packet);
     }
 }
-
 
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "core.pointQuery", scheme = "proto.tl")]
@@ -122,7 +120,7 @@ where
         let size = *packet.len();
         if *LARGEST_DATA_BYTES > size - 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
-            return Err(TlError::InvalidData)
+            return Err(TlError::InvalidData);
         }
 
         let point_by_id_response_tag = {
@@ -133,7 +131,7 @@ where
 
         match point_by_id_response_tag {
             PointByIdResponse::<T>::DEFINED_TL_ID => {
-                //skip 4 bytes of Point tag prefix
+                // skip 4 bytes of Point tag prefix
                 if !verify_hash(&packet[8..]) {
                     tracing::error!("Point hash is invalid");
                     return Err(TlError::InvalidData);

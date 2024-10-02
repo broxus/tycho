@@ -1,7 +1,7 @@
 use futures_util::FutureExt;
 use tl_proto::RawBytes;
-use weedb::rocksdb::DBPinnableSlice;
 use tycho_network::PeerId;
+use weedb::rocksdb::DBPinnableSlice;
 
 use crate::dag::DagRound;
 use crate::dyn_event;
@@ -40,9 +40,7 @@ impl Uploader {
             Some(SearchStatus::Found) => {
                 match store.get_point_raw(point_id.round, point_id.digest) {
                     None => PointByIdResponse::DefinedNone,
-                    Some(slice) => {
-                        PointByIdResponse::Defined(slice)
-                    },
+                    Some(slice) => PointByIdResponse::Defined(slice),
                 }
             }
             Some(SearchStatus::TryLater) => PointByIdResponse::TryLater,

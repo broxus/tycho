@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
-use crate::models::proto::points_btree_map;
 
 use crate::models::point::{Digest, Round, UnixTime};
+use crate::models::proto::points_btree_map;
 
 #[derive(Clone, Copy, TlRead, TlWrite, PartialEq, Debug)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
@@ -14,7 +14,7 @@ pub struct PointId {
     pub digest: Digest,
 }
 
-#[derive(Clone, TlWrite,  TlRead, Debug)]
+#[derive(Clone, TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 pub struct PointData {

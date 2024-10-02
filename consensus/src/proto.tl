@@ -18,6 +18,13 @@ consensus.pointBody
     payload:(vector bytes)
     = consensus.PointBody;
 
+consensus.shortPointBody
+    round:int
+    pointData:consensus.pointData
+    evidence:(vector consensus.peerSignaturePair)
+    payload:(vector bytes)
+    = consensus.ShortPointBody;
+
 consensus.pointId
     author:int256
     round:int
@@ -29,6 +36,12 @@ consensus.pointInner
     signature:bytes
     body:consensus.pointBody
     = consensus.PointInner;
+
+consensus.shortPointInner
+    digest:int256
+    signature:bytes
+    body:consensus.shortPointBody
+    = consensus.ShortPointInner;
 
 consensus.pointInfoInner
     round:int

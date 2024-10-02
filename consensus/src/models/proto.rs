@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use everscale_types::prelude::*;
 use tl_proto::{TlRead, TlWrite};
-use crate::models::{PointData};
+
+use crate::models::PointData;
 
 impl PointData {
     /// Computes the hash of the serialized diff.
@@ -14,8 +15,9 @@ impl PointData {
 pub(crate) mod points_btree_map {
     use tl_proto::{TlPacket, TlResult};
     use tycho_network::PeerId;
-    use crate::models::Digest;
+
     use super::*;
+    use crate::models::Digest;
 
     /// We assume that the number of points is limited.
     const MAX_SIZE: usize = 10_000;
@@ -55,8 +57,9 @@ pub(crate) mod points_btree_map {
 pub(crate) mod evidence_btree_map {
     use tl_proto::{TlPacket, TlResult};
     use tycho_network::PeerId;
-    use crate::models::Signature;
+
     use super::*;
+    use crate::models::Signature;
 
     /// We assume that the number of points is limited.
     const MAX_SIZE: usize = 10_000;

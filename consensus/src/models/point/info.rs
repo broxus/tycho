@@ -2,6 +2,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use tl_proto::{TlRead, TlWrite};
+
 use crate::models::{
     AnchorStageRole, Digest, Link, Point, PointData, PointDataRef, PointId, Round,
 };

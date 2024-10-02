@@ -295,8 +295,11 @@ impl BroadcasterTask {
 
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
-            self.bcast_current
-                .push(peer_id, self.dispatcher.query_broadcast(peer_id, self.bcast_request.clone()));
+            self.bcast_current.push(
+                peer_id,
+                self.dispatcher
+                    .query_broadcast(peer_id, self.bcast_request.clone()),
+            );
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),

@@ -9,11 +9,14 @@ use rayon::prelude::IntoParallelRefIterator;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::models::point::body::PointBody;
+use crate::models::point::body::{PointBody, ShortPointBody};
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
 #[derive(Clone, TlWrite, TlRead)]
 pub struct Point(Arc<PointInner>);
+
+#[derive(Clone, TlWrite, TlRead)]
+pub struct ShortPoint(Arc<ShortPointInner>);
 
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
@@ -23,6 +26,22 @@ struct PointInner {
     // author's signature for the digest
     signature: Signature,
     body: PointBody,
+}
+
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "consensus.shortPointInner", scheme = "proto.tl")]
+struct ShortPointInner {
+    // hash of everything except signature
+    digest: Digest,
+    // author's signature for the digest
+    signature: Signature,
+    body: ShortPointBody,
+}
+
+impl ShortPoint {
+    pub fn payload(&self) -> &Vec<Bytes> {
+        &self.0.body.payload
+    }
 }
 
 impl Debug for Point {

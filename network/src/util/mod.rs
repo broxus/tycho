@@ -1,10 +1,10 @@
 use bytes::Buf;
+
 pub use self::router::{Routable, Router, RouterBuilder};
 #[cfg(test)]
 pub use self::test::make_peer_info_stub;
 pub use self::traits::NetworkExt;
 use crate::types::PeerId;
-use crate::ServiceRequest;
 
 mod router;
 mod traits;
