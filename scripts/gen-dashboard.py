@@ -1673,9 +1673,19 @@ def mempool_storage() -> RowPanel:
             ),
             "Get point count (total at moment)",
         ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_store_get_point_raw_count", range_selector="$__interval"
+            ),
+            "Get point raw count (total at moment)",
+        ),
         create_heatmap_panel(
             "tycho_mempool_store_get_point_time",
             "Get point",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_point_raw_time",
+            "Get point raw",
         ),
         create_counter_panel(
             expr_sum_increase("tycho_mempool_store_get_status_count", range_selector="$__interval"),
