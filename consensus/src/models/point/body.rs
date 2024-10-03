@@ -25,7 +25,7 @@ pub struct PointBody {
 
 #[derive(TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(Clone))]
-#[tl(boxed, id = "consensus.shortPointBody", scheme = "proto.tl")]
+#[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct ShortPointBody {
     pub payload: Vec<Bytes>,
 }
