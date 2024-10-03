@@ -51,6 +51,23 @@ docs:
 test:
     cargo nextest run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util  -p tycho-collator -p tycho-control
 
+test_cov:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTC_WRAPPER=scripts/coverage.py
+    export RUST_LOG=warn
+
+    if [ -n "${CI:-}" ]; then
+        # Running in GitHub Actions
+        cargo llvm-cov nextest --codecov --output-path codecov.json  -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control
+    else
+        # Running locally
+        cargo llvm-cov nextest --open -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control
+    fi
+
+check_dashboard:
+    /usr/bin/env python ./scripts/check-metrics.py
+
 # Generates a Grafana panel JSON.
 gen_dashboard:
     #!/usr/bin/env bash
