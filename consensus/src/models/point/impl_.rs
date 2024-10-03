@@ -404,7 +404,6 @@ mod tests {
     pub fn massive_point_deserialization() {
         let point_key_pair = new_key_pair();
         let point_payload = MSG_COUNT * MSG_BYTES;
-        let mut byte_size = 0;
 
         let point_body = point_body(&point_key_pair);
         let digest = point_body.make_digest();
@@ -417,7 +416,7 @@ mod tests {
         let mut data = BytesMut::with_capacity(1 << 20);
         point.write_to(&mut data);
         let data = data.freeze();
-        byte_size = data.len();
+        let byte_size = data.len();
 
         let timer = Instant::now();
         const POINTS_LEN: u32 = 100;
