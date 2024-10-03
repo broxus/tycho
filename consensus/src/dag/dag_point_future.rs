@@ -222,7 +222,7 @@ impl DagPointFuture {
                 let point = tokio::task::spawn_blocking({
                     let store = store.clone();
                     let round = info.round();
-                    let digest = info.digest().clone();
+                    let digest = *info.digest();
                     move || {
                         store
                             .get_point(round, &digest)
@@ -232,7 +232,7 @@ impl DagPointFuture {
                 .await
                 .expect("db get point");
                 let round = info.round();
-                let digest = info.digest().clone();
+                let digest = *info.digest();
                 let prev_proof = point.prev_proof();
                 drop(point);
                 let dag_point = Verifier::validate(
@@ -278,7 +278,7 @@ impl DagPointFuture {
         let point_id = PointId {
             author: *author,
             round: point_dag_round.round(),
-            digest: digest.clone(),
+            digest: *digest,
         };
         let point_dag_round = point_dag_round.downgrade();
         let state = state.clone();
@@ -296,7 +296,6 @@ impl DagPointFuture {
         let task = async move {
             let stored_valid = tokio::task::spawn_blocking({
                 let store = store.clone();
-                let point_id = point_id.clone();
                 move || match store.get_status(point_id.round, &point_id.digest) {
                     Some(status) if status.is_valid || status.is_certified => {
                         store.get_info(point_id.round, point_id.digest)
@@ -311,7 +310,6 @@ impl DagPointFuture {
                 Some(info) => return DagPoint::Trusted(ValidPoint::new(info)),
                 None => tokio::task::spawn_blocking({
                     let store = store.clone();
-                    let point_id = point_id.clone();
                     move || store.get_point(point_id.round, &point_id.digest)
                 })
                 .await

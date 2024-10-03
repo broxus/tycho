@@ -41,7 +41,7 @@ impl From<&Point> for PointInfo {
     fn from(point: &Point) -> Self {
         PointInfo(Arc::new(PointInfoInner {
             round: point.round(),
-            digest: point.digest().clone(),
+            digest: *point.digest(),
             data: point.data().clone(),
         }))
     }
@@ -64,7 +64,7 @@ impl PointInfo {
         PointId {
             author: self.0.data.author,
             round: self.0.round,
-            digest: self.0.digest.clone(),
+            digest: self.0.digest,
         }
     }
 
@@ -72,7 +72,7 @@ impl PointInfo {
         Some(PointId {
             author: self.0.data.author,
             round: self.0.round.prev(),
-            digest: self.0.data.prev_digest()?.clone(),
+            digest: *self.0.data.prev_digest()?,
         })
     }
 

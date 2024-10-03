@@ -2,11 +2,10 @@ use std::sync::LazyLock;
 
 use blake3::Hash;
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
-use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
-use crate::models::{Digest, Point, PointId, Round};
+use crate::models::{Point, PointId, Round};
 
 // 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
 // as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
@@ -36,8 +35,8 @@ impl<'a> TlRead<'a> for BroadcastQuery {
             return Err(TlError::UnknownConstructor);
         }
 
-        let size = *packet.len();
-        if *LARGEST_DATA_BYTES > size - 4usize {
+        let size = packet.len();
+        if *LARGEST_DATA_BYTES < size - 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -117,8 +116,8 @@ where
             return Err(TlError::UnknownConstructor);
         }
 
-        let size = *packet.len();
-        if *LARGEST_DATA_BYTES > size - 4usize {
+        let size = packet.len();
+        if *LARGEST_DATA_BYTES < size - 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -137,8 +136,8 @@ where
                     return Err(TlError::InvalidData);
                 }
             }
-            PointByIdResponse::<T>::DEFINED_NONE_TL_ID => (),
-            PointByIdResponse::<T>::TRY_LATER_TL_ID => (),
+            PointByIdResponse::<T>::DEFINED_NONE_TL_ID
+            | PointByIdResponse::<T>::TRY_LATER_TL_ID => (),
             _ => {
                 tracing::error!(tag = %point_by_id_response_tag, "Unknown PointByIdResponse tag id");
                 return Err(TlError::UnknownConstructor);

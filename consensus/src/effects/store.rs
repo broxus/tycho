@@ -34,7 +34,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
 
-    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>>;
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice<'_>>>;
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>>;
 
@@ -132,7 +132,7 @@ impl MempoolStore {
             .expect("DB get point full")
     }
 
-    pub fn get_point_raw(&self, round: Round, digest: Digest) -> Option<DBPinnableSlice> {
+    pub fn get_point_raw(&self, round: Round, digest: Digest) -> Option<DBPinnableSlice<'_>> {
         self.0
             .get_point_raw(round, &digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
@@ -320,7 +320,7 @@ impl MempoolStoreImpl for MempoolStorage {
             .transpose()
     }
 
-    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>> {
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
         metrics::counter!("tycho_mempool_store_get_point_raw_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_raw_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
@@ -553,7 +553,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice>> {
+    fn get_point_raw(&self, _: Round, _: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
         Ok(None)
     }
 

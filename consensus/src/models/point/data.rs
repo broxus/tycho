@@ -4,7 +4,7 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::models::point::{Digest, Round, UnixTime};
-use crate::models::proto::points_btree_map;
+use crate::models::proto_utils::points_btree_map;
 
 #[derive(Clone, Copy, TlRead, TlWrite, PartialEq, Debug)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
@@ -123,7 +123,7 @@ impl PointData {
     /// resulting None should be replaced with id of wrapping point
     pub(super) fn anchor_id(&self, link_field: AnchorStageRole, round: Round) -> Option<PointId> {
         match self.anchor_link(link_field) {
-            Link::Indirect { to, .. } => Some(to.clone()),
+            Link::Indirect { to, .. } => Some(*to),
             _direct => self.anchor_link_id(link_field, round),
         }
     }
@@ -151,10 +151,9 @@ impl PointData {
         Some(PointId {
             author,
             round,
-            digest: map
+            digest: *map
                 .get(&author)
-                .expect("Coding error: usage of ill-formed point")
-                .clone(),
+                .expect("Coding error: usage of ill-formed point"),
         })
     }
 }

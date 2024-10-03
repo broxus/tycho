@@ -115,7 +115,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         .expect("prev time must exist");
     let includes = prev_points
         .iter()
-        .map(|point| (point.data().author, point.digest().clone()))
+        .map(|point| (point.data().author, *point.digest()))
         .collect::<BTreeMap<_, _>>();
 
     let mut points = FastHashMap::default();
@@ -242,7 +242,7 @@ fn point_anchor_link(
                 Link::Direct(Through::Includes(last_same_stage_point.author))
             } else {
                 Link::Indirect {
-                    to: last_same_stage_point.clone(),
+                    to: *last_same_stage_point,
                     path: Through::Includes(peer),
                 }
             }

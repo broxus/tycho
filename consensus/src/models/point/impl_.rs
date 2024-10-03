@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
@@ -117,7 +117,7 @@ impl Point {
         PointId {
             author: self.0.body.data.author,
             round: self.0.body.round,
-            digest: self.0.digest.clone(),
+            digest: self.0.digest,
         }
     }
 
@@ -125,13 +125,13 @@ impl Point {
         Some(PointId {
             author: self.0.body.data.author,
             round: self.0.body.round.prev(),
-            digest: self.0.body.data.prev_digest()?.clone(),
+            digest: *self.0.body.data.prev_digest()?,
         })
     }
 
     pub fn prev_proof(&self) -> Option<PrevPoint> {
         Some(PrevPoint {
-            digest: self.0.body.data.prev_digest()?.clone(),
+            digest: *self.0.body.data.prev_digest()?,
             evidence: self.0.body.evidence.clone(),
         })
     }
@@ -404,7 +404,7 @@ mod tests {
     pub fn massive_point_serde() {
         let point_key_pair = new_key_pair();
         let timer = Instant::now();
-        let mut point_payload = MSG_COUNT * MSG_BYTES;
+        let point_payload = MSG_COUNT * MSG_BYTES;
         let mut byte_size = 0;
 
         let point_body = point_body(&point_key_pair);
@@ -415,7 +415,7 @@ mod tests {
             body: point_body.clone(),
         }));
         const POINTS_LEN: u32 = 100;
-        for i in 0..POINTS_LEN {
+        for _ in 0..POINTS_LEN {
             let point = point.clone();
             let mut data = BytesMut::with_capacity(1 << 20);
             point.write_to(&mut data);

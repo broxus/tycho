@@ -1,8 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 
-use bytes::Bytes;
-use tl_proto::{RawBytes, TlError, TlPacket, TlRead, TlResult, TlWrite};
-use tokio::io::AsyncReadExt;
+use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};

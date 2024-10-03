@@ -7,4 +7,4 @@ mod anchor;
 mod dag_point;
 mod peer_count;
 mod point;
-mod proto;
+mod proto_utils;

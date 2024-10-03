@@ -7,7 +7,7 @@ use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
-use crate::models::proto::evidence_btree_map;
+use crate::models::proto_utils::evidence_btree_map;
 
 #[derive(TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(Clone))]

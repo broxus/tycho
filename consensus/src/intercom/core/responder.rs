@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use futures_util::future;
 use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
-use tycho_util::futures::BoxFutureOrNoop;
 
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
@@ -101,7 +100,10 @@ impl Responder {
                         &inner.effects,
                     ),
                 };
-                Response::from_tl(&BroadcastMpResponse)
+                let response = Response::from_tl(&BroadcastMpResponse);
+                EngineContext::broadcast_response_metrics(task_start.elapsed());
+                response
+
             },
             PointQuery as r => {
                 let response = match &inner {
@@ -123,7 +125,10 @@ impl Responder {
                         result
                     }
                 };
-                Response::from_tl(&PointMpResponse(response))
+                let response_body = PointMpResponse(response);
+                let response = Response::from_tl(&response_body);
+                EngineContext::point_by_id_response_metrics(response_body, task_start.elapsed());
+                response
             },
             SignatureQuery as r => {
                 let response = match inner {
@@ -135,7 +140,10 @@ impl Responder {
                         }
                     },
                 };
-                Response::from_tl(&SignatureMpResponse(response))
+                let response_body = SignatureMpResponse(response);
+                let response = Response::from_tl(&response_body);
+                EngineContext::signature_response_metrics(response_body, task_start.elapsed());
+                response
             }
 
         }, e => {
@@ -146,31 +154,37 @@ impl Responder {
             return None;
         });
 
-        // EngineContext::response_metrics(&mp_response, task_start.elapsed());
-
         Some(response)
     }
 }
 
-// impl EngineContext {
-//     fn response_metrics(mp_response: &MPResponse, elapsed: Duration) {
-//         let histogram = match mp_response {
-//             MPResponse::Broadcast => {
-//                 metrics::histogram!("tycho_mempool_broadcast_query_responder_time")
-//             }
-//             MPResponse::Signature(SignatureResponse::NoPoint | SignatureResponse::TryLater) => {
-//                 metrics::histogram!("tycho_mempool_signature_query_responder_pong_time")
-//             }
-//             MPResponse::Signature(
-//                 SignatureResponse::Signature(_) | SignatureResponse::Rejected(_),
-//             ) => metrics::histogram!("tycho_mempool_signature_query_responder_data_time"),
-//             MPResponse::PointById(PointByIdResponse::Defined(_)) => {
-//                 metrics::histogram!("tycho_mempool_download_query_responder_some_time")
-//             }
-//             MPResponse::PointById(PointByIdResponse::DefinedNone | PointByIdResponse::TryLater) => {
-//                 metrics::histogram!("tycho_mempool_download_query_responder_none_time")
-//             }
-//         };
-//         histogram.record(elapsed);
-//     }
-// }
+impl EngineContext {
+    fn broadcast_response_metrics(elapsed: Duration) {
+        let histogram = metrics::histogram!("tycho_mempool_broadcast_query_responder_time");
+        histogram.record(elapsed);
+    }
+
+    fn signature_response_metrics(response: SignatureMpResponse, elapsed: Duration) {
+        let histogram = match response.0 {
+            SignatureResponse::NoPoint | SignatureResponse::TryLater => {
+                metrics::histogram!("tycho_mempool_signature_query_responder_pong_time")
+            }
+            SignatureResponse::Signature(_) | SignatureResponse::Rejected(_) => {
+                metrics::histogram!("tycho_mempool_signature_query_responder_data_time")
+            }
+        };
+        histogram.record(elapsed);
+    }
+
+    fn point_by_id_response_metrics<T>(response: PointMpResponse<T>, elapsed: Duration) {
+        let histogram = match response.0 {
+            PointByIdResponse::Defined(_) => {
+                metrics::histogram!("tycho_mempool_download_query_responder_some_time")
+            }
+            PointByIdResponse::DefinedNone | PointByIdResponse::TryLater => {
+                metrics::histogram!("tycho_mempool_download_query_responder_none_time")
+            }
+        };
+        histogram.record(elapsed);
+    }
+}

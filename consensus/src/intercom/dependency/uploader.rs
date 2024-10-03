@@ -1,5 +1,4 @@
 use futures_util::FutureExt;
-use tl_proto::RawBytes;
 use tycho_network::PeerId;
 use weedb::rocksdb::DBPinnableSlice;
 

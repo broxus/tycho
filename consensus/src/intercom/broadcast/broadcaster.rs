@@ -66,7 +66,7 @@ impl Broadcaster {
         let mut task = BroadcasterTask {
             effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
             dispatcher: self.dispatcher.clone(),
-            point_digest: point.digest().clone(),
+            point_digest: *point.digest(),
             bcaster_signal: Some(bcaster_signal),
             collector_signal,
 
@@ -91,7 +91,7 @@ impl Broadcaster {
         metrics::counter!("tycho_mempool_collected_signatures_count")
             .increment(task.signatures.len() as _);
         LastOwnPoint {
-            digest: point.digest().clone(),
+            digest: *point.digest(),
             evidence: task.signatures.into_iter().collect(),
             round: point.round(),
             signers: signers_count,

@@ -1,9 +1,7 @@
-use anyhow::{Error, Result};
-use bytes::{Buf, Bytes};
+use anyhow::Result;
 use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
-use tl_proto::{TlError, TlPacket, TlRead, TlWrite};
-use tycho_network::{try_handle_prefix, Network, PeerId, PrivateOverlay, Request, Response};
+use tl_proto::{TlError, TlRead};
+use tycho_network::{try_handle_prefix, Network, PeerId, PrivateOverlay, Request};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::intercom::core::dto::{
