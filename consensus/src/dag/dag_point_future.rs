@@ -265,7 +265,7 @@ impl DagPointFuture {
             let prev_proof = verified.prev_proof();
             drop(verified);
 
-            let deeper_effects = Effects::<ValidateContext>::new(&effects, &info);
+            let deeper_effects = effects.deeper(&info);
             tracing::trace!(
                 parent: deeper_effects.span(),
                 "downloaded, start validating",
