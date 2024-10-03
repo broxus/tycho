@@ -16,7 +16,7 @@ use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFact
 use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
 use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::{MempoolAdapterStdImpl, MempoolGlobalConfig};
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
@@ -240,6 +240,7 @@ pub struct Node {
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
     internal_queue_config: QueueConfig,
+    mempool_global_config: MempoolGlobalConfig,
 }
 
 impl Node {
@@ -365,6 +366,14 @@ impl Node {
             collation_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
+            mempool_global_config: MempoolGlobalConfig {
+                clock_skew: global_config.mempool.clock_skew,
+                commit_depth: global_config.mempool.commit_depth,
+                genesis_round: global_config.mempool.genesis_round,
+                payload_batch_size: global_config.mempool.payload_batch_size,
+                deduplicate_rounds: global_config.mempool.deduplicate_rounds,
+                max_anchor_distance: global_config.mempool.max_anchor_distance,
+            },
         })
     }
 
@@ -437,7 +446,7 @@ impl Node {
             &self.peer_resolver,
             &self.overlay_service,
             get_validator_peer_ids(&mc_state)?,
-            mempool_start_round,
+            self.mempool_global_config,
         );
 
         // Create RPC

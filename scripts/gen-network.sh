@@ -98,4 +98,16 @@ zerostate_id=$(
 )
 
 global_config=$(echo "${global_config}" | jq ".zerostate = $zerostate_id")
+
+mempool='{
+  "clock_skew": 5000,
+  "commit_depth": 20,
+  "genesis_round": 0,
+  "payload_batch_size": 786432,
+  "deduplicate_rounds": 140,
+  "max_anchor_distance": 210
+}'
+
+global_config=$(echo "${global_config}" | jq ".mempool = $mempool")
+
 echo "${global_config}" > "${base_dir}/global-config.json"

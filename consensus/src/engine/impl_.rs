@@ -9,7 +9,7 @@ use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
-use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
+use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, DagFront, DagRound, InclusionState, Verifier};
@@ -19,7 +19,7 @@ use crate::effects::{
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::MempoolConfig;
+use crate::engine::{MempoolConfig, MempoolGlobalConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
 
@@ -33,8 +33,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    const PRIVATE_OVERLAY_ID: OverlayId = OverlayId(*b"ac87b6945b4f6f736963f7f65d025943");
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
@@ -45,15 +43,17 @@ impl Engine {
         input_buffer: InputBuffer,
         committed_info_tx: mpsc::UnboundedSender<CommitResult>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        genesis_round: Option<u32>,
+        global_config: MempoolGlobalConfig,
+        init_with_genesis: bool,
     ) -> Self {
-        MempoolConfig::set_genesis_round(Round(genesis_round.unwrap_or_default()));
+        MempoolConfig::init(&global_config);
 
         let consensus_round = RoundWatch::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
-        let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
+        let overlay_id = global_config.overlay_id();
+        let private_overlay = PrivateOverlay::builder(overlay_id)
             .with_peer_resolver(peer_resolver.clone())
             .named("tycho-consensus")
             .build(responder.clone());
@@ -89,7 +89,7 @@ impl Engine {
             let mut consensus_round = consensus_round.receiver();
             async move {
                 // wait both initialized with non-default value to use latest values
-                if genesis_round.is_none() {
+                if !init_with_genesis {
                     // wait if not set locally
                     _ = top_known_anchor.next().await;
                 }

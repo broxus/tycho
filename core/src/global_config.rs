@@ -12,6 +12,7 @@ use crate::proto::blockchain::OverlayIdData;
 pub struct GlobalConfig {
     pub bootstrap_peers: Vec<PeerInfo>,
     pub zerostate: ZerostateId,
+    pub mempool: MempoolGlobalConfig,
 }
 
 impl GlobalConfig {
@@ -49,4 +50,14 @@ impl ZerostateId {
             zerostate_file_hash: self.file_hash.0,
         }))
     }
+}
+
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MempoolGlobalConfig {
+    pub clock_skew: u64,
+    pub commit_depth: u8,
+    pub genesis_round: u32,
+    pub payload_batch_size: u64,
+    pub deduplicate_rounds: u16,
+    pub max_anchor_distance: u16,
 }

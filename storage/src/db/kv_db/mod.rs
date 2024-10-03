@@ -109,6 +109,7 @@ impl WithMigrations for MempoolDb {
 
 weedb::tables! {
     pub struct MempoolTables<Caches> {
+        pub state: tables::State,
         pub points: tables::Points,
         pub points_info: tables:: PointsInfo,
         pub points_status: tables::PointsStatus,

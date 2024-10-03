@@ -9,6 +9,7 @@ use crate::MempoolDb;
 pub struct MempoolStorage {
     pub db: MempoolDb,
 }
+
 impl MempoolStorage {
     pub const KEY_LEN: usize = 4 + 32;
 
@@ -75,4 +76,16 @@ impl MempoolStorage {
 
         Ok(())
     }
+
+    pub fn store_instance_id(&self, id: [u8; 32]) {
+        let state = &self.db.state;
+        state.insert(INSTANCE_ID, id).unwrap();
+    }
+
+    pub fn load_instance_id(&self) -> Option<[u8; 32]> {
+        let id = self.db.state.get(INSTANCE_ID).unwrap();
+        id.map(|x| x.as_ref().try_into().expect("slice with incorrect length"))
+    }
 }
+
+const INSTANCE_ID: &[u8] = b"instance_id";

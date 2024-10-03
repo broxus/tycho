@@ -12,7 +12,7 @@ use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use tokio::sync::mpsc;
 use tycho_consensus::prelude::*;
-use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
+use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver};
 use tycho_storage::MempoolStorage;
 use tycho_util::time::now_millis;
 
@@ -20,6 +20,7 @@ use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+    MempoolGlobalConfig,
 };
 use crate::tracing_targets;
 
@@ -54,11 +55,22 @@ impl MempoolAdapterStdImpl {
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
         peers: Vec<PeerId>,
-        mempool_start_round: Option<u32>,
+        config: MempoolGlobalConfig,
     ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
+
+        let config: tycho_consensus::prelude::MempoolGlobalConfig = config.into();
+
+        let mempool_storage = &self.store.inner;
+        let init_with_genesis = match mempool_storage.load_instance_id() {
+            Some(instance_id) => OverlayId(instance_id) != config.overlay_id(),
+            None => {
+                mempool_storage.store_instance_id(config.overlay_id().0);
+                true
+            }
+        };
 
         let mut engine = Engine::new(
             key_pair,
@@ -69,11 +81,12 @@ impl MempoolAdapterStdImpl {
             self.externals_rx.clone(),
             anchor_tx,
             &self.top_known_anchor,
-            mempool_start_round,
+            config,
+            init_with_genesis,
         );
 
         tokio::spawn(async move {
-            if mempool_start_round.is_some() {
+            if init_with_genesis {
                 engine.init_with_genesis(&peers).await;
             }
             engine.run().await;
@@ -97,14 +110,14 @@ impl MempoolAdapterStdImpl {
         store: MempoolAdapterStore,
         mut anchor_rx: mpsc::UnboundedReceiver<CommitResult>,
     ) {
-        let mut parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
+        let mut parser = Parser::new(MempoolConfig::deduplicate_rounds());
         let mut first_after_gap = None;
         let mut has_gap = false;
         while let Some(commit) = anchor_rx.recv().await {
             let (anchor, history) = match commit {
                 CommitResult::UnrecoverableGap => {
                     cache.reset();
-                    parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
+                    parser = Parser::new(MempoolConfig::deduplicate_rounds());
                     has_gap = true;
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
@@ -137,7 +150,8 @@ impl MempoolAdapterStdImpl {
                     store.set_committed(&anchor, &history);
 
                     let is_collatable = first_after_gap.as_ref().map_or(true, |first_id| {
-                        anchor_id.saturating_sub(*first_id) > MempoolConfig::DEDUPLICATE_ROUNDS as _
+                        anchor_id.saturating_sub(*first_id)
+                            > MempoolConfig::deduplicate_rounds() as _
                     });
 
                     let unique_messages =

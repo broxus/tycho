@@ -18,7 +18,7 @@ static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
     const EXT_IN_BOC_MIN: usize = 48;
 
     let boc = vec![0_u8; EXT_IN_BOC_MIN];
-    let payload = vec![boc; 1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN];
+    let payload = vec![boc; 1 + MempoolConfig::payload_batch_size() / EXT_IN_BOC_MIN];
     let payload_size = bincode::serialized_size(&payload).expect("cannot happen");
 
     u16::MAX as usize + payload_size as usize

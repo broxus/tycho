@@ -52,7 +52,7 @@ impl PointBody {
             cmp::Ordering::Less => false,
         };
         is_special_ok
-            && MempoolConfig::PAYLOAD_BATCH_BYTES >= self.payload.iter().map(|x| x.len()).sum()
+            && MempoolConfig::payload_batch_size() >= self.payload.iter().map(|x| x.len()).sum()
             // proof for previous point consists of digest and 2F++ evidences
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
             && self.evidence.is_empty() != self.data.includes.contains_key(&self.data.author)

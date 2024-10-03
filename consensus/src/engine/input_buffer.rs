@@ -70,7 +70,7 @@ impl InputBufferData {
             .iter()
             .take_while(|elem| {
                 taken_bytes += elem.len();
-                taken_bytes <= MempoolConfig::PAYLOAD_BATCH_BYTES
+                taken_bytes <= MempoolConfig::payload_batch_size()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -186,7 +186,7 @@ mod stub {
             }
             let step =
                 (self.fetch_count.get() / self.payload_step).min(self.steps_until_full.get());
-            let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
+            let msg_count = (MempoolConfig::payload_batch_size() * step)
                 / self.steps_until_full
                 / EXTERNAL_MSG_MAX_BYTES;
             let mut result = Vec::with_capacity(msg_count);

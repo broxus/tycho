@@ -33,13 +33,14 @@ impl TopKnownAnchor {
     pub fn adapter_history_bottom(top_known_anchor: Round) -> Round {
         // oldest unique data to collate (including latest collated round)
         let round = (top_known_anchor.0)
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
-            .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
+            .saturating_sub(MempoolConfig::commit_depth() as u32)
+            .saturating_sub(MempoolConfig::deduplicate_rounds() as u32);
         Round(round).max(MempoolConfig::genesis_round())
     }
     pub fn silence_upper_bound(top_known_anchor: Round) -> Round {
         // oldest unique data to collate (including latest collated round)
-        let round = (top_known_anchor.0).saturating_add(MempoolConfig::MAX_ANCHOR_DISTANCE as u32);
+        let round =
+            (top_known_anchor.0).saturating_add(MempoolConfig::max_anchor_distance() as u32);
         Round(round).max(MempoolConfig::genesis_round())
     }
 }
@@ -66,12 +67,12 @@ impl Consensus {
         // enough to handle acceptable collator lag
         let round = (consensus.0)
             // before silent mode
-            .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32)
+            .saturating_sub(MempoolConfig::max_anchor_distance() as u32)
             // before top known block in silent mode
-            .saturating_sub(MempoolConfig::ACCEPTABLE_COLLATOR_LAG as u32)
+            .saturating_sub(MempoolConfig::acceptable_collator_lag() as u32)
             // oldest data to collate as unique
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
-            .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32); // as unique
+            .saturating_sub(MempoolConfig::commit_depth() as u32) // data to collate
+            .saturating_sub(MempoolConfig::deduplicate_rounds() as u32); // as unique
         Round(round).max(MempoolConfig::genesis_round())
     }
 }
@@ -91,10 +92,10 @@ impl Commit {
     pub fn stored_history_bottom(commit: Round) -> Round {
         // oldest data to collate that is validatable and unique
         let round = (commit.0)
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
+            .saturating_sub(MempoolConfig::commit_depth() as u32) // data to collate
             .saturating_sub(
-                (MempoolConfig::MAX_ANCHOR_DISTANCE as u32) // validatable by other peers
-                    .max(MempoolConfig::DEDUPLICATE_ROUNDS as u32), // unique
+                (MempoolConfig::max_anchor_distance() as u32) // validatable by other peers
+                    .max(MempoolConfig::deduplicate_rounds() as u32), // unique
             );
         Round(round).max(MempoolConfig::genesis_round())
     }

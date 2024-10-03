@@ -3430,6 +3430,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "tikv-jemallocator",
  "tokio",
  "tokio-stream",

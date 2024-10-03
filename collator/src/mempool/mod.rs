@@ -126,3 +126,55 @@ impl MempoolAnchor {
         self.externals.iter().skip(from_idx).cloned()
     }
 }
+
+#[derive(Default, Copy, Clone)]
+pub struct MempoolGlobalConfig {
+    pub clock_skew: u64,
+    pub commit_depth: u8,
+    pub genesis_round: u32,
+    pub payload_batch_size: u64,
+    pub deduplicate_rounds: u16,
+    pub max_anchor_distance: u16,
+}
+
+impl From<MempoolGlobalConfig> for tycho_consensus::prelude::MempoolGlobalConfig {
+    fn from(config: MempoolGlobalConfig) -> Self {
+        tycho_consensus::prelude::MempoolGlobalConfig {
+            clock_skew: config.clock_skew,
+            commit_depth: config.commit_depth,
+            genesis_round: config.genesis_round,
+            payload_batch_size: config.payload_batch_size,
+            deduplicate_rounds: config.deduplicate_rounds,
+            max_anchor_distance: config.max_anchor_distance,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_config_convert() {
+        let config = MempoolGlobalConfig {
+            clock_skew: 1000,
+            commit_depth: 2,
+            genesis_round: 10,
+            payload_batch_size: 3123,
+            deduplicate_rounds: 4,
+            max_anchor_distance: 8,
+        };
+
+        let mempool_config: tycho_consensus::prelude::MempoolGlobalConfig = config.into();
+
+        assert_eq!(config.clock_skew, mempool_config.clock_skew);
+        assert_eq!(config.commit_depth, mempool_config.commit_depth);
+        assert_eq!(config.genesis_round, mempool_config.genesis_round);
+        assert_eq!(config.payload_batch_size, mempool_config.payload_batch_size);
+        assert_eq!(config.deduplicate_rounds, mempool_config.deduplicate_rounds);
+        assert_eq!(
+            config.max_anchor_distance,
+            mempool_config.max_anchor_distance
+        );
+    }
+}

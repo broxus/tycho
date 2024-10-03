@@ -167,7 +167,7 @@ impl Downloader {
 
         let consensus_round = self.inner.consensus_round.get().0;
         let result = if point_id.round.0
-            >= consensus_round.saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
+            >= consensus_round.saturating_sub(MempoolConfig::commit_depth() as _)
         {
             // for validation
             self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, effects)

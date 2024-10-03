@@ -10,7 +10,9 @@ use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
-use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore, MempoolConfig};
+use tycho_consensus::prelude::{
+    Engine, InputBuffer, MempoolAdapterStore, MempoolConfig, MempoolGlobalConfig,
+};
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
@@ -166,6 +168,16 @@ fn make_network(
                         }
                         let (mock_storage, _tmp_dir) =
                             Storage::new_temp().await.expect("new storage");
+
+                        let global_config = MempoolGlobalConfig {
+                            clock_skew: 5000,
+                            commit_depth: 20,
+                            genesis_round: 0,
+                            payload_batch_size: 786432,
+                            deduplicate_rounds: 140,
+                            max_anchor_distance: 210,
+                        };
+
                         let mut engine = Engine::new(
                             key_pair,
                             dht_client.network(),
@@ -178,7 +190,8 @@ fn make_network(
                             InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             committed_tx.clone(),
                             &top_known_anchor,
-                            None,
+                            global_config,
+                            true,
                         );
                         engine.init_with_genesis(&all_peers).await;
                         started.add_permits(1);

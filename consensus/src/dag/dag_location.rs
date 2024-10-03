@@ -142,7 +142,7 @@ impl Signable {
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if valid.info.data().time < (UnixTime::now() + MempoolConfig::CLOCK_SKEW) {
+            if valid.info.data().time < (UnixTime::now() + MempoolConfig::clock_skew()) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {

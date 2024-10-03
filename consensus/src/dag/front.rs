@@ -39,7 +39,7 @@ impl DagFront {
         let front_bottom_round = Round(
             (new_top.0.saturating_add(1))
                 .saturating_sub(Self::HOT_END_ROUNDS)
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
+                .saturating_sub(MempoolConfig::commit_depth() as u32)
                 .max(MempoolConfig::genesis_round().0),
         );
 

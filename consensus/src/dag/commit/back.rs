@@ -375,7 +375,7 @@ impl DagBack {
         }
         let history_limit = Round(
             (anchor.round().0)
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
+                .saturating_sub(MempoolConfig::commit_depth() as _)
                 // do not commit genesis - we may place some arbitrary payload in it
                 .max(MempoolConfig::genesis_round().next().0),
         );

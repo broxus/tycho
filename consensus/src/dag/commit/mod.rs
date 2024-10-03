@@ -151,7 +151,7 @@ impl Committer {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // in case previous anchor was triggered directly - rounds are already dropped
             self.dag.drain_upto(Round(
-                (next.anchor.round().0).saturating_sub(MempoolConfig::COMMIT_DEPTH as _),
+                (next.anchor.round().0).saturating_sub(MempoolConfig::commit_depth() as _),
             ));
             let Some(uncommitted) = self.dag.gather_uncommitted(&next.anchor) else {
                 // tracing::warn!(
@@ -219,6 +219,7 @@ mod test {
     use crate::dag::dag_location::DagLocation;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
     use crate::engine::round_watch::{Consensus, RoundWatch};
+    use crate::engine::MempoolGlobalConfig;
     use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::test_utils;
 
@@ -229,7 +230,16 @@ mod test {
         let stub_store = MempoolStore::no_read_stub();
         let stub_consensus_round = RoundWatch::<Consensus>::default();
 
-        MempoolConfig::set_genesis_round(Round(1));
+        let global_config = MempoolGlobalConfig {
+            clock_skew: 5000,
+            commit_depth: 20,
+            genesis_round: 1,
+            payload_batch_size: 786432,
+            deduplicate_rounds: 140,
+            max_anchor_distance: 210,
+        };
+
+        MempoolConfig::init(&global_config);
 
         let genesis = test_utils::genesis();
         let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
