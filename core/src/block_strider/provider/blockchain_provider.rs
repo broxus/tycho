@@ -83,7 +83,7 @@ impl BlockchainBlockProvider {
                             return parsed;
                         }
                     }
-                    None => tracing::warn!(?prev_block_id, "block not found"),
+                    None => tycho_util::rl_warn!(?prev_block_id, "block not found"),
                 },
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }

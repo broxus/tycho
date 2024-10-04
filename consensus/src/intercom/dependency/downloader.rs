@@ -390,7 +390,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     status.is_in_flight = false;
                     status.failed_queries = status.failed_queries.saturating_add(1);
                     metrics::counter!("tycho_mempool_download_query_failed_count").increment(1);
-                    tracing::warn!(
+                    tycho_util::rl_warn!(
                         peer = display(peer_id.alt()),
                         error = display(network_err),
                         "network error",
