@@ -65,3 +65,16 @@ where
     let constructor = std::convert::identity(body).get_u32_le();
     Ok((constructor, body))
 }
+
+pub fn try_handle_prefix_with_offset<T>(req: &T) -> Result<(u32, &[u8]), tl_proto::TlError>
+where
+    T: AsRef<[u8]>,
+{
+    let body = req.as_ref();
+    if body.len() < 4 {
+        return Err(tl_proto::TlError::UnexpectedEof);
+    }
+
+    let constructor = std::convert::identity(body).get_u32_le();
+    Ok((constructor, &body[4..]))
+}

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 use tl_proto::{TlError, TlRead};
-use tycho_network::{try_handle_prefix, Network, PeerId, PrivateOverlay, Request};
+use tycho_network::{
+    try_handle_prefix, try_handle_prefix_with_offset, Network, PeerId, PrivateOverlay, Request,
+};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::intercom::core::dto::{
@@ -81,7 +83,7 @@ impl Dispatcher {
                 Err(e) => return (peer_id, Err(e)),
             };
 
-            let (constructor, body) = match try_handle_prefix(&response.body) {
+            let (constructor, body) = match try_handle_prefix_with_offset(&response.body) {
                 Ok(data) => data,
                 Err(e) => return (peer_id, Err(e.into())),
             };
@@ -122,7 +124,7 @@ impl Dispatcher {
                 Err(e) => return (peer_id, Err(e)),
             };
 
-            let (constructor, body) = match try_handle_prefix(&response.body) {
+            let (constructor, body) = match try_handle_prefix_with_offset(&response.body) {
                 Ok(data) => data,
                 Err(e) => return (peer_id, Err(e.into())),
             };
@@ -132,12 +134,12 @@ impl Dispatcher {
                 return (peer_id, Err(TlError::InvalidData.into()));
             }
 
-            let response = match SignatureMpResponse::read_from(body, &mut 0) {
+            let response = match SignatureResponse::read_from(body, &mut 0) {
                 Ok(data) => data,
                 Err(e) => return (peer_id, Err(e.into())),
             };
 
-            (peer_id, Ok(response.0))
+            (peer_id, Ok(response))
         };
         Box::pin(future)
     }
