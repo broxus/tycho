@@ -50,6 +50,7 @@ fdlimit = "0.3.0"
 futures-util = "0.3"
 getip = "0.1"
 hex = "0.4"
+halfbrown = { version = "0.2.5" }
 humantime = "2"
 indexmap = "2.2"
 itertools = "0.12"

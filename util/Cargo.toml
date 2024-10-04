@@ -17,6 +17,7 @@ castaway = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
 getip = { workspace = true, optional = true }
+halfbrown = { workspace = true }
 humantime = { workspace = true }
 libc = { workspace = true, optional = true }
 metrics = { workspace = true }

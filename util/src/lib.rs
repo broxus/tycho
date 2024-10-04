@@ -8,6 +8,10 @@ pub mod serde_helpers;
 pub mod time;
 pub mod tl;
 
+pub type FastHalfBrownMap<K, V> = halfbrown::HashMap<K, V, ahash::RandomState>;
+
+pub mod macros;
+
 pub mod futures {
     pub use self::box_future_or_noop::BoxFutureOrNoop;
     pub use self::join_task::JoinTask;
