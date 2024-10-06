@@ -4,6 +4,7 @@ use crate::dag::DagRound;
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::intercom::dto::{SignatureRejectedReason, SignatureResponse};
+use crate::intercom::BroadcastFilter;
 use crate::models::Round;
 
 pub struct Signer;
@@ -11,10 +12,12 @@ impl Signer {
     pub fn signature_response(
         round: Round,
         author: &PeerId,
-        next_dag_round: &DagRound,
+        top_dag_round: &DagRound,
+        broadcast_filter: &BroadcastFilter,
         effects: &Effects<EngineContext>,
     ) -> SignatureResponse {
-        let response = Self::make_signature_response(round, author, next_dag_round);
+        let response =
+            Self::make_signature_response(round, author, top_dag_round, broadcast_filter, effects);
         let level = match response {
             SignatureResponse::Rejected(_) => tracing::Level::WARN,
             _ => tracing::Level::TRACE,
@@ -34,12 +37,21 @@ impl Signer {
         round: Round,
         author: &PeerId,
         next_dag_round: &DagRound,
+        broadcast_filter: &BroadcastFilter,
+        effects: &Effects<EngineContext>,
     ) -> SignatureResponse {
         if round >= next_dag_round.round() {
-            // hold fast nodes from moving forward
-            // notice the engine is initiated with Round(0)), thus avoid panic
-            return SignatureResponse::TryLater;
+            // first check BroadcastFilter, then DAG for top_dag_round exactly
+            if broadcast_filter.has_point(round, author) {
+                // hold fast nodes from moving forward
+                // notice the engine is initiated with Round(0)), thus avoid panic
+                return SignatureResponse::TryLater;
+            } else if round > next_dag_round.round() {
+                // such points may be in BroadcastFilter only
+                return SignatureResponse::NoPoint;
+            };
         };
+
         // notice the first genesis is at with Round(1), thus avoid panic
         let engine_round = next_dag_round.round().prev();
         if round.next() < engine_round {
@@ -59,6 +71,10 @@ impl Signer {
             // retry broadcast
             return SignatureResponse::NoPoint;
         };
+        if round == next_dag_round.round() {
+            // point was moved from broadcast filter to dag, do not respond with `NoPoint`
+            return SignatureResponse::TryLater;
+        }
         if let Some(signable) = state.signable() {
             let is_witness = round.next() == engine_round;
             let current_dag_round_bind = if is_witness {
@@ -75,8 +91,11 @@ impl Signer {
                 // points at current local dag round are includes for next round point
                 next_dag_round.key_pair()
             } else {
-                unreachable!(
-                    "requests for other rounds are filtered out at the beginning of this method"
+                let _guard = effects.span().enter();
+                panic!(
+                    "requests for round {} must be filtered out earlier in this method; author {}",
+                    round.0,
+                    author.alt()
                 )
             };
             signable.sign(engine_round, key_pair);

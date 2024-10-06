@@ -39,6 +39,15 @@ impl Responder {
         if let Some(top_dag_round) = top_dag_round {
             broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
         }
+        // Note that `next_dag_round` for Signer should be advanced _after_ new points
+        //  are moved from BroadcastFilter into DAG. Then Signer will look for points
+        //  (of rounds greater than local engine round, including top dag round exactly)
+        //  first in BroadcastFilter, then in DAG.
+        //  Otherwise local Signer will skip BroadcastFilter check and search in DAG directly,
+        //  will not find cached point and will ask to repeat broadcast once more, and local
+        //  BroadcastFilter may account such repeated broadcast as malicious.
+        //  Though some points of top_dag_round (exactly) may be cached in BroadcastFilter while
+        //  others are being moved into Dag, all of them will be in DAG after one more round.
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
             top_dag_round: top_dag_round.cloned(),
@@ -135,9 +144,13 @@ impl Responder {
                     None => SignatureResponse::TryLater,
                     Some(inner) => match &inner.top_dag_round {
                         None => SignatureResponse::TryLater,
-                            Some(top_dag_round) => {
-                            Signer::signature_response(r.0, &peer_id, top_dag_round, &inner.effects)
-                        }
+                            Some(top_dag_round) =>
+                            Signer::signature_response(r.0,
+                        &peer_id,
+                        top_dag_round,
+                        &inner.broadcast_filter,
+                        &inner.effects,
+                        ),
                     },
                 };
                 let response_body = SignatureMpResponse(response);
