@@ -286,19 +286,19 @@ mod tests {
             body: point_body.clone(),
         }));
         let info = PointInfo::from(&point);
-        let mut data = BytesMut::with_capacity(info.max_size_hint());
+        let mut data = Vec::<u8>::with_capacity(info.max_size_hint());
         info.write_to(&mut data);
         let ref_info = PointInfo::serializable_from(&point);
-        let mut ref_data = BytesMut::with_capacity(info.max_size_hint());
+        let mut ref_data = Vec::<u8>::with_capacity(info.max_size_hint());
         ref_info.write_to(&mut ref_data);
 
         assert_eq!(
             info,
-            <PointInfo>::read_from(&ref_data, &mut 0).expect("deserialize point info from ref"),
+            tl_proto::deserialize(&ref_data).expect("deserialize point info from ref"),
         );
         assert_eq!(
-            Digest::new(data.freeze().as_ref()),
-            Digest::new(ref_data.freeze().as_ref()),
+            Digest::new(&data),
+            Digest::new(&ref_data),
             "compare serialized bytes"
         );
     }
@@ -413,15 +413,14 @@ mod tests {
             body: point_body.clone(),
         }));
 
-        let mut data = BytesMut::with_capacity(1 << 20);
+        let mut data = Vec::<u8>::with_capacity(1 << 20);
         point.write_to(&mut data);
-        let data = data.freeze();
         let byte_size = data.len();
 
         let timer = Instant::now();
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
-            if let Err(e) = Point::read_from(&data, &mut 0) {
+            if let Err(e) = tl_proto::deserialize::<Point>(&data) {
                 println!("error {e:?}");
                 return;
             }
@@ -451,7 +450,7 @@ mod tests {
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
             let point = point.clone();
-            let mut data = BytesMut::with_capacity(1 << 20);
+            let mut data = Vec::<u8>::with_capacity(1 << 20);
             point.write_to(&mut data);
             byte_size = data.len();
             // data.freeze();

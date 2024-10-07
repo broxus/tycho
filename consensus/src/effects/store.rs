@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use itertools::Itertools;
-use tl_proto::{TlRead, TlWrite};
+use tl_proto::TlWrite;
 use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
@@ -249,11 +249,11 @@ impl MempoolStoreImpl for MempoolStorage {
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
 
         let value = PointInfo::serializable_from(point);
-        let mut info = BytesMut::with_capacity(value.max_size_hint());
+        let mut info = Vec::<u8>::with_capacity(value.max_size_hint());
         value.write_to(&mut info);
 
         // new
-        let mut point_bytes = BytesMut::with_capacity(point.max_size_hint());
+        let mut point_bytes = Vec::<u8>::with_capacity(point.max_size_hint());
         point.write_to(&mut point_bytes);
 
         let db = self.db.rocksdb();
@@ -265,8 +265,8 @@ impl MempoolStoreImpl for MempoolStorage {
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
-        batch.put_cf(&points_cf, key.as_slice(), point_bytes.freeze());
-        batch.put_cf(&info_cf, key.as_slice(), info.freeze());
+        batch.put_cf(&points_cf, key.as_slice(), point_bytes);
+        batch.put_cf(&info_cf, key.as_slice(), info);
         batch.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
 
         Ok(db.write(batch)?)
@@ -316,7 +316,7 @@ impl MempoolStoreImpl for MempoolStorage {
         points
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| <Point>::read_from(&a, &mut 0).context("deserialize db point"))
+            .map(|a| tl_proto::deserialize::<Point>(&a).context("deserialize db point"))
             .transpose()
     }
 
@@ -341,7 +341,7 @@ impl MempoolStoreImpl for MempoolStorage {
         table
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| <PointInfo>::read_from(&a, &mut 0).context("deserialize point info"))
+            .map(|a| tl_proto::deserialize::<PointInfo>(&a).context("deserialize point info"))
             .transpose()
     }
 
@@ -397,7 +397,8 @@ impl MempoolStoreImpl for MempoolStorage {
             let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point = <ShortPoint>::read_from(bytes, &mut 0).context("deserialize point")?;
+                let point =
+                    tl_proto::deserialize::<ShortPoint>(bytes).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
                 if found
@@ -406,7 +407,7 @@ impl MempoolStoreImpl for MempoolStorage {
                 {
                     // we panic thus we don't care about performance
                     let full_point =
-                        <Point>::read_from(bytes, &mut 0).context("deserialize point")?;
+                        tl_proto::deserialize::<Point>(bytes).context("deserialize point")?;
                     panic!("iter read non-unique point {:?}", full_point.id())
                 }
             }
@@ -503,7 +504,8 @@ impl MempoolStoreImpl for MempoolStorage {
             let Some((key, info)) = iter.item() else {
                 break;
             };
-            let info = <PointInfo>::read_from(info, &mut 0).context("db deserialize point info")?;
+            let info =
+                tl_proto::deserialize::<PointInfo>(info).context("db deserialize point info")?;
             if let Some(status) = statuses.remove(key) {
                 result.push((info, status));
             } else {

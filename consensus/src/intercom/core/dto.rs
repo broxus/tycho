@@ -36,7 +36,7 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         let size = packet.len();
-        if *LARGEST_DATA_BYTES < size - 4usize {
+        if size - 4usize > *LARGEST_DATA_BYTES {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -117,20 +117,20 @@ where
         }
 
         let size = packet.len();
-        if *LARGEST_DATA_BYTES < size - 4usize {
+        if size - 4usize > *LARGEST_DATA_BYTES {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
 
         let point_by_id_response_tag = {
             let mut prefix = [0_u8; 4];
-            prefix.copy_from_slice(&packet[0..4]);
+            prefix.copy_from_slice(&packet[*offset..*offset + 4usize]);
             u32::from_be_bytes(prefix)
         };
 
         match point_by_id_response_tag {
             PointByIdResponse::<T>::DEFINED_TL_ID => {
-                // skip 4 bytes of Point tag prefix
+                // skip 4+4 bytes of PointByIdResponse and Point tag prefixes
                 if !verify_hash(&packet[8..]) {
                     tracing::error!("Point hash is invalid");
                     return Err(TlError::InvalidData);
@@ -149,6 +149,10 @@ where
 }
 
 pub fn verify_hash(data: &[u8]) -> bool {
+    if data.len() < 32 + 64 {
+        tracing::error!(len = %data.len(), "Data is too short");
+        return false;
+    }
     let hash_slice = &data[0..32];
     // skip 64 bytes of signature
     let point_bytes = &data[96..];
@@ -158,5 +162,5 @@ pub fn verify_hash(data: &[u8]) -> bool {
 }
 
 #[derive(TlWrite, TlRead, Debug)]
-#[tl(boxed, id = "core.mpresponse.point", scheme = "proto.tl")]
+#[tl(boxed, id = "core.mpresponse.signature", scheme = "proto.tl")]
 pub struct SignatureMpResponse(pub SignatureResponse);

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, StreamExt};
+use futures_util::StreamExt;
 use parking_lot::Mutex;
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
@@ -361,8 +361,7 @@ impl<T: DownloadType> DownloadTask<T> {
             self.parent
                 .inner
                 .dispatcher
-                .query_point(peer_id, self.point_id)
-                .boxed(),
+                .query_point(peer_id, self.point_id),
         );
     }
 

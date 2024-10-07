@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::BTreeMap;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
@@ -33,9 +33,9 @@ pub struct ShortPointBody {
 
 impl PointBody {
     pub fn make_digest(&self) -> Digest {
-        let mut data = BytesMut::with_capacity(1 << 20); // 1 mb is much more than max point payload size
+        let mut data = Vec::<u8>::with_capacity(1 << 20); // 1 mb is much more than max point payload size
         self.write_to(&mut data);
-        Digest::new(data.freeze().as_ref())
+        Digest::new(data.as_ref())
     }
 
     pub fn is_well_formed(&self) -> bool {

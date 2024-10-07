@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures_util::future::BoxFuture;
-use tl_proto::{TlError, TlRead};
+use tl_proto::TlError;
 use tycho_network::{
     try_handle_prefix, try_handle_prefix_with_offset, Network, PeerId, PrivateOverlay, Request,
 };
@@ -93,7 +93,7 @@ impl Dispatcher {
                 return (peer_id, Err(TlError::InvalidData.into()));
             }
 
-            let response = match PointByIdResponse::<Point>::read_from(body, &mut 0) {
+            let response = match tl_proto::deserialize::<PointByIdResponse<Point>>(body) {
                 Ok(data) => data,
                 Err(e) => return (peer_id, Err(e.into())),
             };
@@ -134,7 +134,7 @@ impl Dispatcher {
                 return (peer_id, Err(TlError::InvalidData.into()));
             }
 
-            let response = match SignatureResponse::read_from(body, &mut 0) {
+            let response = match tl_proto::deserialize::<SignatureResponse>(body) {
                 Ok(data) => data,
                 Err(e) => return (peer_id, Err(e.into())),
             };
