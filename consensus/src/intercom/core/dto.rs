@@ -42,7 +42,7 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         // skip 4+4 bytes of BroadcastQuery tag and Point tag
-        if !verify_hash(&packet[8..]) {
+        if !verify_hash(&packet[*offset + 4..]) {
             tracing::error!("Point hash is invalid");
             return Err(TlError::InvalidData);
         }
