@@ -61,7 +61,7 @@ pub struct QueueFullDiff<V: InternalMessageValue> {
     pub messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnqueuedMessage {
     pub info: IntMsgInfo,
     pub cell: Cell,

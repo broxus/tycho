@@ -373,10 +373,12 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> MempoolAnchor {
             builder.build().unwrap()
         };
 
+        let addr_hash_base = i % 6 + 1;
+
         let info = ExtInMsgInfo {
             dst: IntAddr::Std(StdAddr::new(
                 if i > 0 && i % 3 == 0 { -1 } else { 0 },
-                rand::random::<HashBytes>(),
+                HashBytes([addr_hash_base.try_into().unwrap(); 32]),
             )),
             ..Default::default()
         };

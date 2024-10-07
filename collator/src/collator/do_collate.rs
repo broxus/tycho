@@ -206,6 +206,7 @@ impl CollatorStdImpl {
                         &mut mq_iterator_adapter,
                         &QueueKey::MIN,
                         &working_state,
+                        true,
                     )
                     .await?;
                 if msg_group.is_none() {
@@ -261,6 +262,7 @@ impl CollatorStdImpl {
                         &mut mq_iterator_adapter,
                         &max_new_message_key_to_current_shard,
                         &working_state,
+                        false,
                     )
                     .await?;
                 fill_msgs_total_elapsed += timer.elapsed();
@@ -683,8 +685,11 @@ impl CollatorStdImpl {
         shard_id: &ShardIdent,
         anchors_cache: &mut AnchorsCache,
         count: usize,
-        collation_data: &mut BlockCollationData,
-        continue_from_read_to: bool,
+        next_chain_time: u64,
+        processed_upto_externals: &mut Option<ExternalsProcessedUpto>,
+        // collation_data: &mut BlockCollationData,
+        current_reader_position: Option<(u32, u64)>,
+        stop_on_prev_read_to: bool,
     ) -> Result<ParsedExternals> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
@@ -692,23 +697,23 @@ impl CollatorStdImpl {
             "shard: {}, count: {}", shard_id, count,
         );
 
-        let was_read_to_opt = if continue_from_read_to {
-            collation_data
-                .processed_upto
-                .externals
-                .as_ref()
-                .map(|upto| upto.read_to)
+        // get previous read_to
+        let prev_read_to = processed_upto_externals
+            .as_ref()
+            .map(|upto| upto.read_to)
+            .unwrap_or_default();
+
+        let was_read_to_opt = if let Some(was_read_to) = current_reader_position {
+            Some(was_read_to)
         } else {
-            collation_data
-                .processed_upto
-                .externals
+            processed_upto_externals
                 .as_ref()
                 .map(|upto| upto.processed_to)
         };
         let was_read_to = was_read_to_opt.unwrap_or_default();
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-            "continue_from_read_to: {}, was_read_to: {:?}",
-            continue_from_read_to, was_read_to,
+            "prev_read_to: {:?}, stop_on_prev_read_to: {}, current_reader_position: {:?}, was_read_to: {:?}",
+            prev_read_to, stop_on_prev_read_to, current_reader_position, was_read_to,
         );
 
         // when read_from is not defined on the blockchain start
@@ -721,8 +726,9 @@ impl CollatorStdImpl {
         let mut has_pending_externals_in_last_read_anchor = false;
 
         let mut anchors_cache_fully_read = false;
-        let mut next_idx = 0;
+        let next_idx = 0;
         let mut last_read_to_anchor_chain_time = None;
+        let mut was_stopped_on_prev_read_to_reached = false;
         loop {
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 "try read next anchor from cache",
@@ -743,139 +749,177 @@ impl CollatorStdImpl {
 
             let key = entry.0;
             if key < was_read_to.0 {
-                // skip and remove already processed anchor from cache
+                // skip and remove already read anchor from cache
                 assert_eq!(next_idx, 0);
                 anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "anchor with key {} already processed, removed from anchors cache", key,
+                    "anchor with key {} already read, removed from anchors cache", key,
                 );
                 // try read next anchor
                 continue;
-            } else {
-                if read_from_anchor_opt.is_none() {
-                    tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "read_from_anchor: {}", key,
-                    );
-                    read_from_anchor_opt = Some(key);
-                }
-                last_read_anchor_opt = Some(key);
-                last_read_to_anchor_chain_time = Some(entry.1.chain_time);
+            }
+
+            if read_from_anchor_opt.is_none() {
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "last_read_anchor: {}", key,
+                    "read_from_anchor: {}", key,
                 );
+                read_from_anchor_opt = Some(key);
+            }
+            last_read_anchor_opt = Some(key);
+            last_read_to_anchor_chain_time = Some(entry.1.chain_time);
+            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                "last_read_anchor: {}", key,
+            );
 
-                let anchor = &entry.1;
-                let expire_timeout = 60 * 1000; // 1 minute
-                let next_chain_time = collation_data.get_gen_chain_time();
-                if next_chain_time - anchor.chain_time > expire_timeout {
-                    let iter_from = if key == was_read_to.0 {
-                        was_read_to.1 as usize
-                    } else {
-                        0
-                    };
-                    let iter = anchor.iter_externals(iter_from);
-                    let mut expired_msgs_count = 0;
-                    for ext_msg in iter {
-                        if shard_id.contains_address(&ext_msg.info.dst) {
-                            tracing::trace!(target: tracing_targets::COLLATOR,
-                                "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
-                            );
-                            expired_msgs_count += 1;
-                        }
-                    }
+            let anchor = &entry.1;
 
-                    metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
-                        .increment(expired_msgs_count);
-                    metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                        .decrement(expired_msgs_count as f64);
-
-                    // skip and remove expired anchor
-                    assert_eq!(next_idx, 0);
-                    anchors_cache.remove(next_idx);
-                    tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
-                    );
-
-                    // try read next anchor
-                    continue;
-                }
-
-                if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
-                    // skip and remove fully processed anchor
-                    assert_eq!(next_idx, 0);
-                    anchors_cache.remove(next_idx);
-                    tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "anchor with key {} fully processed, removed from anchors cache", key,
-                    );
-                    // try read next anchor
-                    continue;
-                }
-
+            // skip and remove fully read anchor
+            if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
+                assert_eq!(next_idx, 0);
+                anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "next anchor externals count: {}", anchor.externals.len(),
+                    "anchor with key {} was fully read before, removed from anchors cache", key,
                 );
+                // try read next anchor
+                continue;
+            }
 
-                if key == was_read_to.0 {
-                    // read first anchor from offset in processed upto
-                    msgs_read_offset_in_last_anchor = was_read_to.1;
+            // skip expired anchor
+            let expire_timeout = 60 * 1000; // 1 minute
+            if next_chain_time - anchor.chain_time > expire_timeout {
+                let iter_from = if key == was_read_to.0 {
+                    was_read_to.1 as usize
                 } else {
-                    // read every next anchor from 0
-                    msgs_read_offset_in_last_anchor = 0;
-                }
-
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "msgs_read_offset_in_last_anchor: {}", msgs_read_offset_in_last_anchor,
-                );
-
-                // get iterator and read messages
-                let mut msgs_collected_from_last_anchor = 0;
-                let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
-
+                    0
+                };
+                let iter = anchor.iter_externals(iter_from);
+                let mut expired_msgs_count = 0;
                 for ext_msg in iter {
-                    tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "read ext_msg dst: {}", ext_msg.info.dst,
-                    );
-                    if total_msgs_collected < count {
-                        msgs_read_offset_in_last_anchor += 1;
-                    }
                     if shard_id.contains_address(&ext_msg.info.dst) {
-                        if total_msgs_collected < count {
-                            // get msgs for target shard until target count reached
-                            ext_messages.push(Box::new(ParsedMessage {
-                                info: MsgInfo::ExtIn(ext_msg.info.clone()),
-                                dst_in_current_shard: true,
-                                cell: ext_msg.cell.clone(),
-                                special_origin: None,
-                                dequeued: None,
-                            }));
-                            total_msgs_collected += 1;
-                            msgs_collected_from_last_anchor += 1;
-                            tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                                "collected ext_msg dst: {}", ext_msg.info.dst,
-                            );
-                        } else {
-                            // when target msgs count reached
-                            // continue looking thru remaining msgs
-                            // to detect if exist unread for target shard
-                            has_pending_externals_in_last_read_anchor = true;
-                            break;
-                        }
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
+                        );
+                        expired_msgs_count += 1;
                     }
                 }
 
+                metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
+                    .increment(expired_msgs_count);
                 metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                    .decrement(msgs_collected_from_last_anchor as f64);
+                    .decrement(expired_msgs_count as f64);
 
+                // skip and remove expired anchor
+                assert_eq!(next_idx, 0);
+                anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "{} externals collected from anchor {}, msgs_read_offset_in_last_anchor: {}",
-                    msgs_collected_from_last_anchor, key, msgs_read_offset_in_last_anchor,
+                    "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
                 );
-                if total_msgs_collected == count {
-                    // stop reading anchors when target msgs count reached
+
+                // try read next anchor
+                continue;
+            }
+
+            if key == was_read_to.0 {
+                // read first anchor from offset in processed upto
+                msgs_read_offset_in_last_anchor = was_read_to.1;
+            } else {
+                // read every next anchor from 0
+                msgs_read_offset_in_last_anchor = 0;
+            }
+
+            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                "next anchor externals count: {}, msgs_read_offset_in_last_anchor: {}",
+                anchor.externals.len(), msgs_read_offset_in_last_anchor,
+            );
+
+            // possibly previous read_to already reached
+            if stop_on_prev_read_to
+                && key == prev_read_to.0
+                && msgs_read_offset_in_last_anchor == prev_read_to.1
+            {
+                was_stopped_on_prev_read_to_reached = true;
+            }
+
+            // get iterator and read messages
+            let mut msgs_collected_from_last_anchor = 0;
+            let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
+
+            for ext_msg in iter {
+                tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                    "read ext_msg dst: {}", ext_msg.info.dst,
+                );
+
+                if total_msgs_collected < count && !was_stopped_on_prev_read_to_reached {
+                    msgs_read_offset_in_last_anchor += 1;
+                }
+                let stop_reading = if shard_id.contains_address(&ext_msg.info.dst) {
+                    if total_msgs_collected < count && !was_stopped_on_prev_read_to_reached {
+                        // get msgs for target shard until target count reached
+                        ext_messages.push(Box::new(ParsedMessage {
+                            info: MsgInfo::ExtIn(ext_msg.info.clone()),
+                            dst_in_current_shard: true,
+                            cell: ext_msg.cell.clone(),
+                            special_origin: None,
+                            dequeued: None,
+                        }));
+                        total_msgs_collected += 1;
+                        msgs_collected_from_last_anchor += 1;
+                        tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                            "collected ext_msg dst: {}", ext_msg.info.dst,
+                        );
+                        false
+                    } else {
+                        // when target msgs count reached
+                        // continue looking thru remaining msgs
+                        // to detect if exist unread for target shard
+                        has_pending_externals_in_last_read_anchor = true;
+                        true
+                    }
+                } else {
+                    false
+                };
+
+                // if required, stop reading anchors when previous read_to reached
+                if stop_on_prev_read_to
+                    && key == prev_read_to.0
+                    && msgs_read_offset_in_last_anchor == prev_read_to.1
+                {
+                    was_stopped_on_prev_read_to_reached = true;
+                }
+
+                if stop_reading {
                     break;
                 }
-                // try read next anchor
-                next_idx += 1;
+            }
+
+            metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                .decrement(msgs_collected_from_last_anchor as f64);
+
+            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                "{} externals collected from anchor {}, msgs_read_offset_in_last_anchor: {}",
+                msgs_collected_from_last_anchor, key, msgs_read_offset_in_last_anchor,
+            );
+
+            // remove fully read anchor
+            if anchor.externals.len() == msgs_read_offset_in_last_anchor as usize {
+                assert_eq!(next_idx, 0);
+                anchors_cache.remove(next_idx);
+                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                    "anchor with key {} just fully read, removed from anchors cache", key,
+                );
+            }
+
+            if was_stopped_on_prev_read_to_reached {
+                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                    "stopped reading externals when prev read_to reached: {:?}",
+                    prev_read_to,
+                );
+                break;
+            }
+
+            if total_msgs_collected == count {
+                // stop reading anchors when target msgs count reached
+                break;
             }
         }
 
@@ -896,23 +940,34 @@ impl CollatorStdImpl {
                 }
             }
         }
-        if let Some(last_read_anchor) = last_read_anchor_opt {
-            if let Some(externals_upto) = collation_data.processed_upto.externals.as_mut() {
-                externals_upto.read_to = (last_read_anchor, msgs_read_offset_in_last_anchor);
+        let current_reader_position = if let Some(last_read_anchor) = last_read_anchor_opt {
+            let current_read_to = (last_read_anchor, msgs_read_offset_in_last_anchor);
+
+            // update processed read to only when current position is above
+            if let Some(externals_upto) = processed_upto_externals {
+                if current_read_to.0 > prev_read_to.0
+                    || (current_read_to.0 == prev_read_to.0 && current_read_to.1 > prev_read_to.1)
+                {
+                    externals_upto.read_to = current_read_to;
+                }
             } else {
-                collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
+                *processed_upto_externals = Some(ExternalsProcessedUpto {
                     processed_to: (read_from_anchor_opt.unwrap(), was_read_to.1),
-                    read_to: (last_read_anchor, msgs_read_offset_in_last_anchor),
+                    read_to: current_read_to,
                 });
             }
-        }
+
+            Some(current_read_to)
+        } else {
+            None
+        };
 
         // check if we still have pending externals
         let has_pending_externals = if has_pending_externals_in_last_read_anchor {
             true
         } else {
-            let has_pending_externals = if let Some(last_read_anchor) = last_read_anchor_opt {
-                anchors_cache.any_after_id(last_read_anchor)
+            let has_pending_externals = if last_read_anchor_opt.is_some() {
+                anchors_cache.len() > 0
             } else {
                 anchors_cache.has_pending_externals()
             };
@@ -925,7 +980,7 @@ impl CollatorStdImpl {
 
         if !has_pending_externals {
             tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                collation_data.processed_upto.externals,
+                processed_upto_externals,
             );
         }
 
@@ -933,7 +988,9 @@ impl CollatorStdImpl {
 
         Ok(ParsedExternals {
             ext_messages,
+            current_reader_position,
             last_read_to_anchor_chain_time,
+            was_stopped_on_prev_read_to_reached,
         })
     }
 

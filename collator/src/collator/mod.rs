@@ -39,6 +39,10 @@ mod types;
 
 pub use error::CollationCancelReason;
 
+#[cfg(test)]
+#[path = "tests/collator_tests.rs"]
+pub(super) mod tests;
+
 // FACTORY
 
 pub struct CollatorContext {
@@ -1057,7 +1061,7 @@ impl CollatorStdImpl {
 
         let mut current_processed_upto = prev_shard_data.processed_upto().clone();
         mq_iterator_adapter
-            .try_init_next_range_iterator(&mut current_processed_upto, working_state)
+            .try_init_next_range_iterator(&mut current_processed_upto, working_state, false)
             .await?;
 
         let has_internals = if !mq_iterator_adapter.no_pending_existing_internals() {

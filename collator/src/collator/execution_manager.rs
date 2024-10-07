@@ -30,6 +30,10 @@ use crate::types::{
     DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
 };
 
+#[cfg(test)]
+#[path = "tests/execution_manager_tests.rs"]
+pub(super) mod tests;
+
 /// Execution manager
 pub(super) struct ExecutionManager {
     shard_id: ShardIdent,
@@ -104,6 +108,7 @@ impl ExecutionManager {
     }
 
     #[tracing::instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_next_message_group(
         &mut self,
         msgs_buffer: &mut MessagesBuffer,
@@ -112,6 +117,7 @@ impl ExecutionManager {
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
         max_new_message_key_to_current_shard: &QueueKey,
         working_state: &WorkingState,
+        refill_mode: bool,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
 
@@ -125,7 +131,11 @@ impl ExecutionManager {
                 will init iterator for current not fully processed ranges or next available"
             );
             mq_iterator_adapter
-                .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
+                .try_init_next_range_iterator(
+                    &mut collation_data.processed_upto,
+                    working_state,
+                    refill_mode,
+                )
                 .await?;
         }
 
@@ -238,11 +248,15 @@ impl ExecutionManager {
                 msgs_buffer.message_groups.reset();
 
                 let next_range_iterator_initialized = mq_iterator_adapter
-                    .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
+                    .try_init_next_range_iterator(
+                        &mut collation_data.processed_upto,
+                        working_state,
+                        refill_mode,
+                    )
                     .await?;
                 if !next_range_iterator_initialized {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        "there are no next available ranges for existing internals iterator, \
+                        "next available ranges for internals are not exist or skipped, \
                         will read externals"
                     );
                     self.read_ext_messages = true;
@@ -250,24 +264,30 @@ impl ExecutionManager {
             }
         }
 
-        // when all available existing internals were processed should externals
+        // when all available existing internals were processed should read externals
         if group_opt.is_none() && self.read_ext_messages && !self.read_new_messages {
             let timer = std::time::Instant::now();
             let mut add_to_groups_elapsed = Duration::ZERO;
+
+            let next_chain_time = collation_data.get_gen_chain_time();
 
             let mut externals_read_count = 0;
             loop {
                 let ParsedExternals {
                     ext_messages,
+                    current_reader_position,
                     last_read_to_anchor_chain_time,
+                    was_stopped_on_prev_read_to_reached,
                 } = CollatorStdImpl::read_next_externals(
                     &self.shard_id,
                     anchors_cache,
                     3,
-                    collation_data,
-                    msgs_buffer.ext_messages_reader_started,
+                    next_chain_time,
+                    &mut collation_data.processed_upto.externals,
+                    msgs_buffer.current_ext_reader_position,
+                    refill_mode,
                 )?;
-                msgs_buffer.ext_messages_reader_started = true;
+                msgs_buffer.current_ext_reader_position = current_reader_position;
                 self.last_read_to_anchor_chain_time = last_read_to_anchor_chain_time;
 
                 externals_read_count += ext_messages.len() as u64;
@@ -290,6 +310,10 @@ impl ExecutionManager {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "first message group is full, stop reading externals",
                     );
+                    break;
+                }
+
+                if was_stopped_on_prev_read_to_reached {
                     break;
                 }
 
@@ -401,7 +425,6 @@ impl ExecutionManager {
             if msgs_buffer.message_groups.is_empty()
                 && msgs_buffer.message_groups.max_message_key() > &QueueKey::MIN
             {
-                // set_int_upto_all_processed(&mut collation_data.processed_upto)?;
                 update_internals_processed_upto(
                     &mut collation_data.processed_upto,
                     self.shard_id,
