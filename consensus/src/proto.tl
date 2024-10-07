@@ -13,9 +13,9 @@ consensus.pointData
 
 consensus.pointBody
     round:int
+    payload:(vector bytes)
     pointData:consensus.pointData
     evidence:(vector consensus.peerSignaturePair)
-    payload:(vector bytes)
     = consensus.PointBody;
 
 consensus.pointId

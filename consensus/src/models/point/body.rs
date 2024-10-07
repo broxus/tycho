@@ -13,8 +13,8 @@ use crate::models::proto_utils::evidence_btree_map;
 #[cfg_attr(test, derive(Clone))]
 #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBody {
-    pub payload: Vec<Bytes>,
     pub round: Round, // let it be @ r+0
+    pub payload: Vec<Bytes>,
     pub data: PointData,
     #[tl(with = "evidence_btree_map")]
     /// signatures for own point from previous round (if one exists, else empty map):
@@ -27,6 +27,7 @@ pub struct PointBody {
 #[cfg_attr(test, derive(Clone))]
 #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct ShortPointBody {
+    pub round: Round,
     pub payload: Vec<Bytes>,
 }
 
