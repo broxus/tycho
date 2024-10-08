@@ -7,7 +7,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
-use tycho_network::PeerId;
+use tycho_network::{PeerId, Request};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
@@ -17,7 +17,7 @@ use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::broadcast::utils::QueryResponses;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, Round, Signature};
+use crate::models::{Digest, PeerCount, Point, Signature};
 
 #[derive(Copy, Clone, Debug)]
 pub enum BroadcasterSignal {
@@ -77,11 +77,11 @@ impl Broadcaster {
             rejections: Default::default(),
             signatures: Default::default(),
 
-            bcast_request: point.clone(),
+            bcast_request: Dispatcher::broadcast_request(point),
             bcast_current: QueryResponses::default(),
             bcast_outdated,
 
-            sig_request: point.round(),
+            sig_request: Dispatcher::signature_request(point.round()),
             sig_peers: FastHashSet::default(),
             sig_current: FuturesUnordered::default(),
         };
@@ -116,11 +116,11 @@ struct BroadcasterTask {
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
 
-    bcast_request: Point,
+    bcast_request: Request,
     bcast_current: QueryResponses<BroadcastResponse>,
     bcast_outdated: QueryResponses<BroadcastResponse>,
 
-    sig_request: Round,
+    sig_request: Request,
     sig_peers: FastHashSet<PeerId>,
     sig_current: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
 }
@@ -298,7 +298,7 @@ impl BroadcasterTask {
             self.bcast_current.push(
                 peer_id,
                 self.dispatcher
-                    .query_broadcast(peer_id, self.bcast_request.clone()),
+                    .query_broadcast(peer_id, &self.bcast_request),
             );
             tracing::trace!(
                 parent: self.effects.span(),
@@ -317,7 +317,7 @@ impl BroadcasterTask {
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.sig_current
-                .push(self.dispatcher.query_signature(peer_id, self.sig_request));
+                .push(self.dispatcher.query_signature(peer_id, &self.sig_request));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),

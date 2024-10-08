@@ -6,7 +6,7 @@ use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
-use tl_proto::{TlRead, TlWrite};
+use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::models::point::body::{PointBody, ShortPointBody};
@@ -14,9 +14,6 @@ use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Ro
 
 #[derive(Clone, TlWrite, TlRead)]
 pub struct Point(Arc<PointInner>);
-
-#[derive(Clone, TlWrite, TlRead)]
-pub struct ShortPoint(Arc<ShortPointInner>);
 
 #[derive(TlWrite, TlRead, Debug)]
 #[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
@@ -28,19 +25,29 @@ struct PointInner {
     body: PointBody,
 }
 
-#[derive(TlWrite, TlRead, Debug)]
-#[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
-struct ShortPointInner {
-    // hash of everything except signature
-    digest: Digest,
-    // author's signature for the digest
-    signature: Signature,
+#[derive(Debug)]
+pub(crate) struct ShortPoint {
+    _digest: Digest,
+    _signature: Signature,
     body: ShortPointBody,
 }
 
 impl ShortPoint {
+    fn read_from_bytes(data: &[u8]) -> Result<Self, TlError> {
+        let mut offset: usize = 0;
+        let tag = u32::read_from(data, &mut offset)?;
+        if tag != Point::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+        Ok(ShortPoint {
+            _digest: Digest::read_from(data, &mut offset)?,
+            _signature: Signature::read_from(data, &mut offset)?,
+            body: ShortPointBody::read_from(data, &mut offset)?,
+        })
+    }
+
     pub fn payload(&self) -> &Vec<Bytes> {
-        &self.0.body.payload
+        &self.body.payload
     }
 }
 
@@ -63,6 +70,10 @@ impl PointInner {
 
 impl Point {
     pub const TL_ID: u32 = tl_proto::id!("consensus.pointInner", scheme = "proto.tl");
+
+    pub(crate) fn short_point_from_bytes<T: AsRef<[u8]>>(data: T) -> Result<ShortPoint, TlError> {
+        ShortPoint::read_from_bytes(data.as_ref())
+    }
     pub fn new(
         local_keypair: &KeyPair,
         round: Round,
@@ -81,6 +92,7 @@ impl Point {
             evidence,
             payload,
         };
+
         let digest = body.make_digest();
         Self(Arc::new(PointInner {
             signature: Signature::new(local_keypair, &digest),
@@ -173,6 +185,20 @@ impl Point {
             .data
             .anchor_link_id(link_field, self.0.body.round)
             .unwrap_or(self.id())
+    }
+
+    pub fn verify_hash(&self) -> bool {
+        let bytes = tl_proto::serialize(self);
+        Self::verify_hash_inner(&bytes[4..])
+    }
+
+    pub fn verify_hash_inner(data: &[u8]) -> bool {
+        if data.len() < 32 + 64 {
+            tracing::error!(len = %data.len(), "Data is too short");
+            return false;
+        }
+        // skip 64 bytes of signature
+        &data[0..32] == blake3::hash(&data[96..]).as_bytes()
     }
 }
 
@@ -369,7 +395,7 @@ mod tests {
         let timer = Instant::now();
         let mut data = BytesMut::with_capacity(point_body.max_size_hint());
         point_body.write_to(&mut data);
-        let bincode_elapsed = timer.elapsed();
+        let elapsed = timer.elapsed();
 
         let bytes = data.freeze();
 
@@ -390,13 +416,13 @@ mod tests {
                 .payload
                 .iter()
                 .fold(0, |acc, bytes| acc + bytes.len()),
-            humantime::format_duration(bincode_elapsed)
+            humantime::format_duration(elapsed)
         );
         println!("hash took {}", humantime::format_duration(sha_elapsed));
         println!("sig took {}", humantime::format_duration(sig_elapsed));
         println!(
             "total {}",
-            humantime::format_duration(bincode_elapsed + sha_elapsed + sig_elapsed)
+            humantime::format_duration(elapsed + sha_elapsed + sig_elapsed)
         );
     }
 
@@ -431,6 +457,27 @@ mod tests {
             "tl read of {POINTS_LEN} point os size {byte_size} bytes of point with {point_payload} bytes payload took {}",
             humantime::format_duration(elapsed)
         );
+    }
+
+    #[test]
+    pub fn point_to_short_point() {
+        let point_key_pair = new_key_pair();
+        let point_body = point_body(&point_key_pair);
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
+
+        let bytes = tl_proto::serialize(&point);
+
+        let short = ShortPoint::read_from_bytes(&bytes)
+            .expect("Failed to deserialize ShortPoint from Point bytes");
+        assert_eq!(short._digest, point.0.digest);
+        assert_eq!(short._signature, point.0.signature);
+        assert_eq!(short.body.round, point.0.body.round);
+        assert_eq!(short.body.payload, point.0.body.payload);
     }
 
     #[test]

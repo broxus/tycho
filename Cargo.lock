@@ -3414,7 +3414,6 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
- "bincode",
  "blake3",
  "bytes",
  "clap",

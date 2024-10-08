@@ -1,23 +1,60 @@
 use std::sync::LazyLock;
 
-use blake3::Hash;
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
+use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
-use crate::models::{Point, PointId, Round};
+use crate::models::{Digest, Link, PeerCount, Point, PointId, Round, Signature, UnixTime};
 
-// 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
+// rough estimate for the largest point
 // as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
 // and 1 mapping of 32 (peer_id) to 64 (signature) valuable bytes (evidence);
 // the size of other data is fixed, and estimate is more than enough to handle `Bytes` encoding
-static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
+
+// 4 bytes of Point tag
+// 32 bytes of Digest
+// 64 bytes of Signature
+
+// 4 bytes of PointBody tag
+// 4 bytes of Round
+// payload max_size_hint is calculated separately
+
+// 4 bytes of PointData tag
+// 32 bytes of author
+// Max peer count * (32 + 32) of includes
+// Max peer count * (32 + 32) of witness
+// 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor_trigger Link
+// 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor proof Link
+// 8 bytes of time
+// 8 bytes of anchor time
+
+// Max peer size * (32 + 64) bytes of evidence
+
+static LARGEST_POINT_BODY_BYTES: LazyLock<usize> = LazyLock::new(|| {
     // size of BOC of least possible ExtIn message
     const EXT_IN_BOC_MIN: usize = 48;
 
     let boc = vec![0_u8; EXT_IN_BOC_MIN];
     let payload = vec![boc; 1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN];
-    u16::MAX as usize + payload.max_size_hint()
+
+    let max_possible_includes_witness: usize =
+        PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES);
+
+    let evidence_size: usize =
+        PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES);
+
+    let point_data_size: usize = 4
+        + PeerId::MAX_TL_BYTES
+        + (2 * max_possible_includes_witness)
+        + 2 * Link::MAX_TL_BYTES
+        + 2 * UnixTime::MAX_TL_BYTES;
+
+    4 + Round::MAX_TL_SIZE + payload.max_size_hint() + point_data_size + evidence_size
+});
+
+static LARGEST_POINT_BYTES: LazyLock<usize> = LazyLock::new(|| {
+    4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES + *LARGEST_POINT_BODY_BYTES
 });
 
 #[derive(Debug)]
@@ -36,13 +73,13 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         let size = packet.len();
-        if size - 4usize > *LARGEST_DATA_BYTES {
+        if size - 4usize > *LARGEST_POINT_BYTES {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
 
         // skip 4+4 bytes of BroadcastQuery tag and Point tag
-        if !verify_hash(&packet[*offset + 4..]) {
+        if !Point::verify_hash_inner(&packet[*offset + 4..]) {
             tracing::error!("Point hash is invalid");
             return Err(TlError::InvalidData);
         }
@@ -117,7 +154,7 @@ where
         }
 
         let size = packet.len();
-        if size - 4usize > *LARGEST_DATA_BYTES {
+        if size - 4usize > *LARGEST_POINT_BYTES {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -131,7 +168,7 @@ where
         match point_by_id_response_tag {
             PointByIdResponse::<T>::DEFINED_TL_ID => {
                 // skip 4+4 bytes of PointByIdResponse and Point tag prefixes
-                if !verify_hash(&packet[8..]) {
+                if !Point::verify_hash_inner(&packet[8..]) {
                     tracing::error!("Point hash is invalid");
                     return Err(TlError::InvalidData);
                 }
@@ -146,19 +183,6 @@ where
 
         PointByIdResponse::<T>::read_from(packet, offset).map(Self)
     }
-}
-
-pub fn verify_hash(data: &[u8]) -> bool {
-    if data.len() < 32 + 64 {
-        tracing::error!(len = %data.len(), "Data is too short");
-        return false;
-    }
-    let hash_slice = &data[0..32];
-    // skip 64 bytes of signature
-    let point_bytes = &data[96..];
-    let mut present_hash_bytes = [0_u8; 32];
-    present_hash_bytes.copy_from_slice(hash_slice);
-    Hash::from_bytes(present_hash_bytes) == blake3::hash(point_bytes)
 }
 
 #[derive(TlWrite, TlRead, Debug)]

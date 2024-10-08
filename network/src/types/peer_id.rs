@@ -10,6 +10,10 @@ use tl_proto::{TlRead, TlWrite};
 pub struct PeerId(pub [u8; 32]);
 
 impl PeerId {
+    pub const MAX_TL_BYTES: usize = 32;
+}
+
+impl PeerId {
     pub const fn wrap(bytes: &[u8; 32]) -> &Self {
         // SAFETY: `[u8; 32]` has the same layout as `PeerId`.
         unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }

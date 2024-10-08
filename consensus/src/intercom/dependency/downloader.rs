@@ -12,7 +12,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::Instrument;
-use tycho_network::PeerId;
+use tycho_network::{PeerId, Request};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
@@ -226,7 +226,7 @@ impl Downloader {
         let mut task = DownloadTask {
             parent: self.clone(),
             _phantom: PhantomData,
-            // request: Dispatcher::point_by_id_request(point_id),
+            request: Dispatcher::point_by_id_request(*point_id),
             point_id: *point_id,
             peer_count,
             reliably_not_found: 0, // this node is +1 to 2F
@@ -252,7 +252,7 @@ struct DownloadTask<T> {
     parent: Downloader,
     _phantom: PhantomData<T>,
 
-    // request: PointId,
+    request: Request,
     point_id: PointId,
 
     peer_count: PeerCount,
@@ -361,7 +361,7 @@ impl<T: DownloadType> DownloadTask<T> {
             self.parent
                 .inner
                 .dispatcher
-                .query_point(peer_id, self.point_id),
+                .query_point(peer_id, &self.request),
         );
     }
 

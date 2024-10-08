@@ -14,7 +14,7 @@ use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteB
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::MempoolConfig;
-use crate::models::{Digest, Point, PointInfo, Round, ShortPoint};
+use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
@@ -397,8 +397,7 @@ impl MempoolStoreImpl for MempoolStorage {
             let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point =
-                    tl_proto::deserialize::<ShortPoint>(bytes).context("deserialize point")?;
+                let point = Point::short_point_from_bytes(bytes).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
                 if found
@@ -556,7 +555,7 @@ impl MempoolStoreImpl for () {
     }
 
     fn get_point_raw(&self, _: Round, _: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
-        Ok(None)
+        anyhow::bail!("should not be used in tests")
     }
 
     fn get_info(&self, _: Round, _: &Digest) -> Result<Option<PointInfo>> {

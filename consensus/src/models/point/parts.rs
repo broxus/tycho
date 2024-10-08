@@ -7,6 +7,9 @@ use tycho_network::PeerId;
 
 #[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
+impl Digest {
+    pub const MAX_TL_BYTES: usize = 32;
+}
 
 impl Display for Digest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -37,6 +40,10 @@ impl Digest {
 
 #[derive(Clone, TlWrite, TlRead, PartialEq)]
 pub struct Signature([u8; 64]);
+
+impl Signature {
+    pub const MAX_TL_BYTES: usize = 64;
+}
 
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -73,6 +80,10 @@ impl Signature {
 pub struct Round(pub u32);
 
 impl Round {
+    pub const MAX_TL_SIZE: usize = 4;
+}
+
+impl Round {
     /// stub that cannot be used even by genesis round
     pub const BOTTOM: Self = Self(0);
     pub fn prev(&self) -> Self {
@@ -93,6 +104,7 @@ impl Round {
 pub struct UnixTime(u64);
 
 impl UnixTime {
+    pub const MAX_TL_BYTES: usize = 8;
     pub const fn from_millis(millis: u64) -> Self {
         Self(millis)
     }

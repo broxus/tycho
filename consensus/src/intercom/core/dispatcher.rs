@@ -18,8 +18,18 @@ pub struct Dispatcher {
     overlay: PrivateOverlay,
     network: Network,
 }
-
 impl Dispatcher {
+    pub fn broadcast_request(point: &Point) -> Request {
+        Request::from_tl(BroadcastQuery(point.clone()))
+    }
+
+    pub fn signature_request(round: Round) -> Request {
+        Request::from_tl(SignatureQuery(round))
+    }
+
+    pub fn point_by_id_request(id: PointId) -> Request {
+        Request::from_tl(PointQuery(id))
+    }
     pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
         Self {
             overlay: private_overlay.clone(),
@@ -29,20 +39,18 @@ impl Dispatcher {
     pub fn query_broadcast(
         &self,
         peer_id: &PeerId,
-        point: Point,
+        request: &Request,
     ) -> BoxFuture<'static, (PeerId, Result<BroadcastResponse>)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_broadcast_query_dispatcher_time");
-        let request = BroadcastQuery(point);
         let overlay = self.overlay.clone();
         let network = self.network.clone();
 
+        let request = request.clone();
+
         let future = async move {
             let _task_duration = metric;
-            let response = match overlay
-                .query(&network, &peer_id, Request::from_tl(request))
-                .await
-            {
+            let response = match overlay.query(&network, &peer_id, request).await {
                 Ok(response) => response,
                 Err(e) => return (peer_id, Err(e)),
             };
@@ -65,20 +73,18 @@ impl Dispatcher {
     pub fn query_point(
         &self,
         peer_id: &PeerId,
-        point: PointId,
+        request: &Request,
     ) -> BoxFuture<'static, (PeerId, Result<PointByIdResponse<Point>>)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
-        let request = PointQuery(point);
         let overlay = self.overlay.clone();
         let network = self.network.clone();
 
+        let request = request.clone();
+
         let future = async move {
             let _task_duration = metric;
-            let response = match overlay
-                .query(&network, &peer_id, Request::from_tl(request))
-                .await
-            {
+            let response = match overlay.query(&network, &peer_id, request).await {
                 Ok(response) => response,
                 Err(e) => return (peer_id, Err(e)),
             };
@@ -106,20 +112,18 @@ impl Dispatcher {
     pub fn query_signature(
         &self,
         peer_id: &PeerId,
-        round: Round,
+        request: &Request,
     ) -> BoxFuture<'static, (PeerId, Result<SignatureResponse>)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time");
-        let request = SignatureQuery(round);
         let overlay = self.overlay.clone();
         let network = self.network.clone();
 
+        let request = request.clone();
+
         let future = async move {
             let _task_duration = metric;
-            let response = match overlay
-                .query(&network, &peer_id, Request::from_tl(request))
-                .await
-            {
+            let response = match overlay.query(&network, &peer_id, request).await {
                 Ok(response) => response,
                 Err(e) => return (peer_id, Err(e)),
             };

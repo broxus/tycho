@@ -7,11 +7,7 @@ pub(crate) mod points_btree_map {
     use tycho_network::PeerId;
 
     use super::*;
-    use crate::models::Digest;
-
-    /// We assume that the number of points is limited.
-    const MAX_SIZE: usize = 10_000;
-
+    use crate::models::{Digest, PeerCount};
     pub fn size_hint(items: &BTreeMap<PeerId, Digest>) -> usize {
         const PER_ITEM: usize = 32 + 32;
 
@@ -29,7 +25,7 @@ pub(crate) mod points_btree_map {
 
     pub fn read(data: &[u8], offset: &mut usize) -> TlResult<BTreeMap<PeerId, Digest>> {
         let len = u32::read_from(data, offset)? as usize;
-        if len > MAX_SIZE {
+        if len > PeerCount::MAX.full() {
             return Err(tl_proto::TlError::InvalidData);
         }
 
@@ -49,10 +45,7 @@ pub(crate) mod evidence_btree_map {
     use tycho_network::PeerId;
 
     use super::*;
-    use crate::models::Signature;
-
-    /// We assume that the number of points is limited.
-    const MAX_SIZE: usize = 10_000;
+    use crate::models::{PeerCount, Signature};
 
     pub fn size_hint(items: &BTreeMap<PeerId, Signature>) -> usize {
         const PER_ITEM: usize = 32 + 64;
@@ -71,7 +64,7 @@ pub(crate) mod evidence_btree_map {
 
     pub fn read(data: &[u8], offset: &mut usize) -> TlResult<BTreeMap<PeerId, Signature>> {
         let len = u32::read_from(data, offset)? as usize;
-        if len > MAX_SIZE {
+        if len > PeerCount::MAX.full() {
             return Err(tl_proto::TlError::InvalidData);
         }
 

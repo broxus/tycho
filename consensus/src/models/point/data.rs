@@ -80,6 +80,10 @@ pub enum Link {
     Indirect { to: PointId, path: Through },
 }
 
+impl Link {
+    pub const MAX_TL_BYTES: usize = 4 + (32 + 32 + 32) + 4 + 32;
+}
+
 #[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Through {

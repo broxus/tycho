@@ -136,6 +136,12 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     }
 
     for point in points.values() {
+        let serialized_point = tl_proto::serialize(point);
+        // skip 4 bytes of Point tag
+        if !Point::verify_hash_inner(&serialized_point[4..]) {
+            panic!("Point hash is not valid");
+        };
+
         Verifier::verify(point, peer_schedule).expect("well-formed point");
         let (_, certified_tx) = oneshot::channel();
         let info = PointInfo::from(point);
