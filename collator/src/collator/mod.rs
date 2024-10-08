@@ -7,7 +7,7 @@ use error::CollatorError;
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::*;
 use futures_util::future::Future;
-use mq_iterator_adapter::QueueIteratorAdapter;
+use mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
@@ -1082,7 +1082,11 @@ impl CollatorStdImpl {
 
         let mut current_processed_upto = prev_shard_data.processed_upto().clone();
         mq_iterator_adapter
-            .try_init_next_range_iterator(&mut current_processed_upto, working_state, false)
+            .try_init_next_range_iterator(
+                &mut current_processed_upto,
+                working_state,
+                InitIteratorMode::UseNextRange,
+            )
             .await?;
 
         let has_internals = if !mq_iterator_adapter.no_pending_existing_internals() {

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
-use crate::collator::types::{BlockCollationData, BlockCollationDataBuilder, ParsedExternals};
+use crate::collator::types::{
+    BlockCollationData, BlockCollationDataBuilder, ParsedExternals, ReadNextExternalsMode,
+};
 use crate::collator::{AnchorsCache, CollatorStdImpl};
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
@@ -102,7 +104,7 @@ fn test_read_next_externals() {
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         None,
-        false,
+        ReadNextExternalsMode::ToTheEnd,
     )
     .unwrap();
 
@@ -134,7 +136,7 @@ fn test_read_next_externals() {
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         None,
-        true,
+        ReadNextExternalsMode::ToPreviuosReadTo,
     )
     .unwrap();
 
@@ -160,7 +162,7 @@ fn test_read_next_externals() {
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         current_reader_position,
-        true,
+        ReadNextExternalsMode::ToPreviuosReadTo,
     )
     .unwrap();
 
@@ -185,7 +187,7 @@ fn test_read_next_externals() {
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         current_reader_position,
-        false,
+        ReadNextExternalsMode::ToTheEnd,
     )
     .unwrap();
 
@@ -209,7 +211,7 @@ fn test_read_next_externals() {
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         current_reader_position,
-        false,
+        ReadNextExternalsMode::ToTheEnd,
     )
     .unwrap();
 
@@ -234,7 +236,7 @@ fn test_read_next_externals() {
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         current_reader_position,
-        false,
+        ReadNextExternalsMode::ToTheEnd,
     )
     .unwrap();
 

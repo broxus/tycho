@@ -15,6 +15,12 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitIteratorMode {
+    UseNextRange,
+    OmitNextRange,
+}
+
 pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     shard_id: ShardIdent,
     /// internals mq adapter
@@ -105,7 +111,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         &mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
         working_state: &WorkingState,
-        do_not_init_next_range: bool,
+        mode: InitIteratorMode,
     ) -> Result<bool> {
         let timer = std::time::Instant::now();
 
@@ -167,7 +173,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             // set processed messages in iterator by original ranges_from
             current_ranges_iterator.commit(current_ranges_from.into_iter().collect())?;
             Some(current_ranges_iterator)
-        } else if do_not_init_next_range {
+        } else if mode == InitIteratorMode::OmitNextRange {
             // on refill we do not need to use next range at all
             if self.iterator_is_none() {
                 tracing::debug!(target: tracing_targets::COLLATOR,

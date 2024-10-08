@@ -1223,7 +1223,7 @@ impl AnchorsCache {
         if index == 0 {
             self.cache.pop_front();
         } else {
-            self.remove(index);
+            self.cache.remove(index);
         }
     }
 
@@ -1262,4 +1262,10 @@ pub struct ParsedExternals {
     pub current_reader_position: Option<(u32, u64)>,
     pub last_read_to_anchor_chain_time: Option<u64>,
     pub was_stopped_on_prev_read_to_reached: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadNextExternalsMode {
+    ToTheEnd,
+    ToPreviuosReadTo,
 }

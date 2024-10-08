@@ -17,13 +17,13 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run_fifo;
 use tycho_util::FastHashMap;
 
-use super::mq_iterator_adapter::QueueIteratorAdapter;
+use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
     AccountId, AnchorsCache, BlockCollationData, Dequeued, MessageGroup, MessagesBuffer,
     ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::collator::types::ParsedExternals;
+use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
@@ -66,6 +66,11 @@ pub(super) struct MessagesExecutor {
     params: Arc<ExecuteParams>,
     /// shard accounts
     accounts_cache: AccountsCache,
+}
+
+pub(super) enum GetNextMessageGroupMode {
+    Continue,
+    Refill,
 }
 
 impl ExecutionManager {
@@ -117,11 +122,16 @@ impl ExecutionManager {
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
         max_new_message_key_to_current_shard: &QueueKey,
         working_state: &WorkingState,
-        refill_mode: bool,
+        mode: GetNextMessageGroupMode,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
 
         let mut group_opt = None;
+
+        let init_iterator_mode = match mode {
+            GetNextMessageGroupMode::Continue => InitIteratorMode::UseNextRange,
+            GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
+        };
 
         // here iterator may not exist (on the first method call during collation)
         // so init iterator for current not fully processed ranges or next available
@@ -134,7 +144,7 @@ impl ExecutionManager {
                 .try_init_next_range_iterator(
                     &mut collation_data.processed_upto,
                     working_state,
-                    refill_mode,
+                    init_iterator_mode,
                 )
                 .await?;
         }
@@ -251,7 +261,7 @@ impl ExecutionManager {
                     .try_init_next_range_iterator(
                         &mut collation_data.processed_upto,
                         working_state,
-                        refill_mode,
+                        init_iterator_mode,
                     )
                     .await?;
                 if !next_range_iterator_initialized {
@@ -271,6 +281,11 @@ impl ExecutionManager {
 
             let next_chain_time = collation_data.get_gen_chain_time();
 
+            let read_next_externals_mode = match mode {
+                GetNextMessageGroupMode::Continue => ReadNextExternalsMode::ToTheEnd,
+                GetNextMessageGroupMode::Refill => ReadNextExternalsMode::ToPreviuosReadTo,
+            };
+
             let mut externals_read_count = 0;
             loop {
                 let ParsedExternals {
@@ -285,7 +300,7 @@ impl ExecutionManager {
                     next_chain_time,
                     &mut collation_data.processed_upto.externals,
                     msgs_buffer.current_ext_reader_position,
-                    refill_mode,
+                    read_next_externals_mode,
                 )?;
                 msgs_buffer.current_ext_reader_position = current_reader_position;
                 self.last_read_to_anchor_chain_time = last_read_to_anchor_chain_time;
