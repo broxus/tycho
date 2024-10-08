@@ -5,6 +5,7 @@ use std::sync::atomic;
 use std::{array, cmp, mem};
 
 use futures_util::FutureExt;
+use itertools::Itertools;
 use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
@@ -58,31 +59,32 @@ impl DagBack {
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
+        assert!(
+            sorted.windows(2).all(|w| w[0].0.round() <= w[1].0.round()),
+            "input must be sorted: [{}]",
+            sorted
+                .iter()
+                .map(|(info, _)| format!("{:?}", info.id().alt()))
+                .join("; ")
+        );
+
         // must be initialized
         let mut rounds_iter = self.rounds.iter().peekable();
 
         'sorted: for (info, status) in sorted {
-            if let Some((round, _)) = rounds_iter.peek() {
+            while let Some((round, dag_round)) = rounds_iter.peek() {
                 if **round < info.round() {
-                    'round_search: for (next, _) in rounds_iter.by_ref() {
-                        if *next < info.round() {
-                            continue 'round_search;
-                        }
-                        break 'round_search;
-                    }
+                    _ = rounds_iter.next();
+                } else {
+                    assert_eq!(
+                        dag_round.round(),
+                        info.round(),
+                        "dag is not contiguous: next dag round skips over point round"
+                    );
+                    _ = dag_round.restore_exact(&info, status, downloader, store, effects);
+                    continue 'sorted;
                 }
-            } else {
-                break 'sorted;
-            };
-            let Some((_, dag_round)) = rounds_iter.peek() else {
-                break 'sorted;
-            };
-            assert_eq!(
-                dag_round.round(),
-                info.round(),
-                "dag is not contiguous: next dag round skips over point round"
-            );
-            _ = dag_round.restore_exact(&info, status, downloader, store, effects);
+            }
         }
 
         self.assert_len();
@@ -312,7 +314,7 @@ impl DagBack {
 
             let Some((_, anchor_dag_round)) = rev_iter.next() else {
                 assert!(
-                    anchor_id.round < self.bottom_round(),
+                    anchor_id.round <= self.bottom_round(), // bottom is excluded by iter bound
                     "{} cannot retrieve anchor {:?}, last proof at {last_proof_round:?}",
                     self.alt(),
                     anchor_id.alt(),
