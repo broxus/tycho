@@ -958,23 +958,44 @@ impl CollatorStdImpl {
         let mut anchors_info = vec![];
         let mut last_anchor = None;
         let mut all_anchors_are_taken_from_cache = false;
+        let mut processed_to_anchor_exists_in_cache = false;
 
-        for anchor in anchors_cache.take_from_id(processed_to_anchor_id) {
-            if anchor.chain_time >= last_block_chain_time {
-                all_anchors_are_taken_from_cache = true;
-                break;
+        for anchor in anchors_cache.iter_from_index(0) {
+            if anchor.id >= processed_to_anchor_id {
+                if anchor.id == processed_to_anchor_id {
+                    processed_to_anchor_exists_in_cache = true;
+                }
+
+                if processed_to_anchor_exists_in_cache {
+                    let anchor_chain_time = anchor.chain_time;
+
+                    // use anchors from cache only when processed_to_anchor_id exists in cache
+                    // otherwise we should clear the cache
+                    last_anchor = Some(anchor);
+
+                    // when we found anchor with last_block_chain_time
+                    // it means that we have all required anchors in the cache
+                    if anchor_chain_time == last_block_chain_time {
+                        all_anchors_are_taken_from_cache = true;
+                        break;
+                    }
+                }
             }
+        }
 
-            last_anchor = Some(anchor);
+        // we have all required anchors in cache
+        if all_anchors_are_taken_from_cache {
+            return Ok(anchors_info);
+        }
+
+        // clear cache if processed_to_anchor_id does not exist in cache
+        if !processed_to_anchor_exists_in_cache {
+            anchors_cache.clear();
         }
 
         let mut our_exts_count_total = 0;
 
         let mut next_anchor = if let Some(anchor) = last_anchor {
-            if all_anchors_are_taken_from_cache {
-                return Ok(anchors_info);
-            }
-
             anchor
         } else {
             let Some(next_anchor) = mpool_adapter

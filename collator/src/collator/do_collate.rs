@@ -625,7 +625,7 @@ impl CollatorStdImpl {
             "collated_block_id={}, time_diff={}, \
             collation_time={}, elapsed_from_prev_block={}, overhead={}, \
             start_lt={}, end_lt={}, exec_count={}, \
-            exec_ext={}, exec_int={}, exec_new_int={}, \
+            exec_ext={}, ext_err={}, exec_int={}, exec_new_int={}, \
             enqueue_count={}, dequeue_count={}, \
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
@@ -634,7 +634,8 @@ impl CollatorStdImpl {
             block_id, block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
-            collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
+            collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
+            collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
             collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),

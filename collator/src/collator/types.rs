@@ -1219,8 +1219,16 @@ impl AnchorsCache {
         self.last_imported_anchor = Some(AnchorInfo::from_anchor(anchor, our_exts_count));
     }
 
-    pub fn remove(&mut self, _index: usize) {
-        self.cache.pop_front();
+    pub fn remove(&mut self, index: usize) {
+        if index == 0 {
+            self.cache.pop_front();
+        } else {
+            self.remove(index);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.cache.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -1239,33 +1247,12 @@ impl AnchorsCache {
         self.has_pending_externals = has_pending_externals;
     }
 
-    fn find_index(&self, processed_to_anchor_id: MempoolAnchorId) -> Option<usize> {
-        self.cache.iter().enumerate().find_map(|(index, (id, _))| {
-            if *id == processed_to_anchor_id {
-                Some(index)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn take_after_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
+    pub fn iter_from_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
         self.cache
             .iter()
             .skip(index)
-            .map(|(_, anchor)| anchor.clone())
-    }
-
-    pub fn take_from_id(
-        &self,
-        processed_to_anchor_id: MempoolAnchorId,
-    ) -> Box<dyn Iterator<Item = Arc<MempoolAnchor>> + '_> {
-        if let Some(mut anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
-            anchor_index_in_cache = anchor_index_in_cache.saturating_sub(1);
-            Box::new(self.take_after_index(anchor_index_in_cache))
-        } else {
-            Box::new(std::iter::empty::<Arc<MempoolAnchor>>())
-        }
+            .map(|(_, anchor)| anchor)
+            .cloned()
     }
 }
 
