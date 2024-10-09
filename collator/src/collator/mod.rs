@@ -519,6 +519,11 @@ impl CollatorStdImpl {
                 "resume collation with reset",
             );
 
+            // previously wait when last state store task finished
+            if let Some(task) = self.store_new_state_task.take() {
+                task.await?;
+            }
+
             // reload prev data, reinit working state, drop msgs buffer
             tracing::debug!(target: tracing_targets::COLLATOR,
                 new_next_block_id = %self.next_block_info,
