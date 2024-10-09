@@ -74,6 +74,17 @@ impl Point {
     pub(crate) fn short_point_from_bytes<T: AsRef<[u8]>>(data: T) -> Result<ShortPoint, TlError> {
         ShortPoint::read_from_bytes(data.as_ref())
     }
+
+    pub const fn max_point_bytes() -> usize {
+        // 4 bytes of Point tag
+        // 32 bytes of Digest
+        // 64 bytes of Signature
+
+        // Point body size
+
+        4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES + PointBody::max_point_body_bytes()
+    }
+
     pub fn new(
         local_keypair: &KeyPair,
         round: Round,

@@ -1,61 +1,7 @@
-use std::sync::LazyLock;
-
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
-use tycho_network::PeerId;
 
-use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
-use crate::models::{Digest, Link, PeerCount, Point, PointId, Round, Signature, UnixTime};
-
-// rough estimate for the largest point
-// as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
-// and 1 mapping of 32 (peer_id) to 64 (signature) valuable bytes (evidence);
-// the size of other data is fixed, and estimate is more than enough to handle `Bytes` encoding
-
-// 4 bytes of Point tag
-// 32 bytes of Digest
-// 64 bytes of Signature
-
-// 4 bytes of PointBody tag
-// 4 bytes of Round
-// payload max_size_hint is calculated separately
-
-// 4 bytes of PointData tag
-// 32 bytes of author
-// Max peer count * (32 + 32) of includes
-// Max peer count * (32 + 32) of witness
-// 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor_trigger Link
-// 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor proof Link
-// 8 bytes of time
-// 8 bytes of anchor time
-
-// Max peer size * (32 + 64) bytes of evidence
-
-static LARGEST_POINT_BODY_BYTES: LazyLock<usize> = LazyLock::new(|| {
-    // size of BOC of least possible ExtIn message
-    const EXT_IN_BOC_MIN: usize = 48;
-
-    let boc = vec![0_u8; EXT_IN_BOC_MIN];
-    let payload = vec![boc; 1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN];
-
-    let max_possible_includes_witness: usize =
-        PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES);
-
-    let evidence_size: usize =
-        PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES);
-
-    let point_data_size: usize = 4
-        + PeerId::MAX_TL_BYTES
-        + (2 * max_possible_includes_witness)
-        + 2 * Link::MAX_TL_BYTES
-        + 2 * UnixTime::MAX_TL_BYTES;
-
-    4 + Round::MAX_TL_SIZE + payload.max_size_hint() + point_data_size + evidence_size
-});
-
-static LARGEST_POINT_BYTES: LazyLock<usize> = LazyLock::new(|| {
-    4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES + *LARGEST_POINT_BODY_BYTES
-});
+use crate::models::{Point, PointId, Round};
 
 #[derive(Debug)]
 pub struct BroadcastQuery(pub Point);
@@ -73,7 +19,7 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         let size = packet.len();
-        if size - 4usize > *LARGEST_POINT_BYTES {
+        if size - 4usize > Point::max_point_bytes() {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -154,7 +100,7 @@ where
         }
 
         let size = packet.len();
-        if size - 4usize > *LARGEST_POINT_BYTES {
+        if size - 4usize > Point::max_point_bytes() {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
