@@ -75,6 +75,11 @@ impl MempoolAdapterStore {
         self.commit_finished.set_max(anchor.round());
     }
 
+    /// allows to remove no more needed data before sync and store of newly created dag part
+    pub fn report_new_start(&self, new_start: Round) {
+        self.commit_finished.set_max(new_start);
+    }
+
     pub fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Bytes> {
         self.inner
             .expand_anchor_history(history)

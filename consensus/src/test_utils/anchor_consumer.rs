@@ -53,7 +53,7 @@ impl AnchorConsumer {
                 .await
                 .expect("committed anchor reader must be alive");
             match commit_result {
-                CommitResult::UnrecoverableGap => {}
+                CommitResult::NewStartAfterGap(_) => {}
                 CommitResult::Next(anchor_data) => {
                     self.top_known_anchor.set_max(anchor_data.anchor.round());
                     self.commit_round.set_max(anchor_data.anchor.round());
@@ -76,8 +76,8 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
 
             let (anchor, history) = match commit_result {
-                CommitResult::UnrecoverableGap => {
-                    tracing::warn!("unrecoverable gap for {}", peer_id.alt());
+                CommitResult::NewStartAfterGap(round) => {
+                    tracing::warn!("unrecoverable gap at {} for {}", round.0, peer_id.alt());
                     continue;
                 }
                 CommitResult::Next(data) => (data.anchor, data.history),

@@ -464,7 +464,7 @@ impl Engine {
 
                     if !committer.set_bottom(bottom_round) {
                         committed_info_tx
-                            .send(CommitResult::UnrecoverableGap) // not recoverable
+                            .send(CommitResult::NewStartAfterGap(bottom_round)) // not recoverable
                             .expect("Failed to send anchor history info to mpsc channel");
                     };
 
