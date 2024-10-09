@@ -27,8 +27,6 @@ struct PointInner {
 
 #[derive(Debug)]
 pub(crate) struct ShortPoint {
-    _digest: Digest,
-    _signature: Signature,
     body: ShortPointBody,
 }
 
@@ -39,9 +37,9 @@ impl ShortPoint {
         if tag != Point::TL_ID {
             return Err(TlError::UnknownConstructor);
         }
+        // skip 36 + 64 bytes of digest and signature
+        offset += 96;
         Ok(ShortPoint {
-            _digest: Digest::read_from(data, &mut offset)?,
-            _signature: Signature::read_from(data, &mut offset)?,
             body: ShortPointBody::read_from(data, &mut offset)?,
         })
     }
@@ -485,8 +483,6 @@ mod tests {
 
         let short = ShortPoint::read_from_bytes(&bytes)
             .expect("Failed to deserialize ShortPoint from Point bytes");
-        assert_eq!(short._digest, point.0.digest);
-        assert_eq!(short._signature, point.0.signature);
         assert_eq!(short.body.round, point.0.body.round);
         assert_eq!(short.body.payload, point.0.body.payload);
     }
