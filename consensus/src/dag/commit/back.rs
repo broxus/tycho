@@ -53,12 +53,14 @@ impl DagBack {
     }
 
     pub fn fill_restore(
-        &mut self,
+        &self,
         sorted: Vec<(PointInfo, PointStatus)>,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
+        assert!(!self.rounds.is_empty(), "must be initialized");
+
         assert!(
             sorted.windows(2).all(|w| w[0].0.round() <= w[1].0.round()),
             "input must be sorted: [{}]",
@@ -90,18 +92,21 @@ impl DagBack {
         self.assert_len();
     }
 
-    pub fn extend_from_front(&mut self, front: &[DagRound], peer_schedule: &PeerSchedule) {
-        let front_first = match front.first() {
-            None => return,
+    /// returns `true` if bottom remains the same (e.g. passing empty `front`)
+    /// returns `false` if found moved bottom round (too long dag or faced a gap)
+    pub fn extend_from_front(&mut self, front: &[DagRound], peer_schedule: &PeerSchedule) -> bool {
+        let mut has_same_bottom = true;
+
+        let front_bottom = match front.first() {
+            None => return has_same_bottom,
             Some(first) => first, // lowest in input
         };
         let history_bottom = match front.last() {
-            None => return,
+            None => return has_same_bottom,
             // extend to the max possible - will be shortened when top known is determined
             Some(last) => Consensus::history_bottom(last.round()),
         };
         if front.len() >= 2 {
-            // TODO debug_assert when whole sync feature gets stabilized
             assert!(
                 front
                     .windows(2)
@@ -116,10 +121,11 @@ impl DagBack {
         }
 
         if self.rounds.is_empty() || self.top().round() < history_bottom {
+            has_same_bottom = false; // bottom is changed, even maybe from some default value
             self.rounds.clear();
             // init with bottom exactly;
             // older rounds behind weak refs will be dropped by going out of scope
-            match front_first.round().cmp(&history_bottom) {
+            match front_bottom.round().cmp(&history_bottom) {
                 cmp::Ordering::Less => {
                     if let Some(bottom) = front
                         .iter()
@@ -133,7 +139,8 @@ impl DagBack {
                     }
                 }
                 cmp::Ordering::Equal => {
-                    self.rounds.insert(front_first.round(), front_first.clone());
+                    self.rounds
+                        .insert(front_bottom.round(), front_bottom.clone());
                 }
                 cmp::Ordering::Greater => {
                     let bottom = DagRound::new_bottom(history_bottom, peer_schedule);
@@ -141,6 +148,7 @@ impl DagBack {
                 }
             }
         } else if self.bottom_round() < history_bottom {
+            has_same_bottom = false;
             _ = self.drain_upto(history_bottom);
             self.assert_len();
         }
@@ -161,6 +169,7 @@ impl DagBack {
         self.assert_len();
 
         metrics::gauge!("tycho_mempool_rounds_dag_length").set(self.rounds.len() as u32);
+        has_same_bottom
     }
 
     fn assert_len(&self) {
@@ -286,11 +295,18 @@ impl DagBack {
                         lookup_proof_id.author, stage.leader,
                         "validate() is broken: anchor proof author is not leader"
                     );
-                    assert!(
-                        !stage.is_used.load(atomic::Ordering::Relaxed),
-                        "limit by round range is broken: visiting already committed proof {:?}",
-                        lookup_proof_id.alt()
-                    );
+                    if stage.is_used.load(atomic::Ordering::Relaxed) {
+                        // this branch must be visited only with engine round change
+                        // (new call to commit), when `anchor_chain` is emptied;
+                        // during the same commit call, expect `anchor_chain` to serve its purpose
+                        assert!(
+                            last_proof_round.is_none(),
+                            "limit by round range is broken: visiting already committed proof {:?}",
+                            lookup_proof_id.alt()
+                        );
+                        // reached already committed proof, so dag is contiguous
+                        return Some(result);
+                    }
                 }
                 _ => panic!(
                     "validate() is broken: anchor stage is not for anchor proof {:?}",
@@ -364,6 +380,7 @@ impl DagBack {
     /// Note: at this point there is no way to check if passed point is really an anchor
     pub fn gather_uncommitted(
         &self,
+        bottom_round: Round,
         anchor: &PointInfo, // @ r+1
     ) -> Option<VecDeque<ValidPoint>> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
@@ -426,12 +443,17 @@ impl DagBack {
             }
             r.rotate_left(1); // [empty r_0, r-1, r-2] => [r-1 as r+0, r-2 as r-1, empty as r-2]
         }
-        assert_eq!(
-            next_round,
-            history_limit,
-            "{} doesn't contain full anchor history",
-            self.alt(),
-        );
+        // we should commit first anchors at commit depth rounds above bottom, discarding them
+        // (because some history may be lost) in adapter when bottom is not genesis
+        // (in case dag bottom is moved after a large gap or severe collator lag behind consensus)
+        if history_limit.0 > (bottom_round.0).saturating_add(MempoolConfig::COMMIT_DEPTH as _) {
+            assert_eq!(
+                next_round,
+                history_limit,
+                "{} doesn't contain full anchor history",
+                self.alt(),
+            );
+        }
         Some(uncommitted)
     }
 
