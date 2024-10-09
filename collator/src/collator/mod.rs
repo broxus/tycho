@@ -484,9 +484,6 @@ impl CollatorStdImpl {
         let working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
-            let _histogram =
-                HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
-
             // update mc_data if newer
             if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
                 working_state.mc_data = mc_data;
@@ -513,9 +510,6 @@ impl CollatorStdImpl {
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
 
-            let _histogram =
-                HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
-
             self.next_block_info = Self::calc_next_block_id_short(&new_prev_blocks_ids);
 
             tracing::info!(target: tracing_targets::COLLATOR,
@@ -524,11 +518,6 @@ impl CollatorStdImpl {
                 new_next_block_id = %self.next_block_info,
                 "resume collation with reset",
             );
-
-            // previously wait when last state store task finished
-            if let Some(task) = self.store_new_state_task.take() {
-                task.await?;
-            }
 
             // reload prev data, reinit working state, drop msgs buffer
             tracing::debug!(target: tracing_targets::COLLATOR,
