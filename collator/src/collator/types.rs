@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
@@ -6,8 +6,8 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate, ImportFees, InMsg,
-    IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
+    BlockRef, CurrencyCollection,  GlobalVersion, HashUpdate, ImportFees, InMsg,
+    Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
     ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
     SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
@@ -16,8 +16,11 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+#[cfg(not(feature = "new-message-groups"))]
+use super::message_group::MessageGroups;
+#[cfg(feature = "new-message-groups")]
+use super::message_group_new::MessageGroupsNew;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::tracing_targets;
 use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 
 pub(super) struct WorkingState {
@@ -848,354 +851,15 @@ pub struct Dequeued {
     pub same_shard: bool,
 }
 
-pub struct Message {
-    pub inner: Box<ParsedMessage>,
-    pub is_internal: bool,
-}
-
-#[derive(Default)]
-pub(super) struct MessageGroups {
-    shard_id: ShardIdent,
-
-    offset: u32,
-    max_message_key: QueueKey,
-
-    current_messages: FastHashMap<HashBytes, VecDeque<Message>>,
-    new_messages: FastHashMap<HashBytes, VecDeque<Message>>,
-
-    int_messages_count: usize,
-    ext_messages_count: usize,
-
-    group_limit: usize,
-    group_vert_size: usize,
-}
-
-impl MessageGroups {
-    pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
-        Self {
-            shard_id,
-            group_limit,
-            group_vert_size,
-            ..Default::default()
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.offset = 0;
-        self.max_message_key = QueueKey::MIN;
-        self.current_messages = Default::default();
-        self.new_messages = Default::default();
-        self.int_messages_count = 0;
-        self.ext_messages_count = 0;
-    }
-
-    pub fn offset(&self) -> u32 {
-        self.offset
-    }
-
-    pub fn max_message_key(&self) -> &QueueKey {
-        &self.max_message_key
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.current_messages.is_empty() && self.new_messages.is_empty()
-    }
-
-    pub fn first_group_is_full(&self) -> bool {
-        let curent_messages_len: usize = self
-            .current_messages
-            .values()
-            .map(|messages| std::cmp::min(messages.len(), self.group_vert_size))
-            .sum();
-
-        if curent_messages_len >= self.group_limit {
-            return true;
-        }
-
-        let new_messages_len: usize = self
-            .new_messages
-            .values()
-            .map(|messages| std::cmp::min(messages.len(), self.group_vert_size))
-            .sum();
-
-        curent_messages_len + new_messages_len >= self.group_limit
-    }
-
-    pub fn messages_count(&self) -> usize {
-        self.int_messages_count + self.ext_messages_count
-    }
-
-    pub fn int_messages_count(&self) -> usize {
-        self.int_messages_count
-    }
-
-    pub fn ext_messages_count(&self) -> usize {
-        self.ext_messages_count
-    }
-
-    fn increment_counters(&mut self, is_int: bool) {
-        if is_int {
-            self.int_messages_count += 1;
-        } else {
-            self.ext_messages_count += 1;
-        }
-    }
-
-    /// add message adjusting groups,
-    pub fn add_message(&mut self, msg: Box<ParsedMessage>) {
-        assert_eq!(
-            msg.special_origin, None,
-            "unexpected special origin in ordinary messages set"
-        );
-
-        let (account_id, is_int) = match &msg.info {
-            MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
-                (dst.as_std().map(|a| a.address).unwrap_or_default(), false)
-            }
-            MsgInfo::Int(IntMsgInfo {
-                dst, created_lt, ..
-            }) => {
-                self.max_message_key = self.max_message_key.max(QueueKey {
-                    lt: *created_lt,
-                    hash: *msg.cell.repr_hash(),
-                });
-                (dst.as_std().map(|a| a.address).unwrap_or_default(), true)
-            }
-            MsgInfo::ExtOut(info) => {
-                unreachable!("ext out message in ordinary messages set: {info:?}")
-            }
-        };
-
-        if let Some(messages) = self.current_messages.get_mut(&account_id) {
-            messages.push_back(Message {
-                inner: msg,
-                is_internal: is_int,
-            });
-        } else {
-            let messages = self.new_messages.entry(account_id).or_default();
-
-            messages.push_back(Message {
-                inner: msg,
-                is_internal: is_int,
-            });
-        }
-
-        self.increment_counters(is_int);
-
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
-        metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
-            .set(self.messages_count() as f64);
-    }
-
-    pub fn extract_first_group(&mut self) -> Option<MessageGroup> {
-        let first_group_opt = self.extract_first_group_inner();
-        if first_group_opt.is_some() {
-            self.offset += 1;
-        }
-        if let Some(first_group) = first_group_opt.as_ref() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "extracted first message group from message_groups buffer: offset={}, buffer int={}, ext={}, group {}",
-                self.offset(), self.int_messages_count(), self.ext_messages_count(),
-                DisplayMessageGroup(first_group),
-            );
-        }
-        first_group_opt
-    }
-
-    fn extract_first_group_inner(&mut self) -> Option<MessageGroup> {
-        let mut group = MessageGroup {
-            inner: FastHashMap::default(),
-            int_messages_count: 0,
-            ext_messages_count: 0,
-            limit: self.group_limit,
-            vert_size: self.group_vert_size,
-        };
-        let mut offset = 0;
-        let mut hashes_to_remove = vec![];
-
-        'hashes: for (hash, messages) in self.current_messages.iter_mut() {
-            if messages.is_empty() {
-                hashes_to_remove.push(*hash);
-                continue;
-            }
-
-            while let Some(message) = messages.pop_front() {
-                group.insert(*hash, message);
-                offset += 1;
-                if group.is_full() {
-                    break 'hashes;
-                }
-                if group.is_vert_size_reached(*hash) {
-                    break;
-                }
-            }
-        }
-
-        for hash in hashes_to_remove {
-            self.current_messages.remove(&hash);
-        }
-
-        if !group.is_full() {
-            let mut new_current_messages: HashSet<HashBytes> = HashSet::default();
-            'hashes: for (hash, messages) in self.new_messages.iter_mut() {
-                while let Some(message) = messages.pop_front() {
-                    group.insert(*hash, message);
-                    new_current_messages.insert(*hash);
-                    offset += 1;
-                    if group.is_full() {
-                        break 'hashes;
-                    }
-                    if group.is_vert_size_reached(*hash) {
-                        break;
-                    }
-                }
-            }
-
-            for hash in new_current_messages {
-                self.current_messages
-                    .insert(hash, self.new_messages.remove(&hash).unwrap());
-            }
-        }
-
-        if group.messages_count() == 0 {
-            None
-        } else {
-            self.int_messages_count -= group.int_messages_count;
-            self.ext_messages_count -= group.ext_messages_count;
-            self.offset = offset;
-            Some(group)
-        }
-    }
-
-    pub fn extract_merged_group(&mut self) -> Option<MessageGroup> {
-        let mut merged_group_opt: Option<MessageGroup> = None;
-        while let Some(next_group) = self.extract_first_group_inner() {
-            if let Some(merged_group) = merged_group_opt.as_mut() {
-                for (account_id, mut account_msgs) in next_group.inner {
-                    if let Some(existing_account_msgs) = merged_group.inner.get_mut(&account_id) {
-                        existing_account_msgs.append(&mut account_msgs);
-                    } else {
-                        merged_group.inner.insert(account_id, account_msgs);
-                    }
-                }
-            } else {
-                self.offset += 1;
-                merged_group_opt = Some(next_group);
-            }
-        }
-        if let Some(merged_group) = merged_group_opt.as_ref() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "extracted merged message group of new messages from message_groups buffer: buffer int={}, ext={}, group {}",
-                self.int_messages_count(), self.ext_messages_count(),
-                DisplayMessageGroup(merged_group),
-            );
-        }
-        merged_group_opt
-    }
-}
-
-#[derive(Default)]
-pub(super) struct MessageGroup {
-    #[allow(clippy::vec_box)]
-    inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
-    int_messages_count: usize,
-    ext_messages_count: usize,
-    limit: usize,
-    vert_size: usize,
-}
-
-impl MessageGroup {
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn messages_count(&self) -> usize {
-        self.int_messages_count + self.ext_messages_count
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.messages_count() == self.limit
-    }
-
-    fn increment_counters(&mut self, is_int: bool) {
-        if is_int {
-            self.int_messages_count += 1;
-        } else {
-            self.ext_messages_count += 1;
-        }
-    }
-    fn insert(&mut self, hash: HashBytes, message: Message) {
-        let messages = self.inner.entry(hash).or_default();
-        let Message { inner, is_internal } = message;
-        messages.push(inner);
-        self.increment_counters(is_internal);
-    }
-
-    fn is_vert_size_reached(&mut self, hash: HashBytes) -> bool {
-        if let Some(messages) = self.inner.get(&hash) {
-            messages.len() == self.vert_size
-        } else {
-            false
-        }
-    }
-}
-
-impl IntoIterator for MessageGroup {
-    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
-    }
-}
-
-pub(super) struct DisplayMessageGroup<'a>(pub &'a MessageGroup);
-
-impl std::fmt::Debug for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "int={}, ext={}, ",
-            self.0.int_messages_count, self.0.ext_messages_count
-        )?;
-        let mut l = f.debug_list();
-        for messages in self.0.inner.values() {
-            l.entry(&messages.len());
-        }
-        l.finish()
-    }
-}
-
-#[allow(dead_code)]
-pub(super) struct DisplayMessageGroups<'a>(pub &'a MessageGroups);
-
-impl std::fmt::Debug for DisplayMessageGroups<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroups<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut m = f.debug_map();
-        for (k, v) in self.0.current_messages.iter() {
-            m.entry(k, &v.len());
-        }
-        for (k, v) in self.0.new_messages.iter() {
-            m.entry(k, &v.len());
-        }
-        m.finish()
-    }
-}
-
 pub(super) struct MessagesBuffer {
+    #[cfg(not(feature = "new-message-groups"))]
     /// messages groups
     pub message_groups: MessageGroups,
+
+    #[cfg(feature = "new-message-groups")]
+    /// messages groups
+    pub message_groups: MessageGroupsNew,
+
     /// current read positions of internals mq iterator
     /// when it is not finished
     pub current_iterator_positions: Option<FastHashMap<ShardIdent, QueueKey>>,
@@ -1209,7 +873,10 @@ impl MessagesBuffer {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
             .set(group_vert_size as f64);
         Self {
+            #[cfg(not(feature = "new-message-groups"))]
             message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
+            #[cfg(feature = "new-message-groups")]
+            message_groups: MessageGroupsNew::new(shard_id, group_limit, group_vert_size),
             current_iterator_positions: Some(FastHashMap::default()),
             current_ext_reader_position: None,
         }
