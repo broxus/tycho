@@ -1086,6 +1086,10 @@ impl MessageGroup {
         }
         false
     }
+
+    pub fn accounts(&self) -> impl Iterator<Item = &HashBytes> {
+        self.inner.keys()
+    }
 }
 
 impl IntoIterator for MessageGroup {

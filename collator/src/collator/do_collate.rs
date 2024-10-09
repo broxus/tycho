@@ -269,6 +269,11 @@ impl CollatorStdImpl {
                 fill_msgs_total_elapsed += timer.elapsed();
 
                 if let Some(msgs_group) = msgs_group_opt {
+                    for account_id in msgs_group.accounts() {
+                        let count = self.accounts_load.entry(*account_id).or_default();
+                        *count += 1;
+                    }
+
                     // Execute messages group
                     timer = std::time::Instant::now();
                     let group_result = executor.execute_group(msgs_group).await?;
@@ -343,6 +348,11 @@ impl CollatorStdImpl {
             metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
                 .set(executed_groups_count as f64);
         }
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "accounts load: = {:?}",
+            self.accounts_load.values()
+        );
 
         metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
             .record(fill_msgs_total_elapsed);

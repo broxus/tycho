@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
-use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
+use types::{AccountId, AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
@@ -212,6 +213,7 @@ pub struct CollatorStdImpl {
     anchors_cache: AnchorsCache,
     stats: CollatorStats,
     timer: std::time::Instant,
+    accounts_load: BTreeMap<AccountId, u32>,
 
     /// Round of a new consensus genesis on recovery
     mempool_start_round: Option<MempoolAnchorId>,
@@ -263,6 +265,7 @@ impl CollatorStdImpl {
             stats: Default::default(),
             timer: std::time::Instant::now(),
             mempool_start_round,
+            accounts_load: Default::default(),
         };
 
         AsyncQueuedDispatcher::run(processor, receiver);
@@ -1306,6 +1309,10 @@ impl CollatorStdImpl {
             drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
+            if !has_uprocessed_messages && !has_externals {
+                self.accounts_load = Default::default();
+            }
+
             // here just imported anchor has no externals
             // or we reached max uncommitted chain length
             let anchor_chain_time = if let Some((next_anchor, _)) = next_anchor_info_opt {
