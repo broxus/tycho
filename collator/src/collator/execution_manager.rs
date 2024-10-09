@@ -23,8 +23,8 @@ use super::message_group::MessageGroup;
 use super::message_group_new::MessageGroupNew;
 use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
-    AccountId, AnchorsCache, BlockCollationData, Dequeued, MessagesBuffer, ParsedMessage,
-    ShardAccountStuff, WorkingState,
+    AccountId, AnchorsCache, BlockCollationData, Dequeued, MessageGroup, MessagesBuffer,
+    ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
@@ -116,7 +116,6 @@ impl ExecutionManager {
         self.add_to_message_groups_total_elapsed
     }
 
-    #[cfg(not(feature = "new-message-groups"))]
     #[tracing::instrument(skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn get_next_message_group(
@@ -1204,7 +1203,6 @@ impl MessagesExecutor {
         self.accounts_cache.take_account_stuff_if(account_id, f)
     }
 
-    #[cfg(not(feature = "new-message-groups"))]
     /// Run one execution group of messages by accounts
     pub async fn execute_group(&mut self, group: MessageGroup) -> Result<ExecutedGroup> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
@@ -1304,106 +1302,6 @@ impl MessagesExecutor {
             items,
             ext_msgs_error_count,
             ext_msgs_skipped,
-        })
-    }
-
-    #[cfg(feature = "new-message-groups")]
-    /// Run one execution group of messages by accounts
-    pub async fn execute_group(&mut self, group: MessageGroupNew) -> Result<ExecutedGroup> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
-
-        let labels = &[("workchain", self.shard_id.workchain().to_string())];
-
-        let group_horizontal_size = group.len();
-        let group_messages_count = group.messages_count();
-        let group_mean_vert_size = group_messages_count
-            .checked_div(group_horizontal_size)
-            .unwrap_or_default();
-        let mut group_max_vert_size = 0;
-
-        // TODO check externals is not exist accounts needed ?
-        let mut futures = FuturesUnordered::new();
-        for (account_id, msgs) in group {
-            group_max_vert_size = cmp::max(group_max_vert_size, msgs.len());
-            let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
-            futures.push(self.execute_messages(shard_account_stuff, msgs));
-        }
-
-        let mut items = Vec::with_capacity(group_messages_count);
-        let mut ext_msgs_error_count = 0;
-
-        let mut max_account_msgs_exec_time = Duration::ZERO;
-        let mut total_exec_time = Duration::ZERO;
-
-        while let Some(executed_msgs_result) = futures.next().await {
-            let executed = executed_msgs_result?;
-
-            max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
-            total_exec_time += executed.exec_time;
-
-            for tx in executed.transactions {
-                if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
-                    if let Err(e) = &tx.result {
-                        tracing::warn!(
-                            target: tracing_targets::EXEC_MANAGER,
-                            account_addr = %executed.account_state.account_addr,
-                            message_hash = %tx.in_message.cell.repr_hash(),
-                            "failed to execute external message: {e:?}",
-                        );
-                        ext_msgs_error_count += 1;
-                        continue;
-                    }
-                }
-
-                let executor_output = tx.result?;
-
-                self.min_next_lt =
-                    cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
-
-                items.push(ExecutedTickItem {
-                    in_message: tx.in_message,
-                    executor_output,
-                });
-            }
-
-            self.accounts_cache
-                .add_account_stuff(executed.account_state);
-        }
-
-        let mean_account_msgs_exec_time = total_exec_time
-            .checked_div(group_horizontal_size as u32)
-            .unwrap_or_default();
-
-        tracing::info!(target: tracing_targets::EXEC_MANAGER,
-            group_horizontal_size, group_max_vert_size,
-            total_exec_time = %format_duration(total_exec_time),
-            mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
-            max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
-            "execute_group",
-        );
-
-        metrics::gauge!("tycho_do_collate_one_tick_group_messages_count", labels)
-            .set(group_messages_count as f64);
-        metrics::gauge!("tycho_do_collate_one_tick_group_horizontal_size", labels)
-            .set(group_horizontal_size as f64);
-        metrics::gauge!("tycho_do_collate_one_tick_group_mean_vert_size", labels)
-            .set(group_mean_vert_size as f64);
-        metrics::gauge!("tycho_do_collate_one_tick_group_max_vert_size", labels)
-            .set(group_max_vert_size as f64);
-        metrics::histogram!(
-            "tycho_do_collate_one_tick_account_msgs_exec_mean_time",
-            labels
-        )
-        .record(mean_account_msgs_exec_time);
-        metrics::histogram!(
-            "tycho_do_collate_one_tick_account_msgs_exec_max_time",
-            labels
-        )
-        .record(max_account_msgs_exec_time);
-
-        Ok(ExecutedGroup {
-            items,
-            ext_msgs_error_count,
         })
     }
 

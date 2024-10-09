@@ -1,11 +1,9 @@
-use std::collections::hash_map::Entry;
-
-use everscale_types::cell::HashBytes;
 use everscale_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
-use super::types::ParsedMessage;
+use super::types::{MessageGroup, ParsedMessage};
+use crate::collator::types::DisplayMessageGroup;
 use crate::tracing_targets;
 
 #[derive(Default)]
@@ -69,7 +67,7 @@ impl MessageGroups {
         self.ext_messages_count
     }
 
-    fn incriment_counters(&mut self, is_int: bool) {
+    fn increment_counters(&mut self, is_int: bool) {
         if is_int {
             self.int_messages_count += 1;
         } else {
@@ -102,47 +100,29 @@ impl MessageGroups {
             }
         };
 
-        self.incriment_counters(is_int);
+        self.increment_counters(is_int);
 
         let mut offset = self.offset;
+        let mut msg = Some(msg);
         loop {
             let group_entry = self.groups.entry(offset).or_default();
 
-            if group_entry.is_full {
-                offset += 1;
+            offset += 1;
+
+            if group_entry.is_full() {
                 continue;
             }
 
-            let group_len = group_entry.inner.len();
-            match group_entry.inner.entry(account_id) {
-                Entry::Vacant(entry) => {
-                    if group_len < self.group_limit {
-                        entry.insert(vec![msg]);
-                        group_entry.incriment_counters(is_int);
-                        break;
-                    }
+            group_entry.insert(
+                &mut msg,
+                is_int,
+                account_id,
+                self.group_limit,
+                self.group_vert_size,
+            );
 
-                    offset += 1;
-                }
-                Entry::Occupied(mut entry) => {
-                    let msgs = entry.get_mut();
-                    if msgs.len() < self.group_vert_size {
-                        msgs.push(msg);
-
-                        if msgs.len() == self.group_vert_size {
-                            group_entry.filling += 1;
-                            if group_entry.filling == self.group_limit {
-                                group_entry.is_full = true;
-                            }
-                        }
-
-                        group_entry.incriment_counters(is_int);
-
-                        break;
-                    }
-
-                    offset += 1;
-                }
+            if msg.is_none() {
+                break;
             }
         }
 
@@ -161,7 +141,7 @@ impl MessageGroups {
             //         .all(|account_msgs| account_msgs.len() >= self.group_vert_size);
             // first_group_is_full
 
-            first_group.is_full
+            first_group.is_full()
         } else {
             false
         }
@@ -184,8 +164,8 @@ impl MessageGroups {
 
     fn extract_first_group_inner(&mut self) -> Option<MessageGroup> {
         if let Some(first_group) = self.groups.remove(&self.offset) {
-            self.int_messages_count -= first_group.int_messages_count;
-            self.ext_messages_count -= first_group.ext_messages_count;
+            self.int_messages_count -= first_group.int_messages_count();
+            self.ext_messages_count -= first_group.ext_messages_count();
 
             Some(first_group)
         } else {
@@ -197,11 +177,11 @@ impl MessageGroups {
         let mut merged_group_opt: Option<MessageGroup> = None;
         while let Some(next_group) = self.extract_first_group_inner() {
             if let Some(merged_group) = merged_group_opt.as_mut() {
-                for (account_id, mut account_msgs) in next_group.inner {
-                    if let Some(existing_account_msgs) = merged_group.inner.get_mut(&account_id) {
+                for (account_id, mut account_msgs) in next_group {
+                    if let Some(existing_account_msgs) = merged_group.get_mut(&account_id) {
                         existing_account_msgs.append(&mut account_msgs);
                     } else {
-                        merged_group.inner.insert(account_id, account_msgs);
+                        merged_group.insert_raw(account_id, account_msgs);
                     }
                 }
             } else {
@@ -217,66 +197,6 @@ impl MessageGroups {
             );
         }
         merged_group_opt
-    }
-}
-
-// pub(super) type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
-#[derive(Default)]
-pub(super) struct MessageGroup {
-    #[allow(clippy::vec_box)]
-    inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
-    int_messages_count: usize,
-    ext_messages_count: usize,
-    filling: usize,
-    is_full: bool,
-}
-
-impl MessageGroup {
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn messages_count(&self) -> usize {
-        self.int_messages_count + self.ext_messages_count
-    }
-
-    fn incriment_counters(&mut self, is_int: bool) {
-        if is_int {
-            self.int_messages_count += 1;
-        } else {
-            self.ext_messages_count += 1;
-        }
-    }
-}
-
-impl IntoIterator for MessageGroup {
-    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
-    }
-}
-
-pub(super) struct DisplayMessageGroup<'a>(pub &'a MessageGroup);
-
-impl std::fmt::Debug for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "int={}, ext={}, ",
-            self.0.int_messages_count, self.0.ext_messages_count
-        )?;
-        let mut l = f.debug_list();
-        for messages in self.0.inner.values() {
-            l.entry(&messages.len());
-        }
-        l.finish()
     }
 }
 
@@ -301,7 +221,7 @@ impl std::fmt::Display for DisplayMessageGroups<'_> {
 
 #[cfg(test)]
 mod tests {
-    use everscale_types::cell::Cell;
+    use everscale_types::cell::{Cell, HashBytes};
     use everscale_types::models::{IntAddr, StdAddr};
 
     use super::*;

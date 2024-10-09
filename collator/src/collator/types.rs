@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
@@ -983,6 +984,147 @@ impl AnchorsCache {
             .skip(index)
             .map(|(_, anchor)| anchor)
             .cloned()
+    }
+}
+
+#[derive(Default)]
+pub(super) struct MessageGroup {
+    #[allow(clippy::vec_box)]
+    inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
+    int_messages_count: usize,
+    ext_messages_count: usize,
+    filling: usize,
+    is_full: bool,
+}
+
+impl MessageGroup {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn messages_count(&self) -> usize {
+        self.int_messages_count + self.ext_messages_count
+    }
+
+    pub fn int_messages_count(&self) -> usize {
+        self.int_messages_count
+    }
+
+    pub fn ext_messages_count(&self) -> usize {
+        self.ext_messages_count
+    }
+
+    #[cfg(not(feature = "new-message-groups"))]
+    pub fn is_full(&self) -> bool {
+        self.is_full
+    }
+
+    pub fn increment_counters(&mut self, is_int: bool) {
+        if is_int {
+            self.int_messages_count += 1;
+        } else {
+            self.ext_messages_count += 1;
+        }
+    }
+
+    pub fn insert(
+        &mut self,
+        msg: &mut Option<Box<ParsedMessage>>,
+        is_int: bool,
+        account_id: HashBytes,
+        group_limit: usize,
+        group_vert_size: usize,
+    ) {
+        let group_len = self.inner.len();
+        match self.inner.entry(account_id) {
+            Entry::Vacant(entry) => {
+                if group_len < group_limit {
+                    entry.insert(vec![msg.take().unwrap()]);
+                    self.increment_counters(is_int);
+                }
+            }
+            Entry::Occupied(mut entry) => {
+                let msgs = entry.get_mut();
+                if msgs.len() < group_vert_size {
+                    msgs.push(msg.take().unwrap());
+
+                    if msgs.len() == group_vert_size {
+                        self.filling += 1;
+                        if self.filling == group_limit {
+                            self.is_full = true;
+                        }
+                    }
+
+                    self.increment_counters(is_int);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "new-message-groups"))]
+    pub fn insert_raw(&mut self, account_id: HashBytes, messages: Vec<Box<ParsedMessage>>) {
+        self.inner.insert(account_id, messages);
+    }
+
+    #[cfg(feature = "new-message-groups")]
+    #[allow(clippy::vec_box)]
+    pub fn new(
+        messages: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
+        int_messages_count: usize,
+        ext_messages_count: usize,
+        filling: usize,
+        is_full: bool,
+    ) -> Self {
+        Self {
+            inner: messages,
+            int_messages_count,
+            ext_messages_count,
+            filling,
+            is_full,
+        }
+    }
+
+    #[cfg(feature = "new-message-groups")]
+    #[allow(clippy::vec_box)]
+    pub fn get(&self, account_id: &HashBytes) -> Option<&Vec<Box<ParsedMessage>>> {
+        self.inner.get(account_id)
+    }
+
+    #[cfg(not(feature = "new-message-groups"))]
+    #[allow(clippy::vec_box)]
+    pub fn get_mut(&mut self, account_id: &HashBytes) -> Option<&mut Vec<Box<ParsedMessage>>> {
+        self.inner.get_mut(account_id)
+    }
+}
+
+impl IntoIterator for MessageGroup {
+    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
+    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+pub(super) struct DisplayMessageGroup<'a>(pub &'a MessageGroup);
+
+impl std::fmt::Debug for DisplayMessageGroup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for DisplayMessageGroup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "int={}, ext={}, ",
+            self.0.int_messages_count, self.0.ext_messages_count
+        )?;
+        let mut l = f.debug_list();
+        for messages in self.0.inner.values() {
+            l.entry(&messages.len());
+        }
+        l.finish()
     }
 }
 
