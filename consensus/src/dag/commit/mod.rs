@@ -16,17 +16,26 @@ use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{AnchorData, AnchorStageRole, PointInfo, Round};
 
-#[derive(Default)]
 pub struct Committer {
     dag: DagBack,
     // from the oldest to the current round; newer ones are in the future;
     anchor_chain: AnchorChain,
+    first_dag_bottom_after_gap: Round,
+}
+
+impl Default for Committer {
+    fn default() -> Self {
+        Self {
+            dag: Default::default(),
+            anchor_chain: Default::default(),
+            first_dag_bottom_after_gap: Round::BOTTOM,
+        }
+    }
 }
 
 impl Committer {
-    #[allow(clippy::too_many_arguments)] // fixme do smth
     pub fn init_at_start(
-        &mut self,
+        &self,
         sorted: Vec<(PointInfo, PointStatus)>,
         downloader: &Downloader,
         store: &MempoolStore,
@@ -39,13 +48,18 @@ impl Committer {
         if rounds.is_empty() {
             return;
         }
-        self.dag.extend_from_front(rounds, peer_schedule);
-        _ = self.anchor_chain.drain_upto(self.dag.bottom_round());
+        if !self.dag.extend_from_front(rounds, peer_schedule) {
+            self.first_dag_bottom_after_gap = self.dag.bottom_round();
+            _ = self.anchor_chain.drain_upto(self.dag.bottom_round());
+        };
     }
 
     /// returns 'true' if ok, `false` if current dag state was below bottom and was damaged
     pub fn set_bottom(&mut self, new_bottom_round: Round) -> bool {
-        let last_proof_round_pre = self.anchor_chain.last_proof_round();
+        let is_chain_advanced = self
+            .anchor_chain
+            .top_proof_round()
+            .map_or(false, |l| l < new_bottom_round);
         let is_dag_drained = self.dag.drain_upto(new_bottom_round).first().is_some();
         let is_chain_drained = self
             .anchor_chain
@@ -53,7 +67,7 @@ impl Committer {
             .peekable()
             .peek()
             .is_some();
-        let is_chain_advanced = last_proof_round_pre < self.anchor_chain.last_proof_round();
+        self.first_dag_bottom_after_gap = self.first_dag_bottom_after_gap.max(new_bottom_round);
 
         !is_dag_drained && !is_chain_drained && !is_chain_advanced
     }
@@ -83,15 +97,15 @@ impl Committer {
 
         self.enqueue_new_anchors(engine_round);
 
-        let _span = if let Some(back) = self.anchor_chain.last() {
+        let _span = if let Some(top) = self.anchor_chain.top() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
-                .set((engine_round.0 as f64) - (back.proof.round().0 as f64));
+                .set((engine_round.0 as f64) - (top.proof.round().0 as f64));
 
             tracing::error_span!(
                 "last anchor proof",
-                author = display(&back.proof.data().author.alt()),
-                round = back.proof.round().0,
-                digest = display(&back.proof.digest().alt()),
+                author = display(&top.proof.data().author.alt()),
+                round = top.proof.round().0,
+                digest = display(&top.proof.digest().alt()),
             )
             .entered()
         } else {
@@ -107,7 +121,7 @@ impl Committer {
         // take all ready triggers, skipping not ready ones
         let triggers = self.dag.triggers(
             self.anchor_chain
-                .last_proof_round()
+                .top_proof_round()
                 .unwrap_or(self.dag.bottom_round()),
             engine_round,
         );
@@ -122,15 +136,14 @@ impl Committer {
         // if chain is broken - take the prefix until first gap
 
         for trigger in triggers {
-            let Some(chain_part) = self.dag.anchor_chain(
-                // Note last proof gets updated every cycle
-                self.anchor_chain.last_proof_round(),
-                &trigger,
-            ) else {
+            let Some(chain_part) = self
+                .dag
+                .anchor_chain(self.anchor_chain.top_proof_round(), &trigger)
+            else {
                 break; // some dag point future is not yet resolved
             };
             for next in chain_part {
-                if let Some(back) = self.anchor_chain.last() {
+                if let Some(back) = self.anchor_chain.top() {
                     assert_eq!(
                         next.anchor.anchor_round(AnchorStageRole::Proof),
                         back.proof.round(),
@@ -153,7 +166,10 @@ impl Committer {
             self.dag.drain_upto(Round(
                 (next.anchor.round().0).saturating_sub(MempoolConfig::COMMIT_DEPTH as _),
             ));
-            let Some(uncommitted) = self.dag.gather_uncommitted(&next.anchor) else {
+            let Some(uncommitted) = self
+                .dag
+                .gather_uncommitted(self.first_dag_bottom_after_gap, &next.anchor)
+            else {
                 // tracing::warn!(
                 //     "undo anchor {:?}, {:?}",
                 //     next.anchor.id().alt(),
@@ -162,7 +178,6 @@ impl Committer {
                 self.anchor_chain.undo_next(next);
                 break; // will continue at the next call if now some point isn't ready
             };
-            self.anchor_chain.set_used(&next);
 
             match self
                 .dag
@@ -278,15 +293,18 @@ mod test {
         committer.extend_from_ahead(&mem::take(&mut buf), &peer_schedule);
 
         println!(
-            "dag of {} rounds with {PEER_COUNT} peers",
-            committer.dag.len()
+            "{} with {PEER_COUNT} peers populated and validated",
+            committer.dag.alt()
         );
 
-        println!("populated and validated");
+        assert_eq!(
+            committer.dag.bottom_round(),
+            Round(39),
+            "test config changed? should update test then"
+        );
 
-        // println!("{:?}", committer.dag.alt());
-
-        assert_eq!(commit(&mut committer, Some(Round(48))).len(), 11);
+        // candidates exist at rounds 40 and 44 with full triplets, 9 anchors are discarded
+        assert_eq!(commit(&mut committer, Some(Round(48))).len(), 2);
 
         let mut r_points = vec![];
 

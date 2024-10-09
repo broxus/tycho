@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter, Write};
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{AnchorStageRole, PointInfo, Round};
+use crate::models::{PointInfo, Round};
 
 pub struct EnqueuedAnchor {
     pub anchor: PointInfo,
@@ -14,20 +14,15 @@ pub struct EnqueuedAnchor {
 pub struct AnchorChain {
     // from the oldest to the last determined without gaps
     queue: VecDeque<EnqueuedAnchor>,
-    // set from both commit and watch; also may be less than chain front and denote a gap
-    last_used_proof_round: Option<Round>,
 }
 
 impl AnchorChain {
-    pub fn last(&self) -> Option<&EnqueuedAnchor> {
+    pub fn top(&self) -> Option<&EnqueuedAnchor> {
         self.queue.back()
     }
 
-    pub fn last_proof_round(&self) -> Option<Round> {
-        match self.queue.back() {
-            Some(back) => Some(back.proof.round()),
-            None => self.last_used_proof_round,
-        }
+    pub fn top_proof_round(&self) -> Option<Round> {
+        Some(self.queue.back()?.proof.round())
     }
 
     pub fn enqueue(&mut self, last: EnqueuedAnchor) {
@@ -35,24 +30,11 @@ impl AnchorChain {
     }
 
     pub fn next(&mut self) -> Option<EnqueuedAnchor> {
-        let next = self.queue.pop_front()?;
-        // FIXME remove this to allow skip gaps
-        if let Some(last_used_proof_round) = self.last_used_proof_round {
-            assert_eq!(
-                next.anchor.anchor_round(AnchorStageRole::Proof),
-                last_used_proof_round,
-                "gap in anchor chain: prev proof round for new anchor mismatches top used proof round",
-            );
-        }
-        Some(next)
+        self.queue.pop_front()
     }
 
     pub fn undo_next(&mut self, next: EnqueuedAnchor) {
         self.queue.push_front(next);
-    }
-
-    pub fn set_used(&mut self, used: &EnqueuedAnchor) {
-        self.last_used_proof_round = Some(used.proof.round());
     }
 
     pub fn drain_upto(
@@ -64,15 +46,6 @@ impl AnchorChain {
             .iter()
             .take_while(|e| e.anchor.round() < bottom_round)
             .count();
-        if outdated > 0 {
-            let as_if_used = self
-                .queue
-                .get(outdated - 1)
-                .expect("must exist at position")
-                .proof
-                .round();
-            self.last_used_proof_round = Some(as_if_used);
-        }
         self.queue.drain(..outdated)
     }
 }
@@ -94,11 +67,6 @@ impl AltFormat for AnchorChain {}
 impl Debug for AltFmt<'_, AnchorChain> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
-        write!(
-            f,
-            "last_used_proof_round {:?}",
-            inner.last_used_proof_round.as_ref().map(|r| r.0)
-        )?;
         f.write_str(", chain:[ ")?;
         for el in &inner.queue {
             f.write_str("{ ")?;
