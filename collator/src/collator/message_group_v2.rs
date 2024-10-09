@@ -14,7 +14,55 @@ pub struct Message {
 }
 
 #[derive(Default)]
-pub(super) struct MessageGroupsNew {
+pub(super) struct MessageGroupContainerV2 {
+    inner: MessageGroup,
+    limit: usize,
+    vert_size: usize,
+}
+
+impl MessageGroupContainerV2 {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn messages_count(&self) -> usize {
+        self.inner.messages_count()
+    }
+
+    pub fn limit_reached(&self) -> bool {
+        self.len() == self.limit
+    }
+
+    fn insert(&mut self, hash: HashBytes, message: Message) {
+        let Message { inner, is_internal } = message;
+        self.inner.insert(
+            &mut Some(inner),
+            is_internal,
+            hash,
+            self.limit,
+            self.vert_size,
+        );
+    }
+
+    fn is_vert_size_reached(&mut self, hash: HashBytes) -> bool {
+        if let Some(messages) = self.inner.get(&hash) {
+            messages.len() == self.vert_size
+        } else {
+            false
+        }
+    }
+}
+
+impl IntoIterator for MessageGroupContainerV2 {
+    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
+    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+#[derive(Default)]
+pub(super) struct MessageGroupsV2 {
     shard_id: ShardIdent,
 
     offset: u32,
@@ -30,7 +78,7 @@ pub(super) struct MessageGroupsNew {
     group_vert_size: usize,
 }
 
-impl MessageGroupsNew {
+impl MessageGroupsV2 {
     pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
         Self {
             shard_id,
@@ -178,7 +226,7 @@ impl MessageGroupsNew {
     }
 
     fn extract_first_group_inner(&mut self) -> Option<MessageGroup> {
-        let mut group = MessageGroupNew {
+        let mut group = MessageGroupContainerV2 {
             inner: MessageGroup::default(),
             limit: self.group_limit,
             vert_size: self.group_vert_size,
@@ -276,12 +324,6 @@ impl MessageGroupsNew {
             return None;
         }
 
-        let filling = messages
-            .iter()
-            .filter(|(_, m)| m.len() >= self.group_vert_size)
-            .count();
-        let is_full = filling >= self.group_limit;
-
         let group = MessageGroup::new(
             messages
                 .into_iter()
@@ -289,8 +331,6 @@ impl MessageGroupsNew {
                 .collect(),
             self.int_messages_count,
             self.ext_messages_count,
-            filling,
-            is_full,
         );
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -303,54 +343,6 @@ impl MessageGroupsNew {
     }
 }
 
-#[derive(Default)]
-pub(super) struct MessageGroupNew {
-    inner: MessageGroup,
-    limit: usize,
-    vert_size: usize,
-}
-
-impl MessageGroupNew {
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn messages_count(&self) -> usize {
-        self.inner.messages_count()
-    }
-
-    pub fn limit_reached(&self) -> bool {
-        self.len() == self.limit
-    }
-
-    fn insert(&mut self, hash: HashBytes, message: Message) {
-        let Message { inner, is_internal } = message;
-        self.inner.insert(
-            &mut Some(inner),
-            is_internal,
-            hash,
-            self.limit,
-            self.vert_size,
-        );
-    }
-
-    fn is_vert_size_reached(&mut self, hash: HashBytes) -> bool {
-        if let Some(messages) = self.inner.get(&hash) {
-            messages.len() == self.vert_size
-        } else {
-            false
-        }
-    }
-}
-
-impl IntoIterator for MessageGroupNew {
-    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use everscale_types::cell::Cell;
@@ -359,7 +351,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn groups_new() {
+    pub fn groups_v2() {
         let shard_id = ShardIdent::new_full(0);
         let group_vert_size = 10;
         let group_limit = 100;
@@ -376,7 +368,7 @@ mod tests {
         let mut all_messages_from_group_count = 0;
 
         let timer = std::time::Instant::now();
-        let mut new = MessageGroupsNew::new(shard_id, group_limit, group_vert_size);
+        let mut new = MessageGroupsV2::new(shard_id, group_limit, group_vert_size);
         for i in 0..externals_group_count {
             let mut address = HashBytes::ZERO;
             address.0[0] = (i % accounts_count) as u8;
@@ -433,11 +425,11 @@ mod tests {
     }
 
     #[test]
-    pub fn functional_groups_new() {
+    pub fn functional_groups_v2() {
         let shard_id = ShardIdent::new_full(0);
         let group_vert_size: usize = 2;
         let group_limit = 3;
-        let mut new = MessageGroupsNew::new(shard_id, group_limit, group_vert_size);
+        let mut new = MessageGroupsV2::new(shard_id, group_limit, group_vert_size);
 
         let mut address = HashBytes::ZERO;
 
@@ -551,7 +543,7 @@ mod tests {
         })
     }
 
-    fn extract_first_group_if_is_full_or_exceed_limit(new: &mut MessageGroupsNew) {
+    fn extract_first_group_if_is_full_or_exceed_limit(new: &mut MessageGroupsV2) {
         let messages_buffer_limit = 10;
         if new.first_group_is_full() || new.messages_count() >= messages_buffer_limit {
             let group = new.extract_first_group().unwrap();

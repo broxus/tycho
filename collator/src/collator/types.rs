@@ -7,20 +7,20 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, CurrencyCollection,  GlobalVersion, HashUpdate, ImportFees, InMsg,
-    Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
-    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
-    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    BlockRef, CurrencyCollection, GlobalVersion, HashUpdate, ImportFees, InMsg, Lazy, LibDescr,
+    MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
+    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, SpecialFlags, StateInit,
+    Transaction, ValueFlow,
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-#[cfg(not(feature = "new-message-groups"))]
-use super::message_group::MessageGroups;
-#[cfg(feature = "new-message-groups")]
-use super::message_group_new::MessageGroupsNew;
+#[cfg(not(feature = "msgs-groups-v2"))]
+use super::message_group_v1::MessageGroupsV1;
+#[cfg(feature = "msgs-groups-v2")]
+use super::message_group_v2::MessageGroupsV2;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 
@@ -853,13 +853,13 @@ pub struct Dequeued {
 }
 
 pub(super) struct MessagesBuffer {
-    #[cfg(not(feature = "new-message-groups"))]
+    #[cfg(not(feature = "msgs-groups-v2"))]
     /// messages groups
-    pub message_groups: MessageGroups,
+    pub message_groups: MessageGroupsV1,
 
-    #[cfg(feature = "new-message-groups")]
+    #[cfg(feature = "msgs-groups-v2")]
     /// messages groups
-    pub message_groups: MessageGroupsNew,
+    pub message_groups: MessageGroupsV2,
 
     /// current read positions of internals mq iterator
     /// when it is not finished
@@ -874,10 +874,10 @@ impl MessagesBuffer {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
             .set(group_vert_size as f64);
         Self {
-            #[cfg(not(feature = "new-message-groups"))]
-            message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
-            #[cfg(feature = "new-message-groups")]
-            message_groups: MessageGroupsNew::new(shard_id, group_limit, group_vert_size),
+            #[cfg(not(feature = "msgs-groups-v2"))]
+            message_groups: MessageGroupsV1::new(shard_id, group_limit, group_vert_size),
+            #[cfg(feature = "msgs-groups-v2")]
+            message_groups: MessageGroupsV2::new(shard_id, group_limit, group_vert_size),
             current_iterator_positions: Some(FastHashMap::default()),
             current_ext_reader_position: None,
         }
@@ -993,8 +993,6 @@ pub(super) struct MessageGroup {
     inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
     int_messages_count: usize,
     ext_messages_count: usize,
-    filling: usize,
-    is_full: bool,
 }
 
 impl MessageGroup {
@@ -1014,17 +1012,35 @@ impl MessageGroup {
         self.ext_messages_count
     }
 
-    #[cfg(not(feature = "new-message-groups"))]
-    pub fn is_full(&self) -> bool {
-        self.is_full
+    #[cfg(not(feature = "msgs-groups-v2"))]
+    pub fn insert_raw(&mut self, account_id: HashBytes, messages: Vec<Box<ParsedMessage>>) {
+        self.inner.insert(account_id, messages);
     }
 
-    pub fn increment_counters(&mut self, is_int: bool) {
-        if is_int {
-            self.int_messages_count += 1;
-        } else {
-            self.ext_messages_count += 1;
+    #[cfg(feature = "msgs-groups-v2")]
+    #[allow(clippy::vec_box)]
+    pub fn new(
+        messages: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
+        int_messages_count: usize,
+        ext_messages_count: usize,
+    ) -> Self {
+        Self {
+            inner: messages,
+            int_messages_count,
+            ext_messages_count,
         }
+    }
+
+    #[cfg(feature = "msgs-groups-v2")]
+    #[allow(clippy::vec_box)]
+    pub fn get(&self, account_id: &HashBytes) -> Option<&Vec<Box<ParsedMessage>>> {
+        self.inner.get(account_id)
+    }
+
+    #[cfg(not(feature = "msgs-groups-v2"))]
+    #[allow(clippy::vec_box)]
+    pub fn get_mut(&mut self, account_id: &HashBytes) -> Option<&mut Vec<Box<ParsedMessage>>> {
+        self.inner.get_mut(account_id)
     }
 
     pub fn insert(
@@ -1034,66 +1050,41 @@ impl MessageGroup {
         account_id: HashBytes,
         group_limit: usize,
         group_vert_size: usize,
-    ) {
+    ) -> bool {
         let group_len = self.inner.len();
-        match self.inner.entry(account_id) {
+
+        let Self {
+            inner,
+            int_messages_count,
+            ext_messages_count,
+        } = self;
+
+        match inner.entry(account_id) {
             Entry::Vacant(entry) => {
                 if group_len < group_limit {
                     entry.insert(vec![msg.take().unwrap()]);
-                    self.increment_counters(is_int);
+                    if is_int {
+                        *int_messages_count += 1;
+                    } else {
+                        *ext_messages_count += 1;
+                    }
+                    return false;
                 }
             }
             Entry::Occupied(mut entry) => {
                 let msgs = entry.get_mut();
                 if msgs.len() < group_vert_size {
                     msgs.push(msg.take().unwrap());
-
-                    if msgs.len() == group_vert_size {
-                        self.filling += 1;
-                        if self.filling == group_limit {
-                            self.is_full = true;
-                        }
+                    if is_int {
+                        *int_messages_count += 1;
+                    } else {
+                        *ext_messages_count += 1;
                     }
-
-                    self.increment_counters(is_int);
+                    return msgs.len() == group_vert_size;
                 }
             }
         }
-    }
-
-    #[cfg(not(feature = "new-message-groups"))]
-    pub fn insert_raw(&mut self, account_id: HashBytes, messages: Vec<Box<ParsedMessage>>) {
-        self.inner.insert(account_id, messages);
-    }
-
-    #[cfg(feature = "new-message-groups")]
-    #[allow(clippy::vec_box)]
-    pub fn new(
-        messages: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
-        int_messages_count: usize,
-        ext_messages_count: usize,
-        filling: usize,
-        is_full: bool,
-    ) -> Self {
-        Self {
-            inner: messages,
-            int_messages_count,
-            ext_messages_count,
-            filling,
-            is_full,
-        }
-    }
-
-    #[cfg(feature = "new-message-groups")]
-    #[allow(clippy::vec_box)]
-    pub fn get(&self, account_id: &HashBytes) -> Option<&Vec<Box<ParsedMessage>>> {
-        self.inner.get(account_id)
-    }
-
-    #[cfg(not(feature = "new-message-groups"))]
-    #[allow(clippy::vec_box)]
-    pub fn get_mut(&mut self, account_id: &HashBytes) -> Option<&mut Vec<Box<ParsedMessage>>> {
-        self.inner.get_mut(account_id)
+        false
     }
 }
 

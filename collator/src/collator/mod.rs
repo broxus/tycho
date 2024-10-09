@@ -34,10 +34,10 @@ mod debug_info;
 mod do_collate;
 mod error;
 mod execution_manager;
-#[cfg(not(feature = "new-message-groups"))]
-mod message_group;
-#[cfg(feature = "new-message-groups")]
-mod message_group_new;
+#[cfg(not(feature = "msgs-groups-v2"))]
+mod message_group_v1;
+#[cfg(feature = "msgs-groups-v2")]
+mod message_group_v2;
 mod mq_iterator_adapter;
 mod types;
 

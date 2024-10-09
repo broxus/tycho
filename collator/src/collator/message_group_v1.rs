@@ -1,3 +1,4 @@
+use everscale_types::cell::HashBytes;
 use everscale_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
@@ -7,12 +8,44 @@ use crate::collator::types::DisplayMessageGroup;
 use crate::tracing_targets;
 
 #[derive(Default)]
-pub(super) struct MessageGroups {
+pub(super) struct MessageGroupContainerV1 {
+    pub inner: MessageGroup,
+    filling: usize,
+    is_full: bool,
+}
+
+impl MessageGroupContainerV1 {
+    pub fn is_full(&self) -> bool {
+        self.is_full
+    }
+
+    pub fn insert(
+        &mut self,
+        msg: &mut Option<Box<ParsedMessage>>,
+        is_int: bool,
+        account_id: HashBytes,
+        group_limit: usize,
+        group_vert_size: usize,
+    ) {
+        if self
+            .inner
+            .insert(msg, is_int, account_id, group_limit, group_vert_size)
+        {
+            self.filling += 1;
+            if self.filling == group_limit {
+                self.is_full = true;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct MessageGroupsV1 {
     shard_id: ShardIdent,
 
     offset: u32,
     max_message_key: QueueKey,
-    groups: FastHashMap<u32, MessageGroup>,
+    groups: FastHashMap<u32, MessageGroupContainerV1>,
 
     int_messages_count: usize,
     ext_messages_count: usize,
@@ -21,7 +54,7 @@ pub(super) struct MessageGroups {
     group_vert_size: usize,
 }
 
-impl MessageGroups {
+impl MessageGroupsV1 {
     pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
         Self {
             shard_id,
@@ -164,10 +197,10 @@ impl MessageGroups {
 
     fn extract_first_group_inner(&mut self) -> Option<MessageGroup> {
         if let Some(first_group) = self.groups.remove(&self.offset) {
-            self.int_messages_count -= first_group.int_messages_count();
-            self.ext_messages_count -= first_group.ext_messages_count();
+            self.int_messages_count -= first_group.inner.int_messages_count();
+            self.ext_messages_count -= first_group.inner.ext_messages_count();
 
-            Some(first_group)
+            Some(first_group.inner)
         } else {
             None
         }
@@ -201,7 +234,7 @@ impl MessageGroups {
 }
 
 #[allow(dead_code)]
-pub(super) struct DisplayMessageGroups<'a>(pub &'a MessageGroups);
+pub(super) struct DisplayMessageGroups<'a>(pub &'a MessageGroupsV1);
 
 impl std::fmt::Debug for DisplayMessageGroups<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -213,7 +246,7 @@ impl std::fmt::Display for DisplayMessageGroups<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut m = f.debug_map();
         for (k, v) in self.0.groups.iter() {
-            m.entry(k, &DisplayMessageGroup(v));
+            m.entry(k, &DisplayMessageGroup(&v.inner));
         }
         m.finish()
     }
@@ -227,7 +260,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn groups_new() {
+    pub fn groups_v1() {
         let shard_id = ShardIdent::new_full(0);
         let group_vert_size = 10;
         let group_limit = 100;
@@ -244,7 +277,7 @@ mod tests {
         let mut all_messages_from_group_count = 0;
 
         let timer = std::time::Instant::now();
-        let mut old = MessageGroups::new(shard_id, group_limit, group_vert_size);
+        let mut old = MessageGroupsV1::new(shard_id, group_limit, group_vert_size);
         for i in 0..externals_group_count {
             let mut address = HashBytes::ZERO;
             address.0[0] = (i % accounts_count) as u8;
