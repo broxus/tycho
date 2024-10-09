@@ -1,5 +1,4 @@
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
@@ -849,13 +848,20 @@ pub struct Dequeued {
     pub same_shard: bool,
 }
 
+pub struct Message {
+    pub inner: Box<ParsedMessage>,
+    pub is_internal: bool,
+}
+
 #[derive(Default)]
 pub(super) struct MessageGroups {
     shard_id: ShardIdent,
 
     offset: u32,
     max_message_key: QueueKey,
-    groups: FastHashMap<u32, MessageGroup>,
+
+    current_messages: FastHashMap<HashBytes, VecDeque<Message>>,
+    new_messages: FastHashMap<HashBytes, VecDeque<Message>>,
 
     int_messages_count: usize,
     ext_messages_count: usize,
@@ -877,7 +883,8 @@ impl MessageGroups {
     pub fn reset(&mut self) {
         self.offset = 0;
         self.max_message_key = QueueKey::MIN;
-        self.groups.clear();
+        self.current_messages = Default::default();
+        self.new_messages = Default::default();
         self.int_messages_count = 0;
         self.ext_messages_count = 0;
     }
@@ -890,12 +897,28 @@ impl MessageGroups {
         &self.max_message_key
     }
 
-    pub fn len(&self) -> usize {
-        self.groups.len()
+    pub fn is_empty(&self) -> bool {
+        self.current_messages.is_empty() && self.new_messages.is_empty()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+    pub fn first_group_is_full(&self) -> bool {
+        let curent_messages_len: usize = self
+            .current_messages
+            .values()
+            .map(|messages| std::cmp::min(messages.len(), self.group_vert_size))
+            .sum();
+
+        if curent_messages_len >= self.group_limit {
+            return true;
+        }
+
+        let new_messages_len: usize = self
+            .new_messages
+            .values()
+            .map(|messages| std::cmp::min(messages.len(), self.group_vert_size))
+            .sum();
+
+        curent_messages_len + new_messages_len >= self.group_limit
     }
 
     pub fn messages_count(&self) -> usize {
@@ -910,7 +933,7 @@ impl MessageGroups {
         self.ext_messages_count
     }
 
-    fn incriment_counters(&mut self, is_int: bool) {
+    fn increment_counters(&mut self, is_int: bool) {
         if is_int {
             self.int_messages_count += 1;
         } else {
@@ -943,69 +966,25 @@ impl MessageGroups {
             }
         };
 
-        self.incriment_counters(is_int);
+        if let Some(messages) = self.current_messages.get_mut(&account_id) {
+            messages.push_back(Message {
+                inner: msg,
+                is_internal: is_int,
+            });
+        } else {
+            let messages = self.new_messages.entry(account_id).or_default();
 
-        let mut offset = self.offset;
-        loop {
-            let group_entry = self.groups.entry(offset).or_default();
-
-            if group_entry.is_full {
-                offset += 1;
-                continue;
-            }
-
-            let group_len = group_entry.inner.len();
-            match group_entry.inner.entry(account_id) {
-                Entry::Vacant(entry) => {
-                    if group_len < self.group_limit {
-                        entry.insert(vec![msg]);
-                        group_entry.incriment_counters(is_int);
-                        break;
-                    }
-
-                    offset += 1;
-                }
-                Entry::Occupied(mut entry) => {
-                    let msgs = entry.get_mut();
-                    if msgs.len() < self.group_vert_size {
-                        msgs.push(msg);
-
-                        if msgs.len() == self.group_vert_size {
-                            group_entry.filling += 1;
-                            if group_entry.filling == self.group_limit {
-                                group_entry.is_full = true;
-                            }
-                        }
-
-                        group_entry.incriment_counters(is_int);
-
-                        break;
-                    }
-
-                    offset += 1;
-                }
-            }
+            messages.push_back(Message {
+                inner: msg,
+                is_internal: is_int,
+            });
         }
+
+        self.increment_counters(is_int);
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
             .set(self.messages_count() as f64);
-    }
-
-    pub fn first_group_is_full(&self) -> bool {
-        if let Some(first_group) = self.groups.get(&self.offset) {
-            // FIXME: check if first group is full by stats on adding message
-            // let first_group_is_full = first_group.len() >= self.group_limit
-            //     && first_group
-            //         .inner
-            //         .values()
-            //         .all(|account_msgs| account_msgs.len() >= self.group_vert_size);
-            // first_group_is_full
-
-            first_group.is_full
-        } else {
-            false
-        }
     }
 
     pub fn extract_first_group(&mut self) -> Option<MessageGroup> {
@@ -1024,13 +1003,67 @@ impl MessageGroups {
     }
 
     fn extract_first_group_inner(&mut self) -> Option<MessageGroup> {
-        if let Some(first_group) = self.groups.remove(&self.offset) {
-            self.int_messages_count -= first_group.int_messages_count;
-            self.ext_messages_count -= first_group.ext_messages_count;
+        let mut group = MessageGroup {
+            inner: FastHashMap::default(),
+            int_messages_count: 0,
+            ext_messages_count: 0,
+            limit: self.group_limit,
+            vert_size: self.group_vert_size,
+        };
+        let mut offset = 0;
+        let mut hashes_to_remove = vec![];
 
-            Some(first_group)
-        } else {
+        'hashes: for (hash, messages) in self.current_messages.iter_mut() {
+            if messages.is_empty() {
+                hashes_to_remove.push(*hash);
+                continue;
+            }
+
+            while let Some(message) = messages.pop_front() {
+                group.insert(*hash, message);
+                offset += 1;
+                if group.is_full() {
+                    break 'hashes;
+                }
+                if group.is_vert_size_reached(*hash) {
+                    break;
+                }
+            }
+        }
+
+        for hash in hashes_to_remove {
+            self.current_messages.remove(&hash);
+        }
+
+        if !group.is_full() {
+            let mut new_current_messages: HashSet<HashBytes> = HashSet::default();
+            'hashes: for (hash, messages) in self.new_messages.iter_mut() {
+                while let Some(message) = messages.pop_front() {
+                    group.insert(*hash, message);
+                    new_current_messages.insert(*hash);
+                    offset += 1;
+                    if group.is_full() {
+                        break 'hashes;
+                    }
+                    if group.is_vert_size_reached(*hash) {
+                        break;
+                    }
+                }
+            }
+
+            for hash in new_current_messages {
+                self.current_messages
+                    .insert(hash, self.new_messages.remove(&hash).unwrap());
+            }
+        }
+
+        if group.messages_count() == 0 {
             None
+        } else {
+            self.int_messages_count -= group.int_messages_count;
+            self.ext_messages_count -= group.ext_messages_count;
+            self.offset = offset;
+            Some(group)
         }
     }
 
@@ -1061,15 +1094,14 @@ impl MessageGroups {
     }
 }
 
-// pub(super) type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
 #[derive(Default)]
 pub(super) struct MessageGroup {
     #[allow(clippy::vec_box)]
     inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
     int_messages_count: usize,
     ext_messages_count: usize,
-    filling: usize,
-    is_full: bool,
+    limit: usize,
+    vert_size: usize,
 }
 
 impl MessageGroup {
@@ -1081,11 +1113,29 @@ impl MessageGroup {
         self.int_messages_count + self.ext_messages_count
     }
 
-    fn incriment_counters(&mut self, is_int: bool) {
+    pub fn is_full(&self) -> bool {
+        self.messages_count() == self.limit
+    }
+
+    fn increment_counters(&mut self, is_int: bool) {
         if is_int {
             self.int_messages_count += 1;
         } else {
             self.ext_messages_count += 1;
+        }
+    }
+    fn insert(&mut self, hash: HashBytes, message: Message) {
+        let messages = self.inner.entry(hash).or_default();
+        let Message { inner, is_internal } = message;
+        messages.push(inner);
+        self.increment_counters(is_internal);
+    }
+
+    fn is_vert_size_reached(&mut self, hash: HashBytes) -> bool {
+        if let Some(messages) = self.inner.get(&hash) {
+            messages.len() == self.vert_size
+        } else {
+            false
         }
     }
 }
@@ -1133,8 +1183,11 @@ impl std::fmt::Debug for DisplayMessageGroups<'_> {
 impl std::fmt::Display for DisplayMessageGroups<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut m = f.debug_map();
-        for (k, v) in self.0.groups.iter() {
-            m.entry(k, &DisplayMessageGroup(v));
+        for (k, v) in self.0.current_messages.iter() {
+            m.entry(k, &v.len());
+        }
+        for (k, v) in self.0.new_messages.iter() {
+            m.entry(k, &v.len());
         }
         m.finish()
     }

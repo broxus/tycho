@@ -411,7 +411,7 @@ impl ExecutionManager {
                     break;
                 }
 
-                if msgs_buffer.message_groups.len() > 1 {
+                if msgs_buffer.message_groups.first_group_is_full() {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "next new message does not fit first group, stop reading new internals",
                     );
