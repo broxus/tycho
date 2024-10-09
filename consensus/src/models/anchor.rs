@@ -1,4 +1,4 @@
-use crate::models::PointInfo;
+use crate::models::{PointInfo, Round};
 
 pub struct AnchorData {
     pub anchor: PointInfo,
@@ -6,6 +6,6 @@ pub struct AnchorData {
 }
 
 pub enum CommitResult {
-    UnrecoverableGap,
+    NewStartAfterGap(Round),
     Next(AnchorData),
 }

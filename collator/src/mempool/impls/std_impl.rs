@@ -102,10 +102,11 @@ impl MempoolAdapterStdImpl {
         let mut has_gap = false;
         while let Some(commit) = anchor_rx.recv().await {
             let (anchor, history) = match commit {
-                CommitResult::UnrecoverableGap => {
+                CommitResult::NewStartAfterGap(round) => {
                     cache.reset();
                     parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
                     has_gap = true;
+                    store.report_new_start(round);
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "externals cache dropped"
