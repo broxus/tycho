@@ -1289,10 +1289,9 @@ impl CollatorStdImpl {
             .map_err(|e| {
                 anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
             })?;
-
             working_state.gas_used_from_last_anchor = 0;
 
-            has_externals = next_anchor_has_externals;
+            has_externals |= next_anchor_has_externals;
             if has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",

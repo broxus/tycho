@@ -349,8 +349,8 @@ impl CollatorStdImpl {
                 .set(executed_groups_count as f64);
         }
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "accounts load: = {:?}",
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            "accounts load = {:?}",
             self.accounts_load.values()
         );
 

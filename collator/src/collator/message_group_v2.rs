@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo, ShardIdent};
@@ -70,6 +70,7 @@ pub(super) struct MessageGroupsV2 {
 
     current_messages: FastHashMap<HashBytes, VecDeque<Message>>,
     new_messages: BTreeMap<HashBytes, VecDeque<Message>>,
+    new_messages_full: BTreeMap<HashBytes, VecDeque<Message>>,
 
     int_messages_count: usize,
     ext_messages_count: usize,
@@ -93,6 +94,7 @@ impl MessageGroupsV2 {
         self.max_message_key = QueueKey::MIN;
         self.current_messages = Default::default();
         self.new_messages = Default::default();
+        self.new_messages_full = Default::default();
         self.int_messages_count = 0;
         self.ext_messages_count = 0;
     }
@@ -106,20 +108,25 @@ impl MessageGroupsV2 {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.current_messages.is_empty() && self.new_messages.is_empty()
+        self.current_messages.is_empty()
+            && self.new_messages.is_empty()
+            && self.new_messages_full.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        let current_len: usize = self.current_messages.values().map(|m| m.len()).sum();
+        let current_len: usize = self
+            .current_messages
+            .values()
+            .filter(|m| !m.is_empty())
+            .count();
+        let new_len_full: usize = self.new_messages_full.len();
+        let new_len: usize = self.new_messages.len();
 
-        let new_len: usize = self.new_messages.values().map(|m| m.len()).sum();
+        let mut len = (current_len + new_len + new_len_full) / self.group_limit;
 
-        let mut len = (current_len + new_len) / self.group_limit;
-
-        if (current_len + new_len) % self.group_limit > 0 {
+        if (current_len + new_len + new_len_full) % self.group_limit > 0 {
             len += 1;
         }
-
         len
     }
 
@@ -134,11 +141,7 @@ impl MessageGroupsV2 {
             return true;
         }
 
-        let new_count = self
-            .new_messages
-            .iter()
-            .filter(|(_, m)| m.len() >= self.group_vert_size)
-            .count();
+        let new_count = self.new_messages_full.len();
 
         if current_count + new_count >= self.group_limit {
             return true;
@@ -197,12 +200,21 @@ impl MessageGroupsV2 {
                 inner: msg,
                 is_internal: is_int,
             });
+        } else if let Some(messages) = self.new_messages_full.get_mut(&account_id) {
+            messages.push_back(Message {
+                inner: msg,
+                is_internal: is_int,
+            });
         } else {
             let messages = self.new_messages.entry(account_id).or_default();
             messages.push_back(Message {
                 inner: msg,
                 is_internal: is_int,
             });
+            if messages.len() == self.group_vert_size {
+                let messages = self.new_messages.remove(&account_id).unwrap();
+                self.new_messages_full.insert(account_id, messages);
+            }
         }
 
         self.increment_counters(is_int);
@@ -255,52 +267,34 @@ impl MessageGroupsV2 {
 
         // take only messages with vert size >= group_vert_size, to fill group faster
         if !group.limit_reached() {
-            let mut new_current_messages: HashSet<HashBytes> = HashSet::default();
-            'hashes: for (hash, messages) in self
-                .new_messages
-                .iter_mut()
-                .filter(|(_, m)| m.len() >= self.group_vert_size)
-            {
+            'hashes: while let Some((hash, mut messages)) = self.new_messages_full.pop_first() {
                 while let Some(message) = messages.pop_front() {
-                    group.insert(*hash, message);
-                    new_current_messages.insert(*hash);
-                    if group.is_vert_size_reached(*hash) {
+                    group.insert(hash, message);
+                    if group.is_vert_size_reached(hash) {
                         break;
                     }
                 }
+                self.current_messages.insert(hash, messages);
+
                 if group.limit_reached() {
                     break 'hashes;
                 }
-            }
-
-            for hash in new_current_messages {
-                self.current_messages
-                    .insert(hash, self.new_messages.remove(&hash).unwrap());
             }
         }
 
         // take all messages remaining
         if !group.limit_reached() {
-            let mut new_current_messages: HashSet<HashBytes> = HashSet::default();
-            'hashes: for (hash, messages) in self.new_messages.iter_mut() {
-                if group.is_vert_size_reached(*hash) {
-                    continue;
-                }
+            'hashes: while let Some((hash, mut messages)) = self.new_messages.pop_first() {
                 while let Some(message) = messages.pop_front() {
-                    group.insert(*hash, message);
-                    new_current_messages.insert(*hash);
-                    if group.is_vert_size_reached(*hash) {
+                    group.insert(hash, message);
+                    if group.is_vert_size_reached(hash) {
                         break;
                     }
                 }
+                self.current_messages.insert(hash, messages);
                 if group.limit_reached() {
                     break 'hashes;
                 }
-            }
-
-            for hash in new_current_messages {
-                self.current_messages
-                    .insert(hash, self.new_messages.remove(&hash).unwrap());
             }
         }
 
@@ -316,6 +310,11 @@ impl MessageGroupsV2 {
     pub fn extract_merged_group(&mut self) -> Option<MessageGroup> {
         let mut messages: Vec<(HashBytes, VecDeque<Message>)> =
             self.current_messages.drain().collect();
+
+        while let Some((key, val)) = self.new_messages_full.pop_first() {
+            messages.push((key, val));
+        }
+
         while let Some((key, val)) = self.new_messages.pop_first() {
             messages.push((key, val));
         }
@@ -355,10 +354,10 @@ mod tests {
         let shard_id = ShardIdent::new_full(0);
         let group_vert_size = 10;
         let group_limit = 100;
-        // let externals_group_count = 25000;
-        let externals_group_count = 2500;
+        let externals_group_count = 25000_u32;
+        // let externals_group_count = 2500;
         let externals_group_len = 4;
-        let accounts_count = 1000;
+        let accounts_count = 1000_u32;
         let messages_buffer_limit = 20000;
 
         let mut count_buffer_limit = 0;
@@ -372,15 +371,15 @@ mod tests {
         for i in 0..externals_group_count {
             let mut address = HashBytes::ZERO;
             address.0[0] = (i % accounts_count) as u8;
-            address.0[1] = (i % accounts_count >> 8) as u8;
+            address.0[1] = ((i % accounts_count) >> 8) as u8;
 
             let info = MsgInfo::ExtIn(ExtInMsgInfo {
                 dst: IntAddr::Std(StdAddr::new(0, address)),
                 ..Default::default()
             });
 
-            let messages_count = externals_group_len + i % accounts_count >> 2;
-            // let messages_count = externals_group_len;
+            // let messages_count = externals_group_len + i % accounts_count >> 2;
+            let messages_count = externals_group_len;
             for _ in 0..messages_count {
                 let msg = Box::new(ParsedMessage {
                     info: info.clone(),
@@ -435,91 +434,91 @@ mod tests {
 
         println!("A1,A2,B1,C1,D1,D2,E1,F1,A3,B2,B3,G1,C2,E2,E3");
         //  A1
-        address.0[0] = 0 as u8;
+        address.0[0] = 0_u8;
         let a1 = create_new_parsed_message(address);
         new.add_message(a1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // A2
-        address.0[0] = 0 as u8;
+        address.0[0] = 0_u8;
         let a2 = create_new_parsed_message(address);
         new.add_message(a2);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // B1
-        address.0[0] = 1 as u8;
+        address.0[0] = 1_u8;
         let b1 = create_new_parsed_message(address);
         new.add_message(b1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // C1
-        address.0[0] = 2 as u8;
+        address.0[0] = 2_u8;
         let c1 = create_new_parsed_message(address);
         new.add_message(c1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // D1
-        address.0[0] = 3 as u8;
+        address.0[0] = 3_u8;
         let d1 = create_new_parsed_message(address);
         new.add_message(d1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // D2
-        address.0[0] = 3 as u8;
+        address.0[0] = 3_u8;
         let d2 = create_new_parsed_message(address);
         new.add_message(d2);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // E1
-        address.0[0] = 4 as u8;
+        address.0[0] = 4_u8;
         let e1 = create_new_parsed_message(address);
         new.add_message(e1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // F1
-        address.0[0] = 5 as u8;
+        address.0[0] = 5_u8;
         let f1 = create_new_parsed_message(address);
         new.add_message(f1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // A3,
-        address.0[0] = 0 as u8;
+        address.0[0] = 0_u8;
         let a3 = create_new_parsed_message(address);
         new.add_message(a3);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // B2
-        address.0[0] = 1 as u8;
+        address.0[0] = 1_u8;
         let b2 = create_new_parsed_message(address);
         new.add_message(b2);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // B3
-        address.0[0] = 1 as u8;
+        address.0[0] = 1_u8;
         let b3 = create_new_parsed_message(address);
         new.add_message(b3);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // G1
-        address.0[0] = 6 as u8;
+        address.0[0] = 6_u8;
         let g1 = create_new_parsed_message(address);
         new.add_message(g1);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // C2
-        address.0[0] = 2 as u8;
+        address.0[0] = 2_u8;
         let c2 = create_new_parsed_message(address);
         new.add_message(c2);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // E2
-        address.0[0] = 4 as u8;
+        address.0[0] = 4_u8;
         let e2 = create_new_parsed_message(address);
         new.add_message(e2);
         extract_first_group_if_is_full_or_exceed_limit(&mut new);
 
         // E3
-        address.0[0] = 4 as u8;
+        address.0[0] = 4_u8;
         let e3 = create_new_parsed_message(address);
         new.add_message(e3);
 
@@ -553,7 +552,7 @@ mod tests {
     }
 
     fn print_group(group: MessageGroup) {
-        for (address, m) in group.into_iter() {
+        for (address, m) in group {
             let s: &str = match address.0[0] {
                 0 => "A",
                 1 => "B",

@@ -264,10 +264,10 @@ mod tests {
         let shard_id = ShardIdent::new_full(0);
         let group_vert_size = 10;
         let group_limit = 100;
-        // let externals_group_count = 25000;
-        let externals_group_count = 2500;
+        let externals_group_count = 25000_u32;
+        // let externals_group_count = 2500;
         let externals_group_len = 4;
-        let accounts_count = 1000;
+        let accounts_count = 1000_u32;
         let messages_buffer_limit = 20000;
 
         let mut count_buffer_limit = 0;
@@ -281,15 +281,15 @@ mod tests {
         for i in 0..externals_group_count {
             let mut address = HashBytes::ZERO;
             address.0[0] = (i % accounts_count) as u8;
-            address.0[1] = (i % accounts_count >> 8) as u8;
+            address.0[1] = ((i % accounts_count) >> 8) as u8;
 
             let info = MsgInfo::ExtIn(ExtInMsgInfo {
                 dst: IntAddr::Std(StdAddr::new(0, address)),
                 ..Default::default()
             });
 
-            let messages_count = externals_group_len + i % accounts_count >> 2;
-            // let messages_count = externals_group_len;
+            // let messages_count = externals_group_len + i % accounts_count >> 2;
+            let messages_count = externals_group_len;
             for _ in 0..messages_count {
                 let msg = Box::new(ParsedMessage {
                     info: info.clone(),

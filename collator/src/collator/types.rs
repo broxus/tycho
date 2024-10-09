@@ -1013,6 +1013,7 @@ impl MessageGroup {
     }
 
     #[cfg(not(feature = "msgs-groups-v2"))]
+    #[allow(clippy::vec_box)]
     pub fn insert_raw(&mut self, account_id: HashBytes, messages: Vec<Box<ParsedMessage>>) {
         self.inner.insert(account_id, messages);
     }
