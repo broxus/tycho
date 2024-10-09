@@ -1221,10 +1221,10 @@ impl CollatorStdImpl {
         );
 
         // check has unprocessed messages in buffer or queue
-        let has_uprocessed_messages = self
+        let has_unprocessed_messages = self
             .check_has_unprocessed_messages(&mut working_state)
             .await?;
-        if has_uprocessed_messages {
+        if has_unprocessed_messages {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed messages from previous block, will collate next block",
             );
@@ -1259,7 +1259,7 @@ impl CollatorStdImpl {
             && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
-        let no_pending_msgs = !has_uprocessed_messages && !has_externals;
+        let no_pending_msgs = !has_unprocessed_messages && !has_externals;
 
         // import next anchor if meet one of above conditions
         let next_anchor_info_opt = if force_mc_block_by_uncommitted_chain {
@@ -1304,11 +1304,11 @@ impl CollatorStdImpl {
         };
 
         // collate block if has internals or externals
-        if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
+        if (has_unprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
             drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
-            if !has_uprocessed_messages && !has_externals {
+            if !has_unprocessed_messages && !has_externals {
                 self.accounts_load = Default::default();
             }
 

@@ -338,6 +338,9 @@ impl MessageGroupsV2 {
             DisplayMessageGroup(&group),
         );
 
+        self.int_messages_count = 0;
+        self.ext_messages_count = 0;
+
         Some(group)
     }
 }
