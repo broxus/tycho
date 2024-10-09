@@ -304,6 +304,7 @@ impl BlockCollationDataBuilder {
             execute_count_all: 0,
             execute_count_ext: 0,
             ext_msgs_error_count: 0,
+            ext_msgs_skipped: 0,
             execute_count_int: 0,
             execute_count_new_int: 0,
             int_enqueue_count: 0,
@@ -341,6 +342,7 @@ pub(super) struct BlockCollationData {
     pub execute_count_new_int: u64,
 
     pub ext_msgs_error_count: u64,
+    pub ext_msgs_skipped: u64,
 
     pub int_enqueue_count: u64,
     pub int_dequeue_count: u64,
@@ -603,6 +605,10 @@ impl ShardAccountStuff {
         }
     }
 
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.shard_account.load_account()?.is_none())
+    }
+
     pub fn build_hash_update(&self) -> Lazy<HashUpdate> {
         Lazy::new(&HashUpdate {
             old: self.initial_state_hash,
@@ -816,6 +822,10 @@ impl ParsedMessage {
             (MsgInfo::Int(_), _) => ParsedMessageKind::Int,
             (MsgInfo::ExtOut(_), _) => ParsedMessageKind::ExtOut,
         }
+    }
+
+    pub fn is_external(&self) -> bool {
+        matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
     }
 }
 

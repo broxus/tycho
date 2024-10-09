@@ -521,6 +521,7 @@ impl MessagesExecutor {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
+        let mut ext_msgs_skipped = 0;
 
         let group_horizontal_size = group.len();
         let group_messages_count = group.messages_count();
@@ -545,6 +546,7 @@ impl MessagesExecutor {
 
         while let Some(executed_msgs_result) = futures.next().await {
             let executed = executed_msgs_result?;
+            ext_msgs_skipped += executed.ext_msgs_skipped;
 
             max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
             total_exec_time += executed.exec_time;
@@ -612,6 +614,7 @@ impl MessagesExecutor {
         Ok(ExecutedGroup {
             items,
             ext_msgs_error_count,
+            ext_msgs_skipped,
         })
     }
 
@@ -626,11 +629,17 @@ impl MessagesExecutor {
         let params = self.params.clone();
 
         rayon_run_fifo(move || {
+            let mut ext_msgs_skipped = 0;
             let timer = std::time::Instant::now();
 
             let mut transactions = Vec::with_capacity(msgs.len());
+            let account_is_empty = account_state.is_empty()?;
 
             for msg in msgs {
+                if msg.is_external() && account_is_empty {
+                    ext_msgs_skipped += 1;
+                    continue;
+                }
                 transactions.push(execute_ordinary_transaction_impl(
                     &mut account_state,
                     msg,
@@ -644,6 +653,7 @@ impl MessagesExecutor {
                 account_state,
                 transactions,
                 exec_time: timer.elapsed(),
+                ext_msgs_skipped,
             })
         })
     }
@@ -769,6 +779,7 @@ impl AccountsCache {
 pub struct ExecutedGroup {
     pub items: Vec<ExecutedTickItem>,
     pub ext_msgs_error_count: u64,
+    pub ext_msgs_skipped: u64,
 }
 
 pub struct ExecutedTickItem {
@@ -780,6 +791,7 @@ pub struct ExecutedTransactions {
     pub account_state: Box<ShardAccountStuff>,
     pub transactions: Vec<ExecutedOrdinaryTransaction>,
     pub exec_time: Duration,
+    pub ext_msgs_skipped: u64,
 }
 
 pub struct ExecutedOrdinaryTransaction {
