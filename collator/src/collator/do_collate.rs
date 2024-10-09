@@ -276,6 +276,7 @@ impl CollatorStdImpl {
                     executed_groups_count += 1;
                     collation_data.tx_count += group_result.items.len() as u64;
                     collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
+                    collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
 
                     // Process transactions
                     timer = std::time::Instant::now();
@@ -572,6 +573,8 @@ impl CollatorStdImpl {
             .increment(collation_data.execute_count_ext);
         metrics::counter!("tycho_do_collate_msgs_error_count_ext", &labels)
             .increment(collation_data.ext_msgs_error_count);
+        metrics::counter!("tycho_do_collate_msgs_skipped_count_ext", &labels)
+            .increment(collation_data.ext_msgs_skipped);
 
         metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
             .increment(collation_data.read_int_msgs_from_iterator);

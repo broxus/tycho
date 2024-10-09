@@ -259,6 +259,10 @@ def blockchain_stats() -> RowPanel:
                     legend_format="failed",
                 ),
                 target(
+                    expr_aggr_avg_rate("tycho_do_collate_msgs_skipped_count_ext"),
+                    legend_format="skipped",
+                ),
+                target(
                     expr_aggr_avg_rate("tycho_do_collate_ext_msgs_expired_count"),
                     legend_format="expired",
                 ),
@@ -1013,6 +1017,11 @@ def collator_message_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_do_collate_msgs_error_count_ext",
             "Ext msgs error count",
+            labels_selectors=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_msgs_skipped_count_ext",
+            "Ext msgs skipped count",
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
