@@ -325,7 +325,6 @@ impl BlockCollationDataBuilder {
 
 #[derive(Debug)]
 pub(super) struct BlockCollationData {
-    // block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
     pub gen_utime: u32,
     pub gen_utime_ms: u16,
@@ -1137,8 +1136,8 @@ pub(super) struct MessagesBuffer {
     /// current read positions of internals mq iterator
     /// when it is not finished
     pub current_iterator_positions: Option<FastHashMap<ShardIdent, QueueKey>>,
-    /// we started ext messages reading before and can continue reading from `read_to`
-    pub ext_messages_reader_started: bool,
+    /// current read position for externals
+    pub current_ext_reader_position: Option<(u32, u64)>,
 }
 
 impl MessagesBuffer {
@@ -1149,7 +1148,7 @@ impl MessagesBuffer {
         Self {
             message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
             current_iterator_positions: Some(FastHashMap::default()),
-            ext_messages_reader_started: false,
+            current_ext_reader_position: None,
         }
     }
 
@@ -1220,8 +1219,20 @@ impl AnchorsCache {
         self.last_imported_anchor = Some(AnchorInfo::from_anchor(anchor, our_exts_count));
     }
 
-    pub fn remove(&mut self, _index: usize) {
-        self.cache.pop_front();
+    pub fn remove(&mut self, index: usize) {
+        if index == 0 {
+            self.cache.pop_front();
+        } else {
+            self.cache.remove(index);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.cache.len()
     }
 
     pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
@@ -1236,46 +1247,25 @@ impl AnchorsCache {
         self.has_pending_externals = has_pending_externals;
     }
 
-    fn find_index(&self, processed_to_anchor_id: MempoolAnchorId) -> Option<usize> {
-        self.cache.iter().enumerate().find_map(|(index, (id, _))| {
-            if *id == processed_to_anchor_id {
-                Some(index)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn take_after_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
+    pub fn iter_from_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
         self.cache
             .iter()
             .skip(index)
-            .map(|(_, anchor)| anchor.clone())
-    }
-
-    pub fn take_from_id(
-        &self,
-        processed_to_anchor_id: MempoolAnchorId,
-    ) -> Box<dyn Iterator<Item = Arc<MempoolAnchor>> + '_> {
-        if let Some(mut anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
-            anchor_index_in_cache = anchor_index_in_cache.saturating_sub(1);
-            Box::new(self.take_after_index(anchor_index_in_cache))
-        } else {
-            Box::new(std::iter::empty::<Arc<MempoolAnchor>>())
-        }
-    }
-
-    pub fn any_after_id(&self, processed_to_anchor_id: MempoolAnchorId) -> bool {
-        if let Some(anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
-            self.cache.len() > anchor_index_in_cache + 1
-        } else {
-            false
-        }
+            .map(|(_, anchor)| anchor)
+            .cloned()
     }
 }
 
 pub struct ParsedExternals {
     #[allow(clippy::vec_box)]
     pub ext_messages: Vec<Box<ParsedMessage>>,
+    pub current_reader_position: Option<(u32, u64)>,
     pub last_read_to_anchor_chain_time: Option<u64>,
+    pub was_stopped_on_prev_read_to_reached: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadNextExternalsMode {
+    ToTheEnd,
+    ToPreviuosReadTo,
 }

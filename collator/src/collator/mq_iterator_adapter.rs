@@ -15,6 +15,12 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitIteratorMode {
+    UseNextRange,
+    OmitNextRange,
+}
+
 pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     shard_id: ShardIdent,
     /// internals mq adapter
@@ -105,6 +111,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         &mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
         working_state: &WorkingState,
+        mode: InitIteratorMode,
     ) -> Result<bool> {
         let timer = std::time::Instant::now();
 
@@ -166,6 +173,26 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             // set processed messages in iterator by original ranges_from
             current_ranges_iterator.commit(current_ranges_from.into_iter().collect())?;
             Some(current_ranges_iterator)
+        } else if mode == InitIteratorMode::OmitNextRange {
+            // on refill we do not need to use next range at all
+            if self.iterator_is_none() {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "try_init_next_range_iterator: init with last ranges, ranges_fully_read={}, \
+                    ranges_from={}, ranges_to={}",
+                    ranges_fully_read,
+                    DisplayIter(ranges_from.iter().map(DisplayTuple)),
+                    DisplayIter(ranges_to.iter().map(DisplayTuple)),
+                );
+                let mut current_ranges_iterator = self
+                    .mq_adapter
+                    .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)
+                    .await?;
+                // set processed messages in iterator by ranges_from
+                current_ranges_iterator.commit(ranges_from.into_iter().collect())?;
+                Some(current_ranges_iterator)
+            } else {
+                None
+            }
         } else {
             // when current iterator exists or existing ranges fully read
 

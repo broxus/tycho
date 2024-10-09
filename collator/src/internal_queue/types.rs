@@ -68,6 +68,20 @@ pub struct EnqueuedMessage {
     pub hash: HashBytes,
 }
 
+#[cfg(test)]
+impl Default for EnqueuedMessage {
+    fn default() -> Self {
+        let info = IntMsgInfo::default();
+        let cell = everscale_types::cell::CellBuilder::build_from(&info).unwrap();
+
+        Self {
+            info,
+            hash: *cell.repr_hash(),
+            cell,
+        }
+    }
+}
+
 impl From<(IntMsgInfo, Cell)> for EnqueuedMessage {
     fn from((info, cell): (IntMsgInfo, Cell)) -> Self {
         let hash = *cell.repr_hash();
