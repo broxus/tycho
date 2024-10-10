@@ -154,17 +154,8 @@ where
 
         metrics_report_last_applied_block_and_anchor(state, &processed_upto);
 
-        let state_cloned = state.clone();
-        self.spawn_task(method_to_async_closure!(
-            detect_top_processed_to_anchor_and_notify_mempool,
-            false,
-            state_cloned,
-            processed_upto
-        ))
-        .await?;
-
-        let state_cloned = state.clone();
-        self.enqueue_task(method_to_async_closure!(handle_block_from_bc, state_cloned))
+        let state = state.clone();
+        self.enqueue_task(method_to_async_closure!(handle_block_from_bc, state))
             .await?;
 
         Ok(())
@@ -1145,6 +1136,10 @@ where
                     .clear_anchors_cache(top_processed_to_anchor_id)
                     .await?;
 
+                self.mpool_adapter
+                    .handle_top_processed_to_anchor(top_processed_to_anchor_id)
+                    .await?;
+
                 self.refresh_collation_sessions(mc_data, true).await?;
 
                 // remove all previous blocks from cache
@@ -1292,13 +1287,6 @@ where
                 .state_node_adapter
                 .load_state(&last_mc_block_id)
                 .await?;
-
-            self.detect_top_processed_to_anchor_and_notify_mempool(
-                false,
-                state.clone(),
-                state.state().processed_upto.load()?,
-            )
-            .await?;
 
             self.handle_block_from_bc(state).await
         }
