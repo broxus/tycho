@@ -38,8 +38,9 @@ pub struct CmdRun {
     logger_config: Option<PathBuf>,
 
     /// Round of a new consensus genesis
+    #[allow(clippy::option_option)]
     #[clap(long)]
-    mempool_start_round: Option<u32>,
+    mempool_start_round: Option<Option<u32>>,
 
     /// step is an amount of points produced by node for payload to grow in size
     #[arg(short, long, default_value_t = 0)]
@@ -101,7 +102,7 @@ impl CmdRun {
         let input_buffer = InputBuffer::new_stub(self.payload_step, self.steps_until_full);
 
         let (engine, anchor_consumer) = mempool
-            .boot(input_buffer, self.mempool_start_round)
+            .boot(input_buffer, self.mempool_start_round.unwrap_or_default())
             .await
             .wrap_err("failed to init mempool")?;
 

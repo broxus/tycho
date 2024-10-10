@@ -113,8 +113,14 @@ init_zerostate_config *flags:
 gen_network *flags:
     ./scripts/gen-network.sh --dir {{local_network_dir}} {{flags}}
 
-# Runs the node `N``.
+# Runs the node `N`.
 # Use `--mempool-start-round {round_id} --from-mc-block-seqno {seqno}`
 # to define last applied mc block and processed to anchor id.
 node *flags:
     ./scripts/run-node.sh --dir {{local_network_dir}} {{flags}}
+
+# Runs only mempool part of the node `N`.
+# Use `--mempool-start-round {round_id}`
+# to define new mempool genesis at non-default round
+mempool *flags:
+    ./scripts/run-mempool.sh --dir {{local_network_dir}} {{flags}}
