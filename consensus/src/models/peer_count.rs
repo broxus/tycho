@@ -31,7 +31,7 @@ impl PeerCount {
     pub const GENESIS: Self = Self(0);
     pub const MAX: Self = Self((u8::MAX - 1) / 3);
 
-    pub fn full(&self) -> usize {
+    pub const fn full(&self) -> usize {
         self.0 as usize * 3 + 1
     }
 

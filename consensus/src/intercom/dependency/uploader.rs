@@ -1,5 +1,6 @@
 use futures_util::FutureExt;
 use tycho_network::PeerId;
+use weedb::rocksdb::DBPinnableSlice;
 
 use crate::dag::DagRound;
 use crate::dyn_event;
@@ -16,13 +17,13 @@ enum SearchStatus {
 }
 
 impl Uploader {
-    pub fn find(
+    pub fn find<'a>(
         peer_id: &PeerId,
         point_id: &PointId,
         top_dag_round: &DagRound,
-        store: &MempoolStore,
+        store: &'a MempoolStore,
         effects: &Effects<EngineContext>,
-    ) -> PointByIdResponse {
+    ) -> PointByIdResponse<DBPinnableSlice<'a>> {
         if point_id.round > top_dag_round.round() {
             // TODO add logs
             return PointByIdResponse::TryLater;
@@ -32,11 +33,14 @@ impl Uploader {
             .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, effects))
             .or(Self::from_store(peer_id, point_id, store, effects));
         match status {
-            Some(SearchStatus::None) | None => PointByIdResponse::Defined(None),
+            Some(SearchStatus::None) | None => PointByIdResponse::DefinedNone,
             // Fixme return serialized as bytes from DB!
             // TODO add error logs if not found in DB while must have been
             Some(SearchStatus::Found) => {
-                PointByIdResponse::Defined(store.get_point(point_id.round, &point_id.digest))
+                match store.get_point_raw(point_id.round, point_id.digest) {
+                    None => PointByIdResponse::DefinedNone,
+                    Some(slice) => PointByIdResponse::Defined(slice),
+                }
             }
             Some(SearchStatus::TryLater) => PointByIdResponse::TryLater,
         }

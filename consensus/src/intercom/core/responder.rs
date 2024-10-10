@@ -3,12 +3,15 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use futures_util::future;
-use tycho_network::{Response, Service, ServiceRequest};
+use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
 
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::intercom::broadcast::Signer;
-use crate::intercom::core::dto::{MPQuery, MPResponse};
+use crate::intercom::core::dto::{
+    BroadcastMpResponse, BroadcastQuery, PointMpResponse, PointQuery, SignatureMpResponse,
+    SignatureQuery,
+};
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
 
@@ -54,7 +57,8 @@ impl Service<ServiceRequest> for Responder {
 
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        future::ready(self.handle_query(&req))
+        let inner = self.0.load_full();
+        future::ready(Self::handle_query(inner, &req))
     }
 
     #[inline]
@@ -69,83 +73,117 @@ impl Service<ServiceRequest> for Responder {
 }
 
 impl Responder {
-    fn handle_query(&self, req: &ServiceRequest) -> Option<Response> {
+    fn handle_query(inner: Option<Arc<ResponderInner>>, req: &ServiceRequest) -> Option<Response> {
         let task_start = Instant::now();
         let peer_id = req.metadata.peer_id;
-        let body = MPQuery::try_from(req)
+
+        let (constructor, body) = try_handle_prefix(&req)
             .inspect_err(|e| {
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
                     error = debug(e),
-                    "unexpected request",
+                    "unexpected prefix",
                 );
             })
-            .ok()?; // malformed request is a reason to ignore it
-        let inner = self.0.load_full();
-        let mp_response = match body {
-            MPQuery::Broadcast(point) => {
+            .ok()?;
+
+        let response = tycho_network::match_tl_request!(body, tag = constructor, {
+            BroadcastQuery as r => {
                 match inner {
                     None => {} // do nothing: sender has retry loop via signature request
                     Some(inner) => inner.broadcast_filter.add(
                         &req.metadata.peer_id,
-                        &Arc::new(point),
+                        &r.0,
                         inner.top_dag_round.as_ref(),
                         &inner.downloader,
                         &inner.store,
                         &inner.effects,
                     ),
                 };
-                MPResponse::Broadcast
-            }
-            MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
-                None => PointByIdResponse::TryLater,
-                Some(inner) => match &inner.top_dag_round {
-                    None => PointByIdResponse::TryLater,
-                    Some(top_dag_round) => Uploader::find(
-                        &peer_id,
-                        &point_id,
-                        top_dag_round,
-                        &inner.store,
-                        &inner.effects,
-                    ),
-                },
-            }),
-            MPQuery::Signature(round) => MPResponse::Signature(match inner {
-                None => SignatureResponse::TryLater,
-                Some(inner) => match &inner.top_dag_round {
-                    None => SignatureResponse::TryLater,
-                    Some(top_dag_round) => {
-                        Signer::signature_response(round, &peer_id, top_dag_round, &inner.effects)
-                    }
-                },
-            }),
-        };
-        let response = Response::try_from(&mp_response).expect("should serialize own response");
+                let response = Response::from_tl(&BroadcastMpResponse);
+                EngineContext::broadcast_response_metrics(task_start.elapsed());
+                response
 
-        EngineContext::response_metrics(&mp_response, task_start.elapsed());
+            },
+            PointQuery as r => {
+                let response = match &inner {
+                    None => PointByIdResponse::TryLater,
+                    Some(inner) => {
+                        let round = &inner.top_dag_round;
+                        let result = match round {
+                            None => PointByIdResponse::TryLater,
+                            Some(top_dag_round) => {
+                                Uploader::find(
+                                    &peer_id,
+                                    &r.0,
+                                    top_dag_round,
+                                    &inner.store,
+                                    &inner.effects,
+                                )
+                            }
+                        };
+                        result
+                    }
+                };
+                let response_body = PointMpResponse(response);
+                let response = Response::from_tl(&response_body);
+                EngineContext::point_by_id_response_metrics(response_body, task_start.elapsed());
+                response
+            },
+            SignatureQuery as r => {
+                let response = match inner {
+                    None => SignatureResponse::TryLater,
+                    Some(inner) => match &inner.top_dag_round {
+                        None => SignatureResponse::TryLater,
+                            Some(top_dag_round) => {
+                            Signer::signature_response(r.0, &peer_id, top_dag_round, &inner.effects)
+                        }
+                    },
+                };
+                let response_body = SignatureMpResponse(response);
+                let response = Response::from_tl(&response_body);
+                EngineContext::signature_response_metrics(response_body, task_start.elapsed());
+                response
+            }
+
+        }, e => {
+            tracing::error!(
+                "unexpected query: {e}",
+            );
+            //ignore corrupted message
+            return None;
+        });
 
         Some(response)
     }
 }
 
 impl EngineContext {
-    fn response_metrics(mp_response: &MPResponse, elapsed: Duration) {
-        let histogram = match mp_response {
-            MPResponse::Broadcast => {
-                metrics::histogram!("tycho_mempool_broadcast_query_responder_time")
-            }
-            MPResponse::Signature(SignatureResponse::NoPoint | SignatureResponse::TryLater) => {
+    fn broadcast_response_metrics(elapsed: Duration) {
+        let histogram = metrics::histogram!("tycho_mempool_broadcast_query_responder_time");
+        histogram.record(elapsed);
+    }
+
+    fn signature_response_metrics(response: SignatureMpResponse, elapsed: Duration) {
+        let histogram = match response.0 {
+            SignatureResponse::NoPoint | SignatureResponse::TryLater => {
                 metrics::histogram!("tycho_mempool_signature_query_responder_pong_time")
             }
-            MPResponse::Signature(
-                SignatureResponse::Signature(_) | SignatureResponse::Rejected(_),
-            ) => metrics::histogram!("tycho_mempool_signature_query_responder_data_time"),
-            MPResponse::PointById(PointByIdResponse::Defined(Some(_))) => {
+            SignatureResponse::Signature(_) | SignatureResponse::Rejected(_) => {
+                metrics::histogram!("tycho_mempool_signature_query_responder_data_time")
+            }
+        };
+        histogram.record(elapsed);
+    }
+
+    fn point_by_id_response_metrics<T>(response: PointMpResponse<T>, elapsed: Duration) {
+        let histogram = match response.0 {
+            PointByIdResponse::Defined(_) => {
                 metrics::histogram!("tycho_mempool_download_query_responder_some_time")
             }
-            MPResponse::PointById(
-                PointByIdResponse::Defined(None) | PointByIdResponse::TryLater,
-            ) => metrics::histogram!("tycho_mempool_download_query_responder_none_time"),
+            PointByIdResponse::DefinedNone | PointByIdResponse::TryLater => {
+                metrics::histogram!("tycho_mempool_download_query_responder_none_time")
+            }
         };
         histogram.record(elapsed);
     }

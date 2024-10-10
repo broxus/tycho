@@ -1,128 +1,146 @@
-use std::sync::LazyLock;
+use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
-use anyhow::anyhow;
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use tycho_network::{Response, ServiceRequest, Version};
-
-use crate::engine::MempoolConfig;
-use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
+use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
-// 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
-// as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
-// and 1 mapping of 32 (peer_id) to 64 (signature) valuable bytes (evidence);
-// the size of other data is fixed, and estimate is more than enough to handle `Bytes` encoding
-static LARGEST_DATA_BYTES: LazyLock<usize> = LazyLock::new(|| {
-    // size of BOC of least possible ExtIn message
-    const EXT_IN_BOC_MIN: usize = 48;
+#[derive(Debug)]
+pub struct BroadcastQuery(pub Point);
 
-    let boc = vec![0_u8; EXT_IN_BOC_MIN];
-    let payload = vec![boc; 1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN];
-    let payload_size = bincode::serialized_size(&payload).expect("cannot happen");
+impl BroadcastQuery {
+    pub(crate) const TL_ID: u32 = tl_proto::id!("core.broadcastQuery", scheme = "proto.tl");
+}
 
-    u16::MAX as usize + payload_size as usize
-});
+impl<'a> TlRead<'a> for BroadcastQuery {
+    type Repr = tl_proto::Boxed;
 
-// broadcast uses simple send_message with () return value
-impl From<&Point> for tycho_network::Request {
-    fn from(value: &Point) -> Self {
-        tycho_network::Request {
-            version: Version::V1,
-            body: Bytes::from(bincode::serialize(value).expect("shouldn't happen")),
+    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
+        if u32::read_from(packet, offset)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
         }
+
+        let size = packet.len();
+        if size > Point::max_byte_size() + 4usize {
+            tracing::error!(size = %size, "Point max size exceeded");
+            return Err(TlError::InvalidData);
+        }
+
+        if size < 8 {
+            tracing::error!(size = %size, "Point does not contain any useful data");
+            return Err(TlError::InvalidData);
+        }
+
+        // skip 4+4 bytes of BroadcastQuery tag and Point tag
+        if !Point::verify_hash_inner(&packet[*offset + 4..]) {
+            tracing::error!("Point hash is invalid");
+            return Err(TlError::InvalidData);
+        }
+
+        Point::read_from(packet, offset).map(Self)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum MPQuery {
-    Broadcast(Point),
-    PointById(PointId),
-    Signature(Round),
-}
+impl TlWrite for BroadcastQuery {
+    type Repr = tl_proto::Boxed;
 
-impl From<&MPQuery> for tycho_network::Request {
-    fn from(value: &MPQuery) -> Self {
-        tycho_network::Request {
-            version: Version::V1,
-            body: Bytes::from(bincode::serialize(value).expect("shouldn't happen")),
-        }
+    fn max_size_hint(&self) -> usize {
+        4 + self.0.max_size_hint()
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: TlPacket,
+    {
+        packet.write_u32(Self::TL_ID);
+        self.0.write_to(packet);
     }
 }
 
-impl TryFrom<&ServiceRequest> for MPQuery {
-    type Error = anyhow::Error;
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "core.pointQuery", scheme = "proto.tl")]
+pub struct PointQuery(pub PointId);
 
-    fn try_from(request: &ServiceRequest) -> Result<Self, Self::Error> {
-        if request.body.len() > *LARGEST_DATA_BYTES {
-            anyhow::bail!("too large request: {} bytes", request.body.len())
-        }
-        Ok(bincode::deserialize::<MPQuery>(&request.body)?)
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "core.signatureQuery", scheme = "proto.tl")]
+pub struct SignatureQuery(pub Round);
+
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "core.mpresponse.broadcast", scheme = "proto.tl")]
+pub struct BroadcastMpResponse;
+
+#[derive(Debug)]
+pub struct PointMpResponse<T>(pub PointByIdResponse<T>);
+
+impl<T> PointMpResponse<T> {
+    pub const TL_ID: u32 = tl_proto::id!("core.mpresponse.point", scheme = "proto.tl");
+}
+
+impl<T> TlWrite for PointMpResponse<T>
+where
+    PointByIdResponse<T>: TlWrite,
+{
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + self.0.max_size_hint()
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: TlPacket,
+    {
+        packet.write_u32(Self::TL_ID);
+        self.0.write_to(packet);
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum MPResponse {
-    Broadcast,
-    PointById(PointByIdResponse),
-    Signature(SignatureResponse),
-}
+impl<'tl, T> TlRead<'tl> for PointMpResponse<T>
+where
+    PointByIdResponse<T>: TlRead<'tl>,
+{
+    type Repr = tl_proto::Boxed;
 
-impl TryFrom<&MPResponse> for Response {
-    type Error = anyhow::Error;
+    fn read_from(packet: &'tl [u8], offset: &mut usize) -> TlResult<Self> {
+        if u32::read_from(packet, offset)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
 
-    fn try_from(value: &MPResponse) -> Result<Self, Self::Error> {
-        let body = Bytes::from(bincode::serialize(value)?);
-        Ok(Response {
-            version: Version::default(),
-            body,
-        })
+        let size = packet.len();
+        if size > Point::max_byte_size() + 4usize {
+            tracing::error!(size = %size, "Point max size exceeded");
+            return Err(TlError::InvalidData);
+        }
+
+        if packet.len() < *offset + 4usize {
+            tracing::error!(size = %size, "PointByIdResponse size is too low");
+            return Err(TlError::InvalidData);
+        }
+
+        let point_by_id_response_tag = {
+            let mut prefix = [0_u8; 4];
+            prefix.copy_from_slice(&packet[*offset..*offset + 4usize]);
+            u32::from_be_bytes(prefix)
+        };
+
+        match point_by_id_response_tag {
+            PointByIdResponse::<T>::DEFINED_TL_ID => {
+                // skip 4+4 bytes of PointByIdResponse and Point tag prefixes
+                if !Point::verify_hash_inner(&packet[8..]) {
+                    tracing::error!("Point hash is invalid");
+                    return Err(TlError::InvalidData);
+                }
+            }
+            PointByIdResponse::<T>::DEFINED_NONE_TL_ID
+            | PointByIdResponse::<T>::TRY_LATER_TL_ID => (),
+            _ => {
+                tracing::error!(tag = %point_by_id_response_tag, "Unknown PointByIdResponse tag id");
+                return Err(TlError::UnknownConstructor);
+            }
+        }
+
+        PointByIdResponse::<T>::read_from(packet, offset).map(Self)
     }
 }
 
-impl TryFrom<&Response> for MPResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: &Response) -> Result<Self, Self::Error> {
-        if response.body.len() > *LARGEST_DATA_BYTES {
-            anyhow::bail!("too large response: {} bytes", response.body.len())
-        }
-        match bincode::deserialize::<MPResponse>(&response.body) {
-            Ok(response) => Ok(response),
-            Err(e) => Err(anyhow!("failed to deserialize: {e:?}")),
-        }
-    }
-}
-
-impl TryFrom<MPResponse> for PointByIdResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
-        match response {
-            MPResponse::PointById(response) => Ok(response),
-            _ => Err(anyhow!("wrapper mismatch, expected PointById")),
-        }
-    }
-}
-
-impl TryFrom<MPResponse> for SignatureResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
-        match response {
-            MPResponse::Signature(response) => Ok(response),
-            _ => Err(anyhow!("wrapper mismatch, expected Signature")),
-        }
-    }
-}
-
-impl TryFrom<MPResponse> for BroadcastResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
-        match response {
-            MPResponse::Broadcast => Ok(BroadcastResponse),
-            _ => Err(anyhow!("wrapper mismatch, expected Broadcast")),
-        }
-    }
-}
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "core.mpresponse.signature", scheme = "proto.tl")]
+pub struct SignatureMpResponse(pub SignatureResponse);

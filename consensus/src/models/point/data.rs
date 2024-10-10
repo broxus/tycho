@@ -1,26 +1,36 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::models::point::{Digest, Round, UnixTime};
+use crate::models::proto_utils::points_btree_map;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Copy, TlRead, TlWrite, PartialEq, Debug)]
+#[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
 pub struct PointId {
     pub author: PeerId,
     pub round: Round,
     pub digest: Digest,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+impl PointId {
+    const MAX_TL_BYTES: usize = 68;
+}
+
+#[derive(Clone, TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
+#[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 pub struct PointData {
     pub author: PeerId,
+    #[tl(with = "points_btree_map")]
     /// `>= 2F+1` points @ r-1,
     /// signed by author @ r-1 with some additional points just mentioned;
     /// mandatory includes author's own vertex iff proof is given.
     /// Repeatable order on every node is needed for commit; map is used during validation
     pub includes: BTreeMap<PeerId, Digest>,
+
+    #[tl(with = "points_btree_map")]
     /// `>= 0` points @ r-2, signed by author @ r-1
     /// Repeatable order on every node needed for commit; map is used during validation
     pub witness: BTreeMap<PeerId, Digest>,
@@ -34,11 +44,14 @@ pub struct PointData {
     pub anchor_time: UnixTime,
 }
 
-#[derive(Serialize)]
+#[derive(TlWrite)]
+#[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 /// Note: fields and their order must be the same with [`PointData`]
 pub struct PointDataRef<'a> {
     author: &'a PeerId,
+    #[tl(with = "points_btree_map")]
     includes: &'a BTreeMap<PeerId, Digest>,
+    #[tl(with = "points_btree_map")]
     witness: &'a BTreeMap<PeerId, Digest>,
     anchor_trigger: &'a Link,
     anchor_proof: &'a Link,
@@ -60,16 +73,27 @@ impl<'a> From<&'a PointData> for PointDataRef<'a> {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum Link {
+    #[tl(id = "point.link.to_self")]
     ToSelf,
+    #[tl(id = "point.link.direct")]
     Direct(Through),
+    #[tl(id = "point.link.indirect")]
     Indirect { to: PointId, path: Through },
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+impl Link {
+    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + 32;
+}
+
+#[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum Through {
+    #[tl(id = "link.through.witness")]
     Witness(PeerId),
+    #[tl(id = "link.through.includes")]
     Includes(PeerId),
 }
 
@@ -107,7 +131,7 @@ impl PointData {
     /// resulting None should be replaced with id of wrapping point
     pub(super) fn anchor_id(&self, link_field: AnchorStageRole, round: Round) -> Option<PointId> {
         match self.anchor_link(link_field) {
-            Link::Indirect { to, .. } => Some(to.clone()),
+            Link::Indirect { to, .. } => Some(*to),
             _direct => self.anchor_link_id(link_field, round),
         }
     }
@@ -135,10 +159,9 @@ impl PointData {
         Some(PointId {
             author,
             round,
-            digest: map
+            digest: *map
                 .get(&author)
-                .expect("Coding error: usage of ill-formed point")
-                .clone(),
+                .expect("Coding error: usage of ill-formed point"),
         })
     }
 }

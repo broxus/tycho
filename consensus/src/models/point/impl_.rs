@@ -6,16 +6,17 @@ use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::models::point::body::PointBody;
+use crate::models::point::body::{PointBody, ShortPointBody};
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
-#[derive(Clone)]
+#[derive(Clone, TlWrite, TlRead)]
 pub struct Point(Arc<PointInner>);
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
 struct PointInner {
     // hash of everything except signature
     digest: Digest,
@@ -24,21 +25,27 @@ struct PointInner {
     body: PointBody,
 }
 
-impl Serialize for Point {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.as_ref().serialize(serializer)
-    }
+#[derive(Debug)]
+pub(crate) struct ShortPoint {
+    body: ShortPointBody,
 }
 
-impl<'de> Deserialize<'de> for Point {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Point(Arc::new(PointInner::deserialize(deserializer)?)))
+impl ShortPoint {
+    fn read_from_bytes(data: &[u8]) -> Result<Self, TlError> {
+        let mut offset: usize = 0;
+        let tag = u32::read_from(data, &mut offset)?;
+        if tag != Point::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+        // skip 36 + 64 bytes of digest and signature
+        offset += 96;
+        Ok(ShortPoint {
+            body: ShortPointBody::read_from(data, &mut offset)?,
+        })
+    }
+
+    pub fn payload(&self) -> &Vec<Bytes> {
+        &self.body.payload
     }
 }
 
@@ -56,11 +63,26 @@ impl PointInner {
     fn is_integrity_ok(&self) -> bool {
         self.signature
             .verifies(&self.body.data.author, &self.digest)
-            && self.digest == self.body.make_digest()
     }
 }
 
 impl Point {
+    pub const TL_ID: u32 = tl_proto::id!("consensus.pointInner", scheme = "proto.tl");
+
+    pub(crate) fn short_point_from_bytes<T: AsRef<[u8]>>(data: T) -> Result<ShortPoint, TlError> {
+        ShortPoint::read_from_bytes(data.as_ref())
+    }
+
+    pub const fn max_byte_size() -> usize {
+        // 4 bytes of Point tag
+        // 32 bytes of Digest
+        // 64 bytes of Signature
+
+        // Point body size
+
+        4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES + PointBody::max_byte_size()
+    }
+
     pub fn new(
         local_keypair: &KeyPair,
         round: Round,
@@ -79,6 +101,7 @@ impl Point {
             evidence,
             payload,
         };
+
         let digest = body.make_digest();
         Self(Arc::new(PointInner {
             signature: Signature::new(local_keypair, &digest),
@@ -115,7 +138,7 @@ impl Point {
         PointId {
             author: self.0.body.data.author,
             round: self.0.body.round,
-            digest: self.0.digest.clone(),
+            digest: self.0.digest,
         }
     }
 
@@ -123,13 +146,13 @@ impl Point {
         Some(PointId {
             author: self.0.body.data.author,
             round: self.0.body.round.prev(),
-            digest: self.0.body.data.prev_digest()?.clone(),
+            digest: *self.0.body.data.prev_digest()?,
         })
     }
 
     pub fn prev_proof(&self) -> Option<PrevPoint> {
         Some(PrevPoint {
-            digest: self.0.body.data.prev_digest()?.clone(),
+            digest: *self.0.body.data.prev_digest()?,
             evidence: self.0.body.evidence.clone(),
         })
     }
@@ -172,6 +195,20 @@ impl Point {
             .anchor_link_id(link_field, self.0.body.round)
             .unwrap_or(self.id())
     }
+
+    pub fn verify_hash(&self) -> bool {
+        let bytes = tl_proto::serialize(self);
+        Self::verify_hash_inner(&bytes[4..])
+    }
+
+    pub fn verify_hash_inner(data: &[u8]) -> bool {
+        if data.len() < 32 + 64 {
+            tracing::error!(len = %data.len(), "Data is too short");
+            return false;
+        }
+        // skip 64 bytes of signature
+        &data[0..32] == blake3::hash(&data[96..]).as_bytes()
+    }
 }
 
 #[derive(Debug)]
@@ -196,7 +233,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Instant;
 
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
     use everscale_crypto::ed25519::SecretKey;
     use rand::{thread_rng, RngCore};
     use tycho_util::sync::rayon_run;
@@ -205,8 +242,8 @@ mod tests {
     use crate::models::{PointInfo, Through, UnixTime};
 
     const PEERS: usize = 100;
-    const MSG_COUNT: usize = 120;
-    const MSG_BYTES: usize = 64 * 100;
+    const MSG_COUNT: usize = 1;
+    const MSG_BYTES: usize = 780768; // 64 * 100;
 
     fn new_key_pair() -> KeyPair {
         let mut secret_bytes: [u8; 32] = [0; 32];
@@ -284,17 +321,19 @@ mod tests {
             body: point_body.clone(),
         }));
         let info = PointInfo::from(&point);
-        let ser_info = bincode::serialize(&info).expect("serialize point");
-        let ser_ref =
-            bincode::serialize(&PointInfo::serializable_from(&point)).expect("serialize point");
+        let mut data = Vec::<u8>::with_capacity(info.max_size_hint());
+        info.write_to(&mut data);
+        let ref_info = PointInfo::serializable_from(&point);
+        let mut ref_data = Vec::<u8>::with_capacity(info.max_size_hint());
+        ref_info.write_to(&mut ref_data);
 
         assert_eq!(
             info,
-            bincode::deserialize::<PointInfo>(&ser_ref).expect("deserialize point info from ref"),
+            tl_proto::deserialize(&ref_data).expect("deserialize point info from ref"),
         );
         assert_eq!(
-            Digest::new(&ser_info),
-            Digest::new(&ser_ref),
+            Digest::new(&data),
+            Digest::new(&ref_data),
             "compare serialized bytes"
         );
     }
@@ -363,11 +402,14 @@ mod tests {
         }));
 
         let timer = Instant::now();
-        let body = bincode::serialize(&point_body).expect("shouldn't happen");
-        let bincode_elapsed = timer.elapsed();
+        let mut data = BytesMut::with_capacity(point_body.max_size_hint());
+        point_body.write_to(&mut data);
+        let elapsed = timer.elapsed();
+
+        let bytes = data.freeze();
 
         let timer = Instant::now();
-        let digest = Digest::new(body.as_slice());
+        let digest = Digest::new(bytes.as_ref());
         let sha_elapsed = timer.elapsed();
         assert_eq!(&digest, point.digest(), "point digest");
 
@@ -377,19 +419,101 @@ mod tests {
         assert_eq!(&sig, point.signature(), "point signature");
 
         println!(
-            "bincode {} bytes of point with {} bytes payload took {}",
-            body.len(),
+            "tl {} bytes of point with {} bytes payload took {}",
+            bytes.len(),
             point_body
                 .payload
                 .iter()
                 .fold(0, |acc, bytes| acc + bytes.len()),
-            humantime::format_duration(bincode_elapsed)
+            humantime::format_duration(elapsed)
         );
         println!("hash took {}", humantime::format_duration(sha_elapsed));
         println!("sig took {}", humantime::format_duration(sig_elapsed));
         println!(
             "total {}",
-            humantime::format_duration(bincode_elapsed + sha_elapsed + sig_elapsed)
+            humantime::format_duration(elapsed + sha_elapsed + sig_elapsed)
+        );
+    }
+
+    #[test]
+    pub fn massive_point_deserialization() {
+        let point_key_pair = new_key_pair();
+        let point_payload = MSG_COUNT * MSG_BYTES;
+
+        let point_body = point_body(&point_key_pair);
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
+
+        let mut data = Vec::<u8>::with_capacity(Point::max_byte_size());
+        point.write_to(&mut data);
+        let byte_size = data.len();
+
+        let timer = Instant::now();
+        const POINTS_LEN: u32 = 100;
+        for _ in 0..POINTS_LEN {
+            if let Err(e) = tl_proto::deserialize::<Point>(&data) {
+                println!("error {e:?}");
+                return;
+            }
+        }
+
+        let elapsed = timer.elapsed();
+        println!(
+            "tl read of {POINTS_LEN} point os size {byte_size} bytes of point with {point_payload} bytes payload took {}",
+            humantime::format_duration(elapsed)
+        );
+    }
+
+    #[test]
+    pub fn point_to_short_point() {
+        let point_key_pair = new_key_pair();
+        let point_body = point_body(&point_key_pair);
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
+
+        let bytes = tl_proto::serialize(&point);
+
+        let short = ShortPoint::read_from_bytes(&bytes)
+            .expect("Failed to deserialize ShortPoint from Point bytes");
+        assert_eq!(short.body.round, point.0.body.round);
+        assert_eq!(short.body.payload, point.0.body.payload);
+    }
+
+    #[test]
+    pub fn massive_point_serialization() {
+        let point_key_pair = new_key_pair();
+        let timer = Instant::now();
+        let point_payload = MSG_COUNT * MSG_BYTES;
+        let mut byte_size = 0;
+
+        let point_body = point_body(&point_key_pair);
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
+        const POINTS_LEN: u32 = 100;
+        for _ in 0..POINTS_LEN {
+            let point = point.clone();
+            let mut data = Vec::<u8>::with_capacity(Point::max_byte_size());
+            point.write_to(&mut data);
+            byte_size = data.len();
+            // data.freeze();
+        }
+
+        let elapsed = timer.elapsed();
+        println!(
+            "tl write of {POINTS_LEN} point os size {byte_size} bytes of point with {point_payload} bytes payload took {}",
+            humantime::format_duration(elapsed)
         );
     }
 }

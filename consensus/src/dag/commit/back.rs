@@ -369,7 +369,7 @@ impl DagBack {
                 *to = from.clone();
             } else {
                 for (peer, digest) in from {
-                    to.insert(*peer, digest.clone());
+                    to.insert(*peer, *digest);
                 }
             }
         }
@@ -502,7 +502,7 @@ impl DagBack {
                 let point_id = PointId {
                     author: *author,
                     round: dag_round.round(),
-                    digest: digest.clone(),
+                    digest: *digest,
                 };
                 panic!("{point_kind} {msg}: {:?}", point_id.alt())
             })

@@ -7,7 +7,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
-use tycho_network::PeerId;
+use tycho_network::{PeerId, Request};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
@@ -16,7 +16,7 @@ use crate::effects::{AltFormat, BroadcasterContext, Effects, EngineContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::broadcast::utils::QueryResponses;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
-use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
+use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, Signature};
 
 #[derive(Copy, Clone, Debug)]
@@ -66,7 +66,7 @@ impl Broadcaster {
         let mut task = BroadcasterTask {
             effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
             dispatcher: self.dispatcher.clone(),
-            point_digest: point.digest().clone(),
+            point_digest: *point.digest(),
             bcaster_signal: Some(bcaster_signal),
             collector_signal,
 
@@ -91,7 +91,7 @@ impl Broadcaster {
         metrics::counter!("tycho_mempool_collected_signatures_count")
             .increment(task.signatures.len() as _);
         LastOwnPoint {
-            digest: point.digest().clone(),
+            digest: *point.digest(),
             evidence: task.signatures.into_iter().collect(),
             round: point.round(),
             signers: signers_count,
@@ -116,11 +116,11 @@ struct BroadcasterTask {
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
 
-    bcast_request: QueryKind,
+    bcast_request: Request,
     bcast_current: QueryResponses<BroadcastResponse>,
     bcast_outdated: QueryResponses<BroadcastResponse>,
 
-    sig_request: QueryKind,
+    sig_request: Request,
     sig_peers: FastHashSet<PeerId>,
     sig_current: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
 }
@@ -295,8 +295,11 @@ impl BroadcasterTask {
 
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
-            self.bcast_current
-                .push(peer_id, self.dispatcher.query(peer_id, &self.bcast_request));
+            self.bcast_current.push(
+                peer_id,
+                self.dispatcher
+                    .query_broadcast(peer_id, &self.bcast_request),
+            );
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),
@@ -314,7 +317,7 @@ impl BroadcasterTask {
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.sig_current
-                .push(self.dispatcher.query(peer_id, &self.sig_request));
+                .push(self.dispatcher.query_signature(peer_id, &self.sig_request));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),

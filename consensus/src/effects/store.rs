@@ -4,11 +4,12 @@ use ahash::HashMapExt;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use itertools::Itertools;
+use tl_proto::TlWrite;
 use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::{ReadOptions, WaitForCompactOptions, WriteBatch};
+use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -32,6 +33,8 @@ trait MempoolStoreImpl: Send + Sync {
     fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()>;
 
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
+
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice<'_>>>;
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>>;
 
@@ -129,9 +132,16 @@ impl MempoolStore {
             .expect("DB get point full")
     }
 
-    pub fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
+    pub fn get_point_raw(&self, round: Round, digest: Digest) -> Option<DBPinnableSlice<'_>> {
         self.0
-            .get_info(round, digest)
+            .get_point_raw(round, &digest)
+            .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
+            .expect("DB get point full")
+    }
+
+    pub fn get_info(&self, round: Round, digest: Digest) -> Option<PointInfo> {
+        self.0
+            .get_info(round, &digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
             .expect("DB get point info")
     }
@@ -238,10 +248,6 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
 
-        let info = bincode::serialize(&PointInfo::serializable_from(point))
-            .context("serialize db point info equivalent from point")?;
-        let point = bincode::serialize(point)?;
-
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
         let info_cf = self.db.points_info.cf();
@@ -251,8 +257,17 @@ impl MempoolStoreImpl for MempoolStorage {
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
-        batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
-        batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
+
+        let mut buffer = Vec::<u8>::with_capacity(Point::max_byte_size());
+        point.write_to(&mut buffer);
+        batch.put_cf(&points_cf, key.as_slice(), &buffer);
+
+        buffer.clear();
+
+        let value = PointInfo::serializable_from(point);
+        value.write_to(&mut buffer);
+
+        batch.put_cf(&info_cf, key.as_slice(), &buffer);
         batch.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
 
         Ok(db.write(batch)?)
@@ -302,8 +317,19 @@ impl MempoolStoreImpl for MempoolStorage {
         points
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| bincode::deserialize(&a).context("deserialize db point"))
+            .map(|a| tl_proto::deserialize::<Point>(&a).context("deserialize db point"))
             .transpose()
+    }
+
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
+        metrics::counter!("tycho_mempool_store_get_point_raw_count").increment(1);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_raw_time");
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+
+        let points = &self.db.points;
+        let point = points.get(key.as_slice()).context("db get")?;
+        Ok(point)
     }
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>> {
@@ -316,7 +342,7 @@ impl MempoolStoreImpl for MempoolStorage {
         table
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| bincode::deserialize(&a).context("deserialize point info"))
+            .map(|a| tl_proto::deserialize::<PointInfo>(&a).context("deserialize point info"))
             .transpose()
     }
 
@@ -372,11 +398,17 @@ impl MempoolStoreImpl for MempoolStorage {
             let key = iter.key().context("history iter invalidated on key")?;
             if keys.remove(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point = bincode::deserialize::<Point>(bytes).context("deserialize point")?;
+                let point = Point::short_point_from_bytes(bytes).context("deserialize point")?;
 
                 total_payload_items += point.payload().len();
-                if let Some(prev_duplicate) = found.insert(key.to_vec().into_boxed_slice(), point) {
-                    panic!("iter read non-unique point {:?}", prev_duplicate.id())
+                if found
+                    .insert(key.to_vec().into_boxed_slice(), point)
+                    .is_some()
+                {
+                    // we panic thus we don't care about performance
+                    let full_point =
+                        tl_proto::deserialize::<Point>(bytes).context("deserialize point")?;
+                    panic!("iter read non-unique point {:?}", full_point.id())
                 }
             }
             if keys.is_empty() {
@@ -473,7 +505,7 @@ impl MempoolStoreImpl for MempoolStorage {
                 break;
             };
             let info =
-                bincode::deserialize::<PointInfo>(info).context("db deserialize point info")?;
+                tl_proto::deserialize::<PointInfo>(info).context("db deserialize point info")?;
             if let Some(status) = statuses.remove(key) {
                 result.push((info, status));
             } else {
@@ -520,6 +552,10 @@ impl MempoolStoreImpl for () {
     }
 
     fn get_point(&self, _: Round, _: &Digest) -> Result<Option<Point>> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn get_point_raw(&self, _: Round, _: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
         anyhow::bail!("should not be used in tests")
     }
 

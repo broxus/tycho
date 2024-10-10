@@ -153,6 +153,11 @@ impl Engine {
             guard.set_next_peers(current_peers, &peer_schedule, true);
             guard.rotate(&peer_schedule);
         }
+
+        if !genesis.verify_hash() {
+            panic!("Failed to verify genesis hash");
+        }
+
         Verifier::verify(&genesis, &self.round_task.state.peer_schedule)
             .expect("genesis failed to verify");
 

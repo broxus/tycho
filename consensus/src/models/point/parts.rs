@@ -2,11 +2,14 @@ use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Sub};
 
 use everscale_crypto::ed25519::KeyPair;
-use serde::{Deserialize, Serialize};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
+impl Digest {
+    pub const MAX_TL_BYTES: usize = 32;
+}
 
 impl Display for Digest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -35,32 +38,11 @@ impl Digest {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, TlWrite, TlRead, PartialEq)]
 pub struct Signature([u8; 64]);
 
-impl Serialize for Signature {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_bytes(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Signature {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let bytes = <&[u8]>::deserialize(deserializer)?;
-        if bytes.len() != 64 {
-            Err(serde::de::Error::invalid_length(bytes.len(), &"64"))
-        } else {
-            let mut target = [0_u8; 64];
-            target.copy_from_slice(bytes);
-            Ok(Signature(target))
-        }
-    }
+impl Signature {
+    pub const MAX_TL_BYTES: usize = 64;
 }
 
 impl Display for Signature {
@@ -94,8 +76,12 @@ impl Signature {
 }
 
 // TODO impl Display (as u32), Add & Sub (saturating), make u32 private + getter, refactor usage
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TlRead, TlWrite)]
 pub struct Round(pub u32);
+
+impl Round {
+    pub const MAX_TL_SIZE: usize = 4;
+}
 
 impl Round {
     /// stub that cannot be used even by genesis round
@@ -114,10 +100,11 @@ impl Round {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Copy, Clone, TlRead, TlWrite, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct UnixTime(u64);
 
 impl UnixTime {
+    pub const MAX_TL_BYTES: usize = 8;
     pub const fn from_millis(millis: u64) -> Self {
         Self(millis)
     }

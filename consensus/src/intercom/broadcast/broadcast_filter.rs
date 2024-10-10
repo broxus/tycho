@@ -237,7 +237,7 @@ impl BroadcastFilterInner {
                     same_round
                         .entry(author)
                         .or_default()
-                        .insert(digest.clone(), point.clone());
+                        .insert(digest, point.clone());
                     // send `Forward` signal inside `add` just once per round, not for every point
                     same_round.len() == peer_count.reliable_minority()
                 }

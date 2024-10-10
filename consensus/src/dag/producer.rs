@@ -79,7 +79,7 @@ impl Producer {
 
         let includes = includes
             .into_iter()
-            .map(|point| (point.data().author, point.digest().clone()))
+            .map(|point| (point.data().author, *point.digest()))
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
@@ -90,7 +90,7 @@ impl Producer {
 
         let witness = witness
             .into_iter()
-            .map(|point| (point.data().author, point.digest().clone()))
+            .map(|point| (point.data().author, *point.digest()))
             .collect::<BTreeMap<_, _>>();
 
         Some(Point::new(

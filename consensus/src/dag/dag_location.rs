@@ -48,7 +48,7 @@ impl DagLocation {
         F: FnOnce(&InclusionState) -> DagPointFuture,
     {
         self.versions
-            .entry(digest.clone())
+            .entry(*digest)
             .or_insert_with(|| init(&self.state))
     }
     pub fn init_or_modify<F, U>(
@@ -61,7 +61,7 @@ impl DagLocation {
         F: FnOnce(&InclusionState) -> DagPointFuture,
         U: FnOnce(&DagPointFuture),
     {
-        match self.versions.entry(digest.clone()) {
+        match self.versions.entry(*digest) {
             btree_map::Entry::Occupied(entry) => {
                 modify(entry.get());
                 None

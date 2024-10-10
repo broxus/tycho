@@ -2,28 +2,77 @@ use std::cmp;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
+use crate::models::proto_utils::evidence_btree_map;
+use crate::models::{PeerCount, UnixTime};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(Clone))]
+#[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBody {
     pub round: Round, // let it be @ r+0
+    pub payload: Vec<Bytes>,
     pub data: PointData,
+    #[tl(with = "evidence_btree_map")]
     /// signatures for own point from previous round (if one exists, else empty map):
     /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     pub evidence: BTreeMap<PeerId, Signature>,
+}
+
+#[derive(TlWrite, TlRead, Debug)]
+#[cfg_attr(test, derive(Clone))]
+#[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
+pub struct ShortPointBody {
+    pub round: Round,
     pub payload: Vec<Bytes>,
 }
 
 impl PointBody {
+    pub const fn max_byte_size() -> usize {
+        // 4 bytes of PointBody tag
+        // 4 bytes of Round
+        // payload bytes_max_size_hint
+
+        // 4 bytes of PointData tag
+        // 32 bytes of author
+        // Max peer count * (32 + 32) of includes
+        // Max peer count * (32 + 32) of witness
+        // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor_trigger Link
+        // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor proof Link
+        // 8 bytes of time
+        // 8 bytes of anchor time
+
+        // Max peer size * (32 + 64) bytes of evidence
+
+        const EXT_IN_BOC_MIN: usize = 48;
+
+        let max_possible_includes_witness: usize =
+            PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES);
+
+        let evidence_size: usize =
+            PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES);
+
+        let point_data_size: usize = 4
+            + PeerId::MAX_TL_BYTES
+            + (2 * max_possible_includes_witness)
+            + 2 * Link::MAX_TL_BYTES
+            + 2 * UnixTime::MAX_TL_BYTES;
+
+        4 + Round::MAX_TL_SIZE
+            + tl_proto::bytes_max_size_hint(EXT_IN_BOC_MIN)
+                * (1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN)
+            + point_data_size
+            + evidence_size
+    }
     pub fn make_digest(&self) -> Digest {
-        let bytes = bincode::serialize(self).expect("serialize point body");
-        Digest::new(bytes.as_slice())
+        let mut data = Vec::<u8>::with_capacity(Self::max_byte_size());
+        self.write_to(&mut data);
+        Digest::new(data.as_ref())
     }
 
     pub fn is_well_formed(&self) -> bool {
