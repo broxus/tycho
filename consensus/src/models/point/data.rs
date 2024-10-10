@@ -14,6 +14,10 @@ pub struct PointId {
     pub digest: Digest,
 }
 
+impl PointId {
+    const MAX_TL_BYTES: usize = 68;
+}
+
 #[derive(Clone, TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
@@ -81,7 +85,7 @@ pub enum Link {
 }
 
 impl Link {
-    pub const MAX_TL_BYTES: usize = 4 + (32 + 32 + 32) + 4 + 32;
+    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + 32;
 }
 
 #[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]

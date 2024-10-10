@@ -8,7 +8,7 @@ use tycho_network::PeerId;
 use crate::engine::MempoolConfig;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
 use crate::models::proto_utils::evidence_btree_map;
-use crate::models::{PeerCount, Point, UnixTime};
+use crate::models::{PeerCount, UnixTime};
 
 #[derive(TlWrite, TlRead, Debug)]
 #[cfg_attr(test, derive(Clone))]
@@ -33,7 +33,7 @@ pub struct ShortPointBody {
 }
 
 impl PointBody {
-    pub const fn max_point_body_bytes() -> usize {
+    pub const fn max_byte_size() -> usize {
         // 4 bytes of PointBody tag
         // 4 bytes of Round
         // payload bytes_max_size_hint
@@ -70,7 +70,7 @@ impl PointBody {
             + evidence_size
     }
     pub fn make_digest(&self) -> Digest {
-        let mut data = Vec::<u8>::with_capacity(Point::max_point_bytes());
+        let mut data = Vec::<u8>::with_capacity(Self::max_byte_size());
         self.write_to(&mut data);
         Digest::new(data.as_ref())
     }

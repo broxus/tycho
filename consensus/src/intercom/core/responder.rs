@@ -93,7 +93,7 @@ impl Responder {
                     None => {} // do nothing: sender has retry loop via signature request
                     Some(inner) => inner.broadcast_filter.add(
                         &req.metadata.peer_id,
-                        &Arc::new(r.0),
+                        &r.0,
                         inner.top_dag_round.as_ref(),
                         &inner.downloader,
                         &inner.store,

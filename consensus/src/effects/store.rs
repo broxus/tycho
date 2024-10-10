@@ -248,14 +248,6 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
 
-        let value = PointInfo::serializable_from(point);
-        let mut info = Vec::<u8>::with_capacity(value.max_size_hint());
-        value.write_to(&mut info);
-
-        // new
-        let mut point_bytes = Vec::<u8>::with_capacity(point.max_size_hint());
-        point.write_to(&mut point_bytes);
-
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
         let info_cf = self.db.points_info.cf();
@@ -265,8 +257,17 @@ impl MempoolStoreImpl for MempoolStorage {
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
-        batch.put_cf(&points_cf, key.as_slice(), point_bytes);
-        batch.put_cf(&info_cf, key.as_slice(), info);
+
+        let mut buffer = Vec::<u8>::with_capacity(Point::max_byte_size());
+        point.write_to(&mut buffer);
+        batch.put_cf(&points_cf, key.as_slice(), &buffer);
+
+        buffer.clear();
+
+        let value = PointInfo::serializable_from(point);
+        value.write_to(&mut buffer);
+
+        batch.put_cf(&info_cf, key.as_slice(), &buffer);
         batch.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
 
         Ok(db.write(batch)?)

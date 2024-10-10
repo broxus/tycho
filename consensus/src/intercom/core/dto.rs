@@ -19,8 +19,13 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         let size = packet.len();
-        if size - 4usize > Point::max_point_bytes() {
+        if size > Point::max_byte_size() + 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
+            return Err(TlError::InvalidData);
+        }
+
+        if size < 8 {
+            tracing::error!(size = %size, "Point does not contain any useful data");
             return Err(TlError::InvalidData);
         }
 
@@ -100,8 +105,13 @@ where
         }
 
         let size = packet.len();
-        if size - 4usize > Point::max_point_bytes() {
+        if size > Point::max_byte_size() + 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
+            return Err(TlError::InvalidData);
+        }
+
+        if packet.len() < *offset + 4usize {
+            tracing::error!(size = %size, "PointByIdResponse size is too low");
             return Err(TlError::InvalidData);
         }
 
