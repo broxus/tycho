@@ -12,7 +12,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore, ValidateContext};
-use crate::engine::MempoolConfig;
+use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointInfo, Round};
 
@@ -60,7 +60,7 @@ impl DagRound {
             (peers_len, guard.local_keys(round))
         };
         let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
-        let peer_count = match round.cmp(&MempoolConfig::genesis_round()) {
+        let peer_count = match round.cmp(&Genesis::round()) {
             cmp::Ordering::Less => panic!(
                 "Coding error: DAG round {} not allowed before genesis",
                 round.0

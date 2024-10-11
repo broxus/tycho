@@ -10,7 +10,7 @@ use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
-use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore, MempoolConfig};
+use tycho_consensus::prelude::{Engine, Genesis, InputBuffer, MempoolAdapterStore};
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
@@ -180,7 +180,7 @@ fn make_network(
                             &top_known_anchor,
                             None,
                         );
-                        engine.init_with_genesis(&all_peers).await;
+                        engine.init(&all_peers).await;
                         started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(
@@ -209,7 +209,7 @@ fn make_network(
                     anchor_consumer
                         .top_known_anchor()
                         // may be uninit until engine started
-                        .set_max(MempoolConfig::genesis_round());
+                        .set_max(Genesis::round());
                     tokio::try_join!(
                         anchor_consumer.check().map(|_| Err::<(), ()>(())),
                         run_guard.until_any_dropped()

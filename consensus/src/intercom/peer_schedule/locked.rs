@@ -94,7 +94,7 @@ impl PeerScheduleLocked {
     }
 
     /// on epoch change
-    pub fn rotate(&mut self, parent: &PeerSchedule) {
+    pub fn apply_next_start(&mut self, parent: &PeerSchedule) {
         self.data.rotate();
         // atomic part is updated under lock too
         parent.update_atomic(|stateless| stateless.rotate());

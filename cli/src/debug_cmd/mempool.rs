@@ -217,7 +217,7 @@ impl Mempool {
             mempool_start_round,
         );
 
-        engine.init_with_genesis(&self.all_peers).await;
+        engine.init(&self.all_peers).await;
 
         tracing::info!("mempool engine initialized");
 

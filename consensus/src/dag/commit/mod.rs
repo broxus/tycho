@@ -234,7 +234,8 @@ mod test {
     use crate::dag::dag_location::DagLocation;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
     use crate::engine::round_watch::{Consensus, RoundWatch};
-    use crate::models::{AnchorData, AnchorStageRole, Round};
+    use crate::engine::Genesis;
+    use crate::models::{AnchorData, AnchorStageRole, Round, UnixTime};
     use crate::test_utils;
 
     const PEER_COUNT: usize = 3;
@@ -244,9 +245,8 @@ mod test {
         let stub_store = MempoolStore::no_read_stub();
         let stub_consensus_round = RoundWatch::<Consensus>::default();
 
-        MempoolConfig::set_genesis_round(Round(1));
+        let (genesis, _) = Genesis::init(Round(1), UnixTime::from_millis(0));
 
-        let genesis = test_utils::genesis();
         let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
             let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));
             (PeerId::from(keys.public_key), keys)

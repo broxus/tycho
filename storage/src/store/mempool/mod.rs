@@ -1,7 +1,7 @@
 pub mod point_status;
 
 use tycho_util::metrics::HistogramGuard;
-use weedb::rocksdb::WriteBatch;
+use weedb::rocksdb::{IteratorMode, WriteBatch};
 
 use crate::MempoolDb;
 
@@ -74,5 +74,42 @@ impl MempoolStorage {
         rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
 
         Ok(())
+    }
+
+    /// returns `true` if only one value existed and was equal to provided arg
+    ///
+    /// if returns `false` - should drop all data and wait for compactions to finish
+    pub fn has_compatible_data(&self, data_version: &[u8]) -> anyhow::Result<bool> {
+        let default_cf = self.db.rocksdb();
+
+        let mut has_same = false;
+        let mut other_values = Vec::<Box<[u8]>>::new();
+
+        for result in default_cf.iterator(IteratorMode::Start) {
+            let (key, _) = result?;
+            if &*key == data_version {
+                has_same = true;
+            } else {
+                other_values.push(key);
+            }
+        }
+
+        if has_same & other_values.is_empty() {
+            return Ok(true);
+        }
+
+        let mut batch = WriteBatch::default();
+
+        for other in other_values {
+            batch.delete(other);
+        }
+        if !has_same {
+            batch.put(data_version, []);
+        }
+        default_cf.write(batch)?;
+
+        default_cf.compact_range(None::<&[u8]>, None::<&[u8]>);
+
+        Ok(false)
     }
 }

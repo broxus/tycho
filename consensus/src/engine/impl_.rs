@@ -9,7 +9,8 @@ use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
-use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
+use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
+use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, DagFront, DagRound, InclusionState, Verifier};
@@ -19,9 +20,9 @@ use crate::effects::{
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::MempoolConfig;
+use crate::engine::Genesis;
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
+use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round, UnixTime};
 
 pub struct Engine {
     dag: DagFront,
@@ -30,11 +31,10 @@ pub struct Engine {
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
+    init_task: Option<JoinTask<()>>,
 }
 
 impl Engine {
-    const PRIVATE_OVERLAY_ID: OverlayId = OverlayId(*b"ac87b6945b4f6f736963f7f65d025943");
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
@@ -47,13 +47,16 @@ impl Engine {
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
         genesis_round: Option<u32>,
     ) -> Self {
-        MempoolConfig::set_genesis_round(Round(genesis_round.unwrap_or_default()));
+        let (genesis, overlay_id) = Genesis::init(
+            Round(genesis_round.unwrap_or_default()),
+            UnixTime::from_millis(0),
+        );
 
         let consensus_round = RoundWatch::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
-        let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
+        let private_overlay = PrivateOverlay::builder(overlay_id)
             .with_peer_resolver(peer_resolver.clone())
             .named("tycho-consensus")
             .build(responder.clone());
@@ -63,11 +66,33 @@ impl Engine {
         let dispatcher = Dispatcher::new(network, &private_overlay);
         let peer_schedule = PeerSchedule::new(key_pair, private_overlay);
 
+        peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
+
+        if !genesis.verify_hash() {
+            panic!("Failed to verify genesis hash");
+        }
+        Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
+
         let store = MempoolStore::new(
             mempool_adapter_store,
             consensus_round.receiver(),
             top_known_anchor.receiver(),
         );
+
+        let init_task = JoinTask::new({
+            let store = store.clone();
+            async move {
+                let init_storage_task = tokio::task::spawn_blocking({
+                    move || store.init_storage(&overlay_id, &genesis)
+                });
+                match init_storage_task.await {
+                    Ok(()) => {}
+                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                    Err(e) => panic!("failed to clean db on genesis {e:?}"),
+                };
+            }
+        });
+
         let round_task = RoundTaskReady::new(
             &dispatcher,
             peer_schedule,
@@ -77,6 +102,7 @@ impl Engine {
             responder,
             input_buffer,
         );
+
         tokio::spawn({
             let peer_schedule = round_task.state.peer_schedule.clone();
             async move {
@@ -106,72 +132,25 @@ impl Engine {
             consensus_round,
             round_task,
             effects,
+            init_task: Some(init_task),
         }
     }
 
-    pub async fn init_with_genesis(&mut self, current_peers: &[PeerId]) {
-        let clean_task = tokio::task::spawn_blocking({
-            let store = self.round_task.state.store.clone();
-            move || store.drop_all_data_before_start()
-        });
-        match clean_task.await {
-            Ok(()) => {}
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(e) => panic!("failed to clean db on genesis {e:?}"),
+    pub async fn init(&mut self, current_peers: &[PeerId]) {
+        if let Some(init_task) = self.init_task.take() {
+            init_task.await;
         };
 
         // note subscribers are created earlier in constructor
         self.round_task
             .state
             .top_known_anchor
-            .set_max(MempoolConfig::genesis_round());
+            .set_max(Genesis::round());
 
-        let genesis = crate::test_utils::genesis();
-        // check only genesis round as it is widely used in point validation.
-        // if some nodes use distinct genesis data, their first points will be rejected
-        assert_eq!(
-            genesis.id(),
-            crate::test_utils::genesis_point_id(),
-            "genesis point id does not match one from config"
-        );
-        {
-            let mut guard = self.round_task.state.peer_schedule.write();
-            let peer_schedule = self.round_task.state.peer_schedule.clone();
-
-            // finished epoch
-            guard.set_next_start(MempoolConfig::genesis_round(), &peer_schedule);
-            guard.set_next_peers(
-                &[crate::test_utils::genesis_point_id().author],
-                &peer_schedule,
-                false,
-            );
-            guard.rotate(&peer_schedule);
-
-            // current epoch
-            guard.set_next_start(MempoolConfig::genesis_round().next(), &peer_schedule);
-            // start updater only after peers are populated into schedule
-            guard.set_next_peers(current_peers, &peer_schedule, true);
-            guard.rotate(&peer_schedule);
-        }
-
-        if !genesis.verify_hash() {
-            panic!("Failed to verify genesis hash");
-        }
-
-        Verifier::verify(&genesis, &self.round_task.state.peer_schedule)
-            .expect("genesis failed to verify");
-
-        let genesis_round =
-            DagRound::new_bottom(genesis.round(), &self.round_task.state.peer_schedule);
-
-        let next_dag_round = genesis_round.new_next(&self.round_task.state.peer_schedule);
-
-        // stores into db with right flags
-        let _ = genesis_round.insert_exact_sign(
-            &genesis,
-            next_dag_round.key_pair(),
-            &self.round_task.state.store,
-        );
+        self.round_task
+            .state
+            .peer_schedule
+            .set_epoch(current_peers, Genesis::round().next(), true);
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
@@ -183,7 +162,7 @@ impl Engine {
         .await
         .expect("load last round from db");
 
-        let first_round = MempoolConfig::genesis_round().max(Round(last_round.0.saturating_sub(2)));
+        let first_round = Genesis::round().max(Round(last_round.0.saturating_sub(2)));
 
         self.effects = Effects::<ChainedRoundsContext>::new(last_round);
         let round_effects = Effects::<EngineContext>::new(&self.effects, last_round);

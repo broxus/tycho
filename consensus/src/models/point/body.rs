@@ -5,7 +5,7 @@ use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::engine::MempoolConfig;
+use crate::engine::{Genesis, MempoolConfig};
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
 use crate::models::proto_utils::evidence_btree_map;
 use crate::models::{PeerCount, UnixTime};
@@ -77,7 +77,7 @@ impl PointBody {
 
     pub fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
-        let is_special_ok = match self.round.cmp(&MempoolConfig::genesis_round()) {
+        let is_special_ok = match self.round.cmp(&Genesis::round()) {
             cmp::Ordering::Equal => {
                 self.payload.is_empty()
                     && self.evidence.is_empty()
@@ -90,7 +90,7 @@ impl PointBody {
             cmp::Ordering::Greater => {
                 // no witness is possible at the round right after genesis;
                 // the other way: we may panic on round.prev().prev() while extracting link's round
-                (self.round > MempoolConfig::genesis_round().next() || self.data.witness.is_empty())
+                (self.round > Genesis::round().next() || self.data.witness.is_empty())
                     // leader must maintain its chain of proofs,
                     // while others must link to previous points (checked at the end of this method);
                     // its decided later (using dag round data) whether current point belongs to leader
@@ -116,12 +116,12 @@ impl PointBody {
             self.data.anchor_round(AnchorStageRole::Proof, self.round),
             self.data.anchor_round(AnchorStageRole::Trigger, self.round)
         ) {
-            (x, y) if y == MempoolConfig::genesis_round() => x >= MempoolConfig::genesis_round(),
-            (x, y) if x == MempoolConfig::genesis_round() => y >= MempoolConfig::genesis_round(),
+            (x, y) if y == Genesis::round() => x >= Genesis::round(),
+            (x, y) if x == Genesis::round() => y >= Genesis::round(),
             // equality is impossible due to commit waves do not start every round;
             // anchor trigger may belong to a later round than proof and vice versa;
             // no indirect links over genesis tombstone
-            (x, y) => x != y && x > MempoolConfig::genesis_round() && y > MempoolConfig::genesis_round(),
+            (x, y) => x != y && x > Genesis::round() && y > Genesis::round(),
         }
     }
 
