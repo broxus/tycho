@@ -30,43 +30,40 @@ impl ControlClient {
     }
 
     pub async fn ping(&self) -> ClientResult<u64> {
-        self.inner
-            .ping(context::current())
-            .await
-            .map_err(Into::into)
+        self.inner.ping(current_context()).await.map_err(Into::into)
     }
 
     pub async fn trigger_archives_gc(&self, trigger: ManualGcTrigger) -> ClientResult<()> {
         self.inner
-            .trigger_archives_gc(context::current(), trigger)
+            .trigger_archives_gc(current_context(), trigger)
             .await
             .map_err(Into::into)
     }
 
     pub async fn trigger_blocks_gc(&self, trigger: ManualGcTrigger) -> ClientResult<()> {
         self.inner
-            .trigger_blocks_gc(context::current(), trigger)
+            .trigger_blocks_gc(current_context(), trigger)
             .await
             .map_err(Into::into)
     }
 
     pub async fn trigger_states_gc(&self, trigger: ManualGcTrigger) -> ClientResult<()> {
         self.inner
-            .trigger_states_gc(context::current(), trigger)
+            .trigger_states_gc(current_context(), trigger)
             .await
             .map_err(Into::into)
     }
 
     pub async fn set_memory_profiler_enabled(&self, enabled: bool) -> ClientResult<bool> {
         self.inner
-            .set_memory_profiler_enabled(context::current(), enabled)
+            .set_memory_profiler_enabled(current_context(), enabled)
             .await
             .map_err(Into::into)
     }
 
     pub async fn dump_memory_profiler(&self) -> ClientResult<Vec<u8>> {
         self.inner
-            .dump_memory_profiler(context::current())
+            .dump_memory_profiler(current_context())
             .await?
             .map_err(Into::into)
     }
@@ -75,7 +72,7 @@ impl ControlClient {
         let req = BlockRequest {
             block_id: *block_id,
         };
-        match self.inner.get_block(context::current(), req).await?? {
+        match self.inner.get_block(current_context(), req).await?? {
             BlockResponse::Found { data } => Ok(Some(data)),
             BlockResponse::NotFound => Ok(None),
         }
@@ -86,11 +83,7 @@ impl ControlClient {
             block_id: *block_id,
         };
 
-        match self
-            .inner
-            .get_block_proof(context::current(), req)
-            .await??
-        {
+        match self.inner.get_block_proof(current_context(), req).await?? {
             BlockResponse::Found { data } => Ok(Some(data)),
             BlockResponse::NotFound => Ok(None),
         }
@@ -101,7 +94,7 @@ impl ControlClient {
             block_id: *block_id,
         };
 
-        match self.inner.get_queue_diff(context::current(), req).await?? {
+        match self.inner.get_queue_diff(current_context(), req).await?? {
             BlockResponse::Found { data } => Ok(Some(data)),
             BlockResponse::NotFound => Ok(None),
         }
@@ -110,7 +103,7 @@ impl ControlClient {
     pub async fn find_archive(&self, mc_seqno: u32) -> ClientResult<Option<ArchiveInfo>> {
         match self
             .inner
-            .get_archive_info(context::current(), ArchiveInfoRequest { mc_seqno })
+            .get_archive_info(current_context(), ArchiveInfoRequest { mc_seqno })
             .await??
         {
             ArchiveInfoResponse::Found(info) => Ok(Some(info)),
@@ -171,7 +164,7 @@ impl ControlClient {
                 JoinTask::new(
                     async move {
                         tracing::debug!("started");
-                        let res = client.get_archive_chunk(context::current(), req).await;
+                        let res = client.get_archive_chunk(current_context(), req).await;
                         tracing::debug!("finished");
                         res
                     }
@@ -199,15 +192,24 @@ impl ControlClient {
 
     pub async fn list_archives(&self) -> ClientResult<Vec<ArchiveInfo>> {
         self.inner
-            .get_archive_ids(context::current())
+            .get_archive_ids(current_context())
             .await?
             .map_err(Into::into)
     }
 
     pub async fn list_blocks(&self, limit: u32, offset: u32) -> ClientResult<Vec<BlockId>> {
         self.inner
-            .get_block_ids(context::current(), BlockListRequest { limit, offset })
+            .get_block_ids(current_context(), BlockListRequest { limit, offset })
             .await?
             .map_err(Into::into)
     }
+}
+
+// sets a 10-minute deadline on the context instead of default 10 seconds
+fn current_context() -> context::Context {
+    use std::time::{Duration, SystemTime};
+
+    let mut context = context::current();
+    context.deadline = SystemTime::now() + Duration::from_secs(600);
+    context
 }
