@@ -1,8 +1,6 @@
-use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::dag::WAVE_ROUNDS;
-use crate::models::{Round, UnixTime};
+use crate::models::UnixTime;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 /// Prod config should use [`Full`], while [`Truncated`] is more friendly to human eyes
@@ -12,8 +10,6 @@ pub enum LogFlavor {
 }
 
 pub struct MempoolConfig;
-
-static GENESIS_ROUND: OnceLock<Round> = OnceLock::new();
 
 impl MempoolConfig {
     /// how far a signed point (by the time in its body)
@@ -25,26 +21,12 @@ impl MempoolConfig {
     /// hard limit (in rounds) on anchor history length, must be divisible by 4 (i.e. commit wave length)
     pub const COMMIT_DEPTH: u8 = 20;
 
-    pub fn set_genesis_round(round: Round) {
-        // Must be (divisible by 4)+1, ie 1,5,9 etc., see `crate::dag::AnchorStage::of()`
-        let aligned = ((round.0 + 2) / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
-        assert!(
-            aligned > Round::BOTTOM.0,
-            "invalid config: genesis round is too low and will make code panic"
-        );
-        GENESIS_ROUND.set(Round(aligned)).ok();
-    }
-
-    pub fn genesis_round() -> Round {
-        *GENESIS_ROUND.get().expect("GENESIS_ROUND")
-    }
-
     /// hard limit on point payload (excessive will be postponed)
     pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
 
     /// External messages are deduplicated within a fixed depth for each anchor.
     /// Zero turns off deduplication.
-    pub const DEDUPLICATE_ROUNDS: u16 = 140;
+    pub const DEDUPLICATE_ROUNDS: u16 = if cfg!(feature = "test") { 20 } else { 140 };
 
     /// The max expected distance (in rounds) between two anchor triggers. Defines both:
     /// * max acceptable distance between consensus and the top known block,
@@ -96,7 +78,11 @@ impl MempoolConfig {
     /// in silent mode (see [`Self::MAX_ANCHOR_DISTANCE`])
     /// is supposed to keep collation-ready history
     /// (see [`Self::DEDUPLICATE_ROUNDS`] and [`Self::COMMIT_DEPTH`])
-    pub const ACCEPTABLE_COLLATOR_LAG: u16 = 1_050 - Self::MAX_ANCHOR_DISTANCE;
+    pub const ACCEPTABLE_COLLATOR_LAG: u16 = if cfg!(feature = "test") {
+        0
+    } else {
+        1_050 - Self::MAX_ANCHOR_DISTANCE
+    };
 
     /// How often (in rounds) try to flush and delete obsolete data. Cannot be zero.
     /// Also affects WAL file size (more often flushes create more small files).

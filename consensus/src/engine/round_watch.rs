@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use tokio::sync::watch;
 
-use crate::engine::MempoolConfig;
+use crate::engine::{Genesis, MempoolConfig};
 use crate::models::Round;
 
 /// Marker trait to distinguish between data sources despite variable names
@@ -35,12 +35,12 @@ impl TopKnownAnchor {
         let round = (top_known_anchor.0)
             .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
             .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
-        Round(round).max(MempoolConfig::genesis_round())
+        Round(round).max(Genesis::round())
     }
     pub fn silence_upper_bound(top_known_anchor: Round) -> Round {
         // oldest unique data to collate (including latest collated round)
         let round = (top_known_anchor.0).saturating_add(MempoolConfig::MAX_ANCHOR_DISTANCE as u32);
-        Round(round).max(MempoolConfig::genesis_round())
+        Round(round).max(Genesis::round())
     }
 }
 
@@ -72,7 +72,7 @@ impl Consensus {
             // oldest data to collate as unique
             .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
             .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32); // as unique
-        Round(round).max(MempoolConfig::genesis_round())
+        Round(round).max(Genesis::round())
     }
 }
 
@@ -96,7 +96,7 @@ impl Commit {
                 (MempoolConfig::MAX_ANCHOR_DISTANCE as u32) // validatable by other peers
                     .max(MempoolConfig::DEDUPLICATE_ROUNDS as u32), // unique
             );
-        Round(round).max(MempoolConfig::genesis_round())
+        Round(round).max(Genesis::round())
     }
 }
 

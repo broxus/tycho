@@ -15,13 +15,12 @@ use tycho_util::FastHashMap;
 use crate::dag::{AnchorStage, DagFront, DagRound, Verifier};
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::round_watch::{Consensus, RoundWatch};
-use crate::engine::MempoolConfig;
+use crate::engine::Genesis;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
     Signature, Through, UnixTime,
 };
-use crate::test_utils;
 
 pub fn make_dag<const PEER_COUNT: usize>(
     peers: &[(PeerId, KeyPair); PEER_COUNT],
@@ -44,26 +43,13 @@ pub fn make_dag<const PEER_COUNT: usize>(
 
     let stub_downloader = Downloader::new(&dispatcher, &peer_schedule, consensus_round.receiver());
 
-    {
-        let mut guard = peer_schedule.write();
-        let peer_schedule = peer_schedule.clone();
-        guard.set_next_start(MempoolConfig::genesis_round(), &peer_schedule);
-        guard.set_next_peers(
-            &[test_utils::genesis_point_id().author],
-            &peer_schedule,
-            false,
-        );
-        guard.rotate(&peer_schedule);
-        // current epoch
-        guard.set_next_start(genesis.round().next(), &peer_schedule);
-        // start updater only after peers are populated into schedule
-        guard.set_next_peers(
-            &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            &peer_schedule,
-            true,
-        );
-        guard.rotate(&peer_schedule);
-    }
+    peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
+    peer_schedule.set_epoch(
+        &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        genesis.round().next(),
+        false,
+    );
+
     let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
     let next_dag_round = genesis_round.new_next(&peer_schedule);
 

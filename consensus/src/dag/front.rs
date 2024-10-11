@@ -1,7 +1,7 @@
 use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::round_watch::Consensus;
-use crate::engine::MempoolConfig;
+use crate::engine::{Genesis, MempoolConfig};
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
@@ -40,7 +40,7 @@ impl DagFront {
             (new_top.0.saturating_add(1))
                 .saturating_sub(Self::HOT_END_ROUNDS)
                 .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
-                .max(MempoolConfig::genesis_round().0),
+                .max(Genesis::round().0),
         );
 
         // extend to the max possible - will be shortened when top known is determined

@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use itertools::Itertools;
 use tl_proto::TlWrite;
+use tycho_network::OverlayId;
 use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
@@ -46,7 +47,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn load_rounds(&self, first: Round, last: Round) -> Result<Vec<(PointInfo, PointStatus)>>;
 
-    fn drop_all_data_before_start(&self) -> Result<()>;
+    fn init_storage(&self, overlay_id: &OverlayId, genesis: &Point) -> Result<()>;
 }
 
 impl MempoolAdapterStore {
@@ -169,9 +170,10 @@ impl MempoolStore {
             .expect("DB load rounds")
     }
 
-    pub fn drop_all_data_before_start(&self) {
+    pub fn init_storage(&self, overlay_id: &OverlayId, genesis: &Point) {
         self.0
-            .drop_all_data_before_start()
+            .init_storage(overlay_id, genesis)
+            .with_context(|| format!("new overlay id {}", overlay_id))
             .expect("DB drop all data");
     }
 
@@ -532,12 +534,19 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(result)
     }
 
-    fn drop_all_data_before_start(&self) -> Result<()> {
-        self.clean(&[u8::MAX; Self::KEY_LEN])?;
-        // no reads/writes yet possible, and should finish prior other ops
-        let mut opt = WaitForCompactOptions::default();
-        opt.set_flush(true);
-        self.db.rocksdb().wait_for_compact(&opt)?;
+    fn init_storage(&self, overlay_id: &OverlayId, genesis: &Point) -> Result<()> {
+        if !self.has_compatible_data(overlay_id.as_bytes())? {
+            self.clean(&[u8::MAX; Self::KEY_LEN])?;
+            // no reads/writes yet possible, and should finish prior other ops
+            let mut opt = WaitForCompactOptions::default();
+            opt.set_flush(true);
+            self.db.rocksdb().wait_for_compact(&opt)?;
+        }
+        // may be overwritten or left unused and removed during next clean task, does not matter
+        self.insert_point(genesis, &PointStatus {
+            is_trusted: true,
+            ..PointStatus::default()
+        })?;
         Ok(())
     }
 }
@@ -584,7 +593,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn drop_all_data_before_start(&self) -> Result<()> {
+    fn init_storage(&self, _: &OverlayId, _: &Point) -> Result<()> {
         Ok(())
     }
 }

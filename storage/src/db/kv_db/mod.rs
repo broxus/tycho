@@ -108,6 +108,10 @@ impl WithMigrations for MempoolDb {
 }
 
 weedb::tables! {
+    /// Default column family contains at most single row: overlay id.
+    /// Overlay id defines data version: data will be removed on mismatch during boot.
+    /// - Key: `overlay id: [u8; 32]`
+    /// - Value: None
     pub struct MempoolTables<Caches> {
         pub points: tables::Points,
         pub points_info: tables:: PointsInfo,

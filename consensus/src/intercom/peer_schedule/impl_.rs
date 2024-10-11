@@ -13,6 +13,7 @@ use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
 use crate::intercom::peer_schedule::utils;
+use crate::models::Round;
 // As validators are elected for wall-clock time range,
 // the round of validator set switch is not known beforehand
 // and will be determined by the time in anchor vertices:
@@ -45,6 +46,15 @@ impl PeerSchedule {
 
     pub fn write(&self) -> RwLockWriteGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.write()
+    }
+
+    pub fn set_epoch(&self, next_peers: &[PeerId], next_round: Round, update_overlay: bool) {
+        let mut guard = self.write();
+        let peer_schedule = self.clone();
+
+        guard.set_next_peers(next_peers, &peer_schedule, update_overlay);
+        guard.set_next_start(next_round, &peer_schedule);
+        guard.apply_next_start(&peer_schedule);
     }
 
     /// in-time snapshot if consistency with peer state is not needed;

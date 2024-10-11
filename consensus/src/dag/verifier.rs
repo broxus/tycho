@@ -12,7 +12,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
-use crate::engine::MempoolConfig;
+use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPoint, ValidPoint,
@@ -74,11 +74,11 @@ impl Verifier {
         // it cannot be validated against AnchorStage (as it knows nothing about genesis)
         // and cannot contain dependencies
         assert!(
-            info.round() >= MempoolConfig::genesis_round(),
+            info.round() >= Genesis::round(),
             "Coding error: can only validate points older than genesis"
         );
-        if info.round() == MempoolConfig::genesis_round() {
-            return if info.id() == crate::test_utils::genesis_point_id() {
+        if info.round() == Genesis::round() {
+            return if info.id() == *Genesis::id() {
                 DagPoint::Trusted(ValidPoint::new(info))
             } else {
                 tracing::error!("unknown point at genesis round: {:?}", info.id().alt());
@@ -305,10 +305,10 @@ impl Verifier {
             return true;
         };
 
-        if round.round() == MempoolConfig::genesis_round() {
+        if round.round() == Genesis::round() {
             // notice that point is required to link to the freshest leader point
             // among all its (in)direct dependencies, which is checked later
-            return linked_id == crate::test_utils::genesis_point_id();
+            return linked_id == *Genesis::id();
         }
 
         match round.anchor_stage() {
@@ -550,7 +550,7 @@ impl Verifier {
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
     ) -> bool {
-        if point.round() == MempoolConfig::genesis_round() {
+        if point.round() == Genesis::round() {
             // `is_well_formed()` ensured that genesis has empty includes, witness and evidence
             return true;
         }
@@ -568,7 +568,7 @@ impl Verifier {
                 return false;
             }
         }
-        let includes_peer_count = if point.round().prev() == MempoolConfig::genesis_round() {
+        let includes_peer_count = if point.round().prev() == Genesis::round() {
             PeerCount::GENESIS
         } else {
             match PeerCount::try_from(includes_peers.len()) {

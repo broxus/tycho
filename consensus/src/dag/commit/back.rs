@@ -14,7 +14,7 @@ use tycho_storage::point_status::PointStatus;
 use crate::dag::{DagRound, EnqueuedAnchor};
 use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::Consensus;
-use crate::engine::MempoolConfig;
+use crate::engine::{Genesis, MempoolConfig};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{AnchorStageRole, Digest, Link, PointId, PointInfo, Round, ValidPoint};
 
@@ -396,7 +396,7 @@ impl DagBack {
             (anchor.round().0)
                 .saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
                 // do not commit genesis - we may place some arbitrary payload in it
-                .max(MempoolConfig::genesis_round().next().0),
+                .max(Genesis::round().next().0),
         );
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]

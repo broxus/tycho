@@ -11,7 +11,7 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
-use crate::engine::MempoolConfig;
+use crate::engine::Genesis;
 use crate::models::{CommitResult, PointId, Round};
 
 #[derive(Default)]
@@ -87,7 +87,7 @@ impl AnchorConsumer {
 
             if next_expected_history_round.is_none() {
                 // Genesis point is excluded from commit, points only reference it
-                next_expected_history_round = Some(MempoolConfig::genesis_round().next());
+                next_expected_history_round = Some(Genesis::round().next());
             }
 
             let anchor_round = anchor.round();
