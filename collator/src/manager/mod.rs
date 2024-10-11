@@ -1470,7 +1470,7 @@ where
             let (subset, hash_short) = full_validators_set
                 .compute_subset(shard_id, &cc_config, new_session_seqno)
                 .ok_or(anyhow!(
-                    "Error calculating subset of collators for the session (shard_id = {}, seqno = {})",
+                    "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
                     shard_id,
                     new_session_seqno,
                 ))?;
