@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use error::CollatorError;
 use everscale_types::cell::{Cell, HashBytes};
@@ -1156,16 +1156,27 @@ impl CollatorStdImpl {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "there are no unprocessed messages, will import next anchor",
             );
-            let (next_anchor, has_externals) = Self::import_next_anchor(
+
+            let import_anchor_result = Self::import_next_anchor(
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
                 self.mempool_start_round,
             )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
-            })?;
+            .await;
+
+            let result = Self::handle_import_anchor_result(
+                import_anchor_result,
+                &mut working_state,
+                &self.listener,
+                &self.next_block_info,
+            )
+            .await?;
+
+            let (next_anchor, has_externals) = match result {
+                Some(result) => result,
+                None => return Ok(()),
+            };
 
             working_state.gas_used_from_last_anchor = 0;
 
@@ -1188,6 +1199,32 @@ impl CollatorStdImpl {
         }
 
         Ok(())
+    }
+
+    async fn handle_import_anchor_result(
+        import_anchor_result: Result<(Arc<MempoolAnchor>, bool), CollatorError>,
+        working_state: &mut WorkingState,
+        listener: &Arc<dyn CollatorEventListener>,
+        next_block_info: &BlockIdShort,
+    ) -> Result<Option<(Arc<MempoolAnchor>, bool)>> {
+        match import_anchor_result {
+            Ok(val) => Ok(Some(val)),
+            Err(e) => match e {
+                CollatorError::Cancelled(cancel_reason) => {
+                    listener
+                        .on_cancelled(
+                            working_state.mc_data.block_id,
+                            working_state.next_block_id_short,
+                            cancel_reason,
+                        )
+                        .await?;
+                    Ok(None)
+                }
+                CollatorError::Anyhow(err) => {
+                    bail!("next_block_info: {}, error: {}", next_block_info, err);
+                }
+            },
+        }
     }
 
     /// Run collation if there are internals or externals,
@@ -1272,16 +1309,27 @@ impl CollatorStdImpl {
                     gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
-            let (next_anchor, next_anchor_has_externals) = Self::import_next_anchor(
+
+            let import_anchor_result = Self::import_next_anchor(
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
                 self.mempool_start_round,
             )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
-            })?;
+            .await;
+
+            let result = Self::handle_import_anchor_result(
+                import_anchor_result,
+                &mut working_state,
+                &self.listener,
+                &self.next_block_info,
+            )
+            .await?;
+
+            let (next_anchor, next_anchor_has_externals) = match result {
+                Some(result) => result,
+                None => return Ok(()),
+            };
 
             working_state.gas_used_from_last_anchor = 0;
 
