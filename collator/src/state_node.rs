@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -74,9 +75,11 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Waits for the specified block by prev_id to be received and returns it
     async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
+    async fn handle_state(&self, state: &ShardStateStuff, collator_state: u8) -> Result<()>;
     /// Loqd queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
+
+    fn get_collator_activation_state(&self) -> CollatorActivationState;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -84,10 +87,15 @@ pub struct StateNodeAdapterStdImpl {
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
+    collator_state: Arc<AtomicU8>,
 }
 
 impl StateNodeAdapterStdImpl {
-    pub fn new(listener: Arc<dyn StateNodeEventListener>, storage: Storage) -> Self {
+    pub fn new(
+        listener: Arc<dyn StateNodeEventListener>,
+        collator_activation_state: u8,
+        storage: Storage,
+    ) -> Self {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
 
         let (broadcaster, _) = broadcast::channel(10000);
@@ -96,6 +104,7 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             broadcaster,
+            collator_state: Arc::new(AtomicU8::new(collator_activation_state)),
         }
     }
 }
@@ -202,8 +211,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         self.wait_for_block_ext(block_id).await
     }
 
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
+    async fn handle_state(&self, state: &ShardStateStuff, collator_state: u8) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
+        self.collator_state.store(collator_state, Ordering::Release);
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
@@ -270,6 +280,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 block_storage.load_queue_diff(&handle).await.map(Some)
             }
             _ => Ok(None),
+        }
+    }
+
+    fn get_collator_activation_state(&self) -> CollatorActivationState {
+        match self.collator_state.load(Ordering::Acquire) {
+            0 => CollatorActivationState::Historical,
+            1 => CollatorActivationState::Current,
+            _ => unreachable!(),
         }
     }
 }
@@ -448,6 +466,12 @@ fn process_signatures(
         total_weight: sig_count as u64,
         signatures,
     })
+}
+
+#[repr(u8)]
+pub enum CollatorActivationState {
+    Historical = 0,
+    Current = 1,
 }
 
 struct PreparedProof {

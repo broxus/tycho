@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,7 +18,9 @@ use tycho_collator::internal_queue::state::session_state::SessionStateImplFactor
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
-use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
+use tycho_collator::state_node::{
+    CollatorActivationState, StateNodeAdapter, StateNodeAdapterStdImpl,
+};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
@@ -499,11 +501,19 @@ impl Node {
             self.validator_config,
         );
 
+        let initial_collator_activation_value = CollatorActivationState::Historical as u8;
+
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
             self.collation_config.clone(),
             Arc::new(message_queue_adapter),
-            |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
+            |listener| {
+                StateNodeAdapterStdImpl::new(
+                    listener,
+                    initial_collator_activation_value,
+                    self.storage.clone(),
+                )
+            },
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
@@ -513,18 +523,20 @@ impl Node {
             vec![],
         );
 
-        let collator_active = Arc::new(AtomicBool::new(false));
+        let collator_active = Arc::new(AtomicU8::new(initial_collator_activation_value));
         let collator_state_subscriber = CollatorStateSubscriber {
-            collator_active: collator_active.clone(),
+            collator_activation_state: collator_active.clone(),
             adapter: collation_manager.state_node_adapter().clone(),
         };
 
-        let activate_collator = ActivateCollator { collator_active };
+        let activate_collator = ActivateCollator {
+            collator_state: collator_active,
+        };
 
         // Explicitly handle the initial state
         collator_state_subscriber
             .adapter
-            .handle_state(&mc_state)
+            .handle_state(&mc_state, initial_collator_activation_value)
             .await?;
 
         // NOTE: Make sure to drop the state after handling it
@@ -589,7 +601,7 @@ impl Node {
         );
 
         let block_strider = BlockStrider::builder()
-            .with_provider(activate_collator.chain(archive_block_provider).chain((
+            .with_provider(archive_block_provider.chain(activate_collator).chain((
                 blockchain_block_provider,
                 storage_block_provider,
                 collator_block_provider,
@@ -620,7 +632,7 @@ impl Node {
 }
 
 struct ActivateCollator {
-    collator_active: Arc<AtomicBool>,
+    collator_state: Arc<AtomicU8>,
 }
 
 impl BlockProvider for ActivateCollator {
@@ -628,7 +640,8 @@ impl BlockProvider for ActivateCollator {
     type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        self.collator_active.store(true, Ordering::Release);
+        self.collator_state
+            .store(CollatorActivationState::Current as u8, Ordering::Release);
         futures_util::future::ready(None)
     }
 
@@ -638,7 +651,7 @@ impl BlockProvider for ActivateCollator {
 }
 
 struct CollatorStateSubscriber {
-    collator_active: Arc<AtomicBool>,
+    collator_activation_state: Arc<AtomicU8>,
     adapter: Arc<dyn StateNodeAdapter>,
 }
 
@@ -646,11 +659,8 @@ impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        if self.collator_active.load(Ordering::Acquire) {
-            self.adapter.handle_state(&cx.state)
-        } else {
-            Box::pin(async move { Ok(()) })
-        }
+        let state = self.collator_activation_state.load(Ordering::Acquire);
+        self.adapter.handle_state(&cx.state, state)
     }
 }
 
