@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
+use std::io::Write;
 
 use zstd_safe::{get_error_name, CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective};
 
@@ -63,6 +64,71 @@ pub fn zstd_compress(input: &[u8], output: &mut Vec<u8>, compression_level: i32)
 
     // Perform the compression
     zstd_safe::compress(output, input, compression_level).expect("buffer size is set correctly");
+}
+
+pub struct ZstdCompressedFile<W: Write> {
+    writer: W,
+    compressor: ZstdCompressStream<'static>,
+    buffer: Vec<u8>,
+}
+
+impl<W: Write> ZstdCompressedFile<W> {
+    pub fn new(writer: W, compression_level: i32, buffer_capacity: usize) -> Result<Self> {
+        Ok(Self {
+            writer,
+            buffer: Vec::with_capacity(buffer_capacity),
+            compressor: ZstdCompressStream::new(compression_level, buffer_capacity)?,
+        })
+    }
+
+    /// Terminates the compression stream. All subsequent writes will fail.
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        self.compressor.finish(&mut self.buffer)?;
+        if !self.buffer.is_empty() {
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    fn flush_buf(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            if self.compressor.finished {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "compressor already terminated",
+                ));
+            }
+
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for ZstdCompressedFile<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.write_all(data).map(|_| data.len())
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.compressor.write(data, &mut self.buffer)?;
+        self.flush_buf()
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_buf()?;
+        self.writer.flush()
+    }
+}
+
+impl<W: Write> Drop for ZstdCompressedFile<W> {
+    fn drop(&mut self) {
+        if !self.compressor.finished {
+            let _ = self.finish();
+        }
+    }
 }
 
 pub struct ZstdCompressStream<'s> {
@@ -245,6 +311,12 @@ pub enum ZstdError {
 
     #[error("Stream already finished")]
     StreamAlreadyFinished,
+}
+
+impl From<ZstdError> for std::io::Error {
+    fn from(value: ZstdError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Other, value)
+    }
 }
 
 impl ZstdError {

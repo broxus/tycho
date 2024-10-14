@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
@@ -10,12 +11,10 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use scopeguard::ScopeGuard;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
-use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
-use tycho_storage::Storage;
+use tycho_storage::PersistentStateKind;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
-use tycho_util::sync::rayon_run;
 
 use crate::overlay_client::{
     Error, Neighbour, PublicOverlayClient, QueryResponse, QueryResponseHandle,
@@ -238,7 +237,7 @@ impl BlockchainRpcClient {
     ) -> Result<QueryResponse<PersistentStateInfo>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, PersistentStateInfo>(&rpc::GetPersistentStateInfo {
+            .query::<_, PersistentStateInfo>(&rpc::GetPersistentShardStateInfo {
                 block_id: *block_id,
             })
             .await?;
@@ -249,16 +248,14 @@ impl BlockchainRpcClient {
         &self,
         neighbour: &Neighbour,
         block_id: &BlockId,
-        limit: u32,
         offset: u64,
     ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query_raw::<Data>(
                 neighbour.clone(),
-                Request::from_tl(rpc::GetPersistentStatePart {
+                Request::from_tl(rpc::GetPersistentShardStateChunk {
                     block_id: *block_id,
-                    limit,
                     offset,
                 }),
             )
@@ -266,126 +263,125 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
-    pub async fn download_and_store_state(
+    pub async fn find_persistent_state(
         &self,
         block_id: &BlockId,
-        storage: Storage,
-    ) -> Result<ShardStateStuff, Error> {
-        const PARALLEL_REQUESTS: usize = 10;
-        const CHUNK_SIZE: u32 = 2 << 20; // 2 MB
-        const MAX_STATE_SIZE: u64 = 10 << 30; // 10 GB
-
-        // TODO: Iterate through all known (or unknown) neighbours
+        kind: PersistentStateKind,
+    ) -> Result<PendingPersistentState, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
+
         let neighbours = self
             .overlay_client()
             .neighbours()
             .choose_multiple(NEIGHBOUR_COUNT)
             .await;
 
-        // Find a neighbour which has the requested state
-        let (neighbour, max_size) = 'info: {
-            let req = Request::from_tl(rpc::GetPersistentStateInfo {
+        let req = match kind {
+            PersistentStateKind::Shard => Request::from_tl(rpc::GetPersistentShardStateInfo {
                 block_id: *block_id,
-            });
-
-            let mut futures = FuturesUnordered::new();
-            for neighbour in neighbours {
-                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
-            }
-
-            let mut err = None;
-            while let Some(info) = futures.next().await {
-                let (handle, info) = match info {
-                    Ok(res) => res.split(),
-                    Err(e) => {
-                        err = Some(e);
-                        continue;
-                    }
-                };
-
-                match info {
-                    PersistentStateInfo::Found { size } if size <= MAX_STATE_SIZE => {
-                        break 'info (handle.accept(), size)
-                    }
-                    PersistentStateInfo::Found { size } => {
-                        let neighbour = handle.reject();
-                        tracing::warn!(
-                            peer_id = %neighbour.peer_id(),
-                            size,
-                            "malicious neighbour has a too large state",
-                        );
-                        continue;
-                    }
-                    PersistentStateInfo::NotFound => continue,
-                }
-            }
-
-            return match err {
-                None => Err(Error::Internal(anyhow::anyhow!(
-                    "no neighbour has the requested state"
-                ))),
-                Some(err) => Err(err),
-            };
+            }),
+            PersistentStateKind::Queue => Request::from_tl(rpc::GetPersistentQueueStateInfo {
+                block_id: *block_id,
+            }),
         };
 
-        // Download the state
-        let chunk_count = (max_size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64;
-        let mut stream =
-            futures_util::stream::iter((0..chunk_count).map(|i| i * CHUNK_SIZE as u64))
-                .map(|offset| {
-                    let neighbour = neighbour.clone();
-                    let req = Request::from_tl(rpc::GetPersistentStatePart {
-                        block_id: *block_id,
-                        limit: CHUNK_SIZE,
-                        offset,
-                    });
-
-                    let client = self.overlay_client().clone();
-                    JoinTask::new(async move {
-                        // TODO: Retry on error
-                        client.query_raw::<Data>(neighbour, req).await
-                    })
-                })
-                .buffered(PARALLEL_REQUESTS);
-
-        let mut store_state_op = storage
-            .shard_state_storage()
-            .begin_store_state_raw(block_id)
-            .map(Box::new)
-            .map_err(Error::Internal)?;
-
-        // NOTE: Buffered items in stream will be polled because they are spawned as tasks
-        while let Some(response) = stream.next().await.transpose()? {
-            let (op, finished) = rayon_run(move || {
-                let (handle, part) = response.split();
-                match store_state_op.process_part(part.data) {
-                    Ok(finished) => Ok((store_state_op, finished)),
-                    Err(e) => {
-                        handle.reject();
-                        Err(e)
-                    }
-                }
-            })
-            .await
-            .map_err(Error::Internal)?;
-
-            if !finished {
-                store_state_op = op;
-                continue;
-            }
-
-            return rayon_run(move || op.finalize())
-                .await
-                .map_err(Error::Internal);
+        let mut futures = FuturesUnordered::new();
+        for neighbour in neighbours {
+            futures.push(
+                self.overlay_client()
+                    .query_raw::<PersistentStateInfo>(neighbour.clone(), req.clone()),
+            );
         }
 
-        Err(Error::Internal(anyhow::anyhow!(
-            "downloaded incomplete state"
-        )))
+        let mut err = None;
+        while let Some(info) = futures.next().await {
+            let (handle, info) = match info {
+                Ok(res) => res.split(),
+                Err(e) => {
+                    err = Some(e);
+                    continue;
+                }
+            };
+
+            match info {
+                PersistentStateInfo::Found { size, chunk_size } => {
+                    let neighbour = handle.accept();
+                    tracing::debug!(
+                        peer_id = %neighbour.peer_id(),
+                        state_size = size.get(),
+                        state_chunk_size = chunk_size.get(),
+                        ?kind,
+                        "found persistent state",
+                    );
+
+                    return Ok(PendingPersistentState {
+                        block_id: *block_id,
+                        kind,
+                        size,
+                        chunk_size,
+                        neighbour,
+                    });
+                }
+                PersistentStateInfo::NotFound => continue,
+            }
+        }
+
+        match err {
+            None => Err(Error::NotFound),
+            Some(err) => Err(err),
+        }
     }
 
-    pub async fn find_archive(&self, mc_seqno: u32) -> Result<Option<PendingArchive>, Error> {
+    #[tracing::instrument(skip_all, fields(
+        peer_id = %state.neighbour.peer_id(),
+        block_id = %state.block_id,
+        kind = ?state.kind,
+    ))]
+    pub async fn download_persistent_state<W>(
+        &self,
+        state: PendingPersistentState,
+        output: W,
+    ) -> Result<W, Error>
+    where
+        W: Write + Send + 'static,
+    {
+        tracing::debug!("started");
+        scopeguard::defer! {
+            tracing::debug!("finished");
+        }
+
+        let block_id = state.block_id;
+
+        download_compressed(
+            state.size,
+            state.chunk_size,
+            output,
+            |offset| {
+                tracing::debug!("downloading persistent state chunk");
+
+                let req = match state.kind {
+                    PersistentStateKind::Shard => {
+                        Request::from_tl(rpc::GetPersistentShardStateChunk { block_id, offset })
+                    }
+                    PersistentStateKind::Queue => {
+                        Request::from_tl(rpc::GetPersistentQueueStateChunk { block_id, offset })
+                    }
+                };
+                download_with_retries(req, self.overlay_client().clone(), state.neighbour.clone())
+            },
+            |output, chunk| {
+                output.write_all(chunk)?;
+                Ok(())
+            },
+            |mut output| {
+                output.flush()?;
+                Ok(output)
+            },
+        )
+        .await
+    }
+
+    pub async fn find_archive(&self, mc_seqno: u32) -> Result<PendingArchive, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
         let neighbours = self
             .overlay_client()
@@ -447,13 +443,11 @@ impl BlockchainRpcClient {
             // Stop using archives when enough neighbors
             // have responded ArchiveInfo::TooNew
             if new_archive_count >= neighbour_count {
-                return Ok(None);
+                return Err(Error::TooNew);
             }
 
             return match err {
-                None => Err(Error::Internal(anyhow::anyhow!(
-                    "no neighbour has the requested archive",
-                ))),
+                None => Err(Error::NotFound),
                 Some(err) => Err(err),
             };
         };
@@ -465,108 +459,50 @@ impl BlockchainRpcClient {
             archuve_chunk_size = pending_archive.chunk_size.get(),
             "found archive",
         );
-
-        Ok(Some(pending_archive))
+        Ok(pending_archive)
     }
 
     #[tracing::instrument(skip_all, fields(
         peer_id = %archive.neighbour.peer_id(),
         archive_id = archive.id,
-        archive_size = %bytesize::ByteSize::b(archive.size.get()),
-        archive_chunk_size = %bytesize::ByteSize::b(archive.chunk_size.get() as _),
     ))]
-    pub async fn download_archive<W>(
-        &self,
-        archive: PendingArchive,
-        mut output: W,
-    ) -> Result<W, Error>
+    pub async fn download_archive<W>(&self, archive: PendingArchive, output: W) -> Result<W, Error>
     where
         W: Write + Send + 'static,
     {
-        const PARALLEL_REQUESTS: usize = 10;
-
         tracing::debug!("started");
+        scopeguard::defer! {
+            tracing::debug!("finished");
+        }
 
-        let target_size = archive.size.get();
-        let chunk_size = archive.chunk_size.get() as usize;
-
-        let (chunks_tx, mut chunks_rx) =
-            mpsc::channel::<(QueryResponseHandle, Bytes)>(PARALLEL_REQUESTS);
-
-        let processing_task = tokio::task::spawn_blocking(move || {
-            let mut verifier = ArchiveVerifier::default();
-            let mut zstd_decoder = ZstdDecompressStream::new(chunk_size)?;
-
-            // Reuse buffer for decompressed data
-            let mut decompressed_chunk = Vec::new();
-
-            // Receive and process chunks
-            let mut downloaded = 0;
-            while let Some((h, chunk)) = chunks_rx.blocking_recv() {
-                let guard = scopeguard::guard(h, |handle| {
-                    handle.reject();
-                });
-
-                anyhow::ensure!(chunk.len() <= chunk_size as _, "received invalid chunk");
-
-                downloaded += chunk.len() as u64;
-                tracing::debug!(
-                    downloaded = %bytesize::ByteSize::b(downloaded),
-                    "got archive chunk"
-                );
-
-                anyhow::ensure!(downloaded <= target_size, "received too many chunks");
-
-                decompressed_chunk.clear();
-                zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
-                verifier.write_verify(&decompressed_chunk)?;
-                output.write_all(&decompressed_chunk)?;
-
-                ScopeGuard::into_inner(guard).accept(); // defuse the guard
-            }
-
-            anyhow::ensure!(
-                target_size == downloaded,
-                "archive size mismatch (target size: {target_size}; downloaded: {downloaded})",
-            );
-
-            verifier.final_check()?;
-            output.flush()?;
-
-            Ok(output)
-        });
-
-        let mut stream = futures_util::stream::iter((0..archive.size.get()).step_by(chunk_size))
-            .map(|offset| {
+        download_compressed(
+            archive.size,
+            archive.chunk_size,
+            (output, ArchiveVerifier::default()),
+            |offset| {
                 let archive_id = archive.id;
                 let neighbour = archive.neighbour.clone();
                 let overlay_client = self.overlay_client().clone();
 
-                tracing::debug!(archive_id, offset, "downloading archive chunk");
-                JoinTask::new(download_with_retries(
+                tracing::debug!(offset, "downloading archive chunk");
+                download_with_retries(
                     Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
                     overlay_client,
                     neighbour,
-                ))
-            })
-            .buffered(PARALLEL_REQUESTS);
-
-        let mut stream = std::pin::pin!(stream);
-        while let Some(chunk) = stream.next().await.transpose()? {
-            if chunks_tx.send(chunk).await.is_err() {
-                break;
-            }
-        }
-
-        drop(chunks_tx);
-
-        let output = processing_task
-            .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to join blocking task: {e}")))?
-            .map_err(Error::Internal)?;
-
-        tracing::debug!("finished");
-        Ok(output)
+                )
+            },
+            |(output, verifier), chunk| {
+                verifier.write_verify(chunk)?;
+                output.write_all(chunk)?;
+                Ok(())
+            },
+            |(mut output, verifier)| {
+                verifier.final_check()?;
+                output.flush()?;
+                Ok(output)
+            },
+        )
+        .await
     }
 }
 
@@ -584,35 +520,13 @@ pub struct PendingArchive {
     pub neighbour: Neighbour,
 }
 
-async fn download_with_retries(
-    req: Request,
-    overlay_client: PublicOverlayClient,
-    neighbour: Neighbour,
-) -> Result<(QueryResponseHandle, Bytes), Error> {
-    // TODO: move to config?
-    const MAX_RETRIES: usize = 10;
-
-    let mut retries = 0;
-    loop {
-        match overlay_client
-            .query_raw::<Data>(neighbour.clone(), req.clone())
-            .await
-        {
-            Ok(r) => {
-                let (h, res) = r.split();
-                return Ok((h, res.data));
-            }
-            Err(e) => {
-                tracing::error!("Failed to download archive slice: {e}");
-                retries += 1;
-                if retries >= MAX_RETRIES {
-                    return Err(e);
-                }
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
+#[derive(Clone)]
+pub struct PendingPersistentState {
+    pub block_id: BlockId,
+    pub kind: PersistentStateKind,
+    pub size: NonZeroU64,
+    pub chunk_size: NonZeroU32,
+    pub neighbour: Neighbour,
 }
 
 pub struct BlockDataFull {
@@ -693,7 +607,10 @@ async fn download_block_inner(
     let (chunks_tx, mut chunks_rx) =
         mpsc::channel::<(QueryResponseHandle, Bytes)>(PARALLEL_REQUESTS);
 
+    let span = tracing::Span::current();
     let processing_task = tokio::task::spawn_blocking(move || {
+        let _span = span.enter();
+
         let mut zstd_decoder = ZstdDecompressStream::new(chunk_size as usize)?;
 
         // Buffer for decompressed data
@@ -772,4 +689,173 @@ async fn download_block_inner(
         }),
         neighbour: neighbour.clone(),
     })
+}
+
+async fn download_compressed<S, T, DF, DFut, PF, FF>(
+    target_size: NonZeroU64,
+    chunk_size: NonZeroU32,
+    mut state: S,
+    mut download_fn: DF,
+    mut process_fn: PF,
+    finalize_fn: FF,
+) -> Result<T, Error>
+where
+    S: Send + 'static,
+    T: Send + 'static,
+    DF: FnMut(u64) -> DFut,
+    DFut: Future<Output = DownloadedChunkResult> + Send + 'static,
+    PF: FnMut(&mut S, &[u8]) -> Result<()> + Send + 'static,
+    FF: FnOnce(S) -> Result<T> + Send + 'static,
+{
+    const PARALLEL_REQUESTS: usize = 10;
+
+    let target_size = target_size.get();
+    let chunk_size = chunk_size.get() as usize;
+
+    let (chunks_tx, mut chunks_rx) =
+        mpsc::channel::<(QueryResponseHandle, Bytes)>(PARALLEL_REQUESTS);
+
+    let span = tracing::Span::current();
+    let processing_task = tokio::task::spawn_blocking(move || {
+        let _span = span.enter();
+
+        let mut zstd_decoder = ZstdDecompressStream::new(chunk_size)?;
+
+        // Reuse buffer for decompressed data
+        let mut decompressed_chunk = Vec::new();
+
+        // Receive and process chunks
+        let mut downloaded = 0;
+        while let Some((h, chunk)) = chunks_rx.blocking_recv() {
+            let guard = scopeguard::guard(h, |handle| {
+                handle.reject();
+            });
+
+            anyhow::ensure!(chunk.len() <= chunk_size as _, "received invalid chunk");
+
+            downloaded += chunk.len() as u64;
+            tracing::debug!(
+                downloaded = %bytesize::ByteSize::b(downloaded),
+                "got chunk"
+            );
+
+            anyhow::ensure!(downloaded <= target_size, "received too many chunks");
+
+            decompressed_chunk.clear();
+            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
+
+            process_fn(&mut state, &decompressed_chunk)?;
+
+            ScopeGuard::into_inner(guard).accept(); // defuse the guard
+        }
+
+        anyhow::ensure!(
+            target_size == downloaded,
+            "size mismatch (target size: {target_size}; downloaded: {downloaded})",
+        );
+
+        finalize_fn(state)
+    });
+
+    let mut stream = futures_util::stream::iter((0..target_size).step_by(chunk_size))
+        .map(|offset| JoinTask::new(download_fn(offset)))
+        .buffered(PARALLEL_REQUESTS);
+
+    let mut stream = std::pin::pin!(stream);
+    while let Some(chunk) = stream.next().await.transpose()? {
+        if chunks_tx.send(chunk).await.is_err() {
+            break;
+        }
+    }
+
+    drop(chunks_tx);
+
+    let output = processing_task
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to join blocking task: {e}")))?
+        .map_err(Error::Internal)?;
+
+    Ok(output)
+}
+
+async fn download_with_retries(
+    req: Request,
+    overlay_client: PublicOverlayClient,
+    neighbour: Neighbour,
+) -> DownloadedChunkResult {
+    // TODO: move to config?
+    const MAX_RETRIES: usize = 10;
+
+    let mut retries = 0;
+    loop {
+        match overlay_client
+            .query_raw::<Data>(neighbour.clone(), req.clone())
+            .await
+        {
+            Ok(r) => {
+                let (h, res) = r.split();
+                return Ok((h, res.data));
+            }
+            Err(e) => {
+                tracing::error!("Failed to download archive slice: {e}");
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(e);
+                }
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+type DownloadedChunkResult = Result<(QueryResponseHandle, Bytes), Error>;
+
+#[cfg(test)]
+mod tests {
+    use rand::RngCore;
+    use tycho_network::PeerId;
+    use tycho_util::compression::zstd_compress;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn download_compressed_works() -> Result<()> {
+        let neighbour = Neighbour::new(PeerId([0; 32]), u32::MAX, &Duration::from_millis(100));
+
+        let mut original_data = vec![0u8; 1 << 20]; // 1 MB of garbage
+        rand::thread_rng().fill_bytes(&mut original_data);
+
+        let mut compressed_data = Vec::new();
+        zstd_compress(&original_data, &mut compressed_data, 9);
+        let compressed_data = Bytes::from(compressed_data);
+
+        assert_ne!(compressed_data, original_data);
+
+        const CHUNK_SIZE: usize = 128;
+
+        let received = download_compressed(
+            NonZeroU64::new(compressed_data.len() as _).unwrap(),
+            NonZeroU32::new(CHUNK_SIZE as _).unwrap(),
+            Vec::new(),
+            |offset| {
+                assert_eq!(offset % CHUNK_SIZE as u64, 0);
+                assert!(offset < compressed_data.len() as u64);
+                let from = offset as usize;
+                let to = std::cmp::min(from + CHUNK_SIZE, compressed_data.len());
+                let chunk = compressed_data.slice(from..to);
+                let handle = QueryResponseHandle::with_roundtrip_ms(neighbour.clone(), 100);
+                futures_util::future::ready(Ok((handle, chunk)))
+            },
+            |result, chunk| {
+                result.extend_from_slice(chunk);
+                Ok(())
+            },
+            |result| Ok(result),
+        )
+        .await?;
+        assert_eq!(received, original_data);
+
+        Ok(())
+    }
 }

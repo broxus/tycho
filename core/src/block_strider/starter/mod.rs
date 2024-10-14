@@ -13,8 +13,7 @@ use crate::global_config::ZerostateId;
 mod cold_boot;
 
 /// Bootstrapping utils.
-///
-/// TODO: Use it as a block provider.
+// TODO: Use it as a block provider?
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Starter {

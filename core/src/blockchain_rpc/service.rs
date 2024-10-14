@@ -3,12 +3,11 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
-use bytesize::ByteSize;
 use everscale_types::models::BlockId;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, Storage};
+use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
@@ -215,8 +214,8 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     Some(Response::from_tl(res))
                 })
             },
-            rpc::GetPersistentStateInfo as req => {
-                tracing::debug!(block_id = %req.block_id, "getPersistentStateInfo");
+            rpc::GetPersistentShardStateInfo as req => {
+                tracing::debug!(block_id = %req.block_id, "getPersistentShardStateInfo");
 
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
@@ -224,17 +223,38 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     Some(Response::from_tl(res))
                 })
             },
-            rpc::GetPersistentStatePart as req => {
+            rpc::GetPersistentQueueStateInfo as req => {
+                tracing::debug!(block_id = %req.block_id, "getPersistentQueueStateInfo");
+
+                let inner = self.inner.clone();
+                BoxFutureOrNoop::future(async move {
+                    let res = inner.handle_get_queue_persistent_state_info(&req);
+                    Some(Response::from_tl(res))
+                })
+            },
+            rpc::GetPersistentShardStateChunk as req => {
                 tracing::debug!(
                     block_id = %req.block_id,
-                    limit = %req.limit,
                     offset = %req.offset,
-                    "getPersistentStatePart"
+                    "getPersistentShardStateChunk"
                 );
 
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_persistent_state_part(&req).await;
+                    let res = inner.handle_get_persistent_shard_state_chunk(&req).await;
+                    Some(Response::from_tl(res))
+                })
+            },
+            rpc::GetPersistentQueueStateChunk as req => {
+                tracing::debug!(
+                    block_id = %req.block_id,
+                    offset = %req.offset,
+                    "getPersistentQueueStateChunk"
+                );
+
+                let inner = self.inner.clone();
+                BoxFutureOrNoop::future(async move {
+                    let res = inner.handle_get_persistent_queue_state_chunk(&req).await;
                     Some(Response::from_tl(res))
                 })
             },
@@ -539,62 +559,42 @@ impl<B> Inner<B> {
 
     fn handle_get_persistent_state_info(
         &self,
-        req: &rpc::GetPersistentStateInfo,
+        req: &rpc::GetPersistentShardStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
         let label = [("method", "getPersistentStateInfo")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
-        let persistent_state_storage = self.storage().persistent_state_storage();
-
-        let res = 'res: {
-            if self.config.serve_persistent_states {
-                if let Some(info) = persistent_state_storage.get_state_info(&req.block_id) {
-                    break 'res PersistentStateInfo::Found {
-                        size: info.size as u64,
-                    };
-                }
-            }
-            PersistentStateInfo::NotFound
-        };
-
+        let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Shard);
         overlay::Response::Ok(res)
     }
 
-    async fn handle_get_persistent_state_part(
+    fn handle_get_queue_persistent_state_info(
         &self,
-        req: &rpc::GetPersistentStatePart,
-    ) -> overlay::Response<Data> {
-        const PART_MAX_SIZE: u64 = ByteSize::mib(2).as_u64();
-
-        let label = [("method", "getPersistentStatePart")];
+        req: &rpc::GetPersistentQueueStateInfo,
+    ) -> overlay::Response<PersistentStateInfo> {
+        let label = [("method", "getQueuePersistentStateInfo")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+        let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Queue);
+        overlay::Response::Ok(res)
+    }
 
-        let persistent_state_storage = self.storage().persistent_state_storage();
-
-        let persistent_state_request_validation = || {
-            anyhow::ensure!(
-                self.config.serve_persistent_states,
-                "persistent states are disabled"
-            );
-            anyhow::ensure!(req.limit as u64 <= PART_MAX_SIZE, "too large max_size");
-            Ok::<_, anyhow::Error>(())
-        };
-
-        if let Err(e) = persistent_state_request_validation() {
-            tracing::debug!("persistent state request validation failed: {e:?}");
-            return overlay::Response::Err(BAD_REQUEST_ERROR_CODE);
-        }
-
-        match persistent_state_storage
-            .read_state_part(&req.block_id, req.limit, req.offset)
+    async fn handle_get_persistent_shard_state_chunk(
+        &self,
+        req: &rpc::GetPersistentShardStateChunk,
+    ) -> overlay::Response<Data> {
+        let label = [("method", "getPersistentShardStateChunk")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Shard)
             .await
-        {
-            Some(data) => overlay::Response::Ok(Data { data: data.into() }),
-            None => {
-                tracing::debug!("failed to read persistent state part");
-                overlay::Response::Err(NOT_FOUND_ERROR_CODE)
-            }
-        }
+    }
+
+    async fn handle_get_persistent_queue_state_chunk(
+        &self,
+        req: &rpc::GetPersistentQueueStateChunk,
+    ) -> overlay::Response<Data> {
+        let label = [("method", "getPersistentQueueStateChunk")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Queue)
+            .await
     }
 }
 
@@ -635,5 +635,55 @@ impl<B> Inner<B> {
             }
             _ => BlockFull::NotFound,
         })
+    }
+
+    fn read_persistent_state_info(
+        &self,
+        block_id: &BlockId,
+        state_kind: PersistentStateKind,
+    ) -> PersistentStateInfo {
+        let persistent_state_storage = self.storage().persistent_state_storage();
+        if self.config.serve_persistent_states {
+            if let Some(info) = persistent_state_storage.get_state_info(block_id, state_kind) {
+                return PersistentStateInfo::Found {
+                    size: info.size,
+                    chunk_size: info.chunk_size,
+                };
+            }
+        }
+        PersistentStateInfo::NotFound
+    }
+
+    async fn read_persistent_state_chunk(
+        &self,
+        block_id: &BlockId,
+        offset: u64,
+        state_kind: PersistentStateKind,
+    ) -> overlay::Response<Data> {
+        let persistent_state_storage = self.storage().persistent_state_storage();
+
+        let persistent_state_request_validation = || {
+            anyhow::ensure!(
+                self.config.serve_persistent_states,
+                "persistent states are disabled"
+            );
+            Ok::<_, anyhow::Error>(())
+        };
+
+        if let Err(e) = persistent_state_request_validation() {
+            tracing::debug!("persistent state request validation failed: {e:?}");
+            return overlay::Response::Err(BAD_REQUEST_ERROR_CODE);
+        }
+
+        match persistent_state_storage
+            .read_state_part(block_id, offset, state_kind)
+            .await
+        {
+            Some(data) => overlay::Response::Ok(Data { data: data.into() }),
+            None => {
+                tracing::debug!("failed to read persistent state part");
+                overlay::Response::Err(NOT_FOUND_ERROR_CODE)
+            }
+        }
     }
 }

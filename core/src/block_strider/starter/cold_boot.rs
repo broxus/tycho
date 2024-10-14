@@ -1,3 +1,4 @@
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,19 +7,24 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tycho_block_util::archive::WithArchiveData;
+use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, KEY_BLOCK_UTIME_STEP,
 };
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockHandle, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta, Storage};
+use tycho_storage::{
+    BlockHandle, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta, PersistentStateKind,
+    Storage,
+};
 use tycho_util::futures::JoinTask;
+use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
 use super::{StarterInner, ZerostateProvider};
-use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
+use crate::block_strider::{CheckProof, ProofChecker};
+use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 
@@ -50,7 +56,6 @@ impl StarterInner {
         self.storage
             .node_state()
             .store_last_mc_block_id(last_key_block.id());
-
         tracing::info!(last_mc_block_id = %last_key_block.id(), "finished");
         Ok(*last_key_block.id())
     }
@@ -314,7 +319,7 @@ impl StarterInner {
     async fn download_start_blocks_and_states(&self, mc_block_id: &BlockId) -> Result<()> {
         // Download and save masterchain block and state
         let (_, init_mc_block) = self
-            .download_block_with_state(mc_block_id, mc_block_id)
+            .download_block_with_states(mc_block_id, mc_block_id)
             .await?;
 
         tracing::info!(
@@ -325,7 +330,7 @@ impl StarterInner {
         // Download and save blocks and states from other shards
         for (_, block_id) in init_mc_block.shard_blocks()? {
             let (handle, _) = self
-                .download_block_with_state(mc_block_id, &block_id)
+                .download_block_with_states(mc_block_id, &block_id)
                 .await?;
 
             self.storage
@@ -409,14 +414,14 @@ impl StarterInner {
         // Import all zerostates
         let handle_storage = self.storage.block_handle_storage();
         let state_storage = self.storage.shard_state_storage();
-        let persistent_state_storage = self.storage.persistent_state_storage();
+        let persistent_states = self.storage.persistent_state_storage();
 
         for state in to_import {
             let (handle, status) =
                 handle_storage.create_or_load_handle(state.block_id(), NewBlockMeta {
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
-                    mc_ref_seqno: Some(0),
+                    mc_ref_seqno: 0,
                 });
 
             let stored = state_storage
@@ -433,8 +438,8 @@ impl StarterInner {
                 "importing zerostate"
             );
 
-            persistent_state_storage
-                .store_state(&handle, state.root_cell().repr_hash())
+            persistent_states
+                .store_shard_state(0, &handle, state.ref_mc_state_handle().clone())
                 .await?;
         }
 
@@ -452,197 +457,384 @@ impl StarterInner {
         let zerostate_id = self.zerostate.as_block_id();
         tracing::info!(zerostate_id = ?zerostate_id, "download zerostates");
 
-        let (handle, state) = self.load_or_download_state(&zerostate_id).await?;
+        let (handle, state) = self
+            .download_shard_state(&zerostate_id, &zerostate_id)
+            .await?;
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
-            let _state = self.load_or_download_state(&block_id).await?;
+            let _state = self.download_shard_state(&zerostate_id, &block_id).await?;
         }
 
         Ok((handle, state))
     }
 
-    async fn load_or_download_state(
-        &self,
-        block_id: &BlockId,
-    ) -> Result<(BlockHandle, ShardStateStuff)> {
-        let storage = &self.storage;
-        let blockchain_rpc_client = &self.blockchain_rpc_client;
-
-        let block_handles = storage.block_handle_storage();
-        let persistent_states = storage.persistent_state_storage();
-
-        let (handle, state) = match block_handles.load_handle(block_id) {
-            Some(handle) if handle.has_state() => {
-                // Load state
-                let shard_state_storage = storage.shard_state_storage();
-                let state = shard_state_storage
-                    .load_state(block_id)
-                    .await
-                    .context("Failed to load zerostate")?;
-
-                (handle, state)
-            }
-            _ => {
-                // Download state
-                let state = blockchain_rpc_client
-                    .download_and_store_state(block_id, storage.clone())
-                    .await?;
-
-                let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-                    block_id,
-                    NewBlockMeta::zero_state(state.state().gen_utime, block_id.is_masterchain()),
-                );
-
-                storage
-                    .shard_state_storage()
-                    .store_state(&handle, &state)
-                    .await?;
-
-                (handle, state)
-            }
-        };
-
-        // TODO: Reuse downloaded state?
-        persistent_states
-            .store_state(&handle, state.root_cell().repr_hash())
-            .await?;
-
-        Ok((handle, state))
-    }
-
-    async fn download_block_with_state(
+    async fn download_block_with_states(
         &self,
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, BlockStuff)> {
-        let block_storage = self.storage.block_storage();
-        let block_handle_storage = self.storage.block_handle_storage();
+        // First download the block itself, with all its parts (proof and queue diff).
+        let (handle, block) = self.download_block_data(mc_block_id, block_id).await?;
 
-        let mc_seqno = mc_block_id.seqno;
-
-        let handle = block_handle_storage
-            .load_handle(block_id)
-            .filter(BlockHandle::has_data);
-
-        // Download block data and proof
-        let (block, handle) = 'data: {
-            if let Some(handle) = handle {
-                break 'data (block_storage.load_block_data(&handle).await?, handle);
-            }
-
-            let blockchain_rpc_client = &self.blockchain_rpc_client;
-
-            // TODO: add retry count to interrupt infinite loop
-            let (block, proof, diff, meta_data) = 'outer: loop {
-                let (block_data_full, neighbour) = 'res: {
-                    match blockchain_rpc_client
-                        .get_block_full(block_id, DataRequirement::Expected)
-                        .await
-                    {
-                        Ok(res) => match res.data {
-                            Some(data) => break 'res (data, res.neighbour),
-                            None => tracing::warn!(%block_id, "block not found"),
-                        },
-                        Err(e) => tracing::warn!(%block_id, "failed to download block: {e:?}"),
-                    }
-
-                    // TODO: Backoff
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue 'outer;
-                };
-
-                anyhow::ensure!(&block_data_full.block_id == block_id, "block id mismatch");
-                let BlockDataFull {
-                    block_data,
-                    proof_data,
-                    queue_diff_data,
-                    ..
-                } = block_data_full;
-
-                let block = match BlockStuff::deserialize_checked(block_id, &block_data) {
-                    Ok(block) => WithArchiveData::new(block, block_data),
-                    Err(e) => {
-                        tracing::error!(%block_id, "failed to deserialize block: {e}");
-                        neighbour.punish(PunishReason::Malicious);
-                        continue;
-                    }
-                };
-
-                let proof = match BlockProofStuff::deserialize(block_id, &proof_data) {
-                    Ok(proof) => WithArchiveData::new(proof, proof_data),
-                    Err(e) => {
-                        tracing::error!(%block_id, "failed to deserialize block proof: {e}");
-                        neighbour.punish(PunishReason::Malicious);
-                        continue;
-                    }
-                };
-
-                let diff = match QueueDiffStuff::deserialize(block_id, &queue_diff_data) {
-                    Ok(diff) => WithArchiveData::new(diff, queue_diff_data),
-                    Err(e) => {
-                        tracing::error!(%block_id, "failed to deserialize queue diff: {e}");
-                        neighbour.punish(PunishReason::Malicious);
-                        continue;
-                    }
-                };
-
-                // TODO: Use `ProofChecker` instead
-                match proof.pre_check_block_proof() {
-                    Ok((_, block_info)) => {
-                        break (block, proof, diff, NewBlockMeta {
-                            is_key_block: block_info.key_block,
-                            gen_utime: block_info.gen_utime,
-                            mc_ref_seqno: Some(mc_seqno),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!("received invalid block: {e:?}");
-                    }
-                }
-            };
-
-            tracing::info!(%block_id, "downloaded block data");
-
-            let mut handle = block_storage
-                .store_block_data(&block, &block.archive_data, meta_data)
-                .await?
-                .handle;
-
-            if !handle.has_proof() {
-                handle = block_storage
-                    .store_block_proof(&proof, handle.into())
-                    .await?
-                    .handle;
-            }
-
-            if !handle.has_queue_diff() {
-                handle = block_storage
-                    .store_queue_diff(&diff, handle.into())
-                    .await?
-                    .handle;
-            }
-
-            (block.data, handle)
-        };
-
-        // Download block state
-        if !handle.has_state() {
+        // Download persistent shard state
+        {
             let state_update = block.as_ref().load_state_update()?;
 
-            tracing::info!(block_id = %handle.id(), "downloading state");
-            let (_, shard_state) = self.load_or_download_state(block_id).await?;
-            tracing::info!(block_id = %handle.id(), "downloaded state");
-
+            let (_, shard_state) = self.download_shard_state(mc_block_id, block_id).await?;
             let state_hash = *shard_state.root_cell().repr_hash();
             anyhow::ensure!(
                 state_update.new_hash == state_hash,
                 "downloaded shard state hash mismatch"
             );
         }
-        block_handle_storage.set_block_applied(&handle);
+
+        // Download persistent queue state
+        // NOTE: There is no queue state for zerostate, and there might be a situation
+        //       where there were no blocks in the shard.
+        if block_id.seqno != 0 {
+            let top_update = &block.as_ref().out_msg_queue_updates;
+            self.download_queue_state(&handle, top_update).await?;
+        }
 
         Ok((handle, block))
+    }
+
+    #[tracing::instrument(skip_all, fields(block_id = %block_id))]
+    async fn download_block_data(
+        &self,
+        mc_block_id: &BlockId,
+        block_id: &BlockId,
+    ) -> Result<(BlockHandle, BlockStuff)> {
+        let rpc = &self.blockchain_rpc_client;
+        let blocks = self.storage.block_storage();
+        let block_handles = self.storage.block_handle_storage();
+
+        let block_handle = block_handles.load_handle(block_id);
+        if let Some(handle) = &block_handle {
+            // NOTE: Block data is stored only after all proofs/queues are verified
+            if handle.has_data() {
+                let block = blocks.load_block_data(handle).await?;
+
+                tracing::info!("using the stored block");
+                return Ok((handle.clone(), block));
+            }
+        }
+
+        let proof_checker = ProofChecker::new(self.storage.clone());
+
+        // TODO: add retry count to interrupt infinite loop
+        'outer: loop {
+            let (full, neighbour) = 'res: {
+                match rpc
+                    .get_block_full(block_id, DataRequirement::Expected)
+                    .await
+                {
+                    Ok(res) => match res.data {
+                        Some(data) if &data.block_id == block_id => {
+                            break 'res (data, res.neighbour)
+                        }
+                        Some(_) => {
+                            res.neighbour.punish(PunishReason::Malicious);
+                            tracing::warn!("received block id mismatch");
+                        }
+                        None => tracing::warn!("block not found"),
+                    },
+                    Err(e) => tracing::warn!("failed to download block: {e:?}"),
+                }
+
+                // TODO: Backoff
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue 'outer;
+            };
+
+            let block_stuff_fut = pin!(rayon_run({
+                let block_id = *block_id;
+                let block_data = full.block_data.clone();
+                move || BlockStuff::deserialize_checked(&block_id, &block_data)
+            }));
+
+            let other_data_fut = pin!(rayon_run({
+                let block_id = *block_id;
+                let proof_data = full.proof_data.clone();
+                let queue_diff_data = full.queue_diff_data.clone();
+                move || {
+                    (
+                        BlockProofStuff::deserialize(&block_id, &proof_data),
+                        QueueDiffStuff::deserialize(&block_id, &queue_diff_data),
+                    )
+                }
+            }));
+
+            let (block_stuff, (block_proof, queue_diff)) =
+                futures_util::future::join(block_stuff_fut, other_data_fut).await;
+
+            match (block_stuff, block_proof, queue_diff) {
+                (Ok(block), Ok(proof), Ok(diff)) => {
+                    let proof = WithArchiveData::new(proof, full.proof_data);
+                    let diff = WithArchiveData::new(diff, full.queue_diff_data);
+                    match proof_checker
+                        .check_proof(CheckProof {
+                            mc_block_id,
+                            block: &block,
+                            proof: &proof,
+                            queue_diff: &diff,
+                            store_on_success: true,
+                        })
+                        .await
+                    {
+                        Ok(meta) => {
+                            let archive_data = ArchiveData::New(full.block_data);
+                            let res = blocks.store_block_data(&block, &archive_data, meta).await?;
+
+                            tracing::info!("using the downloaded block");
+                            return Ok((res.handle, block));
+                        }
+                        Err(e) => {
+                            neighbour.punish(PunishReason::Malicious);
+                            tracing::error!("got invalid block proof: {e}");
+                        }
+                    }
+                }
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                    neighbour.punish(PunishReason::Malicious);
+                    tracing::error!("failed to deserialize shard block or block proof: {e}");
+                }
+            }
+
+            // TODO: Backoff
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    // NOTE: We cannot use block handle here since we also need to use this method
+    //       for downloading zerostates, for which we cannot know the `gen_utime`
+    //       in advance.
+    #[tracing::instrument(skip_all, fields(block_id = %block_id))]
+    async fn download_shard_state(
+        &self,
+        mc_block_id: &BlockId,
+        block_id: &BlockId,
+    ) -> Result<(BlockHandle, ShardStateStuff)> {
+        use tycho_storage::FileBuilder;
+
+        enum StoreZeroStateFrom {
+            File(FileBuilder),
+            State(ShardStateStuff),
+        }
+
+        let rpc = &self.blockchain_rpc_client;
+        let shard_states = self.storage.shard_state_storage();
+        let persistent_states = self.storage.persistent_state_storage();
+        let block_handles = self.storage.block_handle_storage();
+
+        let temp = self.storage.temp_file_storage();
+
+        let mut state_file = temp.file(format!("state_{block_id}"));
+        let state_file_path = state_file.path().to_owned();
+
+        let mut temp_file = state_file.with_extension(TEMP_EXTENSION);
+        let temp_file_path = temp_file.path().to_owned();
+        scopeguard::defer! {
+            std::fs::remove_file(temp_file_path).ok();
+        };
+
+        // NOTE: Intentionally dont spawn yet
+        let remove_state_file = async move {
+            if let Err(e) = tokio::fs::remove_file(&state_file_path).await {
+                tracing::warn!(
+                    path = %state_file_path.display(),
+                    "failed to remove downloaded shard state: {e:?}",
+                );
+            }
+        };
+
+        let mc_seqno = mc_block_id.seqno;
+        let try_save_persistent = |block_handle: &BlockHandle, from: StoreZeroStateFrom| {
+            let block_handle = block_handle.clone();
+            async move {
+                match from {
+                    // Fast reuse the downloaded file if possible
+                    StoreZeroStateFrom::File(mut state_file) => {
+                        // Reuse downloaded (and validated) file as is.
+                        let state_file = state_file.read(true).open()?;
+                        persistent_states
+                            .store_shard_state_file(mc_seqno, &block_handle, state_file)
+                            .await
+                    }
+                    // Possibly slow full state traversal
+                    StoreZeroStateFrom::State(state) => {
+                        // Store zerostate as is
+                        persistent_states
+                            .store_shard_state(
+                                mc_seqno,
+                                &block_handle,
+                                state.ref_mc_state_handle().clone(),
+                            )
+                            .await
+                    }
+                }
+            }
+        };
+
+        // Fast path goes first. If the state exists we only need to try to save persistent.
+        let block_handle = block_handles.load_handle(block_id);
+        if let Some(handle) = &block_handle {
+            if handle.has_state() {
+                let state = shard_states.load_state(block_id).await?;
+
+                if !handle.has_persistent_shard_state() {
+                    let from = if state_file.exists() {
+                        StoreZeroStateFrom::File(state_file)
+                    } else {
+                        StoreZeroStateFrom::State(state.clone())
+                    };
+                    if let Err(e) = try_save_persistent(handle, from).await {
+                        tracing::error!(%block_id, "failed to store persistent shard state: {e:?}");
+                    }
+                }
+
+                remove_state_file.await;
+
+                tracing::info!("using the stored shard state");
+                return Ok((handle.clone(), state));
+            }
+        }
+
+        // Try download the state
+        'attempt: for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
+            let file = loop {
+                if state_file.exists() {
+                    // Use the downloaded state file if it exists
+                    break state_file.read(true).open()?;
+                }
+
+                let try_download = async {
+                    let pending_state = rpc
+                        .find_persistent_state(block_id, PersistentStateKind::Shard)
+                        .await?;
+
+                    let output = temp_file.write(true).create(true).truncate(true).open()?;
+                    rpc.download_persistent_state(pending_state, output).await?;
+
+                    tokio::fs::rename(temp_file.path(), state_file.path()).await?;
+                    Ok::<_, anyhow::Error>(())
+                };
+
+                if let Err(e) = try_download.await {
+                    tracing::error!(attempt, "failed to download persistent shard state: {e}");
+
+                    // TODO: backoff
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue 'attempt;
+                }
+
+                // NOTE: Fill will be loaded on the next iteration of the inner loop
+            };
+
+            // NOTE: `store_state_file` error is mostly unrecoverable since the operation
+            //       context is too large to be atomic.
+            // TODO: Make this operation recoverable to allow an infinite number of attempts.
+            let state = shard_states.store_state_file(block_id, file).await?;
+
+            let block_handle = match block_handle {
+                Some(handle) => handle,
+                None => {
+                    let (handle, _) = block_handles.create_or_load_handle(block_id, NewBlockMeta {
+                        is_key_block: block_id.is_masterchain(),
+                        gen_utime: state.as_ref().gen_utime,
+                        mc_ref_seqno: mc_block_id.seqno,
+                    });
+                    handle
+                }
+            };
+
+            let from = StoreZeroStateFrom::File(state_file);
+            if let Err(e) = try_save_persistent(&block_handle, from).await {
+                tracing::error!("failed to store persistent shard state: {e:?}");
+            }
+
+            remove_state_file.await;
+
+            tracing::info!("using the downloaded shard state");
+            return Ok((block_handle, state));
+        }
+
+        anyhow::bail!("ran out of attempts")
+    }
+
+    #[tracing::instrument(skip_all, fields(block_id = %block_handle.id()))]
+    async fn download_queue_state(
+        &self,
+        block_handle: &BlockHandle,
+        top_update: &OutMsgQueueUpdates,
+    ) -> Result<()> {
+        let block_id = block_handle.id();
+
+        let rpc = &self.blockchain_rpc_client;
+        let internal_queue = self.storage.internal_queue_storage();
+        let temp = self.storage.temp_file_storage();
+
+        let mut state_file = temp.file(format!("queue_state_{block_id}"));
+        let state_file_path = state_file.path().to_owned();
+
+        let mut temp_file = state_file.with_extension(TEMP_EXTENSION);
+        let temp_file_path = temp_file.path().to_owned();
+        scopeguard::defer! {
+            std::fs::remove_file(temp_file_path).ok();
+        };
+
+        // NOTE: Intentionally dont spawn yet
+        let remove_state_file = async move {
+            if let Err(e) = tokio::fs::remove_file(&state_file_path).await {
+                tracing::warn!(
+                    path = %state_file_path.display(),
+                    "failed to remove downloaded queue state: {e:?}",
+                );
+            }
+        };
+
+        'attempt: for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
+            let file = loop {
+                if state_file.exists() {
+                    // Use the downloaded state file if it exists
+                    break state_file.read(true).open()?;
+                }
+
+                let try_download = async {
+                    let pending_state = rpc
+                        .find_persistent_state(block_id, PersistentStateKind::Queue)
+                        .await?;
+
+                    let output = temp_file.write(true).create(true).truncate(true).open()?;
+                    rpc.download_persistent_state(pending_state, output).await?;
+
+                    tokio::fs::rename(temp_file.path(), state_file.path()).await?;
+                    Ok::<_, anyhow::Error>(())
+                };
+
+                if let Err(e) = try_download.await {
+                    tracing::error!(attempt, "failed to download persistent queue state: {e}");
+
+                    // TODO: backoff
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue 'attempt;
+                }
+
+                // NOTE: Fill will be loaded on the next iteration of the inner loop
+            };
+
+            internal_queue
+                .insert_from_file(block_id.shard, top_update, file)
+                .await?;
+
+            remove_state_file.await;
+
+            tracing::info!("using the downloaded queue state");
+            return Ok(());
+        }
+
+        anyhow::bail!("ran out of attempts")
     }
 }
 
@@ -750,7 +942,7 @@ impl InitBlock {
         let res = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
-            mc_ref_seqno: Some(next_proof.proof().proof_for.seqno),
+            mc_ref_seqno: next_proof.proof().proof_for.seqno,
         };
 
         match self {
@@ -777,3 +969,7 @@ impl InitBlock {
 
 const INITIAL_SYNC_TIME_SECONDS: u32 = 300;
 const MAX_EMPTY_PROOF_RETRIES: usize = 10;
+
+const MAX_PERSISTENT_STATE_RETRIES: usize = 10;
+
+const TEMP_EXTENSION: &str = "temp";

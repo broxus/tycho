@@ -111,6 +111,16 @@ impl QueueDiffStuff {
         }
     }
 
+    #[cfg(any(test, feature = "test"))]
+    pub fn new(block_id: &BlockId, diff: QueueDiff) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                block_id: *block_id,
+                diff,
+            }),
+        }
+    }
+
     pub fn builder(
         shard_ident: ShardIdent,
         seqno: u32,

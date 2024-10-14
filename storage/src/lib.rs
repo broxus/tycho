@@ -119,6 +119,8 @@ impl StorageBuilder {
                 .with_options(|opts, _| update_options(opts, threads, fdlimit))
                 .build()?;
 
+        let temp_file_storage = TempFileStorage::new(&file_db)?;
+
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
         let runtime_storage = Arc::new(RuntimeStorage::new(block_handle_storage.clone()));
@@ -129,20 +131,28 @@ impl StorageBuilder {
         ));
         let shard_state_storage = ShardStateStorage::new(
             base_db.clone(),
+            block_handle_storage.clone(),
+            block_storage.clone(),
+            temp_file_storage.clone(),
+            self.config.cells_cache_size.as_u64(),
+        )?;
+        let persistent_state_storage = PersistentStateStorage::new(
+            base_db.clone(),
             &file_db,
             block_handle_storage.clone(),
             block_storage.clone(),
-            self.config.cells_cache_size.as_u64(),
+            shard_state_storage.clone(),
         )?;
-        let persistent_state_storage =
-            PersistentStateStorage::new(base_db.clone(), &file_db, block_handle_storage.clone())?;
 
-        let temp_archive_storage = TempArchiveStorage::new(&file_db)?;
+        persistent_state_storage.preload_states().await?;
+
         let node_state_storage = NodeStateStorage::new(base_db.clone());
 
         let rpc_state = rpc_db.map(RpcStorage::new);
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
+
+        temp_file_storage.remove_outdated_files().await?;
 
         block_storage.finish_block_data().await?;
         block_storage.preload_archive_ids().await?;
@@ -168,7 +178,7 @@ impl StorageBuilder {
             runtime_storage,
             rpc_state,
             internal_queue_storage,
-            temp_archive_storage,
+            temp_file_storage,
             mempool_storage,
         });
 
@@ -244,8 +254,8 @@ impl Storage {
         &self.inner.persistent_state_storage
     }
 
-    pub fn temp_archive_storage(&self) -> &TempArchiveStorage {
-        &self.inner.temp_archive_storage
+    pub fn temp_file_storage(&self) -> &TempFileStorage {
+        &self.inner.temp_file_storage
     }
 
     pub fn block_handle_storage(&self) -> &BlockHandleStorage {
@@ -290,11 +300,11 @@ struct Inner {
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_storage: Arc<BlockStorage>,
-    shard_state_storage: ShardStateStorage,
+    shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
     rpc_state: Option<RpcStorage>,
     internal_queue_storage: InternalQueueStorage,
-    temp_archive_storage: TempArchiveStorage,
+    temp_file_storage: TempFileStorage,
     mempool_storage: MempoolStorage,
 }

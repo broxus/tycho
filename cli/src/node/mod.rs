@@ -28,7 +28,7 @@ use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
+    PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StateSubscriber,
     StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
@@ -382,7 +382,6 @@ impl Node {
     /// Initialize the node and return the init block id.
     async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
-
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
@@ -540,6 +539,7 @@ impl Node {
         tracing::info!("collator started");
 
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
+        let ps_subscriber = PsSubscriber::new(self.storage.clone());
 
         // Create RPC
         // NOTE: This variable is used as a guard to abort the server future on drop.
@@ -607,7 +607,11 @@ impl Node {
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
-                        (collator_state_subscriber, rpc_state_subscriber),
+                        (
+                            collator_state_subscriber,
+                            rpc_state_subscriber,
+                            ps_subscriber,
+                        ),
                     ),
                     rpc_block_subscriber,
                     validator_subscriber,

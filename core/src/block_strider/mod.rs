@@ -17,8 +17,8 @@ use tycho_util::FastHashMap;
 
 pub use self::provider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
-    BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, EmptyBlockProvider,
-    OptionalBlockStuff, ProofChecker, StorageBlockProvider,
+    BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
+    EmptyBlockProvider, OptionalBlockStuff, ProofChecker, StorageBlockProvider,
 };
 pub use self::starter::{FileZerostateProvider, Starter, ZerostateProvider};
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
@@ -27,8 +27,8 @@ pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber,
-    ManualGcTrigger, MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt,
+    ManualGcTrigger, MetricsSubscriber, NoopSubscriber, PsSubscriber, StateSubscriber,
+    StateSubscriberContext, StateSubscriberExt,
 };
 
 mod provider;

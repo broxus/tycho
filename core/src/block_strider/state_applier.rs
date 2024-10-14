@@ -225,14 +225,9 @@ where
             .store_block_data(block, archive_data, NewBlockMeta {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: Some(mc_block_id.seqno),
+                mc_ref_seqno: mc_block_id.seqno,
             })
             .await?;
-
-        self.inner
-            .storage
-            .block_handle_storage()
-            .assign_mc_ref_seq_no(&res.handle, mc_block_id.seqno);
 
         Ok(res.handle)
     }

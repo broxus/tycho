@@ -37,18 +37,24 @@ impl BlockHandleStorage {
         updated
     }
 
-    pub fn set_has_persistent_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().add_flags(BlockFlags::HAS_PERSISTENT_STATE);
+    pub fn set_has_persistent_shard_state(&self, handle: &BlockHandle) -> bool {
+        let updated = handle
+            .meta()
+            .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE);
         if updated {
             self.store_handle(handle);
         }
         updated
     }
 
-    pub fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_ref_seq_no: u32) {
-        if handle.set_mc_ref_seqno(mc_ref_seq_no) {
+    pub fn set_has_persistent_queue_state(&self, handle: &BlockHandle) -> bool {
+        let updated = handle
+            .meta()
+            .add_flags(BlockFlags::HAS_PERSISTENT_QUEUE_STATE);
+        if updated {
             self.store_handle(handle);
         }
+        updated
     }
 
     pub fn create_or_load_handle(
@@ -353,14 +359,13 @@ mod tests {
         let meta = NewBlockMeta {
             is_key_block: false,
             gen_utime: 123,
-            mc_ref_seqno: None,
+            mc_ref_seqno: 456,
         };
 
         {
             let (handle, status) = block_handles.create_or_load_handle(&block_id, meta);
             assert_eq!(status, HandleCreationStatus::Created);
 
-            block_handles.assign_mc_ref_seq_no(&handle, 456);
             assert_eq!(handle.mc_ref_seqno(), 456);
             assert!(!handle.is_key_block());
             assert!(!handle.is_applied());

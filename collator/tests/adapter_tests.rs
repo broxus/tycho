@@ -51,6 +51,7 @@ async fn test_add_and_get_block() {
     let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
 
     let block = BlockStuffForSync {
+        mc_ref_seqno: 1,
         block_stuff_aug,
         queue_diff_aug,
         signatures: Default::default(),
@@ -121,6 +122,7 @@ async fn test_add_and_get_next_block() {
     let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(block_stuff_aug.id()));
 
     let block = BlockStuffForSync {
+        mc_ref_seqno: 2,
         block_stuff_aug,
         queue_diff_aug,
         signatures: Default::default(),
@@ -191,6 +193,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
 
                 let block = BlockStuffForSync {
+                    mc_ref_seqno: i,
                     block_stuff_aug,
                     queue_diff_aug,
                     signatures: Default::default(),

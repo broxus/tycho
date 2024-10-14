@@ -287,6 +287,7 @@ impl McData {
 
 #[derive(Clone)]
 pub struct BlockCandidate {
+    pub mc_ref_seqno: u32,
     pub block: BlockStuffAug,
     pub is_key_block: bool,
     pub prev_blocks_ids: Vec<BlockId>,
@@ -339,6 +340,9 @@ impl ValidatedBlock {
 }
 
 pub struct BlockStuffForSync {
+    /// A masterchain block seqno which will reference this block.
+    pub mc_ref_seqno: u32,
+
     pub block_stuff_aug: BlockStuffAug,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub signatures: FastHashMap<PeerId, ArcSignature>,

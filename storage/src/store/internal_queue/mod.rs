@@ -1,5 +1,7 @@
+use std::fs::File;
+
 use anyhow::Result;
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{ReadOptions, WriteBatch};
@@ -7,10 +9,12 @@ use weedb::{BoundedCfHandle, OwnedSnapshot};
 
 use crate::db::*;
 use crate::model::ShardsInternalMessagesKey;
+use crate::store::QueueStateReader;
 use crate::util::{OwnedIterator, StoredValue};
 
 pub mod model;
 
+#[derive(Clone)]
 pub struct InternalQueueStorage {
     db: BaseDb,
 }
@@ -18,6 +22,63 @@ pub struct InternalQueueStorage {
 impl InternalQueueStorage {
     pub fn new(db: BaseDb) -> Self {
         Self { db }
+    }
+
+    pub async fn insert_from_file(
+        &self,
+        shard_ident: ShardIdent,
+        top_update: &OutMsgQueueUpdates,
+        file: File,
+    ) -> Result<()> {
+        use everscale_types::boc::ser::BocHeader;
+
+        let top_update = top_update.clone();
+        let this = self.clone();
+
+        let span = tracing::Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let mapped = MappedFile::from_existing_file(file)?;
+
+            let mut reader = QueueStateReader::begin_from_mapped(mapped.as_slice(), &top_update)?;
+
+            let cf = this.db.shards_internal_messages.cf();
+            let mut batch = weedb::rocksdb::WriteBatch::default();
+
+            let mut buffer = Vec::new();
+            while let Some(cell) = reader.read_next_message()? {
+                let msg_hash = cell.repr_hash();
+                let msg = cell.parse::<Message<'_>>()?;
+                let MsgInfo::Int(int_msg_info) = &msg.info else {
+                    anyhow::bail!("non-internal message in the queue in msg {msg_hash}");
+                };
+
+                let IntAddr::Std(dest) = &int_msg_info.dst else {
+                    anyhow::bail!("non-std destination address in msg {msg_hash}");
+                };
+
+                let key = ShardsInternalMessagesKey {
+                    shard_ident,
+                    internal_message_key: QueueKey {
+                        lt: int_msg_info.created_lt,
+                        hash: *msg_hash,
+                    },
+                };
+
+                buffer.clear();
+                buffer.push(dest.workchain as u8);
+                buffer.extend_from_slice(&dest.prefix().to_be_bytes());
+                BocHeader::<ahash::RandomState>::with_root(cell.as_ref()).encode(&mut buffer);
+                batch.put_cf(&cf, key.to_vec(), &buffer);
+            }
+
+            reader.finish()?;
+
+            this.db.rocksdb().write(batch)?;
+            Ok(())
+        })
+        .await?
     }
 
     pub fn snapshot(&self) -> OwnedSnapshot {
@@ -40,26 +101,35 @@ impl InternalQueueStorage {
         )
     }
 
-    pub fn clear_session_queue(&self) -> Result<()> {
+    fn clear_queue(&self, cf: &BoundedCfHandle<'_>) -> Result<()> {
         let start_key = [0x00; ShardsInternalMessagesKey::SIZE_HINT];
         let end_key = [0xFF; ShardsInternalMessagesKey::SIZE_HINT];
-        let shards_internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
-        self.db.rocksdb().delete_range_cf(
-            &shards_internal_messages_session_cf,
-            &start_key,
-            &end_key,
-        )?;
-        self.db.rocksdb().compact_range_cf(
-            &shards_internal_messages_session_cf,
-            Some(start_key),
-            Some(end_key),
-        );
+        self.db
+            .rocksdb()
+            .delete_range_cf(cf, &start_key, &end_key)?;
+        self.db
+            .rocksdb()
+            .compact_range_cf(cf, Some(start_key), Some(end_key));
         Ok(())
+    }
+
+    pub fn clear_session_queue(&self) -> Result<()> {
+        let cf = self.db.shards_internal_messages_session.cf();
+        self.clear_queue(&cf)
+    }
+
+    pub fn clear_persistent_queue(&self) -> Result<()> {
+        let cf = self.db.shards_internal_messages.cf();
+        self.clear_queue(&cf)
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
         self.db.rocksdb().write(batch)?;
         Ok(())
+    }
+
+    pub fn create_batch(&self) -> WriteBatch {
+        WriteBatch::default()
     }
 
     pub fn insert_message_session(
@@ -70,9 +140,7 @@ impl InternalQueueStorage {
         value: &[u8],
     ) -> Result<()> {
         let cf = self.db.shards_internal_messages_session.cf();
-        let dest_workchain = dest.workchain() as i8;
-        let dest_prefix = dest.prefix();
-        Self::insert_message(batch, cf, key, dest_workchain, dest_prefix, value)
+        Self::insert_message(batch, cf, key, dest.workchain() as i8, dest.prefix(), value)
     }
 
     fn build_iterator(

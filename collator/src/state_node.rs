@@ -337,7 +337,7 @@ impl StateNodeAdapterStdImpl {
                 MaybeExistingHandle::New(NewBlockMeta {
                     is_key_block: block_info.key_block,
                     gen_utime: block_info.gen_utime,
-                    mc_ref_seqno: None,
+                    mc_ref_seqno: block.mc_ref_seqno,
                 }),
             )
             .await?;
@@ -385,6 +385,9 @@ fn prepare_block_proof(
     block_info.load_prev_ref()?;
     block_info.prev_vert_ref.as_ref().map(|x| x.load());
     block_info.master_ref.as_ref().map(|x| x.load());
+
+    // NOTE: Make sure to "visit" the `out_msg_queue_updates` if we add some
+    //       child cells to it. For now it is loaded inside `.parse::<Block>()`.
 
     let _state_update = block.load_state_update();
 

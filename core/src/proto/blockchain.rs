@@ -3,9 +3,6 @@ use std::num::{NonZeroU32, NonZeroU64};
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 use tycho_block_util::tl::{block_id as tl_block_id, block_id_vec as tl_block_id_vec};
-use tycho_util::tl;
-
-pub type BigBytes = tl::BigBytes<{ 100 << 20 }>; // 100 MB
 
 /// Data for computing a public overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -18,7 +15,6 @@ pub struct OverlayIdData {
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "blockchain.data", scheme = "proto.tl")]
 pub struct Data {
-    #[tl(with = "BigBytes")]
     pub data: Bytes,
 }
 
@@ -58,7 +54,10 @@ pub enum KeyBlockProof {
 #[tl(boxed, scheme = "proto.tl")]
 pub enum PersistentStateInfo {
     #[tl(id = "blockchain.persistentStateInfo.found")]
-    Found { size: u64 },
+    Found {
+        size: NonZeroU64,
+        chunk_size: NonZeroU32,
+    },
     #[tl(id = "blockchain.persistentStateInfo.notFound")]
     NotFound,
 }
@@ -134,22 +133,6 @@ pub mod rpc {
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
-    #[tl(boxed, id = "blockchain.getPersistentStateInfo", scheme = "proto.tl")]
-    pub struct GetPersistentStateInfo {
-        #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
-    }
-
-    #[derive(Debug, Clone, TlRead, TlWrite)]
-    #[tl(boxed, id = "blockchain.getPersistentStatePart", scheme = "proto.tl")]
-    pub struct GetPersistentStatePart {
-        #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
-        pub limit: u32,
-        pub offset: u64,
-    }
-
-    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(
         boxed,
         id = "blockchain.getArchiveInfo",
@@ -169,6 +152,52 @@ pub mod rpc {
     )]
     pub struct GetArchiveChunk {
         pub archive_id: u64,
+        pub offset: u64,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "blockchain.getPersistentShardStateInfo",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentShardStateInfo {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "blockchain.getPersistentShardStateChunk",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentShardStateChunk {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
+        pub offset: u64,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "blockchain.getPersistentQueueStateInfo",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentQueueStateInfo {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "blockchain.getPersistentQueueStateChunk",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentQueueStateChunk {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
         pub offset: u64,
     }
 }

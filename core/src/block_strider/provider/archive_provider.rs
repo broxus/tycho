@@ -1,3 +1,4 @@
+use std::io::{Read, Seek};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +15,9 @@ use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::Storage;
 
-use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
+use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive};
+use crate::overlay_client::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -105,14 +107,20 @@ impl ArchiveBlockProvider {
             }
         };
 
-        let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
+        let (ref block, ref proof, ref queue_diff) = match archive.get_entry_by_id(&block_id) {
             Ok(entry) => entry,
             Err(e) => return Some(Err(e.into())),
         };
 
         match this
             .proof_checker
-            .check_proof(&block, &proof, &diff, true)
+            .check_proof(CheckProof {
+                mc_block_id: &block_id,
+                block,
+                proof,
+                queue_diff,
+                store_on_success: true,
+            })
             .await
         {
             Ok(_) => Some(Ok(block.clone())),
@@ -124,7 +132,7 @@ impl ArchiveBlockProvider {
         let this = self.inner.as_ref();
 
         let mut archive = this.last_known_archive.load_full();
-        let (block, proof, diff) = 'found: {
+        let (ref block, ref proof, ref queue_diff) = 'found: {
             let mut fallback = Some(&this.prev_known_archive);
 
             while let Some(a) = &archive {
@@ -147,7 +155,13 @@ impl ArchiveBlockProvider {
 
         if let Err(e) = this
             .proof_checker
-            .check_proof(&block, &proof, &diff, true)
+            .check_proof(CheckProof {
+                mc_block_id: &block_id_relation.mc_block_id,
+                block,
+                proof,
+                queue_diff,
+                store_on_success: true,
+            })
             .await
         {
             return Some(Err(e));
@@ -260,15 +274,20 @@ impl Inner {
     async fn construct_archive(&self, data: ArchiveData) -> Result<Archive> {
         let bytes = match data {
             ArchiveData::Bytes(bytes) => bytes,
-            ArchiveData::File { id } => {
-                let temp_archives = self.storage.temp_archive_storage();
 
-                let data = temp_archives.read_archive_to_bytes(id).await?;
-                if let Err(e) = temp_archives.remove_archive(id) {
-                    tracing::warn!("failed to remove temp archive: {e:?}");
-                }
-
-                data
+            // NOTE: We are using an existing file descriptor here, so we cannot use
+            //       the suggested `std::fs::read`.
+            #[allow(clippy::verbose_file_reads)]
+            ArchiveData::File(mut file) => {
+                tokio::task::spawn_blocking(move || {
+                    file.seek(std::io::SeekFrom::Start(0))?;
+                    let size = file.metadata().map(|m| m.len() as usize).ok();
+                    let mut bytes = Vec::new();
+                    bytes.reserve_exact(size.unwrap_or(0));
+                    file.read_to_end(&mut bytes)?;
+                    Ok::<_, std::io::Error>(Bytes::from(bytes))
+                })
+                .await??
             }
         };
 
@@ -284,17 +303,20 @@ struct ArchiveDownloader {
 
 impl ArchiveDownloader {
     async fn try_download(&self, seqno: u32) -> Result<Option<ArchiveData>> {
-        let Some(pending) = self.client.find_archive(seqno).await? else {
-            return Ok(None);
+        let pending = match self.client.find_archive(seqno).await {
+            Ok(archive) => archive,
+            Err(Error::TooNew) => return Ok(None),
+            Err(e) => return Err(e.into()),
         };
-
-        let archive_id = pending.id;
 
         let writer = self.get_archive_writer(&pending)?;
         let writer = self.client.download_archive(pending, writer).await?;
 
         let archive_data = match writer {
-            ArchiveWriter::File(_) => ArchiveData::File { id: archive_id },
+            ArchiveWriter::File(file) => match file.into_inner() {
+                Ok(file) => ArchiveData::File(file),
+                Err(e) => return Err(e.into_error().into()),
+            },
             ArchiveWriter::Bytes(data) => ArchiveData::Bytes(data.into_inner().freeze()),
         };
 
@@ -303,10 +325,7 @@ impl ArchiveDownloader {
 
     fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
         Ok(if pending.size.get() > self.memory_threshold.as_u64() {
-            let file = self
-                .storage
-                .temp_archive_storage()
-                .create_archive_file(pending.id)?;
+            let file = self.storage.temp_file_storage().unnamed_file().open()?;
             ArchiveWriter::File(std::io::BufWriter::new(file))
         } else {
             ArchiveWriter::Bytes(BytesMut::new().writer())
@@ -337,10 +356,9 @@ impl Drop for NextArchive {
     }
 }
 
-#[derive(Clone)]
 enum ArchiveData {
     Bytes(Bytes),
-    File { id: u64 },
+    File(std::fs::File),
 }
 
 impl BlockProvider for ArchiveBlockProvider {

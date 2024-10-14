@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tl_proto::{TlRead, TlWrite};
@@ -14,12 +15,19 @@ pub struct QueueDiff {
     /// NOTE: This field is not serialized and can be [`HashBytes::ZERO`] for serialization.
     pub hash: HashBytes,
 
+    /// Hash of the TL repr of the previous queue diff.
     pub prev_hash: HashBytes,
+    /// Shard identifier of the corresponding block
     pub shard_ident: ShardIdent,
+    /// Seqno of the corresponding block.
     pub seqno: u32,
+    /// collator boundaries.
     pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    /// Min message queue key.
     pub min_message: QueueKey,
+    /// Max message queue key.
     pub max_message: QueueKey,
+    /// List of message hashes (sorted ASC).
     pub messages: Vec<HashBytes>,
 }
 
@@ -99,10 +107,36 @@ impl<'tl> TlRead<'tl> for QueueDiff {
     }
 }
 
-/// Representation of a persistent internal messages queue state.
+/// Persistent internal messages queue state.
 #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueState", scheme = "proto.tl")]
 pub struct QueueState {
+    pub header: QueueStateHeader,
+
+    /// Chunks of messages in the same order as messages in `header.queue_diffs.messages`.
+    /// Only the order is guaranteed, but not the chunk sizes.
+    #[tl(with = "state_messages_list")]
+    pub messages: Vec<Bytes>,
+}
+
+/// Persistent internal messages queue state.
+///
+/// A non-owned version of [`QueueState`].
+#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[tl(boxed, id = "block.queueState", scheme = "proto.tl")]
+pub struct QueueStateRef<'tl> {
+    pub header: QueueStateHeader,
+
+    /// Chunks of messages in the same order as messages in `header.queue_diffs.messages`.
+    /// Only the order is guaranteed, but not the chunk sizes.
+    #[tl(with = "state_messages_list_ref")]
+    pub messages: Vec<&'tl [u8]>,
+}
+
+/// A header for a persistent internal messages queue state.
+#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[tl(boxed, id = "block.queueStateHeader", scheme = "proto.tl")]
+pub struct QueueStateHeader {
     #[tl(with = "tl::shard_ident")]
     pub shard_ident: ShardIdent,
     pub seqno: u32,
@@ -332,6 +366,74 @@ mod messages_list {
     }
 }
 
+mod state_messages_list {
+    use super::*;
+
+    /// We assume that the number of chunks is limited.
+    pub const MAX_CHUNKS: usize = 10_000_000;
+
+    pub const MAX_CHUNK_SIZE: usize = 100 << 20; // 100 MB
+
+    pub type BigBytes = tycho_util::tl::BigBytes<MAX_CHUNK_SIZE>;
+
+    pub fn size_hint(items: &[Bytes]) -> usize {
+        4 + items.iter().map(BigBytes::size_hint).sum::<usize>()
+    }
+
+    pub fn write<P: tl_proto::TlPacket>(items: &[Bytes], packet: &mut P) {
+        packet.write_u32(items.len() as u32);
+        for item in items {
+            BigBytes::write(item, packet);
+        }
+    }
+
+    pub fn read(data: &[u8], offset: &mut usize) -> tl_proto::TlResult<Vec<Bytes>> {
+        let len = u32::read_from(data, offset)? as usize;
+        if len > MAX_CHUNKS {
+            return Err(tl_proto::TlError::InvalidData);
+        }
+
+        let mut items = Vec::with_capacity(len);
+        for _ in 0..len {
+            items.push(BigBytes::read(data, offset)?);
+        }
+
+        Ok(items)
+    }
+}
+
+mod state_messages_list_ref {
+    use super::state_messages_list::{MAX_CHUNKS, MAX_CHUNK_SIZE};
+    use super::*;
+
+    type BigBytesRef = tycho_util::tl::BigBytesRef<MAX_CHUNK_SIZE>;
+
+    pub fn size_hint(items: &[&[u8]]) -> usize {
+        4 + items.iter().map(BigBytesRef::size_hint).sum::<usize>()
+    }
+
+    pub fn write<P: tl_proto::TlPacket>(items: &[&[u8]], packet: &mut P) {
+        packet.write_u32(items.len() as u32);
+        for item in items {
+            BigBytesRef::write(item, packet);
+        }
+    }
+
+    pub fn read<'tl>(data: &'tl [u8], offset: &mut usize) -> tl_proto::TlResult<Vec<&'tl [u8]>> {
+        let len = u32::read_from(data, offset)? as usize;
+        if len > MAX_CHUNKS {
+            return Err(tl_proto::TlError::InvalidData);
+        }
+
+        let mut items = Vec::with_capacity(len);
+        for _ in 0..len {
+            items.push(BigBytesRef::read(data, offset)?);
+        }
+
+        Ok(items)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,7 +525,7 @@ mod tests {
         // We store diffs in descending order.
         queue_diffs.reverse();
 
-        let state = QueueState {
+        let state = QueueStateHeader {
             shard_ident: ShardIdent::MASTERCHAIN,
             seqno: 10,
             queue_diffs,
@@ -432,7 +534,7 @@ mod tests {
         let bytes = tl_proto::serialize(&state);
         assert_eq!(bytes.len(), state.max_size_hint());
 
-        let parsed = tl_proto::deserialize::<QueueState>(&bytes).unwrap();
+        let parsed = tl_proto::deserialize::<QueueStateHeader>(&bytes).unwrap();
         assert_eq!(state, parsed);
     }
 }

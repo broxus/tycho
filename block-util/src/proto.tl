@@ -1,5 +1,7 @@
 ---types---
 
+bigBytes ? = BigBytes;
+
 /**
 * @param workchain      workchain identifier
 * @param prefix         shard prefix with tag
@@ -53,13 +55,20 @@ block.queueDiff
 * @param shard_ident    shard identifier of the corresponding block
 * @param seqno          seqno of the corresponding block
 * @param queue_diffs    the smallest list of required diffs for the block (sorted DESC by `seqno`)
-* @param messages       multi-root BOC with messages
 */
-block.queueState
+block.queueStateHeader
     shard_ident:block.shardIdent
     seqno:int
     queue_diffs:(vector block.QueueDiff)
-    messages:bytes
+    = block.QueueStateHeader;
+
+/**
+* @param header         queue state description
+* @param messages       a list of multi-root BOCs with messages
+*/
+block.queueState
+    header:block.QueueStateHeader
+    messages:(vector bigBytes)
     = block.QueueState;
 
 ---types---

@@ -1,6 +1,8 @@
 #![allow(clippy::disallowed_methods)]
 #![allow(clippy::disallowed_types)] // it's wrapper around Files so
 
+use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -8,11 +10,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-pub use self::mapped_file::MappedFile;
-pub use self::temp_file::TempFile;
+pub use self::mapped_file::{MappedFile, MappedFileMut};
 
 mod mapped_file;
-mod temp_file;
 
 #[derive(Clone)]
 pub struct FileDb(Arc<FileDbInner>);
@@ -65,6 +65,13 @@ impl FileDb {
         }
     }
 
+    pub fn unnamed_file(&self) -> UnnamedFileBuilder {
+        UnnamedFileBuilder {
+            base_dir: self.0.base_dir.clone(),
+            prealloc: None,
+        }
+    }
+
     /// Creates `FileDb` instance for a subdirectory of the current one.
     /// **Note**: The subdirectory will not be created if it does not exist.
     /// Use `create_subdir` to create it.
@@ -93,6 +100,7 @@ struct FileDbInner {
     base_dir: PathBuf,
 }
 
+#[derive(Clone)]
 pub struct FileBuilder {
     path: PathBuf,
     options: OpenOptions,
@@ -100,6 +108,14 @@ pub struct FileBuilder {
 }
 
 impl FileBuilder {
+    pub fn with_extension<S: AsRef<OsStr>>(&self, extension: S) -> Self {
+        Self {
+            path: self.path.with_extension(extension),
+            options: self.options.clone(),
+            prealloc: self.prealloc,
+        }
+    }
+
     pub fn open(&self) -> Result<File> {
         let file = self
             .options
@@ -111,16 +127,40 @@ impl FileBuilder {
         Ok(file)
     }
 
-    pub fn open_as_temp(&self) -> Result<TempFile> {
-        let file = self.open()?;
-        Ok(TempFile::new(self.path.clone(), file))
+    pub fn open_as_mapped(&self) -> Result<MappedFile> {
+        anyhow::ensure!(self.prealloc.is_none(), "cannot prealloc an read-only file");
+
+        // Force set `read` flag
+        let file = self.clone().read(true).open()?;
+        MappedFile::from_existing_file(file).map_err(Into::into)
     }
 
-    pub fn open_as_mapped(&self) -> Result<MappedFile> {
+    pub fn open_as_mapped_mut(&self) -> Result<MappedFileMut> {
+        anyhow::ensure!(self.prealloc.is_none(), "cannot prealloc an read-only file");
+
         Ok(match self.prealloc {
-            Some(length) => MappedFile::new(&self.path, length)?,
-            None => MappedFile::from_existing_file(self.open()?)?,
+            Some(length) => MappedFileMut::new(&self.path, length)?,
+            None => {
+                // Force set `read` and `write` flag
+                let file = self.clone().read(true).write(true).open()?;
+                MappedFileMut::from_existing_file(file)?
+            }
         })
+    }
+
+    pub fn rename<P: AsRef<Path>>(&self, new_path: P) -> std::io::Result<()> {
+        let new_path = match self.path.parent() {
+            Some(parent) => Cow::Owned(parent.join(new_path)),
+            None => Cow::Borrowed(new_path.as_ref()),
+        };
+        std::fs::rename(&self.path, new_path)
+    }
+
+    pub fn exists(&self) -> bool {
+        std::fs::metadata(&self.path)
+            .ok()
+            .map(|m| m.is_file())
+            .unwrap_or_default()
     }
 
     pub fn append(&mut self, append: bool) -> &mut Self {
@@ -160,6 +200,44 @@ impl FileBuilder {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+pub struct UnnamedFileBuilder {
+    base_dir: PathBuf,
+    prealloc: Option<usize>,
+}
+
+impl UnnamedFileBuilder {
+    pub fn open(self) -> Result<File> {
+        let file = tempfile::tempfile_in(&self.base_dir)?;
+        if let Some(prealloc) = self.prealloc {
+            file.set_len(prealloc as u64)?;
+        }
+
+        Ok(file)
+    }
+
+    pub fn open_as_mapped_mut(&self) -> Result<MappedFileMut> {
+        let file = tempfile::tempfile_in(&self.base_dir).with_context(|| {
+            format!("failed to create a tempfile in {}", self.base_dir.display())
+        })?;
+
+        if let Some(prealloc) = self.prealloc {
+            #[cfg(target_os = "linux")]
+            alloc_file(&file, prealloc)?;
+
+            file.set_len(prealloc as u64)?;
+        } else {
+            anyhow::bail!("prealloc is required for mapping unnamed files");
+        }
+
+        MappedFileMut::from_existing_file(file).map_err(Into::into)
+    }
+
+    pub fn prealloc(&mut self, prealloc: usize) -> &mut Self {
+        self.prealloc = Some(prealloc);
+        self
     }
 }
 

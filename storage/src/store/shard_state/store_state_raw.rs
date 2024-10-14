@@ -1,156 +1,126 @@
 use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use everscale_types::cell::*;
 use everscale_types::models::BlockId;
+use everscale_types::util::ArrayVec;
 use tycho_block_util::state::*;
+use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
 use weedb::{rocksdb, BoundedCfHandle};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use super::shard_state_reader::*;
 use crate::db::*;
-use crate::store::shard_state::StoredValue;
+use crate::store::{BriefBocHeader, ShardStateReader, TempFileStorage};
+use crate::util::StoredValue;
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
-pub struct StoreStateRaw {
-    block_id: BlockId,
-    db: BaseDb,
-    cell_storage: Arc<CellStorage>,
-    min_ref_mc_state: MinRefMcStateTracker,
-    reader: ShardStatePacketReader,
-    header: Option<BocHeader>,
-    cells_read: u64,
-    file_ctx: FilesContext,
-
-    cells_progress: ProgressBar,
+pub struct StoreStateContext {
+    pub db: BaseDb,
+    pub cell_storage: Arc<CellStorage>,
+    pub temp_file_storage: TempFileStorage,
+    pub min_ref_mc_state: MinRefMcStateTracker,
 }
 
-impl StoreStateRaw {
-    pub(crate) fn new(
-        block_id: &BlockId,
-        downloads_dir: &FileDb,
-        db: BaseDb,
-        cell_storage: Arc<CellStorage>,
-        min_ref_mc_state: MinRefMcStateTracker,
-    ) -> Result<Self> {
-        let file_ctx =
-            FilesContext::new(downloads_dir, block_id).context("failed to create files context")?;
-        let pg = ProgressBar::builder()
+impl StoreStateContext {
+    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<ShardStateStuff>
+    where
+        R: std::io::Read,
+    {
+        let preprocessed = self.preprocess(reader)?;
+        self.finalize(block_id, preprocessed)
+    }
+
+    fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
+    where
+        R: std::io::Read,
+    {
+        let mut pg = ProgressBar::builder()
             .exact_unit("cells")
-            .build(|msg| tracing::info!("downloading state... {msg}"));
+            .build(|msg| tracing::info!("preprocessing state... {msg}"));
 
-        Ok(Self {
-            block_id: *block_id,
-            db,
-            file_ctx,
-            cell_storage,
-            min_ref_mc_state,
-            reader: ShardStatePacketReader::new(),
-            header: None,
-            cells_read: 0,
-            cells_progress: pg,
-        })
-    }
+        let mut reader = ShardStateReader::begin(reader)?;
+        let header = *reader.header();
+        tracing::debug!(?header);
 
-    pub fn header(&self) -> &Option<BocHeader> {
-        &self.header
-    }
+        pg.set_progress(header.cell_count);
 
-    pub fn process_part(&mut self, part: Bytes) -> Result<bool> {
-        let progress_bar = &mut self.cells_progress;
-        let cells_file = self.file_ctx.cells_file()?;
+        let temp_file = self.temp_file_storage.unnamed_file().open()?;
 
-        self.reader.set_next_packet(part);
+        const CELLS_PER_CHUNK: usize = 10000;
 
-        let header = loop {
-            if let Some(header) = &self.header {
-                break header;
+        let mut buffer = [0; 256]; // At most 2 + 128 + 4 * 4
+        let mut temp_file = BufWriter::with_capacity(buffer.len() * CELLS_PER_CHUNK, temp_file);
+
+        let mut remaining_cells = header.cell_count;
+        while remaining_cells > 0 {
+            let to_read = std::cmp::min(remaining_cells, CELLS_PER_CHUNK as _);
+
+            let mut chunk_bytes = 0u32;
+            for _ in 0..to_read {
+                let cell_size = reader.read_next_cell(&mut buffer)?;
+                debug_assert!(cell_size < 256);
+                buffer[cell_size] = cell_size as u8;
+
+                // Write cell data and its size
+                temp_file.write_all(&buffer[..=cell_size])?;
+
+                chunk_bytes += cell_size as u32 + 1;
             }
 
-            let header = match self.reader.read_header()? {
-                Some(header) => header,
-                None => {
-                    return Ok(false);
-                }
-            };
+            tracing::debug!(chunk_bytes, "creating chunk");
+            temp_file.write_all(&chunk_bytes.to_le_bytes())?;
 
-            tracing::debug!(?header);
-            progress_bar.set_total(header.cell_count);
+            remaining_cells -= to_read;
 
-            self.header = Some(header);
-        };
-
-        let mut chunk_size = 0u32;
-        let mut buffer = [0; 256]; // At most 2 + 128 + 4 * 4
-
-        while self.cells_read < header.cell_count {
-            let cell_size = match self.reader.read_cell(header.ref_size, &mut buffer)? {
-                Some(cell_size) => cell_size,
-                None => break,
-            };
-
-            buffer[cell_size] = cell_size as u8;
-            cells_file.write_all(&buffer[..cell_size + 1])?;
-
-            chunk_size += cell_size as u32 + 1;
-            self.cells_read += 1;
+            pg.set_progress(header.cell_count - remaining_cells);
         }
 
-        progress_bar.set_progress(self.cells_read);
+        reader.finish()?;
 
-        if chunk_size > 0 {
-            tracing::debug!(chunk_size, "creating chunk");
-            let bytes = cells_file.write(&chunk_size.to_le_bytes())?;
-            tracing::trace!(bytes, "writing cells to file");
+        pg.complete();
+
+        match temp_file.into_inner() {
+            Ok(mut file) => {
+                file.flush()?;
+                file.seek(std::io::SeekFrom::Start(0))?;
+                Ok(PreprocessedState { header, file })
+            }
+            Err(e) => Err(e.into_error().into()),
         }
-
-        if self.cells_read < header.cell_count {
-            return Ok(false);
-        }
-
-        if header.has_crc && self.reader.read_crc()?.is_none() {
-            return Ok(false);
-        }
-
-        progress_bar.complete();
-        Ok(true)
     }
 
-    pub fn finalize(mut self) -> Result<ShardStateStuff> {
+    fn finalize(
+        &self,
+        block_id: &BlockId,
+        preprocessed: PreprocessedState,
+    ) -> Result<ShardStateStuff> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
 
-        let mut progress_bar = ProgressBar::builder()
+        let PreprocessedState { header, file } = preprocessed;
+
+        let mut pg = ProgressBar::builder()
             .with_mapper(|x| bytesize::to_string(x, false))
             .build(|msg| tracing::info!("processing state... {msg}"));
 
-        let header = match &self.header {
-            Some(header) => header,
-            None => {
-                return Err(ReplaceTransactionError::InvalidShardStatePacket)
-                    .context("BOC header not found");
-            }
-        };
+        let file = MappedFile::from_existing_file(file)?;
 
-        let hashes_file = self
-            .file_ctx
-            .create_mapped_hashes_file(header.cell_count as usize * HashesEntry::LEN)?;
-
-        let cells_file = self.file_ctx.create_mapped_cells_file()?;
+        let mut hashes_file = self
+            .temp_file_storage
+            .unnamed_file()
+            .prealloc(header.cell_count as usize * HashesEntry::LEN)
+            .open_as_mapped_mut()?;
 
         let raw = self.db.rocksdb().as_ref();
         let write_options = self.db.cells.new_write_config();
 
-        let mut tail = [0; 4];
         let mut ctx = FinalizationContext::new(&self.db);
         ctx.clear_temp_cells(&self.db)?;
 
@@ -158,21 +128,30 @@ impl StoreStateRaw {
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
         let mut data_buffer = vec![0u8; MAX_DATA_SIZE];
 
-        let total_size = cells_file.length();
-        progress_bar.set_total(total_size as u64);
+        let total_size = file.length();
+        pg.set_total(total_size as u64);
 
         let mut file_pos = total_size;
         let mut cell_index = header.cell_count;
         let mut batch_len = 0;
         while file_pos >= 4 {
             file_pos -= 4;
-            unsafe { cells_file.read_exact_at(file_pos, &mut tail) };
 
-            let mut chunk_size = u32::from_le_bytes(tail) as usize;
+            // Read chunk size from the current tail position
+            let mut chunk_size = {
+                let mut tail = [0; 4];
+                unsafe { file.read_exact_at(file_pos, &mut tail) };
+                u32::from_le_bytes(tail) as usize
+            };
+
+            // Rewind to the chunk start
+            file_pos = file_pos
+                .checked_sub(chunk_size)
+                .ok_or_else(|| parser_error("invalid chunk size"))?;
+
+            // Read chunk data
             chunk_buffer.resize(chunk_size, 0);
-
-            file_pos -= chunk_size;
-            unsafe { cells_file.read_exact_at(file_pos, &mut chunk_buffer) };
+            unsafe { file.read_exact_at(file_pos, &mut chunk_buffer) };
 
             tracing::debug!(chunk_size, "processing chunk");
 
@@ -180,7 +159,9 @@ impl StoreStateRaw {
                 cell_index -= 1;
                 batch_len += 1;
                 let cell_size = chunk_buffer[chunk_size - 1] as usize;
-                chunk_size -= cell_size + 1;
+                chunk_size = chunk_size
+                    .checked_sub(cell_size + 1)
+                    .ok_or_else(|| parser_error("chunk size underflow"))?;
 
                 let cell = RawCell::from_stored_data(
                     &mut &chunk_buffer[chunk_size..chunk_size + cell_size],
@@ -192,6 +173,7 @@ impl StoreStateRaw {
 
                 for (&index, buffer) in cell
                     .reference_indices
+                    .as_ref()
                     .iter()
                     .zip(ctx.entries_buffer.iter_child_buffers())
                 {
@@ -199,7 +181,7 @@ impl StoreStateRaw {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                StoreStateRaw::finalize_cell(&mut ctx, cell_index as u32, cell)?;
+                ctx.finalize_cell(cell_index as u32, cell)?;
 
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
@@ -218,7 +200,7 @@ impl StoreStateRaw {
                 batch_len = 0;
             }
 
-            progress_bar.set_progress((total_size - file_pos) as u64);
+            pg.set_progress((total_size - file_pos) as u64);
         }
 
         if batch_len > 0 {
@@ -233,10 +215,10 @@ impl StoreStateRaw {
         self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
         ctx.clear_temp_cells(&self.db)?;
 
-        let shard_state_key = self.block_id.to_vec();
+        let shard_state_key = block_id.to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
 
-        progress_bar.complete();
+        pg.complete();
 
         // Load stored shard state
         match self.db.shard_states.get(shard_state_key)? {
@@ -245,24 +227,50 @@ impl StoreStateRaw {
 
                 let cell = self.cell_storage.load_cell(cell_id)?;
                 Ok(ShardStateStuff::from_root(
-                    &self.block_id,
+                    block_id,
                     Cell::from(cell as Arc<_>),
                     &self.min_ref_mc_state,
                 )?)
             }
-            None => Err(ReplaceTransactionError::NotFound.into()),
+            None => Err(StoreStateError::NotFound.into()),
+        }
+    }
+}
+
+struct FinalizationContext<'a> {
+    pruned_branches: FastHashMap<u32, Vec<u8>>,
+    cell_usages: FastHashMap<[u8; 32], i32>,
+    entries_buffer: EntriesBuffer,
+    output_buffer: Vec<u8>,
+    temp_cells_cf: BoundedCfHandle<'a>,
+    write_batch: rocksdb::WriteBatch,
+}
+
+impl<'a> FinalizationContext<'a> {
+    fn new(db: &'a BaseDb) -> Self {
+        Self {
+            pruned_branches: Default::default(),
+            cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
+            entries_buffer: EntriesBuffer::new(),
+            output_buffer: Vec::with_capacity(1 << 10),
+            temp_cells_cf: db.temp_cells.cf(),
+            write_batch: rocksdb::WriteBatch::default(),
         }
     }
 
-    fn finalize_cell(
-        ctx: &mut FinalizationContext<'_>,
-        cell_index: u32,
-        cell: RawCell<'_>,
-    ) -> Result<()> {
+    fn clear_temp_cells(&self, db: &BaseDb) -> std::result::Result<(), rocksdb::Error> {
+        let from = &[0x00; 32];
+        let to = &[0xff; 32];
+        db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
+    }
+
+    // TODO: Somehow reuse `everscale_types::cell::CellParts`.
+    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<()> {
         use sha2::{Digest, Sha256};
 
-        let (mut current_entry, children) =
-            ctx.entries_buffer.split_children(&cell.reference_indices);
+        let (mut current_entry, children) = self
+            .entries_buffer
+            .split_children(cell.reference_indices.as_ref());
 
         current_entry.clear();
 
@@ -293,7 +301,7 @@ impl StoreStateRaw {
         };
 
         if cell.descriptor.level_mask() != level_mask.to_byte() {
-            return Err(ReplaceTransactionError::InvalidCell).context("Level mask mismatch");
+            return Err(StoreStateError::InvalidCell).context("Level mask mismatch");
         }
 
         // Save mask and counters
@@ -337,10 +345,10 @@ impl StoreStateRaw {
             let mut depth = 0;
             for (index, child) in children.iter() {
                 let child_depth = if child.cell_type().is_pruned_branch() {
-                    let child_data = ctx
+                    let child_data = self
                         .pruned_branches
                         .get(index)
-                        .ok_or(ReplaceTransactionError::InvalidCell)
+                        .ok_or(StoreStateError::InvalidCell)
                         .context("Pruned branch data not found")?;
                     child.pruned_branch_depth(hash_idx + is_merkle_cell as u8, child_data)
                 } else {
@@ -352,7 +360,7 @@ impl StoreStateRaw {
                     .checked_add(1)
                     .map(|next_depth| next_depth.max(depth))
                     .filter(|&depth| depth <= MAX_DEPTH)
-                    .ok_or(ReplaceTransactionError::InvalidCell)
+                    .ok_or(StoreStateError::InvalidCell)
                     .context("Max tree depth exceeded")?;
             }
 
@@ -360,10 +368,10 @@ impl StoreStateRaw {
 
             for (index, child) in children.iter() {
                 let child_hash = if child.cell_type().is_pruned_branch() {
-                    let child_data = ctx
+                    let child_data = self
                         .pruned_branches
                         .get(index)
-                        .ok_or(ReplaceTransactionError::InvalidCell)
+                        .ok_or(StoreStateError::InvalidCell)
                         .context("Pruned branch data not found")?;
                     child
                         .pruned_branch_hash(hash_idx + is_merkle_cell as u8, child_data)
@@ -382,11 +390,11 @@ impl StoreStateRaw {
 
         // Update pruned branches
         if is_pruned_cell {
-            ctx.pruned_branches.insert(cell_index, cell.data.to_vec());
+            self.pruned_branches.insert(cell_index, cell.data.to_vec());
         }
 
         // Write cell data
-        let output_buffer = &mut ctx.output_buffer;
+        let output_buffer = &mut self.output_buffer;
         output_buffer.clear();
 
         output_buffer.extend_from_slice(&[cell.descriptor.d1, cell.descriptor.d2]);
@@ -401,10 +409,10 @@ impl StoreStateRaw {
         // Write cell references
         for (index, child) in children.iter() {
             let child_hash = if child.cell_type().is_pruned_branch() {
-                let child_data = ctx
+                let child_data = self
                     .pruned_branches
                     .get(index)
-                    .ok_or(ReplaceTransactionError::InvalidCell)
+                    .ok_or(StoreStateError::InvalidCell)
                     .context("Pruned branch data not found")?;
                 child
                     .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
@@ -413,7 +421,7 @@ impl StoreStateRaw {
                 child.hash(LevelMask::MAX_LEVEL)
             };
 
-            *ctx.cell_usages.entry(*child_hash).or_default() += 1;
+            *self.cell_usages.entry(*child_hash).or_default() += 1;
             output_buffer.extend_from_slice(child_hash);
         }
 
@@ -430,40 +438,12 @@ impl StoreStateRaw {
             current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
         };
 
-        ctx.write_batch
-            .put_cf(&ctx.temp_cells_cf, repr_hash, output_buffer.as_slice());
-        ctx.cell_usages.insert(*repr_hash, -1);
+        self.write_batch
+            .put_cf(&self.temp_cells_cf, repr_hash, output_buffer.as_slice());
+        self.cell_usages.insert(*repr_hash, -1);
 
         // Done
         Ok(())
-    }
-}
-
-struct FinalizationContext<'a> {
-    pruned_branches: FastHashMap<u32, Vec<u8>>,
-    cell_usages: FastHashMap<[u8; 32], i32>,
-    entries_buffer: EntriesBuffer,
-    output_buffer: Vec<u8>,
-    temp_cells_cf: BoundedCfHandle<'a>,
-    write_batch: rocksdb::WriteBatch,
-}
-
-impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a BaseDb) -> Self {
-        Self {
-            pruned_branches: Default::default(),
-            cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
-            entries_buffer: EntriesBuffer::new(),
-            output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
-            write_batch: rocksdb::WriteBatch::default(),
-        }
-    }
-
-    fn clear_temp_cells(&self, db: &BaseDb) -> std::result::Result<(), rocksdb::Error> {
-        let from = &[0x00; 32];
-        let to = &[0xff; 32];
-        db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
     }
 
     fn finalize_cell_usages(&mut self) {
@@ -482,97 +462,88 @@ impl<'a> FinalizationContext<'a> {
     }
 }
 
-struct FilesContext {
-    cells_path: PathBuf,
-    hashes_path: PathBuf,
-    cells_file: Option<File>,
+struct PreprocessedState {
+    header: BriefBocHeader,
+    file: File,
 }
 
-impl FilesContext {
-    pub fn new(downloads_dir: &FileDb, block_id: &BlockId) -> Result<Self> {
-        let block_id = format!(
-            "({},{:016x},{})",
-            block_id.shard.workchain(),
-            block_id.shard.prefix(),
-            block_id.seqno
-        );
+struct RawCell<'a> {
+    descriptor: CellDescriptor,
+    data: &'a [u8],
+    bit_len: u16,
+    reference_indices: ArrayVec<u32, 4>,
+}
 
-        let cells_file_name = format!("state_cells_{block_id}");
-        let hashes_file_name = format!("state_hashes_{block_id}");
+impl<'a> RawCell<'a> {
+    fn from_stored_data<R>(
+        src: &mut R,
+        ref_size: usize,
+        cell_count: usize,
+        cell_index: usize,
+        data_buffer: &'a mut [u8],
+    ) -> std::io::Result<Self>
+    where
+        R: Read,
+    {
+        let mut descriptor = [0u8; 2];
+        src.read_exact(&mut descriptor)?;
+        let descriptor = CellDescriptor::new(descriptor);
+        let byte_len = descriptor.byte_len() as usize;
+        let ref_count = descriptor.reference_count() as usize;
 
-        let cells_file = downloads_dir
-            .file(&cells_file_name)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .open()?;
-
-        Ok(Self {
-            cells_path: downloads_dir.path().join(cells_file_name),
-            hashes_path: downloads_dir.path().join(hashes_file_name),
-            cells_file: Some(cells_file),
-        })
-    }
-
-    pub fn cells_file(&mut self) -> Result<&mut File> {
-        match &mut self.cells_file {
-            Some(file) => Ok(file),
-            None => Err(FilesContextError::AlreadyFinalized.into()),
+        if descriptor.is_absent() || ref_count > 4 {
+            return Err(parser_error("invalid preprocessed cell descriptor"));
         }
-    }
 
-    pub fn create_mapped_hashes_file(&self, length: usize) -> Result<MappedFile> {
-        let mapped_file = MappedFile::new(&self.hashes_path, length)?;
-        Ok(mapped_file)
-    }
+        let data = &mut data_buffer[0..byte_len];
+        src.read_exact(data)?;
 
-    pub fn create_mapped_cells_file(&mut self) -> Result<MappedFile> {
-        let file = match self.cells_file.take() {
-            Some(mut file) => {
-                file.flush()?;
-                file
+        let mut reference_indices = ArrayVec::new();
+        for _ in 0..ref_count {
+            let index = src.read_be_uint(ref_size)? as usize;
+            if index > cell_count || index <= cell_index {
+                return Err(parser_error("reference index out of range"));
+            } else {
+                // SAFETY: `ref_count` is in range 0..=4
+                unsafe { reference_indices.push(index as u32) };
             }
-            None => return Err(FilesContextError::AlreadyFinalized.into()),
+        }
+
+        // TODO: Require normalized
+        let bit_len = if descriptor.is_aligned() {
+            (byte_len * 8) as u16
+        } else if let Some(data) = data.last() {
+            byte_len as u16 * 8 - data.trailing_zeros() as u16 - 1
+        } else {
+            0
         };
 
-        let mapped_file = MappedFile::from_existing_file(file)?;
-        Ok(mapped_file)
+        Ok(RawCell {
+            descriptor,
+            data,
+            bit_len,
+            reference_indices,
+        })
     }
 }
 
-impl Drop for FilesContext {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.cells_path) {
-            tracing::error!(file = ?self.cells_path, "failed to remove file: {e}");
-        }
-
-        if let Err(e) = std::fs::remove_file(&self.hashes_path) {
-            tracing::error!(file = ?self.cells_path, "failed to remove file: {e}");
-        }
-    }
+fn parser_error<E>(error: E) -> std::io::Error
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    std::io::Error::new(std::io::ErrorKind::Other, error)
 }
 
 #[derive(thiserror::Error, Debug)]
-enum ReplaceTransactionError {
+enum StoreStateError {
     #[error("Not found")]
     NotFound,
-    #[error("Invalid shard state packet")]
-    InvalidShardStatePacket,
     #[error("Invalid cell")]
     InvalidCell,
 }
 
-#[derive(thiserror::Error, Debug)]
-enum FilesContextError {
-    #[error("Already finalized")]
-    AlreadyFinalized,
-}
-
 #[cfg(test)]
 mod test {
-    use std::io::{BufReader, Read};
-
     use bytesize::ByteSize;
     use everscale_types::models::ShardIdent;
     use tycho_util::project_root;
@@ -618,8 +589,12 @@ mod test {
         let base_db = storage.base_db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
-        let tracker = MinRefMcStateTracker::new();
-        let download_dir = storage.root().create_subdir("downloads")?;
+        let store_ctx = StoreStateContext {
+            db: base_db.clone(),
+            cell_storage: cell_storage.clone(),
+            temp_file_storage: storage.temp_file_storage().clone(),
+            min_ref_mc_state: MinRefMcStateTracker::new(),
+        };
 
         for file in std::fs::read_dir(current_test_path.join("states"))? {
             let file = file?;
@@ -627,32 +602,10 @@ mod test {
 
             let block_id = parse_filename(filename.as_ref());
 
-            let mut store_state = StoreStateRaw::new(
-                &block_id,
-                &download_dir,
-                base_db.clone(),
-                cell_storage.clone(),
-                tracker.clone(),
-            )
-            .context("Failed to create ShardStateReplaceTransaction")?;
-
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
-            let mut file = BufReader::new(file);
-            let chunk_size = 10_000_000; // size of each chunk in bytes
-            let mut buffer = vec![0u8; chunk_size];
 
-            loop {
-                let bytes_read = file.read(&mut buffer)?;
-                if bytes_read == 0 {
-                    break; // End of file
-                }
-
-                let packet = Bytes::copy_from_slice(&buffer[..bytes_read]);
-                store_state.process_part(packet)?;
-            }
-
-            store_state.finalize()?;
+            store_ctx.store(&block_id, file)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");

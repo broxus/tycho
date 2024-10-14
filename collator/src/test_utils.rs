@@ -52,7 +52,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
     let meta_data = NewBlockMeta {
         is_key_block: mc_state_extra.after_key_block,
         gen_utime: master_state_stuff.state().gen_utime,
-        mc_ref_seqno: Some(master_id.seqno),
+        mc_ref_seqno: master_id.seqno,
     };
     let (handle, _) = storage
         .block_handle_storage()
@@ -100,7 +100,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
             .create_or_load_handle(&shard_id, NewBlockMeta {
                 is_key_block: false,
                 gen_utime: shard_state_stuff.state().gen_utime,
-                mc_ref_seqno: Some(master_id.seqno),
+                mc_ref_seqno: master_id.seqno,
             });
 
     storage

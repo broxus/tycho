@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -194,6 +194,9 @@ impl KeyArgs {
     fn get_keypair(&self) -> Result<ed25519::KeyPair> {
         let key = match &self.key {
             Some(key) => key.clone().into_bytes(),
+            None if std::io::stdin().is_terminal() => {
+                anyhow::bail!("expected a `key` param or an stdin input");
+            }
             None => {
                 let mut key = Vec::new();
                 std::io::stdin().read_to_end(&mut key)?;

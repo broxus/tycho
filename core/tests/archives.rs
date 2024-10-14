@@ -9,8 +9,9 @@ use tycho_block_util::block::{BlockIdExt, BlockIdRelation, BlockProofStuff, Bloc
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::block_strider::{
-    BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
-    ProofChecker, ShardStateApplier, StateSubscriber, StateSubscriberContext,
+    BlockProvider, BlockProviderExt, BlockStrider, CheckProof, OptionalBlockStuff,
+    PersistentBlockStriderState, ProofChecker, ShardStateApplier, StateSubscriber,
+    StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
@@ -42,14 +43,25 @@ pub struct ArchiveProvider {
 
 impl ArchiveProvider {
     async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
-        let (block, proof, diff) = match self.archive.get_entry_by_id(&block_id_relation.block_id) {
+        let BlockIdRelation {
+            mc_block_id,
+            block_id,
+        } = block_id_relation;
+
+        let (ref block, ref proof, ref queue_diff) = match self.archive.get_entry_by_id(block_id) {
             Ok(entry) => entry,
             Err(e) => return Some(Err(e.into())),
         };
 
         match self
             .proof_checker
-            .check_proof(&block, &proof, &diff, true)
+            .check_proof(CheckProof {
+                mc_block_id,
+                block,
+                proof,
+                queue_diff,
+                store_on_success: true,
+            })
             .await
         {
             Ok(_) => Some(Ok(block.clone())),
@@ -84,7 +96,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
             .create_or_load_handle(zerostate.block_id(), NewBlockMeta {
                 is_key_block: zerostate.block_id().is_masterchain(),
                 gen_utime: zerostate.state().gen_utime,
-                mc_ref_seqno: Some(0),
+                mc_ref_seqno: 0,
             });
 
     storage
@@ -127,7 +139,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
                 .create_or_load_handle(state.block_id(), NewBlockMeta {
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
-                    mc_ref_seqno: Some(0),
+                    mc_ref_seqno: 0,
                 });
 
         storage
