@@ -293,10 +293,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     fn get_collator_activation_state(&self) -> CollatorActivationState {
-        match self.collator_state.load(Ordering::Acquire) {
-            0 => CollatorActivationState::Historical,
-            1 => CollatorActivationState::Recent,
-            i => panic!("invalid CollatorActivationState value: {i}"),
+        match self.collator_state.load(Ordering::Acquire).try_into() {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::error!("Failed to get collator activation state {e:?}");
+                panic!();
+            }
         }
     }
 }
@@ -482,6 +484,18 @@ fn process_signatures(
 pub enum CollatorActivationState {
     Historical = 0,
     Recent = 1,
+}
+
+impl TryFrom<u8> for CollatorActivationState {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(CollatorActivationState::Historical),
+            1 => Ok(CollatorActivationState::Recent),
+            i => anyhow::bail!("invalid CollatorActivationState value: {i}"),
+        }
+    }
 }
 
 struct PreparedProof {

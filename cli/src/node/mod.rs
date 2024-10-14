@@ -530,7 +530,7 @@ impl Node {
         };
 
         let activate_collator = ActivateCollator {
-            collator_state: collator_active,
+            collator_activation_state: collator_active,
         };
 
         // Explicitly handle the initial state
@@ -632,7 +632,7 @@ impl Node {
 }
 
 struct ActivateCollator {
-    collator_state: Arc<AtomicU8>,
+    collator_activation_state: Arc<AtomicU8>,
 }
 
 impl BlockProvider for ActivateCollator {
@@ -640,7 +640,7 @@ impl BlockProvider for ActivateCollator {
     type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        self.collator_state
+        self.collator_activation_state
             .store(CollatorActivationState::Recent as u8, Ordering::Release);
         futures_util::future::ready(None)
     }
@@ -659,13 +659,14 @@ impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        let state = self.collator_activation_state.load(Ordering::Acquire);
-        let state = match state {
-            0 => CollatorActivationState::Historical,
-            1 => CollatorActivationState::Recent,
-            i => panic!("invalid CollatorActivationState value: {i}"),
-        };
-        self.adapter.handle_state(&cx.state, state)
+        let state = self
+            .collator_activation_state
+            .load(Ordering::Acquire)
+            .try_into();
+        match state {
+            Ok(state) => self.adapter.handle_state(&cx.state, state),
+            Err(e) => Box::pin(futures_util::future::err(e)),
+        }
     }
 }
 
