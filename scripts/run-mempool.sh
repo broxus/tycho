@@ -44,7 +44,7 @@ if ! is_number "$N" || ((N < 1)); then
     exit 1
 fi
 
-cargo run --bin tycho --features=debug -- debug mempool \
+RUST_BACKTRACE=1 cargo run --bin tycho --features=debug -- debug mempool \
     --keys "${base_dir}/keys${N}.json" \
     --config "${base_dir}/config${N}.json" \
     --global-config "${base_dir}/global-config.json" \

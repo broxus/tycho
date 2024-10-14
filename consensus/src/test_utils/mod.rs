@@ -5,3 +5,4 @@ pub use dag::*;
 mod anchor_consumer;
 mod bootstrap;
 mod dag;
+pub mod test_logger;

@@ -8,12 +8,12 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use tokio::sync::mpsc;
 use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
-use tycho_consensus::test_utils::AnchorConsumer;
+use tycho_consensus::test_utils::{test_logger, AnchorConsumer};
 use tycho_core::global_config::GlobalConfig;
 use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
 use tycho_storage::Storage;
 use tycho_util::cli::error::ResultExt;
-use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
+use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::{resolve_public_ip, signal};
 
 use crate::node::config::{NodeConfig, NodeKeys};
@@ -85,7 +85,7 @@ impl CmdRun {
 
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
         init_logger(&node_config.logger, self.logger_config)?;
-        set_abort_with_tracing();
+        test_logger::set_print_panic_hook(true);
 
         let mempool = {
             let global_config = GlobalConfig::from_file(self.global_config)
