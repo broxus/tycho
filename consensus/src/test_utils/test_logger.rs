@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::io::Write;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use tracing_flame::FlameLayer;
@@ -23,16 +24,22 @@ pub fn spans(test_name: &str, filter: &str) {
 
     tracing::info!("{test_name}");
 
-    let first_panic = Arc::new(Mutex::new(true));
+    set_print_panic_hook(false);
+}
+static FIRST_PANIC: OnceLock<()> = OnceLock::new();
 
+pub fn set_print_panic_hook(with_exit: bool) {
     std::panic::set_hook(Box::new(move |info| {
-        let mut guard = first_panic.lock();
-        if *guard {
+        if FIRST_PANIC.set(()).is_ok() {
             let backtrace = std::backtrace::Backtrace::force_capture();
             tracing::error!("root panic: {info}\n{backtrace}");
-            *guard = false;
+            if with_exit {
+                std::io::stderr().flush().ok();
+                std::io::stdout().flush().ok();
+                #[allow(clippy::exit)]
+                std::process::exit(1);
+            }
         }
-        drop(guard);
         tracing::error!("induced panic: {info}");
         // flush at the end of main thread, after all threads are joined
     }));

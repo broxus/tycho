@@ -15,8 +15,6 @@ use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
 
-mod logger;
-
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -56,9 +54,9 @@ struct Cli {
 impl Cli {
     fn run(self) -> anyhow::Result<()> {
         if self.flame {
-            logger::flame("engine with --flame");
+            test_logger::flame("engine with --flame");
         } else {
-            logger::spans("engine", "info,tycho_consensus=info,tycho_network=info");
+            test_logger::spans("engine", "info,tycho_consensus=info,tycho_network=info");
         }
         check_parking_lot();
 
