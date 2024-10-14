@@ -13,7 +13,8 @@ pub struct DagFront {
 
 impl DagFront {
     // next round, current round and witness round are above depth for point validation
-    const HOT_END_ROUNDS: u32 = 3;
+    // also `-1` as value is subtracted from some top round (inclusive)
+    const DEPTH: u32 = MempoolConfig::COMMIT_DEPTH as u32 + 3 - 1;
 
     pub fn init(&mut self, bottom_round: DagRound) {
         assert!(self.rounds.is_empty(), "DAG already initialized");
@@ -36,12 +37,7 @@ impl DagFront {
     }
 
     pub fn fill_to_top(&mut self, new_top: Round, peer_schedule: &PeerSchedule) -> Vec<DagRound> {
-        let front_bottom_round = Round(
-            (new_top.0.saturating_add(1))
-                .saturating_sub(Self::HOT_END_ROUNDS)
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
-                .max(Genesis::round().0),
-        );
+        let front_bottom_round = Round(new_top.0.saturating_sub(Self::DEPTH)).max(Genesis::round());
 
         // extend to the max possible - will be shortened when top known is determined
         let back_bottom_round = Consensus::history_bottom(new_top);
@@ -73,7 +69,8 @@ impl DagFront {
         assert_eq!(
             (top.0 - bottom.0) as usize + 1,
             self.rounds.len(),
-            "DAG has invalid length to be contiguous"
+            "{} has invalid length to be contiguous",
+            self.alt()
         );
     }
 
@@ -111,5 +108,17 @@ impl std::fmt::Debug for AltFmt<'_, DagFront> {
             write!(f, "{:?}; ", dag_round.alt())?;
         }
         Ok(())
+    }
+}
+impl std::fmt::Display for AltFmt<'_, DagFront> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let this = &AltFormat::unpack(self);
+        write!(
+            f,
+            "DagFront len {} [{}..{}] ",
+            this.rounds.len(),
+            this.bottom_round().0,
+            this.top().round().0,
+        )
     }
 }

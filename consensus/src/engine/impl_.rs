@@ -68,9 +68,7 @@ impl Engine {
 
         peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
 
-        if !genesis.verify_hash() {
-            panic!("Failed to verify genesis hash");
-        }
+        genesis.verify_hash().expect("Failed to verify genesis");
         Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
 
         let store = MempoolStore::new(

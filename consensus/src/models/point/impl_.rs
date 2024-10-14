@@ -196,18 +196,23 @@ impl Point {
             .unwrap_or(self.id())
     }
 
-    pub fn verify_hash(&self) -> bool {
+    pub fn verify_hash(&self) -> Result<(), &'static str> {
         let bytes = tl_proto::serialize(self);
-        Self::verify_hash_inner(&bytes[4..])
+        if Self::verify_hash_inner(&bytes[4..]) {
+            Ok(())
+        } else {
+            Err("hash mismatch")
+        }
     }
 
     pub fn verify_hash_inner(data: &[u8]) -> bool {
-        if data.len() < 32 + 64 {
+        let body_offset = Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
+        if data.len() < body_offset {
             tracing::error!(len = %data.len(), "Data is too short");
             return false;
         }
         // skip 64 bytes of signature
-        &data[0..32] == blake3::hash(&data[96..]).as_bytes()
+        &data[0..Digest::MAX_TL_BYTES] == blake3::hash(&data[body_offset..]).as_bytes()
     }
 }
 
