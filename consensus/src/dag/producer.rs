@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use tycho_network::PeerId;
 
 use crate::dag::DagRound;
-use crate::engine::InputBuffer;
+use crate::effects::AltFormat;
+use crate::engine::{Genesis, InputBuffer};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
     Through, UnixTime,
@@ -27,13 +28,7 @@ impl Producer {
         let finished_round = current_round.prev().upgrade()?;
         let key_pair = current_round.key_pair()?;
 
-        let payload = input_buffer.fetch(last_own_point.as_ref().map_or(false, |last| {
-            // it's not necessary to resend external messages from previous round
-            // if at least 1F+1 peers (one reliable) signed previous point;
-            // also notice that payload elems are deduplicated in mempool adapter
-            last.evidence.len() >= last.signers.reliable_minority()
-        }));
-        let last_own_point = last_own_point
+        let proven_vertex = last_own_point
             // previous round's point needs 2F signatures from peers scheduled for current round
             .filter(|prev| {
                 // Note: prev point is used only once until weak links are implemented
@@ -43,7 +38,7 @@ impl Producer {
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
             // wave leader must skip new round if it failed to produce 3 points in a row
-            Some(stage) if stage.leader == local_id && last_own_point.is_none() => return None,
+            Some(stage) if stage.leader == local_id && proven_vertex.is_none() => return None,
             _ => {}
         };
         let includes = Self::includes(&finished_round);
@@ -69,13 +64,20 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        let (time, anchor_time) = Self::get_time(
-            &anchor_proof,
-            &local_id,
-            last_own_point,
-            &includes,
-            &witness,
-        );
+        // first produced point is reproducible
+        let (time, anchor_time, payload) = if finished_round.round() == Genesis::round() {
+            (Genesis::time(), Genesis::time(), Vec::new())
+        } else {
+            let (time, anchor_time) =
+                Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
+            let payload = input_buffer.fetch(last_own_point.as_ref().map_or(false, |last| {
+                // it's not necessary to resend external messages from previous round
+                // if at least 1F+1 peers (one reliable) signed previous point;
+                // also notice that payload elems are deduplicated in mempool adapter
+                last.evidence.len() >= last.signers.reliable_minority()
+            }));
+            (time, anchor_time, payload)
+        };
 
         let includes = includes
             .into_iter()
@@ -83,7 +85,7 @@ impl Producer {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
-            last_own_point.as_ref().map(|prev| &prev.digest),
+            proven_vertex.as_ref().map(|prev| &prev.digest),
             includes.get(&local_id),
             "must include own point if it exists and vice versa"
         );
@@ -96,7 +98,7 @@ impl Producer {
         Some(Point::new(
             key_pair,
             current_round.round(),
-            last_own_point
+            proven_vertex
                 .map(|p| p.evidence.clone())
                 .unwrap_or_default(),
             payload,
@@ -127,7 +129,9 @@ impl Producer {
             .collect::<Vec<_>>();
         assert!(
             includes.len() >= finished_round.peer_count().majority(),
-            "Coding error: producing point with not enough includes, check Collector logic"
+            "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
+            finished_round.round().next(),
+            finished_round.alt()
         );
         includes
     }
@@ -209,7 +213,7 @@ impl Producer {
     fn get_time(
         anchor_proof: &Link,
         local_id: &PeerId,
-        prev_point: Option<&LastOwnPoint>,
+        proven_vertex: Option<&LastOwnPoint>,
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
@@ -222,7 +226,7 @@ impl Producer {
 
         assert_eq!(
             prev_info.map(|prev| prev.digest()),
-            prev_point.map(|prev| &prev.digest),
+            proven_vertex.map(|prev| &prev.digest),
             "included prev point digest does not match broadcasted one"
         );
 
