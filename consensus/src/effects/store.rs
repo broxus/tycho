@@ -45,8 +45,6 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn load_last_broadcasts(&self) -> Result<Option<(Point, Option<Point>)>>;
 
-    fn _load_rounds(&self, first: Round, last: Round) -> Result<Vec<(PointInfo, PointStatus)>>;
-
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
 
@@ -163,13 +161,6 @@ impl MempoolStore {
         self.0
             .load_last_broadcasts()
             .expect("DB load last broadcasts")
-    }
-
-    pub fn _load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointStatus)> {
-        self.0
-            ._load_rounds(first, last)
-            .with_context(|| format!("first {} last {}", first.0, last.0))
-            .expect("DB load rounds")
     }
 
     pub fn init_storage(&self, overlay_id: &OverlayId) {
@@ -486,71 +477,6 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(Some((last_broadcast, prev_point)))
     }
 
-    fn _load_rounds(&self, first: Round, last: Round) -> Result<Vec<(PointInfo, PointStatus)>> {
-        fn opts(first: Round, last: Round, buf: &mut [u8; MempoolStorage::KEY_LEN]) -> ReadOptions {
-            let mut opt = ReadOptions::default();
-            MempoolStorage::fill_prefix(first.0, buf);
-            opt.set_iterate_lower_bound(&buf[..]);
-            MempoolStorage::fill_prefix(last.next().0, buf);
-            opt.set_iterate_upper_bound(&buf[..]);
-            opt
-        }
-
-        let mut buf = [0_u8; MempoolStorage::KEY_LEN];
-        let db = self.db.rocksdb();
-        let info_cf = self.db.points_info.cf();
-        let status_cf = self.db.points_status.cf();
-
-        let opt = opts(first, last, &mut buf);
-        let mut iter = db.raw_iterator_cf_opt(&status_cf, opt);
-        let mut statuses = FastHashMap::default();
-        iter.seek_to_first();
-
-        while iter.valid() {
-            let Some((key, bytes)) = iter.item() else {
-                break;
-            };
-            statuses.insert(
-                Vec::from(key).into_boxed_slice(),
-                PointStatus::decode(bytes).with_context(|| MempoolStorage::format_key(key))?,
-            );
-            iter.next();
-        }
-        iter.status().context("point status iter is not ok")?;
-        drop(iter);
-
-        let opt = opts(first, last, &mut buf);
-        let mut iter = db.raw_iterator_cf_opt(&info_cf, opt);
-        iter.seek_to_first();
-
-        let mut result = Vec::with_capacity(statuses.len());
-        while iter.valid() {
-            let Some((key, info)) = iter.item() else {
-                break;
-            };
-            let info =
-                tl_proto::deserialize::<PointInfo>(info).context("db deserialize point info")?;
-            if let Some(status) = statuses.remove(key) {
-                result.push((info, status));
-            } else {
-                anyhow::bail!("point stored without status: {:?}", info.id().alt())
-            }
-            iter.next();
-        }
-        iter.status().context("point info iter is not ok")?;
-        drop(iter);
-
-        if !statuses.is_empty() {
-            let keys = statuses
-                .keys()
-                .map(|key| MempoolStorage::format_key(key))
-                .collect::<Vec<_>>();
-            anyhow::bail!("point info stored without point status: {keys:?}");
-        }
-
-        Ok(result)
-    }
-
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
             self.clean(&[u8::MAX; Self::KEY_LEN])?;
@@ -598,10 +524,6 @@ impl MempoolStoreImpl for () {
     }
 
     fn load_last_broadcasts(&self) -> Result<Option<(Point, Option<Point>)>> {
-        anyhow::bail!("should not be used in tests")
-    }
-
-    fn _load_rounds(&self, _: Round, _: Round) -> Result<Vec<(PointInfo, PointStatus)>> {
         anyhow::bail!("should not be used in tests")
     }
 

@@ -6,17 +6,14 @@ mod back;
 
 use std::sync::atomic::Ordering;
 
-use futures_util::future::BoxFuture;
-use tycho_network::PeerId;
-use tycho_storage::point_status::PointStatus;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::commit::back::DagBack;
-use crate::dag::{DagRound, InclusionState};
-use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
+use crate::dag::DagRound;
+use crate::effects::AltFormat;
 use crate::engine::MempoolConfig;
-use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{AnchorData, AnchorStageRole, PointInfo, Round};
+use crate::intercom::PeerSchedule;
+use crate::models::{AnchorData, AnchorStageRole, Round};
 
 pub struct Committer {
     dag: DagBack,
@@ -36,16 +33,6 @@ impl Default for Committer {
 }
 
 impl Committer {
-    pub fn _init_at_start(
-        &self,
-        sorted: Vec<(PointInfo, PointStatus)>,
-        downloader: &Downloader,
-        store: &MempoolStore,
-        effects: &Effects<EngineContext>,
-    ) -> Vec<(Round, PeerId, BoxFuture<'static, InclusionState>)> {
-        self.dag._fill_restore(sorted, downloader, store, effects)
-    }
-
     pub fn extend_from_ahead(&mut self, rounds: &[DagRound], peer_schedule: &PeerSchedule) {
         if rounds.is_empty() {
             return;
