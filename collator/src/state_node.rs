@@ -75,7 +75,11 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Waits for the specified block by prev_id to be received and returns it
     async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
-    async fn handle_state(&self, state: &ShardStateStuff, collator_state: u8) -> Result<()>;
+    async fn handle_state(
+        &self,
+        state: &ShardStateStuff,
+        collator_state: CollatorActivationState,
+    ) -> Result<()>;
     /// Loqd queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
 
@@ -93,7 +97,7 @@ pub struct StateNodeAdapterStdImpl {
 impl StateNodeAdapterStdImpl {
     pub fn new(
         listener: Arc<dyn StateNodeEventListener>,
-        collator_activation_state: u8,
+        collator_activation_state: CollatorActivationState,
         storage: Storage,
     ) -> Self {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
@@ -104,7 +108,7 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             broadcaster,
-            collator_state: Arc::new(AtomicU8::new(collator_activation_state)),
+            collator_state: Arc::new(AtomicU8::new(collator_activation_state as u8)),
         }
     }
 }
@@ -211,9 +215,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         self.wait_for_block_ext(block_id).await
     }
 
-    async fn handle_state(&self, state: &ShardStateStuff, collator_state: u8) -> Result<()> {
+    async fn handle_state(
+        &self,
+        state: &ShardStateStuff,
+        collator_state: CollatorActivationState,
+    ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
-        self.collator_state.store(collator_state, Ordering::Release);
+        self.collator_state
+            .store(collator_state as u8, Ordering::Release);
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
@@ -286,8 +295,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     fn get_collator_activation_state(&self) -> CollatorActivationState {
         match self.collator_state.load(Ordering::Acquire) {
             0 => CollatorActivationState::Historical,
-            1 => CollatorActivationState::Current,
-            _ => unreachable!(),
+            1 => CollatorActivationState::Recent,
+            i => panic!("invalid CollatorActivationState value: {i}"),
         }
     }
 }
@@ -469,9 +478,10 @@ fn process_signatures(
 }
 
 #[repr(u8)]
+#[derive(Copy, Clone)]
 pub enum CollatorActivationState {
     Historical = 0,
-    Current = 1,
+    Recent = 1,
 }
 
 struct PreparedProof {

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -501,7 +501,7 @@ impl Node {
             self.validator_config,
         );
 
-        let initial_collator_activation_value = CollatorActivationState::Historical as u8;
+        let initial_collator_activation_value = CollatorActivationState::Historical;
 
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
@@ -523,7 +523,7 @@ impl Node {
             vec![],
         );
 
-        let collator_active = Arc::new(AtomicU8::new(initial_collator_activation_value));
+        let collator_active = Arc::new(AtomicU8::new(initial_collator_activation_value as u8));
         let collator_state_subscriber = CollatorStateSubscriber {
             collator_activation_state: collator_active.clone(),
             adapter: collation_manager.state_node_adapter().clone(),
@@ -641,7 +641,7 @@ impl BlockProvider for ActivateCollator {
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.collator_state
-            .store(CollatorActivationState::Current as u8, Ordering::Release);
+            .store(CollatorActivationState::Recent as u8, Ordering::Release);
         futures_util::future::ready(None)
     }
 
@@ -660,6 +660,11 @@ impl StateSubscriber for CollatorStateSubscriber {
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         let state = self.collator_activation_state.load(Ordering::Acquire);
+        let state = match state {
+            0 => CollatorActivationState::Historical,
+            1 => CollatorActivationState::Recent,
+            i => panic!("invalid CollatorActivationState value: {i}"),
+        };
         self.adapter.handle_state(&cx.state, state)
     }
 }
