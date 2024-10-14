@@ -7,17 +7,21 @@ use crate::dag::WAVE_ROUNDS;
 use crate::engine::MempoolConfig;
 use crate::models::{Link, Point, PointData, PointId, Round, UnixTime};
 
-static GENESIS: OnceLock<PointId> = OnceLock::new();
+static GENESIS: OnceLock<(PointId, UnixTime)> = OnceLock::new();
 
 pub struct Genesis;
 
 impl Genesis {
     pub fn id() -> &'static PointId {
-        GENESIS.get().expect("GENESIS_ID")
+        &GENESIS.get().expect("GENESIS_ID").0
     }
 
     pub fn round() -> Round {
-        GENESIS.get().expect("GENESIS_ROUND").round
+        GENESIS.get().expect("GENESIS_ROUND").0.round
+    }
+
+    pub fn time() -> UnixTime {
+        GENESIS.get().expect("GENESIS_ROUND").1
     }
 
     pub fn init(start_round: Round, time: UnixTime) -> (Point, OverlayId) {
@@ -56,7 +60,7 @@ impl Genesis {
             },
         );
 
-        GENESIS.set(genesis.id()).ok();
+        GENESIS.set((genesis.id(), time)).ok();
         assert_eq!(
             *Genesis::id(),
             genesis.id(),
