@@ -11,7 +11,7 @@ use tycho_util::FastHashSet;
 use crate::dag::{DagRound, InclusionState};
 use crate::dyn_event;
 use crate::effects::{AltFormat, CollectorContext, Effects};
-use crate::engine::MempoolConfig;
+use crate::engine::{Genesis, MempoolConfig};
 use crate::intercom::broadcast::dto::ConsensusEvent;
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
@@ -28,6 +28,7 @@ pub struct Collector {
     from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
     next_round: Round,
     next_includes: Option<FuturesUnordered<BoxFuture<'static, InclusionState>>>,
+    max_ready_includes_round: Round,
 }
 
 impl Collector {
@@ -36,6 +37,7 @@ impl Collector {
             from_bcast_filter,
             next_round: Round::BOTTOM,
             next_includes: None,
+            max_ready_includes_round: Genesis::round(),
         }
     }
 
@@ -46,6 +48,10 @@ impl Collector {
     ) {
         self.next_round = start_round;
         self.next_includes = Some(start_with_includes);
+    }
+
+    pub fn includes_ready_round(&self) -> Round {
+        self.max_ready_includes_round
     }
 
     pub async fn run(
@@ -91,6 +97,7 @@ impl Collector {
             includes_ready,
             is_includes_ready: false,
             next_includes: FuturesUnordered::new(),
+            max_ready_includes_round: self.max_ready_includes_round,
             collector_signal,
             is_bcaster_ready_ok: false,
         };
@@ -112,6 +119,8 @@ impl Collector {
                 self.next_round = round;
             }
         }
+        self.max_ready_includes_round = task.max_ready_includes_round;
+
         self.next_round
     }
 }
@@ -126,6 +135,7 @@ struct CollectorTask {
     // need to drop them with round change
     includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
     includes_ready: FastHashSet<PeerId>,
+    max_ready_includes_round: Round,
     is_includes_ready: bool,
     /// do not poll during this round, just pass to next round;
     /// anyway should rewrite signing mechanics - look for comments inside [`DagRound`::`add_exact`]
@@ -158,7 +168,8 @@ impl CollectorTask {
                 Ok(bcaster_signal) = &mut bcaster_signal, if !self.is_bcaster_ready_ok => {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
-                        return Err(self.next_dag_round.round().next())
+                        // return Err(self.next_dag_round.round().next())
+                        return Ok(()) // step to next round, preserving next includes
                     }
                     // bcaster sends its signal immediately after receiving Signal::Retry,
                     // so we don't have to wait for one more interval
@@ -216,6 +227,11 @@ impl CollectorTask {
         // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
         self.is_includes_ready |=
             self.includes_ready.len() >= self.current_round.peer_count().majority();
+        if self.is_includes_ready {
+            self.max_ready_includes_round = self
+                .max_ready_includes_round
+                .max(self.current_round.round());
+        }
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         if result {
             _ = self.collector_signal.send_replace(CollectorSignal::Finish); // last signal
@@ -236,6 +252,7 @@ impl CollectorTask {
         // will be signed on the next round
         self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;
+        self.max_ready_includes_round = self.max_ready_includes_round.max(point_round.prev());
         let result = match point_round.cmp(&self.next_dag_round.round()) {
             cmp::Ordering::Less => {
                 let _guard = self.effects.span().enter();
@@ -274,6 +291,11 @@ impl CollectorTask {
                 #[allow(clippy::match_same_arms)] // for comments
                 let should_fail = match consensus_round.cmp(&self.next_dag_round.round()) {
                     // we're too late, consensus moved forward
+                    // FIXME (bug!) engine can jump and try to produce own point at received round,
+                    //  expecting that some point (from this received round) is locally validated
+                    //  so that its dependencies are ready to be reused.
+                    //  But validation may not be finished yet and deps are not ready.
+                    //  Have to wait to the end of validation with 'inclusion state'.
                     cmp::Ordering::Greater => true,
                     // we still have a chance to finish current round
                     cmp::Ordering::Equal => false,
@@ -293,7 +315,10 @@ impl CollectorTask {
                     "from bcast filter",
                 );
                 if should_fail {
-                    return Err(consensus_round);
+                    // next local round may be finished shortly after first point at consensus
+                    // round is validated, to produce point at consensus round
+                    // (it's a temporary workaround for a bug described above)
+                    return Err(consensus_round.prev());
                 }
             }
             ConsensusEvent::Validating { point_id, task } => {
@@ -336,10 +361,10 @@ impl CollectorTask {
             None => false,
         };
         let point_signed = state.signed().map_or(false, |result| result.is_ok());
-        let point_included = match point_signed && dag_point.round() == self.current_round.round() {
-            true => self.includes_ready.insert(dag_point.author()),
-            false => self.includes_ready.contains(&dag_point.author()),
-        };
+        let point_included = point_signed && dag_point.round() == self.current_round.round();
+        if point_included {
+            self.includes_ready.insert(dag_point.author());
+        }
         let level = if dag_point.trusted().is_some() {
             tracing::Level::TRACE
         } else {

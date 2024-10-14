@@ -1574,6 +1574,10 @@ def mempool_engine() -> RowPanel:
             "tycho_mempool_commit_anchor_latency_time",
             "Engine committed anchor: time latency (min over batch)",
         ),
+        create_gauge_panel(
+            "tycho_mempool_includes_ready_round_lag",
+            "Engine produce point: rounds lag to last enough collected includes",
+        ),
         create_heatmap_panel(
             "tycho_mempool_adapter_parse_anchor_history_time",
             "Adapter: parse anchor history into cells",

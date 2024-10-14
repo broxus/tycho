@@ -336,7 +336,7 @@ impl Engine {
         let mut rounds_buffer = Vec::new();
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
-            let (prev_round_ok, current_dag_round, round_effects) = {
+            let (current_dag_round, round_effects) = {
                 // do not repeat the `get()` - it can give non-reproducible result
                 let consensus_round = self.consensus_round.get();
                 let top_dag_round = self.dag.top().clone();
@@ -349,22 +349,10 @@ impl Engine {
                 metrics::gauge!("tycho_mempool_engine_rounds_skipped")
                     .increment((consensus_round.0 as f64) - (top_dag_round.round().0 as f64));
 
-                // `true` if we collected enough dependencies and (optionally) signatures,
-                // so `next_dag_round` from the previous loop is the current now
-                let prev_round_ok = consensus_round == top_dag_round.round();
-                if prev_round_ok {
-                    // Round was not advanced by `BroadcastFilter`, and `Collector` gathered enough
-                    // broadcasts during previous round. So if `Broadcaster` was run at previous
-                    // round (controlled by `Collector`), then it gathered enough signatures.
-                    // If our newly created current round repeats such success, then we've moved
-                    // consensus with other 2F nodes during previous round
-                    // (at this moment we are not sure to be free from network lag).
-                    // Then any reliable point received _up to this moment_ should belong to a round
-                    // not greater than new `next_dag_round`, and any future round cannot exist.
-
+                if consensus_round == top_dag_round.round() {
                     let round_effects =
                         Effects::<EngineContext>::new(&self.effects, consensus_round);
-                    (prev_round_ok, top_dag_round, round_effects)
+                    (top_dag_round, round_effects)
                 } else {
                     self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
                     let round_effects =
@@ -374,7 +362,7 @@ impl Engine {
                             .dag
                             .fill_to_top(consensus_round, &self.round_task.state.peer_schedule),
                     );
-                    (prev_round_ok, self.dag.top().clone(), round_effects)
+                    (self.dag.top().clone(), round_effects)
                 }
             };
             metrics::gauge!("tycho_mempool_engine_current_round").set(current_dag_round.round().0);
@@ -393,7 +381,6 @@ impl Engine {
                     (point_fut.boxed(), own_point_state)
                 }
                 None => self.round_task.own_point_task(
-                    prev_round_ok,
                     &collector_signal_rx,
                     &current_dag_round,
                     &round_effects,

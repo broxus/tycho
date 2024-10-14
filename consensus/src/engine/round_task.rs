@@ -1,3 +1,4 @@
+use std::cmp;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,6 +14,7 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
+use crate::engine::Genesis;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
@@ -71,7 +73,6 @@ impl RoundTaskReady {
 
     pub fn own_point_task(
         &self,
-        prev_round_ok: bool,
         collector_signal_rx: &watch::Receiver<CollectorSignal>,
         current_dag_round: &DagRound,
         round_effects: &Effects<EngineContext>,
@@ -79,8 +80,41 @@ impl RoundTaskReady {
         BoxFuture<'static, Result<Option<Point>, JoinError>>,
         BoxFuture<'static, InclusionState>,
     ) {
+        metrics::gauge!("tycho_mempool_includes_ready_round_lag").set(
+            current_dag_round.round().0 as f32
+                - self.collector.includes_ready_round().next().0 as f32,
+        );
         let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
-        let point_fut = if prev_round_ok {
+        let allowed_to_produce = match self
+            .collector
+            .includes_ready_round()
+            .cmp(&current_dag_round.round().prev().max(Genesis::round()))
+        {
+            cmp::Ordering::Less => false,
+            cmp::Ordering::Equal => true,
+            cmp::Ordering::Greater => panic!(
+                "have includes ready at {:?}, but producing point at {:?}",
+                self.collector.includes_ready_round(),
+                current_dag_round.round(),
+            ),
+        } && self.last_own_point.as_ref().map_or(true, |prev_own| {
+            match prev_own.round.next().cmp(&current_dag_round.round()) {
+                cmp::Ordering::Less => true,
+                cmp::Ordering::Equal => {
+                    prev_own.evidence.len() >= prev_own.signers.majority_of_others()
+                }
+                cmp::Ordering::Greater => panic!(
+                    "already produced point at {:?} and gathered {}/{} evidence, \
+                     trying to produce point at {:?}",
+                    prev_own.round,
+                    prev_own.evidence.len(),
+                    prev_own.signers.majority_of_others(),
+                    current_dag_round.round()
+                ),
+            }
+        });
+
+        let point_fut = if allowed_to_produce {
             self.own_point_fut(
                 own_point_state_tx,
                 collector_signal_rx,
