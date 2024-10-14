@@ -310,7 +310,6 @@ impl RoundTaskReady {
                 info,
                 point.prev_proof(),
                 point_round,
-                false, // to be sure
                 downloader,
                 store,
                 do_not_certify_tx,
