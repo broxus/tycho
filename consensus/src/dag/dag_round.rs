@@ -5,7 +5,6 @@ use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tycho_network::PeerId;
-use tycho_storage::point_status::PointStatus;
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
@@ -14,7 +13,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointInfo, Round};
+use crate::models::{Digest, PeerCount, Point, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -225,32 +224,6 @@ impl DagRound {
                 |existing| existing.resolve_download(point),
             )
             .map(|first| first.clone().map(|_| result_state).boxed())
-        })
-    }
-
-    pub fn _restore_exact(
-        &self,
-        info: &PointInfo,
-        status: PointStatus,
-        downloader: &Downloader,
-        store: &MempoolStore,
-        effects: &Effects<EngineContext>,
-    ) -> BoxFuture<'static, InclusionState> {
-        let _guard = effects.span().enter();
-        assert_eq!(
-            info.round(),
-            self.round(),
-            "Coding error: point info round does not match dag round"
-        );
-        let digest = info.digest();
-        self.edit(&info.data().author, |loc| {
-            let result_state = loc.state().clone();
-            loc.get_or_init(digest, |state| {
-                DagPointFuture::_new_restore(self, info, status, state, downloader, store, effects)
-            })
-            .clone()
-            .map(|_| result_state)
-            .boxed()
         })
     }
 
