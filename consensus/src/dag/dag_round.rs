@@ -135,6 +135,8 @@ impl DagRound {
     }
 
     /// for genesis (next round key pair) and own points (point round key pair)
+    /// this does not start recursive validation so node may restart with only broadcast point
+    /// and download dependencies when consensus round is determined
     pub fn insert_exact_sign(
         &self,
         point: &Point,
@@ -150,7 +152,12 @@ impl DagRound {
             let _ready = loc.init_or_modify(
                 point.digest(),
                 |state| DagPointFuture::new_local_trusted(point, state, store),
-                |_existing| {},
+                |_existing| {
+                    panic!(
+                        "local point must be created only once. {:?}",
+                        point.id().alt()
+                    )
+                },
             );
             loc.state().clone()
         });

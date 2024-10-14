@@ -296,9 +296,8 @@ impl RoundTaskReady {
         effects: Effects<EngineContext>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            if !point.verify_hash() {
-                panic!("Failed to verify own point hash");
-            }
+            point.verify_hash().expect("Failed to verify own point");
+
             if let Err(err) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = effects.span().enter();
                 panic!("Failed to verify own point: {err:?} {:?}", point)
