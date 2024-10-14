@@ -136,7 +136,6 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             info,
             point.prev_proof(),
             dag_round.downgrade(),
-            false, // no matter
             downloader.clone(),
             store.clone(),
             certified_tx,

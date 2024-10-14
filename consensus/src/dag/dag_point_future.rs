@@ -132,7 +132,6 @@ impl DagPointFuture {
                 info,
                 prev_proof,
                 point_dag_round,
-                false, // mandatory
                 downloader,
                 store.clone(),
                 certified_rx,
@@ -173,9 +172,9 @@ impl DagPointFuture {
         effects: &Effects<EngineContext>,
     ) -> Self {
         if status.is_ill_formed {
-            return Self(DagPointFutureType::Ready(future::ready(
-                DagPoint::IllFormed(Arc::new(info.id())),
-            )));
+            let dag_point = DagPoint::IllFormed(Arc::new(info.id()));
+            state.init(&dag_point);
+            return Self(DagPointFutureType::Ready(future::ready(dag_point)));
         }
 
         let point_dag_round = point_dag_round.downgrade();
@@ -200,7 +199,6 @@ impl DagPointFuture {
                     info.clone(),
                     None, // no matter if already validated
                     point_dag_round,
-                    true, // if true - just need resolve dependencies
                     downloader,
                     store.clone(),
                     certified_rx,
@@ -239,7 +237,6 @@ impl DagPointFuture {
                     info,
                     prev_proof,
                     point_dag_round,
-                    false,
                     downloader,
                     store.clone(),
                     certified_rx,
@@ -307,7 +304,11 @@ impl DagPointFuture {
             .expect("db get point info status");
 
             let stored_verified = match stored_valid {
-                Some(info) => return DagPoint::Trusted(ValidPoint::new(info)),
+                Some(info) => {
+                    let dag_point = DagPoint::Trusted(ValidPoint::new(info));
+                    state.init(&dag_point);
+                    return dag_point;
+                }
                 None => tokio::task::spawn_blocking({
                     let store = store.clone();
                     move || store.get_point(point_id.round, &point_id.digest)
@@ -340,9 +341,15 @@ impl DagPointFuture {
                             })
                             .await
                             .expect("db store ill-formed download");
-                            return DagPoint::IllFormed(Arc::new(point_id));
+                            let dag_point = DagPoint::IllFormed(Arc::new(point_id));
+                            state.init(&dag_point);
+                            return dag_point;
                         }
-                        DownloadResult::NotFound => return DagPoint::NotFound(Arc::new(point_id)),
+                        DownloadResult::NotFound => {
+                            let dag_point = DagPoint::NotFound(Arc::new(point_id));
+                            state.init(&dag_point);
+                            return dag_point;
+                        }
                     };
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();
@@ -367,7 +374,6 @@ impl DagPointFuture {
                 info,
                 prev_proof,
                 point_dag_round,
-                false, // if we got here, point was not stored as valid
                 downloader,
                 store.clone(),
                 certified_rx,

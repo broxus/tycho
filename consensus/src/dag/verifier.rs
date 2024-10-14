@@ -61,7 +61,6 @@ impl Verifier {
         info: PointInfo,               // @ r+0
         prev_proof: Option<PrevPoint>, // @ r+0
         r_0: WeakDagRound,             // r+0
-        is_stored_as_valid: bool,
         downloader: Downloader,
         store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
@@ -143,7 +142,6 @@ impl Verifier {
 
         let mut signatures_fut = std::pin::pin!(match prev_proof {
             None => future::Either::Left(future::ready(true)),
-            Some(_) if is_stored_as_valid => future::Either::Left(future::ready(true)),
             Some(proof) => future::Either::Right(
                 rayon_run(move || proof.signatures_match()).instrument(effects.span().clone()),
             ),
@@ -158,9 +156,7 @@ impl Verifier {
         )
         .instrument(effects.span().clone()));
 
-        let mut is_valid_fut = std::pin::pin!(if is_stored_as_valid {
-            future::Either::Left(future::ready(true))
-        } else {
+        let mut is_valid_fut = std::pin::pin!({
             // peer has to jump over a round if it had some invalid point in prev loc
             let other_versions = r_1.view(&info.data().author, |loc| {
                 // do not add same prev_digest twice - it is added as one of 'includes'
@@ -171,10 +167,7 @@ impl Verifier {
                 .cloned()
                 // do not extend listed dependencies as they may become trusted by consensus
                 .chain(other_versions.into_iter().flatten());
-            future::Either::Right(
-                Self::is_valid(info.clone(), deps_and_prev.collect())
-                    .instrument(effects.span().clone()),
-            )
+            Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(effects.span().clone())
         });
 
         // drop strong links before await
