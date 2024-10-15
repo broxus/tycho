@@ -100,14 +100,19 @@ impl Responder {
             BroadcastQuery as r => {
                 match inner {
                     None => {} // do nothing: sender has retry loop via signature request
-                    Some(inner) => inner.broadcast_filter.add(
-                        &req.metadata.peer_id,
-                        &r.0,
-                        inner.top_dag_round.as_ref(),
-                        &inner.downloader,
-                        &inner.store,
-                        &inner.effects,
-                    ),
+                    Some(inner) => match &inner.top_dag_round {
+                        None => {} // do nothing for now, will remove Option soon
+                        Some(top_dag_round) => {
+                            inner.broadcast_filter.add(
+                                &req.metadata.peer_id,
+                                &r.0,
+                                top_dag_round,
+                                &inner.downloader,
+                                &inner.store,
+                                &inner.effects,
+                            );
+                        }
+                    }
                 };
                 let response = Response::from_tl(&BroadcastMpResponse);
                 EngineContext::broadcast_response_metrics(task_start.elapsed());

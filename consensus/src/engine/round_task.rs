@@ -51,12 +51,6 @@ impl RoundTaskReady {
     ) -> Self {
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
         let broadcast_filter = BroadcastFilter::new(&peer_schedule, consensus_round, bcast_tx);
-        tokio::spawn({
-            let this = broadcast_filter.clone();
-            async move {
-                this.clear_cache().await;
-            }
-        });
         let downloader = Downloader::new(dispatcher, &peer_schedule, consensus_round.receiver());
         Self {
             state: RoundTaskState {
