@@ -293,13 +293,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     fn get_collator_activation_state(&self) -> CollatorActivationState {
-        match self.collator_state.load(Ordering::Acquire).try_into() {
-            Ok(state) => state,
-            Err(e) => {
-                tracing::error!("Failed to get collator activation state {e:?}");
-                panic!();
-            }
-        }
+        self.collator_state
+            .load(Ordering::Acquire)
+            .try_into()
+            .expect("Failed to get collator activation state")
     }
 }
 
