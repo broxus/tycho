@@ -60,6 +60,7 @@ tycho-util = { workspace = true, features = ["test"] }
 default = []
 test = ["tycho-block-util/test"]
 block-creator-stats = []
+msgs-groups-v2 = []
 
 [lints]
 workspace = true

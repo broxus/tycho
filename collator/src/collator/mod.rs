@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
-use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
+use types::{AccountId, AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
@@ -34,6 +35,10 @@ mod debug_info;
 mod do_collate;
 mod error;
 mod execution_manager;
+#[cfg(not(feature = "msgs-groups-v2"))]
+mod message_group_v1;
+#[cfg(feature = "msgs-groups-v2")]
+mod message_group_v2;
 mod mq_iterator_adapter;
 mod types;
 
@@ -208,6 +213,7 @@ pub struct CollatorStdImpl {
     anchors_cache: AnchorsCache,
     stats: CollatorStats,
     timer: std::time::Instant,
+    accounts_load: BTreeMap<AccountId, u32>,
 
     /// Round of a new consensus genesis on recovery
     mempool_start_round: Option<MempoolAnchorId>,
@@ -259,6 +265,7 @@ impl CollatorStdImpl {
             stats: Default::default(),
             timer: std::time::Instant::now(),
             mempool_start_round,
+            accounts_load: Default::default(),
         };
 
         AsyncQueuedDispatcher::run(processor, receiver);
@@ -1214,10 +1221,10 @@ impl CollatorStdImpl {
         );
 
         // check has unprocessed messages in buffer or queue
-        let has_uprocessed_messages = self
+        let has_unprocessed_messages = self
             .check_has_unprocessed_messages(&mut working_state)
             .await?;
-        if has_uprocessed_messages {
+        if has_unprocessed_messages {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed messages from previous block, will collate next block",
             );
@@ -1252,7 +1259,7 @@ impl CollatorStdImpl {
             && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
-        let no_pending_msgs = !has_uprocessed_messages && !has_externals;
+        let no_pending_msgs = !has_unprocessed_messages && !has_externals;
 
         // import next anchor if meet one of above conditions
         let next_anchor_info_opt = if force_mc_block_by_uncommitted_chain {
@@ -1282,10 +1289,9 @@ impl CollatorStdImpl {
             .map_err(|e| {
                 anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
             })?;
-
             working_state.gas_used_from_last_anchor = 0;
 
-            has_externals = next_anchor_has_externals;
+            has_externals |= next_anchor_has_externals;
             if has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",
@@ -1298,10 +1304,14 @@ impl CollatorStdImpl {
         };
 
         // collate block if has internals or externals
-        if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
+        if (has_unprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
             drop(histogram);
             self.do_collate(working_state, None).await?;
         } else {
+            if !has_unprocessed_messages && !has_externals {
+                self.accounts_load = Default::default();
+            }
+
             // here just imported anchor has no externals
             // or we reached max uncommitted chain length
             let anchor_chain_time = if let Some((next_anchor, _)) = next_anchor_info_opt {

@@ -50,7 +50,7 @@ tracing-subscriber = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
-tycho-collator = { workspace = true }
+tycho-collator = { workspace = true, features = ["msgs-groups-v2"] }
 tycho-control = { workspace = true }
 tycho-core = { workspace = true }
 tycho-network = { workspace = true }
