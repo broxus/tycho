@@ -33,32 +33,19 @@ impl Default for Committer {
 }
 
 impl Committer {
-    pub fn extend_from_ahead(&mut self, rounds: &[DagRound], peer_schedule: &PeerSchedule) {
-        if rounds.is_empty() {
-            return;
-        }
-        if !self.dag.extend_from_front(rounds, peer_schedule) {
+    /// returns new bottom after gap if it was moved, and `None` if no gap occurred
+    pub fn extend_from_ahead(
+        &mut self,
+        rounds: &[DagRound],
+        peer_schedule: &PeerSchedule,
+    ) -> Option<Round> {
+        if rounds.is_empty() || self.dag.extend_from_front(rounds, peer_schedule) {
+            None
+        } else {
             self.first_dag_bottom_after_gap = self.dag.bottom_round();
             _ = self.anchor_chain.drain_upto(self.dag.bottom_round());
-        };
-    }
-
-    /// returns 'true' if ok, `false` if current dag state was below bottom and was damaged
-    pub fn set_bottom(&mut self, new_bottom_round: Round) -> bool {
-        let is_chain_advanced = self
-            .anchor_chain
-            .top_proof_round()
-            .map_or(false, |l| l < new_bottom_round);
-        let is_dag_drained = self.dag.drain_upto(new_bottom_round).first().is_some();
-        let is_chain_drained = self
-            .anchor_chain
-            .drain_upto(new_bottom_round)
-            .peekable()
-            .peek()
-            .is_some();
-        self.first_dag_bottom_after_gap = self.first_dag_bottom_after_gap.max(new_bottom_round);
-
-        !is_dag_drained && !is_chain_drained && !is_chain_advanced
+            Some(self.dag.bottom_round())
+        }
     }
 
     pub fn commit(&mut self) -> Vec<AnchorData> {

@@ -40,6 +40,7 @@ impl DagFront {
         let front_bottom_round = Round(new_top.0.saturating_sub(Self::DEPTH)).max(Genesis::round());
 
         // extend to the max possible - will be shortened when top known is determined
+        // FIXME apply new scheme
         let back_bottom_round = Consensus::history_bottom(new_top);
         if self.top().round() < back_bottom_round {
             self.rounds.clear();
