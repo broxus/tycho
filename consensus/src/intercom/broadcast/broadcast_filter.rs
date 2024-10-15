@@ -1,7 +1,5 @@
-use std::cmp;
 use std::sync::Arc;
 
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -12,7 +10,6 @@ use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
-use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
 
@@ -32,7 +29,6 @@ impl BroadcastFilter {
                 peer_schedule: peer_schedule.clone(),
                 consensus_round: consensus_round.clone(),
                 output,
-                last_by_peer: Default::default(),
                 by_round: Default::default(),
             }),
         }
@@ -42,7 +38,7 @@ impl BroadcastFilter {
         &self,
         sender: &PeerId,
         point: &Point,
-        top_dag_round: Option<&DagRound>,
+        top_dag_round: &DagRound,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -68,42 +64,16 @@ impl BroadcastFilter {
         self.inner
             .advance_round(top_dag_round, downloader, store, round_effects);
     }
-
-    /// must be run before broadcaster is set into responder
-    /// because of lock on `self.inner.peer_schedule`
-    pub async fn clear_cache(self) -> ! {
-        let mut rx = self.inner.peer_schedule.read().updates();
-        let name = "clear cached points for unresolved peers";
-        loop {
-            match rx.recv().await {
-                Ok((peer_id, PeerState::Unknown)) => {
-                    // assume peers aren't removed from DHT immediately
-                    let round = self.inner.consensus_round.get();
-                    tracing::info!(round = round.0, peer = display(peer_id.alt()), name);
-                    self.inner.last_by_peer.remove(&peer_id);
-                }
-                Ok((_peer_id, PeerState::Resolved)) => {} // skip
-                Err(err @ RecvError::Lagged(_)) => {
-                    tracing::error!(error = display(err), name);
-                }
-                Err(err @ RecvError::Closed) => {
-                    panic!("{name} {err}");
-                }
-            }
-        }
-    }
 }
 
-type SimpleDagLocations = FastHashMap<PeerId, FastHashMap<Digest, Point>>;
+type SimpleDagLocations = FastHashMap<PeerId, FastHashMap<Digest, (Point, usize)>>;
 struct BroadcastFilterInner {
     peer_schedule: PeerSchedule,
     consensus_round: RoundWatch<Consensus>,
     output: mpsc::UnboundedSender<ConsensusEvent>,
-    // defend from spam from future rounds:
-    // should keep rounds greater than current dag round
-    last_by_peer: FastDashMap<PeerId, (Round, usize)>,
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
+    // TODO outer by round - scc tree index (?); inner by peer - dash map
     by_round: FastDashMap<Round, (PeerCount, SimpleDagLocations)>,
 }
 
@@ -121,7 +91,7 @@ impl BroadcastFilterInner {
         &self,
         sender: &PeerId,
         point: &Point,
-        top_dag_round: Option<&DagRound>,
+        top_dag_round: &DagRound,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -134,164 +104,127 @@ impl BroadcastFilterInner {
             digest,
         } = point.id();
 
-        tracing::debug!(
-            parent: effects.span(),
-            sender = display(sender.alt()),
-            author = display(author.alt()),
-            round = round.0,
-            digest = display(digest.alt()),
-            "received broadcast"
-        );
-
-        let verified = if sender != author {
-            tracing::error!(
-                parent: effects.span(),
-                sender = display(sender.alt()),
-                author = display(author.alt()),
-                round = round.0,
-                digest = display(digest.alt()),
-                "sender is not author"
-            );
-            Err(None)
+        let verified_result = if sender != author {
+            None // sender is not author
         } else {
-            Verifier::verify(point, &self.peer_schedule).map_err(|err| {
-                tracing::error!(
-                    parent: effects.span(),
-                    result = debug(&err),
-                    author = display(author.alt()),
-                    round = round.0,
-                    digest = display(digest.alt()),
-                    "verified"
-                );
-                Some(err)
-            })
+            Some(Verifier::verify(point, &self.peer_schedule))
         };
 
-        let (last_peer_round, duplicates) = *self
-            .last_by_peer
-            .entry(author)
-            .and_modify(|(last_by_peer, duplcates)| {
-                match round.cmp(last_by_peer) {
-                    cmp::Ordering::Less => {} // do nothing, blame later
-                    cmp::Ordering::Equal => *duplcates += 1,
-                    cmp::Ordering::Greater => {
-                        *last_by_peer = round;
-                        *duplcates = 0;
-                    }
-                }
-            })
-            .or_insert((round, 0));
-        if verified.is_err() || round < last_peer_round || duplicates > 0 {
-            // we should ban a peer that broadcasts its rounds out of order,
-            //   though we cannot prove this decision for other nodes;
-            // rarely a consecutive pair of broadcasts may be reordered during high CPU load
-            let level = if verified.is_err() || round < last_peer_round.prev() || duplicates >= 3 {
-                // that's severe errors, that require ban
-                tracing::Level::ERROR
-            } else {
-                // sender could have not received our response, thus decides to retry
-                tracing::Level::WARN
-            };
-            dyn_event!(
-                parent: effects.span(),
-                level,
-                malformed = verified.is_err(),
-                out_of_order = last_peer_round > round,
-                duplicated = duplicates > 0,
-                last_round = last_peer_round.0,
-                duplicates = duplicates,
-                author = display(author.alt()),
-                round = round.0,
-                digest = display(digest.alt()),
-                "misbehaving broadcast"
-            );
-            // do not determine next round by garbage points; it's a ban
-            return;
-        };
-
-        let is_threshold_reached = {
+        let (is_threshold_reached, duplicates) = if let Some(verified) = &verified_result {
             enum ExtendMapErr {
                 RoundIsInDag,
-                UnknownPeerCount,
+                CannotExtend,
             }
-            // note: lock guard inside result
-            let try_by_round_entry = self.by_round.entry(round).or_try_insert_with(|| {
-                // if `top dag round` not defined: node start is not finished and dag is not ready,
-                // has to cache incoming points in Filter's map first, then in channel to Collector
+            // note: lock guard inside result is also taken to advance round and remove the entry
+            let try_by_round_entry = {
+                self.by_round.entry(round).or_try_insert_with(|| {
+                    // if `top dag round` not defined: node start is not finished and dag is not ready,
+                    // has to cache incoming points in Filter's map first, then in channel to Collector
 
-                // if `point round` > `top dag round`: either consensus moved forward without us,
-                // or we shouldn't accept the point into DAG yet, or it's a spam
+                    // if `point round` > `top dag round`: either consensus moved forward without us,
+                    // or we shouldn't accept the point into DAG yet, or it's a spam
 
-                if top_dag_round.map_or(false, |top| round <= top.round()) {
-                    // if entry was removed - do not create one, insert right into DAG
-                    Err(ExtendMapErr::RoundIsInDag)
-                } else {
-                    // how many nodes should send broadcasts
-                    PeerCount::try_from(self.peer_schedule.atomic().peers_for(round).len())
-                        // Err: will not accept broadcasts from not yet initialized validator set
-                        .map_err(|_peer_count_err| ExtendMapErr::UnknownPeerCount)
-                        .map(|peer_count| (peer_count, Default::default()))
-                }
-            });
+                    if round <= top_dag_round.round() {
+                        // if entry was removed - do not create one, insert right into DAG
+                        Err(ExtendMapErr::RoundIsInDag)
+                    } else if verified.is_ok() {
+                        // how many nodes should send broadcasts
+                        PeerCount::try_from(self.peer_schedule.atomic().peers_for(round).len())
+                            // Err: will not accept broadcasts from not yet initialized validator set
+                            .map_err(|_peer_count_err| ExtendMapErr::CannotExtend)
+                            .map(|peer_count| (peer_count, Default::default()))
+                    } else {
+                        Err(ExtendMapErr::CannotExtend)
+                    }
+                })
+            };
             match try_by_round_entry {
-                Err(ExtendMapErr::UnknownPeerCount) => false,
-                Err(ExtendMapErr::RoundIsInDag) => {
-                    let top_dag_round = top_dag_round.expect("must exist for this branch");
-                    assert!(
-                        round <= top_dag_round.round(),
-                        "branch clause is broken, expected {} <= {}",
-                        round.0,
-                        top_dag_round.round().0
-                    );
-                    // commented out: outdated broadcast may resolve download or short-circuit a validation
-                    // if round < top_dag_round.round().prev() {
-                    //     return; // will not be certified; look Signer's response `TooOldRound`
-                    // }
-                    let Some(point_round) = top_dag_round.scan(point.round()) else {
-                        // tracing::warn!("DAG is too shallow", round = round.0);
-                        return; // cannot process anyway
-                    };
-                    match verified {
-                        Ok(()) => {
-                            self.send_validating(&point_round, point, downloader, store, effects);
-                        }
-                        Err(Some(VerifyError::IllFormed)) => {
-                            point_round.add_ill_formed_broadcast_exact(point, store, effects);
-                        }
-                        Err(Some(VerifyError::BadSig)) => {
-                            point_round.set_bad_sig_in_broadcast_exact(&point.data().author);
-                        }
-                        Err(None) => {} // should ban sender, it is not the author
-                    };
-                    false
-                }
-                Ok(mut entry) => {
+                Err(ExtendMapErr::CannotExtend) => (false, None),
+                // grab a lock
+                Ok(mut entry) if verified.is_ok() => {
                     let (peer_count, same_round) = entry.value_mut();
                     // ban the author, if we detect equivocation now; we won't be able to prove it
                     //   if some signatures are invalid (it's another reason for a local ban)
-                    same_round
+                    let duplicates = same_round
                         .entry(author)
                         .or_default()
-                        .insert(digest, point.clone());
+                        .entry(digest)
+                        .and_modify(|(_point, duplicates)| *duplicates += 1)
+                        .or_insert((point.clone(), 0))
+                        .1;
                     // send `Forward` signal inside `add` just once per round, not for every point
-                    same_round.len() == peer_count.reliable_minority()
+                    let is_threshold_reached = same_round.len() == peer_count.reliable_minority();
+                    // allow few duplicates in case of network error
+                    (is_threshold_reached, Some(duplicates).filter(|d| *d > 3))
+                }
+                // points must be channelled to Collector only after signal that threshold is reached
+                // (i.e. round is advanced), so had to piggyback on map's locking
+                _ => {
+                    assert!(
+                        verified.is_err() || round <= top_dag_round.round(),
+                        "branch clause is broken, expected {round:?} <= top dag {:?}, \
+                         also verified {verified:?}",
+                        top_dag_round.round()
+                    );
+                    match verified {
+                        Ok(()) => {
+                            if let Some(point_round) = top_dag_round.scan(point.round()) {
+                                self.send_validating(
+                                    &point_round,
+                                    point,
+                                    downloader,
+                                    store,
+                                    effects,
+                                );
+                            }
+                        }
+                        Err(VerifyError::IllFormed) => {
+                            if let Some(point_round) = top_dag_round.scan(point.round()) {
+                                point_round.add_ill_formed_broadcast_exact(point, store, effects);
+                            }
+                        }
+                        Err(VerifyError::BadSig) => {
+                            if let Some(point_round) = top_dag_round.scan(point.round()) {
+                                point_round.set_bad_sig_in_broadcast_exact(&point.data().author);
+                            }
+                        }
+                    }
+                    (false, None)
                 }
             }
+        } else {
+            (false, None) // should ban sender
         };
+
         if is_threshold_reached {
             self.output
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
             self.consensus_round.set_max(round);
-        } else {
-            tracing::trace!(
-                parent: effects.span(),
-                author = display(author.alt()),
-                round = round.0,
-                digest = display(digest.alt()),
-                "threshold not reached yet"
-            );
         }
+
+        // we should ban a peer that broadcasts its rounds out of order,
+        //   though we cannot prove this decision for other nodes;
+        // rarely a consecutive pair of broadcasts may be reordered during high CPU load
+        let level = if verified_result.map_or(true, |vr| vr.is_err()) || duplicates.is_some() {
+            // that's severe errors, that require ban
+            tracing::Level::ERROR
+        } else {
+            // sender could have not received our response, thus decides to retry
+            tracing::Level::DEBUG
+        };
+        dyn_event!(
+            parent: effects.span(),
+            level,
+            author = display(author.alt()),
+            round = round.0,
+            digest = display(digest.alt()),
+            sender = verified_result.ok_or(display(sender.alt())).err(),
+            malformed = verified_result.and_then(|e| e.err()).map(debug),
+            duplicates = duplicates,
+            advance = Some(is_threshold_reached).filter(|x| *x),
+            "received broadcast"
+        );
     }
 
     /// drop everything up to the new round (inclusive)
@@ -336,7 +269,7 @@ impl BroadcastFilterInner {
                 continue;
             };
             // Note: no need to channel to Collector, no new local point will reference them anyway
-            for point in points {
+            for (point, _) in points {
                 _ = point_round.add_broadcast_exact(&point, downloader, store, effects);
             }
             released.push(round.0);
@@ -354,7 +287,7 @@ impl BroadcastFilterInner {
                     let points = map_by_peer
                         .values()
                         .flat_map(|map_by_digest| map_by_digest.values());
-                    for point in points {
+                    for (point, _) in points {
                         self.send_validating(&point_round, point, downloader, store, effects);
                     }
                     released.push(round.0);

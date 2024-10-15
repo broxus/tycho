@@ -31,7 +31,7 @@ use crate::models::{
 
 pub struct Verifier;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum VerifyError {
     BadSig,
     IllFormed,
