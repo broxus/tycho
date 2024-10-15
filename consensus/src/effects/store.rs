@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use ahash::HashMapExt;
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use itertools::Itertools;
 use tl_proto::TlWrite;
 use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::effects::AltFormat;
@@ -362,81 +360,65 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>> {
+        let mut history = history.to_vec(); // it copies a bunch of arcs so it's fine
+        history.sort_unstable();
+
         let _call_duration =
             HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
         let mut buf = [0_u8; MempoolStorage::KEY_LEN];
-        let mut keys = history
-            .iter()
-            .map(|info| {
-                MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-                buf.to_vec().into_boxed_slice()
-            })
-            .collect::<FastHashSet<_>>();
-        buf.fill(0);
+
+        anyhow::ensure!(!history.is_empty(), "anchor history must not be empty");
 
         let mut opt = ReadOptions::default();
 
-        let first = history
-            .first()
-            .context("anchor history must not be empty")?;
+        let first = history.first().expect("non-empty history");
         MempoolStorage::fill_prefix(first.round().0, &mut buf);
         opt.set_iterate_lower_bound(buf);
 
-        let last = history.last().context("anchor history must not be empty")?;
+        let last = history.last().expect("non-empty history");
         MempoolStorage::fill_prefix(last.round().next().0, &mut buf);
         opt.set_iterate_upper_bound(buf);
 
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
 
-        let mut found = FastHashMap::with_capacity(history.len());
+        let mut result = Vec::new();
         let mut iter = db.raw_iterator_cf_opt(&points_cf, opt);
         iter.seek_to_first();
 
-        let mut total_payload_items = 0;
-        while iter.valid() {
-            let key = iter.key().context("history iter invalidated on key")?;
-            if keys.remove(key) {
+        let mut history_index = 0;
+        while iter.valid() && history_index < history.len() {
+            let key: [u8; MempoolStorage::KEY_LEN] = iter
+                .key()
+                .context("history iter invalidated on key")?
+                .try_into()
+                .context("invalid key length")?;
+
+            let current_info = &history[history_index];
+            MempoolStorage::fill_key(
+                current_info.round().0,
+                current_info.digest().inner(),
+                &mut buf,
+            );
+
+            if key == buf {
                 let bytes = iter.value().context("history iter invalidated on value")?;
                 let point = Point::short_point_from_bytes(bytes).context("deserialize point")?;
+                result.extend_from_slice(point.payload());
+                history_index += 1;
+            }
 
-                total_payload_items += point.payload().len();
-                if found
-                    .insert(key.to_vec().into_boxed_slice(), point)
-                    .is_some()
-                {
-                    // we panic thus we don't care about performance
-                    let full_point =
-                        tl_proto::deserialize::<Point>(bytes).context("deserialize point")?;
-                    panic!("iter read non-unique point {:?}", full_point.id())
-                }
-            }
-            if keys.is_empty() {
-                break;
-            }
             iter.next();
         }
+
         iter.status().context("anchor history iter is not ok")?;
-        drop(iter);
 
         anyhow::ensure!(
-            keys.is_empty(),
-            "some history points were not found id db:\n {}",
-            keys.iter()
-                .map(|key| MempoolStorage::format_key(key))
-                .join(",\n")
+            history_index == history.len(),
+            "Not all history points found in db. Found {} out of {}",
+            history_index,
+            history.len()
         );
-        anyhow::ensure!(found.len() == history.len(), "stored point key collision");
-
-        let mut result = Vec::with_capacity(total_payload_items);
-        for info in history {
-            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-            let point = found
-                .remove(buf.as_slice())
-                .with_context(|| MempoolStorage::format_key(&buf))
-                .context("key was searched in db but was not found")?;
-            result.extend_from_slice(point.payload());
-        }
 
         Ok(result)
     }

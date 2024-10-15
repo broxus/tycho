@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -8,16 +9,34 @@ use crate::models::{
 };
 
 #[derive(Clone, TlRead, TlWrite)]
-#[cfg_attr(test, derive(PartialEq))]
 pub struct PointInfo(Arc<PointInfoInner>);
 
 #[derive(TlWrite, TlRead)]
-#[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
     round: Round,
     digest: Digest,
     data: PointData,
 }
+
+impl Ord for PointInfo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (&self.0.round, &self.0.digest).cmp(&(&other.0.round, &other.0.digest))
+    }
+}
+
+impl PartialOrd for PointInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for PointInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.digest == other.0.digest
+    }
+}
+
+impl Eq for PointInfo {}
 
 #[derive(TlWrite)]
 /// Note: fields and their order must be the same with [`PointInfoInner`]
