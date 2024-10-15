@@ -120,9 +120,7 @@ async fn test_collation_process_on_stubs() {
         node_1_keypair.clone(),
         config,
         Arc::new(message_queue_adapter),
-        |listener| {
-            StateNodeAdapterStdImpl::new(listener, CollatorActivationState::Recent, storage.clone())
-        },
+        |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
         |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
         ValidatorStdImpl::new(
             validator_network,

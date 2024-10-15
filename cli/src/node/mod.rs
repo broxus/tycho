@@ -507,13 +507,7 @@ impl Node {
             self.keypair.clone(),
             self.collation_config.clone(),
             Arc::new(message_queue_adapter),
-            |listener| {
-                StateNodeAdapterStdImpl::new(
-                    listener,
-                    initial_collator_activation_value,
-                    self.storage.clone(),
-                )
-            },
+            |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,

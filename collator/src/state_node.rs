@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -82,8 +81,6 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     ) -> Result<()>;
     /// Loqd queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
-
-    fn get_collator_activation_state(&self) -> CollatorActivationState;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -91,15 +88,10 @@ pub struct StateNodeAdapterStdImpl {
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
-    collator_state: Arc<AtomicU8>,
 }
 
 impl StateNodeAdapterStdImpl {
-    pub fn new(
-        listener: Arc<dyn StateNodeEventListener>,
-        collator_activation_state: CollatorActivationState,
-        storage: Storage,
-    ) -> Self {
+    pub fn new(listener: Arc<dyn StateNodeEventListener>, storage: Storage) -> Self {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
 
         let (broadcaster, _) = broadcast::channel(10000);
@@ -108,7 +100,6 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             broadcaster,
-            collator_state: Arc::new(AtomicU8::new(collator_activation_state as u8)),
         }
     }
 }
@@ -218,11 +209,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn handle_state(
         &self,
         state: &ShardStateStuff,
-        collator_state: CollatorActivationState,
+        _collator_state: CollatorActivationState,
     ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
-        self.collator_state
-            .store(collator_state as u8, Ordering::Release);
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
@@ -290,13 +279,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             }
             _ => Ok(None),
         }
-    }
-
-    fn get_collator_activation_state(&self) -> CollatorActivationState {
-        self.collator_state
-            .load(Ordering::Acquire)
-            .try_into()
-            .expect("Failed to get collator activation state")
     }
 }
 

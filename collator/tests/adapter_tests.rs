@@ -41,8 +41,7 @@ async fn test_add_and_get_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter =
-        StateNodeAdapterStdImpl::new(listener, CollatorActivationState::Recent, mock_storage);
+    let adapter = StateNodeAdapterStdImpl::new(listener, mock_storage);
 
     // Test adding a block
 
@@ -93,8 +92,7 @@ async fn test_storage_accessors() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter =
-        StateNodeAdapterStdImpl::new(listener, CollatorActivationState::Recent, storage.clone());
+    let adapter = StateNodeAdapterStdImpl::new(listener, storage.clone());
 
     let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
 
@@ -112,8 +110,7 @@ async fn test_add_and_get_next_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter =
-        StateNodeAdapterStdImpl::new(listener, CollatorActivationState::Recent, mock_storage);
+    let adapter = StateNodeAdapterStdImpl::new(listener, mock_storage);
 
     // Test adding a block
     let prev_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 1);
@@ -169,7 +166,6 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     });
     let adapter = Arc::new(StateNodeAdapterStdImpl::new(
         listener.clone(),
-        CollatorActivationState::Recent,
         storage.clone(),
     ));
 
