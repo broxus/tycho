@@ -166,28 +166,16 @@ impl Engine {
         self.effects = Effects::<ChainedRoundsContext>::new(top_round);
         let round_effects = Effects::<EngineContext>::new(&self.effects, top_round);
 
+        // store in committer (back dag) - no data to init with;
         // commiter must contain the same rounds as front dag, plus required history
-        let mut back_rounds =
-            (self.dag).fill_to_top(top_round, &self.round_task.state.peer_schedule);
-        back_rounds.extend_from_slice(self.dag.as_slice());
-
-        // store in committer (back dag) - no data to init with,
         // as consensus may be far away while local history has some unfinished downloads
-
-        self.committer_run = tokio::spawn({
-            let peer_schedule = self.round_task.state.peer_schedule.clone();
-            let mut consensus_round = self.consensus_round.receiver();
-            async move {
-                let mut committer = Committer::default();
-                // store those evicted from and contained in front dag
-                committer.extend_from_ahead(&back_rounds, &peer_schedule);
-                // restrict download depth if consensus is running
-                // (dag will not validate points until round changes and dag advances)
-                consensus_round.next().await;
-                committer.set_bottom(Consensus::history_bottom(consensus_round.get()));
-                committer
-            }
-        });
+        let mut committer = Committer::default();
+        committer.extend_from_ahead(
+            &(self.dag).fill_to_top(top_round, &self.round_task.state.peer_schedule),
+            &self.round_task.state.peer_schedule,
+        );
+        committer.extend_from_ahead(self.dag.as_slice(), &self.round_task.state.peer_schedule);
+        self.committer_run = tokio::spawn(future::ready(committer));
 
         // bcast filter will be init on round start
 
@@ -279,7 +267,6 @@ impl Engine {
             };
 
             let peer_schedule = self.round_task.state.peer_schedule.clone();
-            let top_known_anchor = self.round_task.state.top_known_anchor.get();
 
             let round_task_run = self
                 .round_task
@@ -306,24 +293,19 @@ impl Engine {
 
                 let moved_rounds_buf = mem::take(&mut rounds_buffer);
 
-                // max(): keep in-mem dag as short as possible; each commit shortens it even more;
-                // this bottom is applied only in case of a gap in mempool history
-                let bottom_round = TopKnownAnchor::adapter_history_bottom(top_known_anchor)
-                    .max(Consensus::history_bottom(current_dag_round.round()));
-
                 let committed_info_tx = self.committed_info_tx.clone();
                 let round_effects = round_effects.clone();
 
                 self.committer_run = tokio::task::spawn_blocking(move || {
                     let _guard = round_effects.span().enter();
 
-                    if !committer.set_bottom(bottom_round) {
+                    if let Some(new_bottom) =
+                        committer.extend_from_ahead(&moved_rounds_buf, &peer_schedule)
+                    {
                         committed_info_tx
-                            .send(CommitResult::NewStartAfterGap(bottom_round)) // not recoverable
+                            .send(CommitResult::NewStartAfterGap(new_bottom)) // not recoverable
                             .expect("Failed to send anchor history info to mpsc channel");
                     };
-
-                    committer.extend_from_ahead(&moved_rounds_buf, &peer_schedule);
 
                     let committed = committer.commit();
 

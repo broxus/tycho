@@ -61,7 +61,7 @@ impl DagBack {
         };
         let history_bottom = match front.last() {
             None => return has_same_bottom,
-            // extend to the max possible - will be shortened when top known is determined
+            // FIXME apply new scheme
             Some(last) => Consensus::history_bottom(last.round()),
         };
         if front.len() >= 2 {
