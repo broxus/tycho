@@ -661,7 +661,7 @@ impl BlockStorage {
         Ok(chunk.to_vec())
     }
 
-    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<u32> {
+    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<Option<u32>> {
         let key = BlockDataEntryKey {
             block_id: block_id.into(),
             chunk_index: BLOCK_DATA_SIZE_MAGIC,
@@ -670,13 +670,12 @@ impl BlockStorage {
             .db
             .block_data_entries
             .get(key.to_vec())?
-            .map(|slice| u32::from_le_bytes(slice.as_ref().try_into().unwrap()))
-            .ok_or(BlockStorageError::BlockNotFound)?;
+            .map(|slice| u32::from_le_bytes(slice.as_ref().try_into().unwrap()));
 
         Ok(size)
     }
 
-    pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Vec<u8>> {
+    pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Option<Vec<u8>>> {
         let chunk_size = self.block_data_chunk_size().get();
         if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
@@ -691,9 +690,9 @@ impl BlockStorage {
             .db
             .block_data_entries
             .get(key.to_vec())?
-            .ok_or(BlockStorageError::BlockNotFound)?;
+            .map(|x| x.to_vec());
 
-        Ok(chunk.to_vec())
+        Ok(chunk)
     }
 
     // === GC stuff ===
@@ -1419,8 +1418,6 @@ struct PreparedArchiveId {
 enum BlockStorageError {
     #[error("Archive not found")]
     ArchiveNotFound,
-    #[error("Block not found")]
-    BlockNotFound,
     #[error("Block data not found")]
     BlockDataNotFound,
     #[error("Block proof not found")]

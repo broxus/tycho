@@ -453,9 +453,13 @@ impl<B> Inner<B> {
 
         let block_storage = self.storage.block_storage();
         match block_storage.get_block_data_chunk(&req.block_id, req.offset) {
-            Ok(data) => overlay::Response::Ok(Data { data: data.into() }),
+            Ok(Some(data)) => overlay::Response::Ok(Data { data: data.into() }),
+            Ok(None) => {
+                tracing::warn!(?req.block_id, "get_block_data_chunk: block not found");
+                overlay::Response::Err(BAD_REQUEST_ERROR_CODE)
+            }
             Err(e) => {
-                tracing::warn!("get_block_data_chunk failed: {e:?}");
+                tracing::warn!(?req.block_id, "get_block_data_chunk failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
@@ -603,38 +607,47 @@ impl<B> Inner<B> {
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
-        Ok(match block_handle_storage.load_handle(block_id) {
+        let block_full = match block_handle_storage.load_handle(block_id) {
             Some(handle) if handle.has_all_block_parts() => {
-                let data_chunk_size = block_storage.block_data_chunk_size();
-                let data = block_storage.get_block_data_chunk(block_id, 0)?;
-                let data_size = if data.len() < data_chunk_size.get() as usize {
-                    // NOTE: Skip one RocksDB read for relatively small blocks
-                    //       Average block size is 4KB, while the chunk size is 1MB.
-                    data.len() as u32
-                } else {
-                    block_storage.get_block_data_size(block_id)?
-                };
+                match block_storage.get_block_data_chunk(block_id, 0)? {
+                    Some(data) => {
+                        let data_chunk_size = block_storage.block_data_chunk_size();
+                        let data_size = if data.len() < data_chunk_size.get() as usize {
+                            // NOTE: Skip one RocksDB read for relatively small blocks
+                            //       Average block size is 4KB, while the chunk size is 1MB.
+                            data.len() as u32
+                        } else {
+                            match block_storage.get_block_data_size(block_id)? {
+                                Some(size) => size,
+                                None => return Ok(BlockFull::NotFound),
+                            }
+                        };
 
-                let block = BlockData {
-                    data: data.into(),
-                    size: NonZeroU32::new(data_size).expect("shouldn't happen"),
-                    chunk_size: data_chunk_size,
-                };
+                        let block = BlockData {
+                            data: data.into(),
+                            size: NonZeroU32::new(data_size).expect("shouldn't happen"),
+                            chunk_size: data_chunk_size,
+                        };
 
-                let (proof, queue_diff) = tokio::join!(
-                    block_storage.load_block_proof_raw(&handle),
-                    block_storage.load_queue_diff_raw(&handle)
-                );
+                        let (proof, queue_diff) = tokio::join!(
+                            block_storage.load_block_proof_raw(&handle),
+                            block_storage.load_queue_diff_raw(&handle)
+                        );
 
-                BlockFull::Found {
-                    block_id: *block_id,
-                    block,
-                    proof: proof?.into(),
-                    queue_diff: queue_diff?.into(),
+                        BlockFull::Found {
+                            block_id: *block_id,
+                            block,
+                            proof: proof?.into(),
+                            queue_diff: queue_diff?.into(),
+                        }
+                    }
+                    None => BlockFull::NotFound,
                 }
             }
             _ => BlockFull::NotFound,
-        })
+        };
+
+        Ok(block_full)
     }
 
     fn read_persistent_state_info(
