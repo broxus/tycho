@@ -501,8 +501,6 @@ impl Node {
             self.validator_config,
         );
 
-        let initial_collator_activation_value = CollatorActivationState::Historical;
-
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
             self.collation_config.clone(),
@@ -517,7 +515,7 @@ impl Node {
             vec![],
         );
 
-        let collator_active = Arc::new(AtomicU8::new(initial_collator_activation_value as u8));
+        let collator_active = Arc::new(AtomicU8::new(CollatorActivationState::Historical as u8));
         let collator_state_subscriber = CollatorStateSubscriber {
             collator_activation_state: collator_active.clone(),
             adapter: collation_manager.state_node_adapter().clone(),
@@ -530,7 +528,7 @@ impl Node {
         // Explicitly handle the initial state
         collator_state_subscriber
             .adapter
-            .handle_state(&mc_state, initial_collator_activation_value)
+            .handle_state(&mc_state, CollatorActivationState::Persistent)
             .await?;
 
         // NOTE: Make sure to drop the state after handling it

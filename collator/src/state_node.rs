@@ -461,8 +461,9 @@ fn process_signatures(
 #[repr(u8)]
 #[derive(Copy, Clone)]
 pub enum CollatorActivationState {
-    Historical = 0,
-    Recent = 1,
+    Persistent = 0,
+    Historical = 1,
+    Recent = 2,
 }
 
 impl TryFrom<u8> for CollatorActivationState {
@@ -470,8 +471,9 @@ impl TryFrom<u8> for CollatorActivationState {
 
     fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
         match value {
-            0 => Ok(CollatorActivationState::Historical),
-            1 => Ok(CollatorActivationState::Recent),
+            0 => Ok(CollatorActivationState::Persistent),
+            1 => Ok(CollatorActivationState::Historical),
+            2 => Ok(CollatorActivationState::Recent),
             i => anyhow::bail!("invalid CollatorActivationState value: {i}"),
         }
     }
