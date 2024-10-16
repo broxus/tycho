@@ -11,7 +11,7 @@ use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProviderExt, BlockStrider,
     BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState,
-    ShardStateApplier, Starter, StateSubscriber, StorageBlockProvider,
+    ShardStateApplier, Starter, StarterConfig, StateSubscriber, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -27,8 +27,6 @@ use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::resolve_public_ip;
 
 use crate::config::{NodeConfig, NodeKeys};
-
-const SERVICE_NAME: &str = "tycho-node";
 
 /// Run a Tycho node.
 #[derive(Args, Clone)]
@@ -122,6 +120,7 @@ pub struct Node<C> {
     rpc_config: Option<RpcConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
     archive_block_provider_config: ArchiveBlockProviderConfig,
+    starter_config: StarterConfig,
 
     run_handle: Option<tokio::task::JoinHandle<()>>,
 
@@ -163,7 +162,6 @@ impl<C> Node<C> {
         let network = Network::builder()
             .with_config(node_config.network)
             .with_private_key(keys.secret.0)
-            .with_service_name(SERVICE_NAME)
             .with_remote_addr(public_addr)
             .build(local_addr, router)
             .context("failed to build node network")?;
@@ -245,6 +243,7 @@ impl<C> Node<C> {
             rpc_config: node_config.rpc,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             archive_block_provider_config: node_config.archive_block_provider,
+            starter_config: node_config.starter,
             run_handle: None,
         })
     }
@@ -271,6 +270,7 @@ impl<C> Node<C> {
                     self.storage.clone(),
                     self.blockchain_rpc_client.clone(),
                     self.zerostate,
+                    self.starter_config.clone(),
                 )
                 .cold_boot(zerostates.map(FileZerostateProvider))
                 .await?

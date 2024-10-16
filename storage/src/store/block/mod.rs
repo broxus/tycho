@@ -851,7 +851,7 @@ impl BlockStorage {
 
     #[tracing::instrument(skip(self))]
     pub async fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
-        tracing::info!("started archives GC");
+        tracing::trace!("started archives GC");
 
         let mut archive_ids = self.archive_ids.write();
 
@@ -860,7 +860,7 @@ impl BlockStorage {
             // `archive_ids` will now contain [..until_id]
             Some(until_id) => archive_ids.split_off(&until_id),
             None => {
-                tracing::info!("nothing to remove");
+                tracing::trace!("nothing to remove");
                 return Ok(());
             }
         };

@@ -1,4 +1,4 @@
-(blockchain_block_provider, storage_block_provider) #!/usr/bin/env bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 

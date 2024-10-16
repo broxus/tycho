@@ -13,6 +13,9 @@ on:
       - "Cargo.lock"
       - "**.rs"
       - ".github**"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }} # cancels previous runs on the same PR / commit group
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -81,7 +84,7 @@ jobs:
   integration-test:
     name: Integration Test Suite
     runs-on: [self-hosted, linux]
-    needs: test
+    needs: rustfmt
     steps:
       - uses: actions/checkout@v3
       - name: Install Clang
@@ -95,22 +98,6 @@ jobs:
         env:
           RUST_LOG: warn
         run: just run_integration_tests
-
-  cli-builds:
-    name: tycho-cli check
-    runs-on: [self-hosted, linux]
-    needs: rustfmt
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: extractions/setup-just@v2
-      - name: Build CLI
-        run: just build
 
   metrics:
     name: Metrics

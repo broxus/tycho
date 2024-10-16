@@ -6,7 +6,9 @@ use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tycho_core::block_strider::{ArchiveBlockProviderConfig, BlockchainBlockProviderConfig};
+use tycho_core::block_strider::{
+    ArchiveBlockProviderConfig, BlockchainBlockProviderConfig, StarterConfig,
+};
 use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
@@ -86,6 +88,8 @@ pub struct NodeConfig<T> {
 
     pub logger_config: LoggerConfig,
 
+    pub starter: StarterConfig,
+
     #[serde(flatten)]
     pub user_config: T,
 }
@@ -113,6 +117,7 @@ where
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),
             logger_config: Default::default(),
+            starter: Default::default(),
             user_config: Default::default(),
         }
     }

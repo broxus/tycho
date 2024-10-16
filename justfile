@@ -39,7 +39,7 @@ check_format: install_fmt
 # Clippy go brr.
 lint:
     #cargo clippy --all-targets --all-features --workspace # update when clippy is fixed
-    cargo clippy --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -p tycho-cli -- -D warnings
+    cargo clippy --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -p tycho-light-node  -p tycho-cli -- -D warnings
 
 # Generates cargo docs.
 docs:
@@ -121,7 +121,7 @@ node *flags:
 
 # Participates in elections from the node `N`.
 elect *flags:
-    ./scripts/elect-node.sh --dir {{local_network_dir}} {{flags}}
+    ./scripts/elect-node.sh --dir {{ local_network_dir }} {{ flags }}
 
 # Runs only mempool part of the node `N`.
 # Use `--mempool-start-round {round_id}`
