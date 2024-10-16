@@ -9,13 +9,11 @@ use crate::internal_queue::types::InternalMessageValue;
 pub struct StatesIteratorsManager<V: InternalMessageValue> {
     iterators: Vec<Box<dyn StateIterator<V>>>,
     current_snapshot: usize,
-    message_counts: Vec<usize>, // Add this line to keep track of message counts
 }
 
 impl<V: InternalMessageValue> StatesIteratorsManager<V> {
     pub fn new(iterators: Vec<Box<dyn StateIterator<V>>>) -> Self {
         StatesIteratorsManager {
-            message_counts: vec![0; iterators.len()], // Initialize the message_counts vector
             iterators,
             current_snapshot: 0,
         }
@@ -26,15 +24,9 @@ impl<V: InternalMessageValue> StatesIteratorsManager<V> {
     pub fn next(&mut self) -> Result<Option<MessageExt<V>>> {
         while self.current_snapshot < self.iterators.len() {
             if let Some(message) = self.iterators[self.current_snapshot].next()? {
-                self.message_counts[self.current_snapshot] += 1; // Increment message count for the current iterator
                 return Ok(Some(message));
             }
-            tracing::debug!(target: "local_debug", "No messages in snapshot {}", self.current_snapshot);
             self.current_snapshot += 1;
-        }
-
-        for (index, count) in self.message_counts.iter().enumerate() {
-            tracing::debug!(target: "local_debug", "Iterator {} read {} messages", index, count);
         }
 
         Ok(None)
