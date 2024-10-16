@@ -88,6 +88,7 @@ impl Default for MsgsExecutionParams {
 }
 
 pub struct BlockCollationResult {
+    pub collation_session_id: CollationSessionId,
     pub candidate: Box<BlockCandidate>,
     pub prev_mc_block_id: BlockId,
     pub mc_data: Option<Arc<McData>>,
@@ -355,28 +356,32 @@ pub(crate) type CollationSessionId = (ShardIdent, u32);
 
 #[derive(Clone)]
 pub struct CollationSessionInfo {
+    shard: ShardIdent,
     /// Sequence number of the collation session
-    workchain: i32,
     seqno: u32,
     collators: ValidatorSubsetInfo,
     current_collator_keypair: Option<Arc<KeyPair>>,
 }
 impl CollationSessionInfo {
     pub fn new(
-        workchain: i32,
+        shard: ShardIdent,
         seqno: u32,
         collators: ValidatorSubsetInfo,
         current_collator_keypair: Option<Arc<KeyPair>>,
     ) -> Self {
         Self {
-            workchain,
+            shard,
             seqno,
             collators,
             current_collator_keypair,
         }
     }
-    pub fn workchain(&self) -> i32 {
-        self.workchain
+
+    pub fn id(&self) -> CollationSessionId {
+        (self.shard, self.seqno)
+    }
+    pub fn shard(&self) -> ShardIdent {
+        self.shard
     }
     pub fn seqno(&self) -> u32 {
         self.seqno

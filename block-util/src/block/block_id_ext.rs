@@ -1,4 +1,4 @@
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, BlockIdShort};
 
 pub trait BlockIdExt {
     fn relative_to(self, mc_block_id: BlockId) -> BlockIdRelation;
@@ -58,5 +58,16 @@ impl BlockIdExt for &BlockId {
             mc_block_id: *self,
             block_id: *self,
         }
+    }
+}
+
+pub fn calc_next_block_id_short(prev_blocks_ids: &[BlockId]) -> BlockIdShort {
+    debug_assert!(!prev_blocks_ids.is_empty());
+
+    let shard = prev_blocks_ids[0].shard;
+    let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
+    BlockIdShort {
+        shard,
+        seqno: max_prev_seqno + 1,
     }
 }

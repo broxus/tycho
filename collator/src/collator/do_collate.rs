@@ -521,6 +521,7 @@ impl CollatorStdImpl {
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
+                    collation_session_id: self.collation_session.id(),
                     candidate: finalized.block_candidate,
                     prev_mc_block_id: working_state.mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
