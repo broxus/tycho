@@ -76,8 +76,13 @@ impl Engine {
             top_known_anchor.receiver(),
         );
 
+        // Dag, created at genesis, will at first extend up to it's greatest length
+        // (in case last broadcast is within it) without data,
+        // and may shrink to its medium len (in case broadcast or consensus are further)
+        // before being filled with data
         let mut dag = DagFront::default();
-        dag.init(DagRound::new_bottom(Genesis::round(), &peer_schedule));
+        let committer = dag.init(DagRound::new_bottom(Genesis::round(), &peer_schedule));
+        let committer_run = tokio::spawn(future::ready(committer));
 
         let init_task = JoinTask::new({
             let store = store.clone();
@@ -114,9 +119,6 @@ impl Engine {
                 peer_schedule.run_updater().await;
             }
         });
-
-        let committer_run = tokio::spawn(future::pending());
-        committer_run.abort(); // sill be replaced during init
 
         Self {
             dag,
@@ -169,12 +171,12 @@ impl Engine {
         // store in committer (back dag) - no data to init with;
         // commiter must contain the same rounds as front dag, plus required history
         // as consensus may be far away while local history has some unfinished downloads
-        let mut committer = Committer::default();
-        committer.extend_from_ahead(
-            &(self.dag).fill_to_top(top_round, &self.round_task.state.peer_schedule),
+        let mut committer = take_committer(&mut self.committer_run).expect("init");
+        (self.dag).fill_to_top(
+            top_round,
+            Some(&mut committer),
             &self.round_task.state.peer_schedule,
         );
-        committer.extend_from_ahead(self.dag.as_slice(), &self.round_task.state.peer_schedule);
         self.committer_run = tokio::spawn(future::ready(committer));
 
         // bcast filter will be init on round start
@@ -206,15 +208,12 @@ impl Engine {
 
     pub async fn run(mut self) -> ! {
         let mut start_point_with_state = self.pre_run().await;
-
-        // may be sparse when engine jumped over large amount of rounds
-        // TODO new struct in `dag::commit` mod to:
-        //  * keep Vec<Vec<DagRound>> for less allocation compared to a flattened Vec<DagRound>
-        //  * discard outdated rounds as soon as possible
-        //  * somewhat simplify logic of existing Committer parts by moving it to a new part
-        let mut rounds_buffer = Vec::new();
+        let mut full_history_bottom = None;
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
+            // commit may take longer than a round if it ends with a jump to catch up with consensus
+            let mut ready_committer = take_committer(&mut self.committer_run);
+
             let (current_dag_round, round_effects) = {
                 // do not repeat the `get()` - it can give non-reproducible result
                 let consensus_round = self.consensus_round.get();
@@ -236,18 +235,19 @@ impl Engine {
                     self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
                     let round_effects =
                         Effects::<EngineContext>::new(&self.effects, consensus_round);
-                    rounds_buffer.append(
-                        &mut self
-                            .dag
-                            .fill_to_top(consensus_round, &self.round_task.state.peer_schedule),
-                    );
+                    full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+                        consensus_round,
+                        ready_committer.as_mut(),
+                        &self.round_task.state.peer_schedule,
+                    ));
                     (self.dag.top().clone(), round_effects)
                 }
             };
             metrics::gauge!("tycho_mempool_engine_current_round").set(current_dag_round.round().0);
 
-            rounds_buffer.append(&mut self.dag.fill_to_top(
+            full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
                 current_dag_round.round().next(),
+                ready_committer.as_mut(),
                 &self.round_task.state.peer_schedule,
             ));
             let next_dag_round = self.dag.top().clone();
@@ -266,8 +266,6 @@ impl Engine {
                 ),
             };
 
-            let peer_schedule = self.round_task.state.peer_schedule.clone();
-
             let round_task_run = self
                 .round_task
                 .run(
@@ -280,30 +278,16 @@ impl Engine {
                 )
                 .until_ready();
 
-            // commit may take longer than a round if it ends with a jump to catch up with consensus
-            if self.committer_run.is_finished() {
-                let mut committer = match self.committer_run.now_or_never() {
-                    Some(Ok(committer)) => committer,
-                    Some(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Some(Err(e)) => panic!("committer task: {e:?}"),
-                    None => unreachable!("committer task is finished and can be taken only once"),
-                };
-
-                rounds_buffer.extend_from_slice(self.dag.as_slice());
-
-                let moved_rounds_buf = mem::take(&mut rounds_buffer);
-
+            if let Some(mut committer) = ready_committer {
                 let committed_info_tx = self.committed_info_tx.clone();
                 let round_effects = round_effects.clone();
 
                 self.committer_run = tokio::task::spawn_blocking(move || {
                     let _guard = round_effects.span().enter();
 
-                    if let Some(new_bottom) =
-                        committer.extend_from_ahead(&moved_rounds_buf, &peer_schedule)
-                    {
+                    if let Some(full_history_bottom) = mem::take(&mut full_history_bottom) {
                         committed_info_tx
-                            .send(CommitResult::NewStartAfterGap(new_bottom)) // not recoverable
+                            .send(CommitResult::NewStartAfterGap(full_history_bottom)) // not recoverable
                             .expect("Failed to send anchor history info to mpsc channel");
                     };
 
@@ -331,6 +315,21 @@ impl Engine {
                 Err(e) => panic!("mempool engine failed: {e:?}"),
             }
         }
+    }
+}
+
+fn take_committer(committer_run: &mut JoinHandle<Committer>) -> Option<Committer> {
+    if committer_run.is_finished() {
+        let taken = mem::replace(committer_run, tokio::spawn(future::pending()));
+        committer_run.abort();
+        match taken.now_or_never() {
+            Some(Ok(committer)) => Some(committer),
+            Some(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Some(Err(e)) => panic!("committer task: {e:?}"),
+            None => unreachable!("committer task is finished and can be taken only once"),
+        }
+    } else {
+        None
     }
 }
 

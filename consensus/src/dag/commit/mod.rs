@@ -10,16 +10,17 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::commit::back::DagBack;
 use crate::dag::DagRound;
-use crate::effects::AltFormat;
+use crate::effects::{AltFmt, AltFormat};
 use crate::engine::MempoolConfig;
-use crate::intercom::PeerSchedule;
 use crate::models::{AnchorData, AnchorStageRole, Round};
 
 pub struct Committer {
     dag: DagBack,
     // from the oldest to the current round; newer ones are in the future;
     anchor_chain: AnchorChain,
-    first_dag_bottom_after_gap: Round,
+    // some anchors won't contain full history after a gap (filled with sync),
+    // so this determines least round at which fully reproducible anchor may be produced
+    full_history_bottom: Round,
 }
 
 impl Default for Committer {
@@ -27,25 +28,31 @@ impl Default for Committer {
         Self {
             dag: Default::default(),
             anchor_chain: Default::default(),
-            first_dag_bottom_after_gap: Round::BOTTOM,
+            full_history_bottom: Round::BOTTOM,
         }
     }
 }
 
 impl Committer {
+    pub fn init(&mut self, bottom_round: &DagRound) -> Round {
+        assert_eq!(
+            self.full_history_bottom,
+            Round::BOTTOM,
+            "already initialized"
+        );
+        self.dag.init(bottom_round);
+        self.full_history_bottom =
+            Round((bottom_round.round().0).saturating_add(MempoolConfig::COMMIT_DEPTH as u32));
+        self.full_history_bottom // hidden in other cases
+    }
+
+    pub fn bottom_round(&self) -> Round {
+        self.dag.bottom_round()
+    }
+
     /// returns new bottom after gap if it was moved, and `None` if no gap occurred
-    pub fn extend_from_ahead(
-        &mut self,
-        rounds: &[DagRound],
-        peer_schedule: &PeerSchedule,
-    ) -> Option<Round> {
-        if rounds.is_empty() || self.dag.extend_from_front(rounds, peer_schedule) {
-            None
-        } else {
-            self.first_dag_bottom_after_gap = self.dag.bottom_round();
-            _ = self.anchor_chain.drain_upto(self.dag.bottom_round());
-            Some(self.dag.bottom_round())
-        }
+    pub fn extend_from_ahead(&mut self, rounds: &[DagRound]) {
+        self.dag.extend_from_front(rounds);
     }
 
     pub fn commit(&mut self) -> Vec<AnchorData> {
@@ -144,7 +151,7 @@ impl Committer {
             ));
             let Some(uncommitted) = self
                 .dag
-                .gather_uncommitted(self.first_dag_bottom_after_gap, &next.anchor)
+                .gather_uncommitted(self.full_history_bottom, &next.anchor)
             else {
                 // tracing::warn!(
                 //     "undo anchor {:?}, {:?}",
@@ -197,10 +204,36 @@ impl Committer {
     }
 }
 
+impl AltFormat for Committer {}
+impl std::fmt::Debug for AltFmt<'_, Committer> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        write!(
+            f,
+            "{:?} chain {:?} full history bottom {}",
+            inner.dag.alt(),
+            inner.anchor_chain.alt(),
+            inner.full_history_bottom.0,
+        )
+    }
+}
+impl std::fmt::Display for AltFmt<'_, Committer> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        write!(
+            f,
+            "{} chain {} full history bottom {}",
+            inner.dag.alt(),
+            inner.anchor_chain.alt(),
+            inner.full_history_bottom.0,
+        )
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::array;
     use std::io::Write;
-    use std::{array, mem};
 
     use everscale_crypto::ed25519::{KeyPair, SecretKey};
     use tycho_network::PeerId;
@@ -208,8 +241,8 @@ mod test {
 
     use super::*;
     use crate::dag::dag_location::DagLocation;
+    use crate::dag::DagFront;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
-    use crate::engine::round_watch::{Consensus, RoundWatch};
     use crate::engine::Genesis;
     use crate::models::{AnchorData, AnchorStageRole, Round, UnixTime};
     use crate::test_utils;
@@ -219,7 +252,6 @@ mod test {
     #[tokio::test]
     async fn test_commit_with_gap() {
         let stub_store = MempoolStore::no_read_stub();
-        let stub_consensus_round = RoundWatch::<Consensus>::default();
 
         let (genesis, _) = Genesis::init(Round(1), UnixTime::from_millis(0));
 
@@ -228,45 +260,49 @@ mod test {
             (PeerId::from(keys.public_key), keys)
         });
 
-        let (mut dag, peer_schedule, stub_downloader) =
-            test_utils::make_dag(&peers, &genesis, &stub_store, &stub_consensus_round);
+        let (genesis_round, peer_schedule, stub_downloader) =
+            test_utils::make_dag_parts(&peers, &genesis, &stub_store);
 
         let chained_effects = Effects::<ChainedRoundsContext>::new(genesis.round());
         let mut engine_effects;
 
-        let mut committer = Committer::default();
+        let mut dag = DagFront::default();
+        let mut committer = dag.init(genesis_round);
 
-        let mut buf = Vec::new();
-        for i in 0..10 {
-            // println!("{:?}", committer.dag.alt());
+        for round in (0..100).map(Round) {
+            // println!("{}", round.0);
 
-            for round in (0..10).map(|k| Round(i * 10 + k)) {
-                if round <= genesis.round() {
-                    continue;
-                }
-                engine_effects = Effects::<EngineContext>::new(&chained_effects, round);
-
-                buf.append(&mut dag.fill_to_top(round, &peer_schedule));
-
-                test_utils::populate_points(
-                    dag.top(),
-                    &peers,
-                    &peer_schedule,
-                    &stub_downloader,
-                    &stub_store,
-                    &engine_effects,
-                    0,
-                    0,
-                )
-                .await;
+            if round <= genesis.round() {
+                continue;
             }
-            if i < 50 {
-                buf.extend_from_slice(dag.as_slice());
-                committer.extend_from_ahead(&mem::take(&mut buf), &peer_schedule);
+            engine_effects = Effects::<EngineContext>::new(&chained_effects, round);
+
+            if let Some(skip_to) = dag.fill_to_top(round, Some(&mut committer), &peer_schedule) {
+                println!("gap: next anchor with full history not earlier than {skip_to:?}");
+            };
+
+            // println!("front {:?}", dag.alt());
+            // println!("back {:?}", committer.alt());
+
+            test_utils::populate_points(
+                dag.top(),
+                &peers,
+                &peer_schedule,
+                &stub_downloader,
+                &stub_store,
+                &engine_effects,
+                0,
+                0,
+            )
+            .await;
+
+            if round.0 == 33 {
+                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 7);
+            }
+            if round.0 == 66 {
+                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 4);
             }
         }
-        buf.extend_from_slice(dag.as_slice());
-        committer.extend_from_ahead(&mem::take(&mut buf), &peer_schedule);
 
         println!(
             "{} with {PEER_COUNT} peers populated and validated",
@@ -275,12 +311,9 @@ mod test {
 
         assert_eq!(
             committer.dag.bottom_round(),
-            Round(39),
+            Round(24),
             "test config changed? should update test then"
         );
-
-        // candidates exist at rounds 40 and 44 with full triplets, 9 anchors are discarded
-        assert_eq!(commit(&mut committer, Some(Round(48))).len(), 2);
 
         let mut r_points = vec![];
 

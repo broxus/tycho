@@ -97,27 +97,23 @@ impl MempoolAdapterStdImpl {
     ) {
         let mut parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
         let mut first_after_gap = None;
-        let mut has_gap = false;
         while let Some(commit) = anchor_rx.recv().await {
             let (anchor, history) = match commit {
-                CommitResult::NewStartAfterGap(round) => {
+                CommitResult::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
                     parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
-                    has_gap = true;
-                    store.report_new_start(round);
+                    store.report_new_start(anchors_full_bottom);
+                    first_after_gap = Some(
+                        (anchors_full_bottom.0)
+                            .saturating_add(MempoolConfig::DEDUPLICATE_ROUNDS as u32),
+                    );
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "externals cache dropped"
                     );
                     continue;
                 }
-                CommitResult::Next(data) => {
-                    if has_gap {
-                        has_gap = false;
-                        first_after_gap = Some(data.anchor.round().0);
-                    }
-                    (data.anchor, data.history)
-                }
+                CommitResult::Next(data) => (data.anchor, data.history),
             };
 
             let task = tokio::task::spawn_blocking({
@@ -135,14 +131,14 @@ impl MempoolAdapterStdImpl {
                     // set committed only after point data is read or skipped
                     store.set_committed(&anchor, &history);
 
-                    let is_collatable = first_after_gap.as_ref().map_or(true, |first_id| {
-                        anchor_id.saturating_sub(*first_id) > MempoolConfig::DEDUPLICATE_ROUNDS as _
-                    });
+                    let is_executable = first_after_gap
+                        .as_ref()
+                        .map_or(true, |first_id| anchor_id >= *first_id);
 
                     let unique_messages =
-                        parser.parse_unique(anchor_id, chain_time, is_collatable, points);
+                        parser.parse_unique(anchor_id, chain_time, is_executable, points);
 
-                    if is_collatable {
+                    if is_executable {
                         anchors.push(Arc::new(MempoolAnchor {
                             id: anchor_id,
                             chain_time,

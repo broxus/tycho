@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{AnchorStage, DagFront, DagRound, Verifier};
+use crate::dag::{AnchorStage, DagRound, Verifier};
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::Genesis;
@@ -22,12 +22,11 @@ use crate::models::{
     Signature, Through, UnixTime,
 };
 
-pub fn make_dag<const PEER_COUNT: usize>(
+pub fn make_dag_parts<const PEER_COUNT: usize>(
     peers: &[(PeerId, KeyPair); PEER_COUNT],
     genesis: &Point,
     store: &MempoolStore,
-    consensus_round: &RoundWatch<Consensus>,
-) -> (DagFront, PeerSchedule, Downloader) {
+) -> (DagRound, PeerSchedule, Downloader) {
     let network = Network::builder()
         .with_random_private_key()
         .with_service_name("mempool-stub-network-service")
@@ -39,9 +38,13 @@ pub fn make_dag<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
-    let peer_schedule = PeerSchedule::new(Arc::new(peers[0].1), private_overlay);
+    let local_keys = Arc::new(peers[0].1);
 
-    let stub_downloader = Downloader::new(&dispatcher, &peer_schedule, consensus_round.receiver());
+    let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
+
+    let stub_consensus_round = RoundWatch::<Consensus>::default();
+    let stub_downloader =
+        Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
 
     peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
     peer_schedule.set_epoch(
@@ -51,15 +54,10 @@ pub fn make_dag<const PEER_COUNT: usize>(
     );
 
     let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
-    let next_dag_round = genesis_round.new_next(&peer_schedule);
 
-    let _ = genesis_round.insert_exact_sign(genesis, next_dag_round.key_pair(), store);
+    let _ = genesis_round.insert_exact_sign(genesis, Some(&local_keys), store);
 
-    let mut dag = DagFront::default();
-
-    dag.init(genesis_round.clone());
-
-    (dag, peer_schedule, stub_downloader)
+    (genesis_round, peer_schedule, stub_downloader)
 }
 
 #[allow(clippy::too_many_arguments, reason = "ok in test")]
