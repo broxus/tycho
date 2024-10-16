@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::convert::identity;
 use std::ops::Bound;
 use std::sync::atomic;
-use std::{array, cmp, mem};
+use std::{array, mem};
 
 use futures_util::FutureExt;
 use rand::prelude::SliceRandom;
@@ -11,9 +11,7 @@ use tycho_network::PeerId;
 
 use crate::dag::{DagRound, EnqueuedAnchor};
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::round_watch::Consensus;
 use crate::engine::{Genesis, MempoolConfig};
-use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Digest, Link, PointId, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
@@ -23,6 +21,11 @@ pub struct DagBack {
 }
 
 impl DagBack {
+    pub fn init(&mut self, dag_bottom: &DagRound) {
+        assert!(self.rounds.is_empty(), "already init");
+        self.rounds.insert(dag_bottom.round(), dag_bottom.clone());
+    }
+
     /// the next after current engine round
     pub fn top(&self) -> &DagRound {
         match self.rounds.last_key_value() {
@@ -50,27 +53,26 @@ impl DagBack {
         self.rounds.get(&round)
     }
 
-    /// returns `true` if bottom remains the same (e.g. passing empty `front`)
-    /// returns `false` if found moved bottom round (too long dag or faced a gap)
-    pub fn extend_from_front(&mut self, front: &[DagRound], peer_schedule: &PeerSchedule) -> bool {
-        let mut has_same_bottom = true;
-
+    pub fn extend_from_front(&mut self, front: &[DagRound]) {
         let front_bottom = match front.first() {
-            None => return has_same_bottom,
+            None => return,
             Some(first) => first, // lowest in input
         };
-        let history_bottom = match front.last() {
-            None => return has_same_bottom,
-            // FIXME apply new scheme
-            Some(last) => Consensus::history_bottom(last.round()),
-        };
+
+        let self_top = self.top().round();
+        assert!(
+            self.top().round().next() >= front_bottom.round(),
+            "{} front slice passed to back dag must not contain gaps, front bottom {}",
+            self.alt(),
+            front_bottom.round().0,
+        );
+
         if front.len() >= 2 {
             assert!(
                 front
                     .windows(2)
-                    .all(|w| w[0].round() < history_bottom || w[0].round().next() == w[1].round()),
-                "dag slice must be contiguous above history bottom {}: {:?}",
-                history_bottom.0,
+                    .all(|w| w[0].round().next() == w[1].round()),
+                "dag slice must be contiguous: {:?}",
                 front
                     .iter()
                     .map(|dag_round| dag_round.round().0)
@@ -78,48 +80,9 @@ impl DagBack {
             );
         }
 
-        if self.rounds.is_empty() || self.top().round() < history_bottom {
-            has_same_bottom = false; // bottom is changed, even maybe from some default value
-            self.rounds.clear();
-            // init with bottom exactly;
-            // older rounds behind weak refs will be dropped by going out of scope
-            match front_bottom.round().cmp(&history_bottom) {
-                cmp::Ordering::Less => {
-                    if let Some(bottom) = front
-                        .iter()
-                        .find(|ahead| ahead.round() >= history_bottom)
-                        .filter(|ahead| ahead.round() == history_bottom)
-                    {
-                        self.rounds.insert(bottom.round(), bottom.clone());
-                    } else {
-                        let bottom = DagRound::new_bottom(history_bottom, peer_schedule);
-                        self.rounds.insert(bottom.round(), bottom);
-                    }
-                }
-                cmp::Ordering::Equal => {
-                    self.rounds
-                        .insert(front_bottom.round(), front_bottom.clone());
-                }
-                cmp::Ordering::Greater => {
-                    let bottom = DagRound::new_bottom(history_bottom, peer_schedule);
-                    self.rounds.insert(bottom.round(), bottom);
-                }
-            }
-        } else if self.bottom_round() < history_bottom {
-            has_same_bottom = false;
-            _ = self.drain_upto(history_bottom);
-            self.assert_len();
-        }
-
         for source_dag_round in front {
-            // skip duplicates
-            if source_dag_round.round() <= self.top().round() {
-                continue;
-            }
-            // fill gap if there is one
-            for _ in self.top().round().0..source_dag_round.round().0 {
-                let next = self.top().new_next(peer_schedule);
-                self.rounds.insert(next.round(), next);
+            if source_dag_round.round() <= self_top {
+                continue; // skip duplicates
             }
             self.rounds
                 .insert(source_dag_round.round(), source_dag_round.clone());
@@ -127,7 +90,6 @@ impl DagBack {
         self.assert_len();
 
         metrics::gauge!("tycho_mempool_rounds_dag_length").set(self.rounds.len() as u32);
-        has_same_bottom
     }
 
     fn assert_len(&self) {
@@ -338,7 +300,7 @@ impl DagBack {
     /// Note: at this point there is no way to check if passed point is really an anchor
     pub fn gather_uncommitted(
         &self,
-        bottom_round: Round,
+        full_history_bottom: Round,
         anchor: &PointInfo, // @ r+1
     ) -> Option<VecDeque<ValidPoint>> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
@@ -403,8 +365,9 @@ impl DagBack {
         }
         // we should commit first anchors at commit depth rounds above bottom, discarding them
         // (because some history may be lost) in adapter when bottom is not genesis
-        // (in case dag bottom is moved after a large gap or severe collator lag behind consensus)
-        if history_limit.0 > (bottom_round.0).saturating_add(MempoolConfig::COMMIT_DEPTH as _) {
+        // (in case dag bottom is moved after a large gap or severe collator lag behind consensus);
+        // note inclusive bound (`bottom`, not `after`) because anchor payload not committed
+        if history_limit >= full_history_bottom {
             assert_eq!(
                 next_round,
                 history_limit,
@@ -505,7 +468,7 @@ impl std::fmt::Display for AltFmt<'_, DagBack> {
         let this = &AltFormat::unpack(self);
         write!(
             f,
-            "DagBack len {} [{}..{}] ",
+            "DagBack len {} [{}..{}]",
             this.rounds.len(),
             this.bottom_round().0,
             this.top().round().0,

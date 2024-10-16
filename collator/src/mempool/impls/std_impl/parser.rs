@@ -45,7 +45,7 @@ impl Parser {
         &mut self,
         anchor_id: MempoolAnchorId,
         chain_time: u64,
-        is_collatable: bool,
+        is_executable: bool,
         payloads: Vec<Bytes>,
     ) -> Vec<Arc<ExternalMessage>> {
         let _guard = HistogramGuard::begin("tycho_mempool_adapter_parse_anchor_history_time");
@@ -92,7 +92,7 @@ impl Parser {
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             id = anchor_id,
-            %is_collatable,
+            %is_executable,
             time = chain_time,
             externals_unique = unique_messages.len(),
             externals_skipped = total_messages - unique_messages.len(),

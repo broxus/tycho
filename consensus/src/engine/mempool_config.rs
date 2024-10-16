@@ -79,7 +79,7 @@ impl MempoolConfig {
     /// is supposed to keep collation-ready history
     /// (see [`Self::DEDUPLICATE_ROUNDS`] and [`Self::COMMIT_DEPTH`])
     pub const ACCEPTABLE_COLLATOR_LAG: u16 = if cfg!(feature = "test") {
-        0
+        15
     } else {
         1_050 - Self::MAX_ANCHOR_DISTANCE
     };

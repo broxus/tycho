@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
-use std::fmt::{Debug, Formatter, Write};
+use std::fmt::{Debug, Display, Formatter, Write};
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{PointInfo, Round};
+use crate::models::{AnchorStageRole, PointInfo, Round};
 
 pub struct EnqueuedAnchor {
     pub anchor: PointInfo,
@@ -36,18 +36,6 @@ impl AnchorChain {
     pub fn undo_next(&mut self, next: EnqueuedAnchor) {
         self.queue.push_front(next);
     }
-
-    pub fn drain_upto(
-        &mut self,
-        bottom_round: Round,
-    ) -> impl DoubleEndedIterator<Item = EnqueuedAnchor> + '_ {
-        let outdated = self
-            .queue
-            .iter()
-            .take_while(|e| e.anchor.round() < bottom_round)
-            .count();
-        self.queue.drain(..outdated)
-    }
 }
 
 impl AltFormat for EnqueuedAnchor {}
@@ -67,7 +55,7 @@ impl AltFormat for AnchorChain {}
 impl Debug for AltFmt<'_, AnchorChain> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
-        f.write_str(", chain:[ ")?;
+        f.write_str("[ ")?;
         for el in &inner.queue {
             f.write_str("{ ")?;
             write!(
@@ -97,6 +85,21 @@ impl Debug for AltFmt<'_, AnchorChain> {
                 )?,
             }
             f.write_str(" }, ")?;
+        }
+        f.write_str("]")
+    }
+}
+impl Display for AltFmt<'_, AnchorChain> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        f.write_str("[")?;
+        for el in &inner.queue {
+            write!(
+                f,
+                "{}<={}, ",
+                el.anchor.anchor_round(AnchorStageRole::Proof).prev().0,
+                el.anchor.round().0,
+            )?;
         }
         f.write_str("]")
     }
