@@ -16,6 +16,7 @@ use tycho_network::PeerId;
 
 use crate::mempool::{
     ExternalMessage, MempoolAdapter, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+    StateUpdateContext,
 };
 use crate::tracing_targets;
 
@@ -160,12 +161,16 @@ impl MempoolAdapterStubImpl {
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStubImpl {
-    async fn on_new_mc_state(&self, mc_block_id: &BlockId) -> Result<()> {
+    async fn handle_mc_state_update(&self, cx: StateUpdateContext) -> Result<()> {
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            "STUB: New masterchain state (block_id: {}) processing enqueued to mempool",
-            mc_block_id.as_short_id(),
+            "STUB: Processing state update from mc block {}: {:?}",
+            cx.mc_block_id.as_short_id(), cx,
         );
+        Ok(())
+    }
+
+    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
         Ok(())
     }
 
@@ -336,10 +341,6 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
 
             return Ok(Some(anchor));
         }
-    }
-
-    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
-        Ok(())
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {

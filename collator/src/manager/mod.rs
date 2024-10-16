@@ -31,6 +31,7 @@ use crate::collator::{
 use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+    StateUpdateContext,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
@@ -42,6 +43,7 @@ use crate::types::{
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
+use crate::utils::vldr_set_cache::ValidatorSetCache;
 use crate::validator::{AddSession, ValidationStatus, Validator};
 use crate::{method_to_async_closure, tracing_targets};
 
@@ -103,6 +105,9 @@ where
     last_processed_mc_block_id: Mutex<Option<BlockId>>,
 
     chain_times_sync_state: Mutex<ChainTimesSyncState>,
+
+    /// Cache for validator sets from config
+    validator_set_cache: ValidatorSetCache,
 
     /// Round of a new consensus genesis
     mempool_start_round: Option<u32>,
@@ -309,6 +314,8 @@ where
             last_processed_mc_block_id: Default::default(),
 
             chain_times_sync_state: Default::default(),
+
+            validator_set_cache: Default::default(),
 
             mempool_start_round,
             from_mc_block_seqno,
@@ -809,15 +816,8 @@ where
                     )
                     .await?;
                 } else {
-                    // otherwise execute master block processing routines
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "Will notify mempool and refresh collation sessions",
-                    );
-
-                    Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &block_id)
-                        .await?;
-
-                    self.refresh_collation_sessions(collation_result.mc_data.unwrap(), false)
+                    // otherwise execute master state update processing routines
+                    self.process_mc_state_update(collation_result.mc_data.unwrap(), false)
                         .await?;
                 }
             } else {
@@ -1122,16 +1122,6 @@ where
 
             // if it is last one then commit diffs, notify mempool and refresh collation sessions
             if is_last {
-                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                    "Will notify mempool and refresh collation sessions with HARD RESET",
-                );
-
-                Self::notify_mempool_about_mc_block(
-                    self.mpool_adapter.clone(),
-                    &mc_block_entry.block_id,
-                )
-                .await?;
-
                 self.commit_block_queue_diff(
                     &mc_block_entry.block_id,
                     &mc_block_entry.top_shard_blocks_info,
@@ -1170,7 +1160,7 @@ where
                     .handle_top_processed_to_anchor(top_processed_to_anchor_id)
                     .await?;
 
-                self.refresh_collation_sessions(mc_data, true).await?;
+                self.process_mc_state_update(mc_data, true).await?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1324,18 +1314,58 @@ where
         .await
     }
 
-    /// Get shards info from the master state,
-    /// then start missing sessions for these shards, or refresh existing.
-    /// For each shard run collation process if current node is included in collators subset.
+    async fn process_mc_state_update(
+        &self,
+        mc_data: Arc<McData>,
+        reset_collators: bool,
+    ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            reset_collators,
+            "Will notify mempool and refresh collation sessions",
+        );
+
+        self.notify_mc_state_update_to_mempool(mc_data.clone())
+            .await?;
+
+        self.refresh_collation_sessions(mc_data, reset_collators)
+            .await
+    }
+
+    async fn notify_mc_state_update_to_mempool(&self, mc_data: Arc<McData>) -> Result<()> {
+        let prev_validator_set = self
+            .validator_set_cache
+            .get_prev_validator_set(&mc_data.config)?;
+        let current_validator_set = self
+            .validator_set_cache
+            .get_current_validator_set(&mc_data.config)?;
+        let next_validator_set = self
+            .validator_set_cache
+            .get_next_validator_set(&mc_data.config)?;
+
+        let cx = StateUpdateContext {
+            mc_block_id: mc_data.block_id,
+            mempool_switch_round: mc_data.validator_info.catchain_seqno,
+            mempool_config: mc_data.config.get_catchain_config()?,
+            prev_validator_set,
+            current_validator_set,
+            next_validator_set,
+        };
+
+        self.mpool_adapter.handle_mc_state_update(cx).await
+    }
+
+    /// Get shards and validator set info from the master state,
+    /// then start missing collation sessions, finish outdated, resume actual.
+    /// Start/stop/resume collators and validators.
     #[tracing::instrument(skip_all)]
-    pub async fn refresh_collation_sessions(
+    async fn refresh_collation_sessions(
         &self,
         mc_data: Arc<McData>,
         reset_collators: bool,
     ) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Trying to refresh collation sessions by mc stat ({})...",
+            "Trying to refresh collation sessions by mc state ({})...",
             mc_data.block_id.as_short_id(),
         );
 
@@ -1691,14 +1721,6 @@ where
         if let Some(mut active_collator) = self.active_collators.get_mut(shard_id) {
             active_collator.state = state;
         }
-    }
-
-    /// Send master state related to master block to mempool (it may perform gc or nodes rotation)
-    async fn notify_mempool_about_mc_block(
-        mpool_adapter: Arc<dyn MempoolAdapter>,
-        mc_block_id: &BlockId,
-    ) -> Result<()> {
-        mpool_adapter.on_new_mc_state(mc_block_id).await
     }
 
     /// Set master block lates chain time to calc next interval for master block collation.

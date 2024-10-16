@@ -496,16 +496,12 @@ impl CollatorStdImpl {
         let mut validator_info = None;
         if is_key_block {
             // check if validator set changed by the cells hash
-            let old_curr_set_raw = match prev_config.get_raw(ConfigParam35::ID)? {
-                Some(value) => Some(value),
-                None => prev_config.get_raw(ConfigParam34::ID)?,
-            }
-            .unwrap();
-            let mut new_curr_set_raw = match config.get_raw(ConfigParam35::ID)? {
-                Some(value) => Some(value),
-                None => config.get_raw(ConfigParam34::ID)?,
-            }
-            .unwrap();
+            let old_curr_set_raw = prev_config
+                .get_raw_or(ConfigParam35::ID, ConfigParam34::ID)?
+                .unwrap();
+            let mut new_curr_set_raw = config
+                .get_raw_or(ConfigParam35::ID, ConfigParam34::ID)?
+                .unwrap();
             if new_curr_set_raw.cell().repr_hash() != old_curr_set_raw.cell().repr_hash() {
                 // calc next mempool switch round (identifies next session_seqno)
                 let prev_processed_to_anchor = prev_shard_data

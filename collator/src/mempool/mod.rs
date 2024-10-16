@@ -48,10 +48,29 @@ pub trait MempoolEventListener: Send + Sync {
 
 // === Adapter ===
 
+#[derive(Debug)]
+pub struct StateUpdateContext {
+    pub mc_block_id: BlockId,
+    pub mempool_switch_round: u32,
+    // TODO: should use MempoolConfig struct when it will be added
+    pub mempool_config: CatchainConfig,
+    pub prev_validator_set: Option<(HashBytes, Arc<ValidatorSet>)>,
+    pub current_validator_set: (HashBytes, Arc<ValidatorSet>),
+    pub next_validator_set: Option<(HashBytes, Arc<ValidatorSet>)>,
+}
+
 #[async_trait]
 pub trait MempoolAdapter: Send + Sync + 'static {
-    /// Schedule task to process new master block state (may perform gc or nodes rotation).
-    async fn on_new_mc_state(&self, mc_block_id: &BlockId) -> Result<()>;
+    /// Process updates related to master block:
+    /// 1. Mempool switch round
+    /// 2. Mempool config
+    /// 3. Validators sets
+    async fn handle_mc_state_update(&self, cx: StateUpdateContext) -> Result<()>;
+
+    /// Process top processed to anchor reported by collation manager.
+    /// Will manage mempool sync depth.
+    /// Mempool should be ready to return this anchor and all next after it.
+    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
@@ -67,11 +86,6 @@ pub trait MempoolAdapter: Send + Sync + 'static {
         &self,
         prev_anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>>;
-
-    /// Process top processed to anchor reported by collation manager.
-    /// Will manage mempool sync depth.
-    /// Mempool should be ready to return this anchor and all next after it.
-    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()>;
 
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks

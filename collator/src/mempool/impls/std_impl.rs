@@ -9,7 +9,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::*;
 use tokio::sync::mpsc;
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
@@ -20,6 +19,7 @@ use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+    StateUpdateContext,
 };
 use crate::tracing_targets;
 
@@ -175,13 +175,18 @@ impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
-    async fn on_new_mc_state(&self, mc_block_id: &BlockId) -> Result<()> {
+    async fn handle_mc_state_update(&self, cx: StateUpdateContext) -> Result<()> {
         // TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            "STUB: New masterchain state (block_id: {}) processing enqueued to mempool",
-            mc_block_id.as_short_id(),
+            "STUB: Processing state update from mc block {}: {:?}",
+            cx.mc_block_id.as_short_id(), cx,
         );
+        Ok(())
+    }
+
+    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
+        self.top_known_anchor.set_max_raw(anchor_id);
         Ok(())
     }
 
@@ -197,11 +202,6 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         prev_anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>> {
         Ok(self.cache.get_next_anchor(prev_anchor_id).await)
-    }
-
-    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
-        self.top_known_anchor.set_max_raw(anchor_id);
-        Ok(())
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
