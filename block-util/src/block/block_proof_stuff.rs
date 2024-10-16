@@ -516,7 +516,7 @@ impl ValidatorSubsetInfo {
         cc_seqno: u32,
     ) -> Result<Self> {
         let Some((validators, short_hash)) =
-            validator_set.compute_subset(block_id.shard, catchain_config, cc_seqno)
+            validator_set.hack_compute_subset(block_id.shard, catchain_config, cc_seqno)
         else {
             anyhow::bail!("failed to compute a validator subset");
         };
@@ -525,5 +525,46 @@ impl ValidatorSubsetInfo {
             validators,
             short_hash,
         })
+    }
+}
+
+pub trait ValidatorSetHack {
+    fn hack_compute_subset(
+        &self,
+        shard_ident: everscale_types::models::ShardIdent,
+        cc_config: &everscale_types::models::CatchainConfig,
+        cc_seqno: u32,
+    ) -> Option<(Vec<everscale_types::models::ValidatorDescription>, u32)>;
+}
+impl ValidatorSetHack for everscale_types::models::ValidatorSet {
+    fn hack_compute_subset(
+        &self,
+        _shard_ident: everscale_types::models::ShardIdent,
+        _cc_config: &everscale_types::models::CatchainConfig,
+        cc_seqno: u32,
+    ) -> Option<(Vec<everscale_types::models::ValidatorDescription>, u32)> {
+        // HACK: emulate nodes rotation
+        let rotation_freq = 50;
+        let max_anchor_distance = 210;
+
+        let validators_set_len = self.list.len();
+        let validators_subset_len = validators_set_len * 2 / 3 + 1;
+
+        let mut next_idx = (cc_seqno.saturating_sub(max_anchor_distance) as usize / rotation_freq
+            * rotation_freq)
+            % (validators_set_len * validators_subset_len)
+            / rotation_freq;
+
+        let mut subset = vec![];
+        while subset.len() < validators_subset_len {
+            let idx = next_idx % validators_set_len;
+            let v = self.list.get(idx).cloned().unwrap();
+            subset.push(v);
+            next_idx += 1;
+        }
+        let hash_short =
+            everscale_types::models::ValidatorSet::compute_subset_hash_short(&subset, cc_seqno);
+
+        Some((subset, hash_short))
     }
 }

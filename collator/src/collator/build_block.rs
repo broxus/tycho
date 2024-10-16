@@ -8,7 +8,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, ValidatorSetHack};
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::SerializedQueueDiff;
@@ -533,6 +533,15 @@ impl CollatorStdImpl {
                 });
             }
         }
+        // ==================================
+        // HACK: update session_seqno every to emulate nodes rotation
+        let validator_info = hack_create_validator_info(
+            &config,
+            collation_data,
+            working_state,
+            max_anchor_distance,
+        )?;
+        // ==================================
         let validator_info = validator_info.unwrap_or(ValidatorInfo {
             nx_cc_updated: false,
             ..prev_state_extra.validator_info
@@ -812,4 +821,52 @@ fn create_merkle_update(
     );
 
     Ok(state_update)
+}
+
+fn hack_create_validator_info(
+    config: &BlockchainConfig,
+    collation_data: &BlockCollationData,
+    working_state: &WorkingState,
+    max_anchor_distance: u32,
+) -> Result<Option<ValidatorInfo>, anyhow::Error> {
+    let rotation_freq = 50;
+    let new_curr_val_set = config.get_current_validator_set()?;
+    let val_set_len = new_curr_val_set.list.len();
+    let val_subset_len = val_set_len * 2 / 3 + 1;
+    let block_seqno = collation_data.block_id_short.seqno as usize;
+
+    if block_seqno % rotation_freq != 0 {
+        return Ok(None);
+    };
+
+    let prev_shard_data = working_state.prev_shard_data_ref();
+    let prev_processed_to_anchor = prev_shard_data
+        .processed_upto()
+        .externals
+        .as_ref()
+        .map(|ext_upto| ext_upto.processed_to.0)
+        .unwrap_or_default();
+    let next_session_seqno = prev_processed_to_anchor + max_anchor_distance;
+
+    tracing::debug!(
+        target: tracing_targets::COLLATOR,
+        val_set_len,
+        val_subset_len,
+        block_seqno,
+        next_session_seqno,
+        "HACK: session_seqno update emulated",
+    );
+    let subset_config = config.get_catchain_config()?;
+    let (_, validator_list_hash_short) = new_curr_val_set
+        .hack_compute_subset(
+            working_state.next_block_id_short.shard,
+            &subset_config,
+            next_session_seqno,
+        )
+        .unwrap();
+    Ok(Some(ValidatorInfo {
+        validator_list_hash_short,
+        catchain_seqno: next_session_seqno,
+        nx_cc_updated: true,
+    }))
 }

@@ -12,7 +12,7 @@ use everscale_types::models::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tracing::Instrument;
-use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
+use tycho_block_util::block::{calc_next_block_id_short, ValidatorSetHack, ValidatorSubsetInfo};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
@@ -1435,7 +1435,7 @@ where
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
-                    .compute_subset(shard_id, &subset_config, current_session_seqno)
+                    .hack_compute_subset(shard_id, &subset_config, current_session_seqno)
                     .ok_or(anyhow!(
                         "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
                         shard_id,

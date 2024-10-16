@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_block_util::block::ValidatorSetHack;
 use tycho_util::cli::error::ResultExt;
 use tycho_util::FastHashMap;
 
@@ -371,7 +372,7 @@ impl ZerostateConfig {
         let subset_config = self.params.get_catchain_config()?;
         let session_seqno = 0;
         let (_, validator_list_hash_short) = curr_validator_set
-            .compute_subset(ShardIdent::MASTERCHAIN, &subset_config, session_seqno)
+            .hack_compute_subset(ShardIdent::MASTERCHAIN, &subset_config, session_seqno)
             .ok_or(anyhow::anyhow!(
                 "Error calculating subset of validators in zerostate (shard_id = {}, session_seqno = {})",
                 ShardIdent::MASTERCHAIN, session_seqno,
