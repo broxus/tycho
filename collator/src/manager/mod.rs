@@ -146,6 +146,13 @@ where
         ))
         .await?;
 
+        let state_cloned = state.clone();
+        self.spawn_task(method_to_async_closure!(
+            cancel_validation_sessions_until_block,
+            state_cloned
+        ))
+        .await?;
+
         Ok(())
     }
 
@@ -386,6 +393,13 @@ where
                 .await?;
         }
 
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
+    async fn cancel_validation_sessions_until_block(&self, state: ShardStateStuff) -> Result<()> {
+        self.validator
+            .cancel_validation(&state.block_id().as_short_id())?;
         Ok(())
     }
 
