@@ -394,7 +394,7 @@ impl CollatorStdImpl {
             //      We can produce incorrect shard block and then ignore it.
             //      Or we can try to specify last imported anchor id as a start round.
             //      Currently we do not cancel shard collator init because from block should be correct.
-            Some(mempool_start_round) => {
+            Some(mempool_start_round) if mempool_start_round > 0 => {
                 let import_init_anchors = if processed_to_anchor_id <= mempool_start_round {
                     if processed_to_anchor_id < mempool_start_round
                         && self.shard_id.is_masterchain()
