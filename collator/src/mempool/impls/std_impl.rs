@@ -73,7 +73,7 @@ impl MempoolAdapterStdImpl {
         );
 
         tokio::spawn(async move {
-            engine.init(&peers).await;
+            engine.set_peers(&peers);
             engine.run().await;
         });
 

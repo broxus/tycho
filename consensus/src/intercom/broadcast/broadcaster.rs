@@ -166,7 +166,9 @@ impl Broadcaster {
     pub async fn run_continue(mut self) {
         let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
         retry_interval.reset_immediately();
-
+        for peer in mem::take(&mut self.bcast_peers) {
+            self.broadcast(&peer);
+        }
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
