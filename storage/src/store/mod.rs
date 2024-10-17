@@ -6,7 +6,6 @@ pub use self::mempool::*;
 pub use self::node_state::*;
 pub use self::persistent_state::*;
 pub use self::rpc::*;
-pub use self::runtime::*;
 pub use self::shard_state::*;
 pub use self::temp_file::*;
 
@@ -18,6 +17,5 @@ mod mempool;
 mod node_state;
 mod persistent_state;
 mod rpc;
-mod runtime;
 mod shard_state;
 mod temp_file;

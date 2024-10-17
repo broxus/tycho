@@ -6,7 +6,7 @@ use anyhow::Result;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueKey;
-use tycho_block_util::state::{is_persistent_state, RefMcStateHandle};
+use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::{BlockHandle, Storage};
 
 use crate::block_strider::{StateSubscriber, StateSubscriberContext};
@@ -22,7 +22,7 @@ impl PsSubscriber {
         let last_key_block_utime = storage
             .block_handle_storage()
             .find_last_key_block()
-            .map_or(0, |handle| handle.meta().gen_utime());
+            .map_or(0, |handle| handle.gen_utime());
 
         Self {
             inner: Arc::new(Inner {
@@ -44,7 +44,7 @@ impl StateSubscriber for PsSubscriber {
                 .inner
                 .last_key_block_utime
                 .swap(block_info.gen_utime, Ordering::Relaxed);
-            let is_persistent = is_persistent_state(block_info.gen_utime, prev_utime);
+            let is_persistent = BlockStuff::compute_is_persistent(block_info.gen_utime, prev_utime);
 
             if is_persistent && cx.block.id().seqno != 0 {
                 let block = cx.block.clone();
@@ -87,14 +87,14 @@ impl Inner {
                 mc_block.clone(),
                 mc_state_handle
             ),
-            self.save_persistent_queue_states(mc_block_handle, mc_block),
+            self.save_persistent_queue_states(mc_block_handle.clone(), mc_block),
         );
         state_result?;
         queue_result?;
 
         self.storage
             .persistent_state_storage()
-            .clear_old_persistent_states()
+            .rotate_persistent_states(&mc_block_handle)
             .await
     }
 

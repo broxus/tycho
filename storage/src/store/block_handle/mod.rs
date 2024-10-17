@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use everscale_types::models::BlockId;
-use tycho_block_util::block::ShardHeights;
-use tycho_block_util::state::is_persistent_state;
+use tycho_block_util::block::{BlockStuff, ShardHeights};
 use tycho_util::FastDashMap;
 
 pub(crate) use self::handle::BlockDataGuard;
@@ -217,10 +216,8 @@ impl BlockHandleStorage {
 
         // Load previous key blocks and check if the `key_block` is for persistent state
         while let Some(prev_key_block) = get_key_block() {
-            if is_persistent_state(
-                key_block.meta().gen_utime(),
-                prev_key_block.meta().gen_utime(),
-            ) {
+            if BlockStuff::compute_is_persistent(key_block.gen_utime(), prev_key_block.gen_utime())
+            {
                 // Found
                 return Some(key_block);
             }

@@ -65,8 +65,7 @@ async fn persistent_shard_state() -> Result<()> {
     }
 
     // Write persistent state to file
-    let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
-    assert!(persistent_state_keeper.current().is_none());
+    assert!(persistent_states.load_oldest_known_handle().is_none());
 
     persistent_states
         .store_shard_state(0, &handle, zerostate.ref_mc_state_handle().clone())

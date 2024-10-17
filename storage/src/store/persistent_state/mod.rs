@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwapAny;
 use dashmap::DashMap;
 use everscale_types::models::{BlockId, PrevBlockRef};
 use parking_lot::Mutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
-use tycho_block_util::block::{BlockStuff, KEY_BLOCK_UTIME_STEP};
+use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_util::FastHashSet;
@@ -20,7 +21,7 @@ pub use self::queue_state::reader::QueueStateReader;
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
-use super::ShardStateStorage;
+use super::{KeyBlocksDirection, ShardStateStorage};
 use crate::db::{BaseDb, FileDb, MappedFile};
 use crate::store::{BlockHandle, BlockHandleStorage, BlockStorage};
 
@@ -103,12 +104,58 @@ impl PersistentStateStorage {
                 mc_seqno_to_block_ids: Default::default(),
                 is_cancelled,
                 chunks_semaphore: Semaphore::new(MAX_PARALLEL_CHUNK_READS),
+                handles_queue: Default::default(),
+                oldest_ps_changed: Default::default(),
+                oldest_ps_handle: Default::default(),
             }),
         })
     }
 
+    pub fn load_oldest_known_handle(&self) -> Option<BlockHandle> {
+        self.inner.oldest_ps_handle.load_full()
+    }
+
+    pub fn oldest_known_handle_changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.inner.oldest_ps_changed.notified()
+    }
+
     #[tracing::instrument(skip_all)]
-    pub async fn preload_states(&self) -> Result<()> {
+    pub async fn preload(&self) -> Result<()> {
+        self.preload_handles_queue()?;
+        self.preload_states().await
+    }
+
+    fn preload_handles_queue(&self) -> Result<()> {
+        let this = self.inner.as_ref();
+
+        let block_handles = this.block_handles.as_ref();
+
+        let mut changed = false;
+        let mut prev_utime = 0;
+        for block_id in block_handles.key_blocks_iterator(KeyBlocksDirection::ForwardFrom(0)) {
+            let block_handle = block_handles
+                .load_handle(&block_id)
+                .context("key block handle not found")?;
+
+            let gen_utime = block_handle.gen_utime();
+            if BlockStuff::compute_is_persistent(gen_utime, prev_utime) {
+                prev_utime = gen_utime;
+
+                let mut queue = this.handles_queue.lock();
+                if queue.push(block_handle) {
+                    this.oldest_ps_handle.store(queue.oldest_known().cloned());
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            this.oldest_ps_changed.notify_waiters();
+        }
+        Ok(())
+    }
+
+    async fn preload_states(&self) -> Result<()> {
         // For each mc_seqno directory
         let process_states = |this: &Inner, dir: &PathBuf, mc_seqno: u32| -> Result<()> {
             'outer: for entry in std::fs::read_dir(dir)?.flatten() {
@@ -419,7 +466,27 @@ impl PersistentStateStorage {
         .await?
     }
 
-    pub async fn clear_old_persistent_states(&self) -> Result<()> {
+    pub async fn rotate_persistent_states(&self, top_handle: &BlockHandle) -> Result<()> {
+        anyhow::ensure!(
+            top_handle.is_masterchain(),
+            "top persistent state handle must be in the masterchain"
+        );
+
+        {
+            tracing::info!(
+                mc_block_id = %top_handle.id(),
+                "adding new persistent state to the queue"
+            );
+
+            let mut queue = self.inner.handles_queue.lock();
+            if queue.push(top_handle.clone()) {
+                self.inner
+                    .oldest_ps_handle
+                    .store(queue.oldest_known().cloned());
+                self.inner.oldest_ps_changed.notify_waiters();
+            }
+        }
+
         tracing::info!("started clearing old persistent state directories");
         let start = Instant::now();
         scopeguard::defer! {
@@ -430,6 +497,11 @@ impl PersistentStateStorage {
         }
 
         let this = self.inner.clone();
+        let mut top_handle = top_handle.clone();
+        if top_handle.id().seqno == 0 {
+            // Nothing to clear for the zerostate
+            return Ok(());
+        }
 
         let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
@@ -437,48 +509,43 @@ impl PersistentStateStorage {
 
             let block_handles = &this.block_handles;
 
-            // Keep 2 days of states + 1 state before
-            let block = {
-                let now = tycho_util::time::now_sec();
+            let now_utime = top_handle.gen_utime();
 
-                let mut key_block = block_handles
-                    .find_last_key_block()
-                    .context("no key blocks found")?;
-
-                loop {
-                    match block_handles.find_prev_persistent_key_block(key_block.id().seqno) {
-                        Some(prev_key_block) => {
-                            if prev_key_block.meta().gen_utime() + 2 * KEY_BLOCK_UTIME_STEP < now {
-                                break prev_key_block;
-                            } else {
-                                key_block = prev_key_block;
-                            }
-                        }
-                        None => return Ok(()),
+            // Find a state before the
+            let mut has_suitable = false;
+            loop {
+                match block_handles.find_prev_persistent_key_block(top_handle.id().seqno) {
+                    // Find the newest usable persistent state...
+                    Some(handle) if !has_suitable => {
+                        has_suitable |= BlockStuff::can_use_for_boot(handle.gen_utime(), now_utime);
+                        top_handle = handle;
                     }
+                    // ...and return the previous one.
+                    Some(handle) => {
+                        top_handle = handle;
+                        break;
+                    }
+                    // Or do nothing if not found.
+                    None => return Ok(()),
                 }
-            };
-
-            // Remove cached states
-            {
-                let recent_mc_seqno = block.id().seqno;
-
-                let mut index = this.mc_seqno_to_block_ids.lock();
-                index.retain(|&mc_seqno, block_ids| {
-                    if mc_seqno >= recent_mc_seqno || mc_seqno == 0 {
-                        return true;
-                    }
-
-                    for block_id in block_ids.drain() {
-                        // TODO: Clear flag in block handle
-                        this.clear_cache(&block_id);
-                    }
-                    false
-                });
             }
 
+            // Remove cached states
+            let mut index = this.mc_seqno_to_block_ids.lock();
+            index.retain(|&mc_seqno, block_ids| {
+                if mc_seqno >= top_handle.id().seqno || mc_seqno == 0 {
+                    return true;
+                }
+
+                for block_id in block_ids.drain() {
+                    // TODO: Clear flag in block handle
+                    this.clear_cache(&block_id);
+                }
+                false
+            });
+
             // Remove files
-            this.clear_outdated_state_entries(block.id())
+            this.clear_outdated_state_entries(top_handle.id())
         })
         .await?
     }
@@ -544,6 +611,9 @@ struct Inner {
     mc_seqno_to_block_ids: Mutex<BTreeMap<u32, FastHashSet<BlockId>>>,
     is_cancelled: Arc<AtomicBool>,
     chunks_semaphore: Semaphore,
+    handles_queue: Mutex<HandlesQueue>,
+    oldest_ps_changed: Notify,
+    oldest_ps_handle: ArcSwapAny<Option<BlockHandle>>,
 }
 
 impl Inner {
@@ -685,6 +755,42 @@ pub struct PersistentStateInfo {
 struct CachedState {
     mc_seqno: u32,
     file: MappedFile,
+}
+
+#[derive(Default)]
+struct HandlesQueue {
+    handles: VecDeque<BlockHandle>,
+}
+
+impl HandlesQueue {
+    fn oldest_known(&self) -> Option<&BlockHandle> {
+        self.handles.back()
+    }
+
+    fn push(&mut self, new_handle: BlockHandle) -> bool {
+        // Allow only new blocks
+        if let Some(newest) = self.handles.front() {
+            if newest.id().seqno >= new_handle.id().seqno {
+                return false;
+            }
+        }
+
+        // Remove too old states
+        let now_utime = new_handle.gen_utime();
+        let mut has_suitable = false;
+        self.handles.retain(|old_handle| {
+            if !has_suitable {
+                has_suitable |= BlockStuff::can_use_for_boot(old_handle.gen_utime(), now_utime);
+                true
+            } else {
+                false
+            }
+        });
+
+        // Add the new one
+        self.handles.push_front(new_handle);
+        true
+    }
 }
 
 const STATE_CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB

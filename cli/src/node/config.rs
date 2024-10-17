@@ -9,7 +9,9 @@ use tycho_collator::internal_queue::queue::QueueConfig;
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::ValidatorStdImplConfig;
 use tycho_control::ControlServerConfig;
-use tycho_core::block_strider::{ArchiveBlockProviderConfig, BlockchainBlockProviderConfig};
+use tycho_core::block_strider::{
+    ArchiveBlockProviderConfig, BlockchainBlockProviderConfig, StarterConfig,
+};
 use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
@@ -61,6 +63,8 @@ pub struct NodeConfig {
 
     pub storage: StorageConfig,
 
+    pub starter: StarterConfig,
+
     pub blockchain_rpc_service: BlockchainRpcServiceConfig,
 
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
@@ -98,6 +102,7 @@ impl Default for NodeConfig {
             overlay: OverlayConfig::default(),
             public_overlay_client: PublicOverlayClientConfig::default(),
             storage: StorageConfig::default(),
+            starter: StarterConfig::default(),
             blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
             archive_block_provider: ArchiveBlockProviderConfig::default(),

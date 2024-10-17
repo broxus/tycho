@@ -123,7 +123,6 @@ impl StorageBuilder {
 
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
-        let runtime_storage = Arc::new(RuntimeStorage::new(block_handle_storage.clone()));
         let block_storage = Arc::new(BlockStorage::new(
             base_db.clone(),
             block_handle_storage.clone(),
@@ -144,7 +143,7 @@ impl StorageBuilder {
             shard_state_storage.clone(),
         )?;
 
-        persistent_state_storage.preload_states().await?;
+        persistent_state_storage.preload().await?;
 
         let node_state_storage = NodeStateStorage::new(base_db.clone());
 
@@ -175,7 +174,6 @@ impl StorageBuilder {
             persistent_state_storage,
             block_connection_storage,
             node_state_storage,
-            runtime_storage,
             rpc_state,
             internal_queue_storage,
             temp_file_storage,
@@ -246,10 +244,6 @@ impl Storage {
         &self.inner.config
     }
 
-    pub fn runtime_storage(&self) -> &RuntimeStorage {
-        &self.inner.runtime_storage
-    }
-
     pub fn persistent_state_storage(&self) -> &PersistentStateStorage {
         &self.inner.persistent_state_storage
     }
@@ -296,7 +290,6 @@ struct Inner {
     base_db: BaseDb,
     config: StorageConfig,
 
-    runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_storage: Arc<BlockStorage>,

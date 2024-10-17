@@ -1,4 +1,5 @@
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -18,6 +19,23 @@ pub struct BlockStuff {
 }
 
 impl BlockStuff {
+    /// Time until the block is considered "trusted". We use it to force
+    /// all new nodes to download at least this amount of history.
+    pub const BOOT_OFFSET: Duration = Duration::from_secs(12 * 3600);
+
+    pub fn compute_is_persistent(block_utime: u32, prev_utime: u32) -> bool {
+        block_utime >> 17 != prev_utime >> 17
+    }
+
+    pub fn can_use_for_boot(block_utime: u32, now_utime: u32) -> bool {
+        now_utime.saturating_sub(block_utime) as u64 >= Self::BOOT_OFFSET.as_secs()
+    }
+
+    pub fn time_until_can_use_for_boot(block_utime: u32, now_utime: u32) -> Duration {
+        let time_since_collated = Duration::from_secs(now_utime.saturating_sub(block_utime) as _);
+        Self::BOOT_OFFSET.saturating_sub(time_since_collated)
+    }
+
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(shard: ShardIdent, seqno: u32) -> Self {
         use everscale_types::merkle::MerkleUpdate;

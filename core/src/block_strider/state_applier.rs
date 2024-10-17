@@ -165,7 +165,7 @@ where
         tracing::info!(id = ?cx.block.id(), "handling block");
 
         // Update metrics
-        let gen_utime = prepared.handle.meta().gen_utime() as f64;
+        let gen_utime = prepared.handle.gen_utime() as f64;
         let seqno = prepared.handle.id().seqno as f64;
         let now = tycho_util::time::now_millis() as f64 / 1000.0;
 

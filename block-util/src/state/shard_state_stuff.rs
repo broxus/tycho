@@ -163,10 +163,6 @@ pub struct Inner {
     root: Cell,
 }
 
-pub fn is_persistent_state(block_utime: u32, prev_utime: u32) -> bool {
-    block_utime >> 17 != prev_utime >> 17
-}
-
 static ZEROSTATE_REFS: std::sync::OnceLock<MinRefMcStateTracker> = std::sync::OnceLock::new();
 
 #[cfg(test)]

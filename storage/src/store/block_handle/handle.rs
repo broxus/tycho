@@ -51,8 +51,16 @@ impl BlockHandle {
         &self.inner.id
     }
 
+    pub fn is_masterchain(&self) -> bool {
+        self.inner.id.is_masterchain()
+    }
+
     pub fn meta(&self) -> &BlockMeta {
         &self.inner.meta
+    }
+
+    pub fn gen_utime(&self) -> u32 {
+        self.inner.meta.gen_utime()
     }
 
     pub fn is_key_block(&self) -> bool {

@@ -28,8 +28,8 @@ use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StateSubscriber,
-    StateSubscriberContext, StorageBlockProvider,
+    PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StarterConfig,
+    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -232,6 +232,7 @@ pub struct Node {
 
     state_tracker: MinRefMcStateTracker,
 
+    starter_config: StarterConfig,
     rpc_config: Option<RpcConfig>,
     control_config: Option<ControlServerConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
@@ -358,6 +359,7 @@ impl Node {
             rpc_mempool_adapter,
             blockchain_rpc_client,
             state_tracker,
+            starter_config: node_config.starter,
             rpc_config: node_config.rpc,
             control_config: node_config.control,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
@@ -389,6 +391,7 @@ impl Node {
                     self.storage.clone(),
                     self.blockchain_rpc_client.clone(),
                     self.zerostate,
+                    self.starter_config.clone(),
                 )
                 .cold_boot(zerostates.map(FileZerostateProvider))
                 .await?

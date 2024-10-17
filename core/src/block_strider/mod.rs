@@ -20,7 +20,7 @@ pub use self::provider::{
     BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
     EmptyBlockProvider, OptionalBlockStuff, ProofChecker, StorageBlockProvider,
 };
-pub use self::starter::{FileZerostateProvider, Starter, ZerostateProvider};
+pub use self::starter::{FileZerostateProvider, Starter, StarterConfig, ZerostateProvider};
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
 pub use self::state_applier::ShardStateApplier;
 #[cfg(any(test, feature = "test"))]

@@ -8,9 +8,7 @@ use everscale_types::prelude::*;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
-use tycho_block_util::block::{
-    BlockProofStuff, BlockProofStuffAug, BlockStuff, KEY_BLOCK_UTIME_STEP,
-};
+use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::{
@@ -67,9 +65,8 @@ impl StarterInner {
     where
         P: ZerostateProvider,
     {
-        let block_id = self
-            .storage
-            .node_state()
+        let node_state = self.storage.node_state();
+        let block_id = node_state
             .load_init_mc_block_id()
             .unwrap_or(self.zerostate.as_block_id());
 
@@ -81,6 +78,9 @@ impl StarterInner {
                 Some(zerostates) => self.import_zerostates(zerostates).await?,
                 None => self.download_zerostates().await?,
             };
+
+            // NOTE: Ensure that init block id is always present
+            node_state.store_init_mc_block_id(handle.id());
 
             InitBlock::ZeroState {
                 handle: Arc::new(handle),
@@ -157,6 +157,12 @@ impl StarterInner {
         // Start getting next key blocks
         tasks_tx.send(*prev_key_block.handle().id())?;
 
+        let satisfies_offset = |gen_utime: u32, now_utime: u32| match self.config.custom_boot_offset
+        {
+            None => BlockStuff::can_use_for_boot(gen_utime, now_utime),
+            Some(t) => now_utime.saturating_sub(gen_utime) as u64 >= t.as_secs(),
+        };
+
         let mut retry_counter = 0usize;
         while let Some((requested_key_block, ids)) = ids_rx.recv().await {
             let stream = futures_util::stream::iter(ids)
@@ -175,11 +181,13 @@ impl StarterInner {
             // Save previous key block to restart downloading in case of error
             let fallback_key_block = prev_key_block.clone();
 
+            let now_utime = now_sec();
+            let mut has_newer = false;
             let proofs_len = proofs.len();
             for (index, proof) in proofs.into_iter().enumerate() {
                 // Verify block proof
                 match prev_key_block.check_next_proof(&proof.data) {
-                    Ok(meta) => {
+                    Ok(meta) if satisfies_offset(meta.gen_utime, now_utime) => {
                         // Save block proof
                         let handle = self
                             .storage
@@ -188,11 +196,11 @@ impl StarterInner {
                             .await?
                             .handle;
 
-                        let block_utime = handle.meta().gen_utime();
-                        let prev_utime = prev_key_block.handle().meta().gen_utime();
+                        let block_utime = handle.gen_utime();
+                        let prev_utime = prev_key_block.handle().gen_utime();
 
                         // Update init_mc_block_id
-                        if tycho_block_util::state::is_persistent_state(block_utime, prev_utime) {
+                        if BlockStuff::compute_is_persistent(block_utime, prev_utime) {
                             self.storage
                                 .node_state()
                                 .store_init_mc_block_id(handle.id());
@@ -209,6 +217,10 @@ impl StarterInner {
                             proof: Box::new(proof.data),
                         };
                     }
+                    Ok(_) => {
+                        has_newer = true;
+                        break;
+                    }
                     Err(e) => {
                         tracing::warn!("got invalid key block proof: {e:?}");
 
@@ -221,8 +233,7 @@ impl StarterInner {
                 }
             }
 
-            let now_utime = now_sec();
-            let last_utime = prev_key_block.handle().meta().gen_utime();
+            let last_utime = prev_key_block.handle().gen_utime();
             let no_proofs = proofs_len == 0;
 
             tracing::debug!(
@@ -232,9 +243,7 @@ impl StarterInner {
             );
 
             // Prevent infinite key blocks loading
-            if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime
-                || no_proofs && retry_counter >= MAX_EMPTY_PROOF_RETRIES
-            {
+            if has_newer || no_proofs && retry_counter >= MAX_EMPTY_PROOF_RETRIES {
                 break;
             }
 
@@ -267,37 +276,19 @@ impl StarterInner {
             })
             .peekable();
 
-        let mut last_known_key_block = None;
-
         // Iterate all key blocks in reverse order (from the latest to the oldest)
         while let Some(handle) = key_blocks.next().transpose()? {
-            let handle_utime = handle.meta().gen_utime();
+            let handle_utime = handle.gen_utime();
             let prev_utime = match key_blocks.peek() {
-                Some(Ok(prev_block)) => prev_block.meta().gen_utime(),
+                Some(Ok(prev_block)) => prev_block.gen_utime(),
                 Some(Err(e)) => anyhow::bail!("failed to load previous key block: {e:?}"),
                 None => 0,
             };
 
-            let is_persistent =
-                tycho_block_util::state::is_persistent_state(handle_utime, prev_utime);
-
-            tracing::debug!(
-                seq_no = handle.id().seqno,
-                is_persistent,
-                "new key block candidate",
-            );
-
             // Skip not persistent
+            let is_persistent = BlockStuff::compute_is_persistent(handle_utime, prev_utime);
             if !is_persistent {
-                tracing::debug!("ignoring state: not persistent");
-                continue;
-            }
-
-            // Skip too new key blocks
-            if handle_utime + INITIAL_SYNC_TIME_SECONDS > now_sec() {
-                last_known_key_block = Some(handle);
-
-                tracing::debug!("ignoring state: too new");
+                tracing::debug!(seq_no = handle.id().seqno, "skipping key block");
                 continue;
             }
 
@@ -306,14 +297,8 @@ impl StarterInner {
             return Ok(handle);
         }
 
-        let key_block = last_known_key_block.context("persistent shard state not found")?;
-
-        tracing::warn!(
-            seq_no = key_block.id().seqno,
-            "starting from too new key block"
-        );
-
-        Ok(key_block)
+        // NOTE: Should be unreachable since we will definitely have a zerostate
+        anyhow::bail!("no suitable key block found")
     }
 
     async fn download_start_blocks_and_states(&self, mc_block_id: &BlockId) -> Result<()> {
@@ -967,9 +952,7 @@ impl InitBlock {
     }
 }
 
-const INITIAL_SYNC_TIME_SECONDS: u32 = 300;
 const MAX_EMPTY_PROOF_RETRIES: usize = 10;
-
 const MAX_PERSISTENT_STATE_RETRIES: usize = 10;
 
 const TEMP_EXTENSION: &str = "temp";
