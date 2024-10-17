@@ -2,13 +2,10 @@ use std::mem;
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
-use futures_util::future::BoxFuture;
-use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt};
 use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::Instrument;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -31,7 +28,7 @@ pub struct Engine {
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
-    init_task: Option<JoinTask<()>>,
+    init_task: Option<JoinTask<InclusionState>>,
 }
 
 impl Engine {
@@ -47,12 +44,14 @@ impl Engine {
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
         genesis_round: Option<u32>,
     ) -> Self {
+        // mostly everything depends on genesis - must init at the first line
         let (genesis, overlay_id) = Genesis::init(
             Round(genesis_round.unwrap_or_default()),
             UnixTime::from_millis(0),
         );
 
         let consensus_round = RoundWatch::default();
+        consensus_round.set_max(Genesis::round());
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
@@ -64,7 +63,7 @@ impl Engine {
         overlay_service.add_private_overlay(&private_overlay);
 
         let dispatcher = Dispatcher::new(network, &private_overlay);
-        let peer_schedule = PeerSchedule::new(key_pair, private_overlay);
+        let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
 
         peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
 
@@ -77,17 +76,25 @@ impl Engine {
             top_known_anchor.receiver(),
         );
 
+        let mut dag = DagFront::default();
+        dag.init(DagRound::new_bottom(Genesis::round(), &peer_schedule));
+
         let init_task = JoinTask::new({
             let store = store.clone();
+            let genesis_dag_round = dag.top().clone();
             async move {
                 let init_storage_task = tokio::task::spawn_blocking({
-                    move || store.init_storage(&overlay_id, &genesis)
+                    move || {
+                        store.init_storage(&overlay_id);
+                        // may be overwritten or left unused until next clean task, does not matter
+                        genesis_dag_round.insert_exact_sign(&genesis, Some(&key_pair), &store)
+                    }
                 });
                 match init_storage_task.await {
-                    Ok(()) => {}
+                    Ok(genesis_incl_state) => genesis_incl_state,
                     Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                     Err(e) => panic!("failed to clean db on genesis {e:?}"),
-                };
+                }
             }
         });
 
@@ -108,23 +115,11 @@ impl Engine {
             }
         });
 
-        let committer_run = tokio::spawn({
-            let mut top_known_anchor = top_known_anchor.receiver();
-            let mut consensus_round = consensus_round.receiver();
-            async move {
-                // wait both initialized with non-default value to use latest values
-                if genesis_round.is_none() {
-                    // wait if not set locally
-                    _ = top_known_anchor.next().await;
-                }
-                _ = consensus_round.next().await;
-
-                Committer::default()
-            }
-        });
+        let committer_run = tokio::spawn(future::pending());
+        committer_run.abort(); // sill be replaced during init
 
         Self {
-            dag: DagFront::default(),
+            dag,
             committer_run,
             committed_info_tx,
             consensus_round,
@@ -134,17 +129,7 @@ impl Engine {
         }
     }
 
-    pub async fn init(&mut self, current_peers: &[PeerId]) {
-        if let Some(init_task) = self.init_task.take() {
-            init_task.await;
-        };
-
-        // note subscribers are created earlier in constructor
-        self.round_task
-            .state
-            .top_known_anchor
-            .set_max(Genesis::round());
-
+    pub fn set_peers(&mut self, current_peers: &[PeerId]) {
         self.round_task
             .state
             .peer_schedule
@@ -152,181 +137,87 @@ impl Engine {
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> Option<(Point, BoxFuture<'static, InclusionState>)> {
-        let last_round = tokio::task::spawn_blocking({
+    async fn pre_run(&mut self) -> Option<(Point, InclusionState)> {
+        let genesis_incl_state = self.init_task.take().expect("init task must be set").await;
+        let broadcast_points = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
-            move || store.latest_round()
+            let peer_schedule = self.round_task.state.peer_schedule.clone();
+            move || {
+                store.load_last_broadcasts().and_then(|(last, prev)| {
+                    peer_schedule
+                        .atomic()
+                        .local_keys(last.round()) // against db cloning
+                        .map(|keys| (PeerId::from(keys.public_key), keys))
+                        .filter(|(local_id, _)| local_id == last.data().author)
+                        .map(|(_, keys)| (last, keys, prev))
+                })
+            }
         })
         .await
         .expect("load last round from db");
 
-        let first_round = Genesis::round().max(Round(last_round.0.saturating_sub(2)));
-
-        self.effects = Effects::<ChainedRoundsContext>::new(last_round);
-        let round_effects = Effects::<EngineContext>::new(&self.effects, last_round);
-
-        self.round_task.state.responder.update(
-            &self.round_task.state.broadcast_filter,
-            None,
-            &self.round_task.state.downloader,
-            &self.round_task.state.store,
-            &round_effects,
-        );
-
-        let info_status = tokio::task::spawn_blocking({
-            let store = self.round_task.state.store.clone();
-            move || store.load_rounds(first_round, last_round)
-        })
-        .instrument(round_effects.span().clone())
-        .await
-        .expect("load last info and status from db");
-
-        let _span_guard = round_effects.span().enter();
-        assert!(
-            info_status.first().map(|(i, _)| i.round())
-                <= info_status.last().map(|(i, _)| i.round()),
-            "wrong order of data from db on init"
-        );
-
-        let start_info = {
-            let maybe_unfinished_round = last_round.prev();
-            let local_id = {
-                // if local id changed, then we can't reuse that old point
-                let guard = self.round_task.state.peer_schedule.atomic();
-                guard
-                    .local_keys(last_round)
-                    .or(guard.local_keys(maybe_unfinished_round))
-                    .map(|key_pair| PeerId::from(key_pair.public_key))
-            };
-            match local_id {
-                None => None,
-                Some(local_id) => info_status
-                    .iter()
-                    .rev()
-                    .filter(|(info, _)| info.data().author == local_id)
-                    .take_while(|(info, _)| info.round() >= maybe_unfinished_round)
-                    .max_by_key(|(info, _)| info.round())
-                    .map(|(info, _)| info)
-                    .cloned(),
-            }
+        // even if have some history in DB above broadcast rounds, we replay the last broadcasts
+        let top_round = match &broadcast_points {
+            Some((last_broadcast, _, _)) => last_broadcast.round(),
+            None => Genesis::round(), // will reproduce the first point after genesis,
         };
+        self.consensus_round.set_max(top_round);
 
-        // init dag and committer with current bounds, ready to load related stored data
+        self.effects = Effects::<ChainedRoundsContext>::new(top_round);
+        let round_effects = Effects::<EngineContext>::new(&self.effects, top_round);
 
-        let start_round = start_info.as_ref().map_or(last_round, |info| info.round());
-        // top known block's anchor is not known yet, will shorten dag length later
-        self.dag.init(DagRound::new_bottom(
-            Consensus::history_bottom(last_round),
-            &self.round_task.state.peer_schedule,
-        ));
-        // commiter must contain the same rounds as front dag
-        let mut buf = (self.dag).fill_to_top(start_round, &self.round_task.state.peer_schedule);
-        buf.extend_from_slice(self.dag.as_slice());
+        // commiter must contain the same rounds as front dag, plus required history
+        let mut back_rounds =
+            (self.dag).fill_to_top(top_round, &self.round_task.state.peer_schedule);
+        back_rounds.extend_from_slice(self.dag.as_slice());
 
-        let committer_after_watches =
-            mem::replace(&mut self.committer_run, tokio::spawn(future::pending()));
-        let committer_init = tokio::spawn({
-            let store = self.round_task.state.store.clone();
+        // store in committer (back dag) - no data to init with,
+        // as consensus may be far away while local history has some unfinished downloads
+
+        self.committer_run = tokio::spawn({
             let peer_schedule = self.round_task.state.peer_schedule.clone();
-            let downloader = self.round_task.state.downloader.clone();
-            let top_known_anchor = self.round_task.state.top_known_anchor.clone();
-            let consensus_round = self.consensus_round.clone();
-            let round_effects = round_effects.clone();
-
+            let mut consensus_round = self.consensus_round.receiver();
             async move {
-                let mut committer = match committer_after_watches.await {
-                    Ok(committer) => committer,
-                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Err(e) => panic!("default committer after rounds init: {e:?}"),
-                };
-                committer.extend_from_ahead(&buf, &peer_schedule);
-
-                // watches contain non-default values as committer future is resolved
-                // max(): keep in-mem dag as short as possible
-                let bottom = TopKnownAnchor::adapter_history_bottom(top_known_anchor.get())
-                    .max(Consensus::history_bottom(consensus_round.get()));
-
-                committer.set_bottom(bottom);
-
-                if bottom < last_round {
-                    // init commit data with up-to-date data, if such is stored
-                    let info_status = tokio::task::spawn_blocking({
-                        let store = store.clone();
-                        move || store.load_rounds(bottom, last_round)
-                    })
-                    .instrument(round_effects.span().clone())
-                    .await
-                    .expect("load last info and status from db");
-
-                    committer.init_at_start(info_status, &downloader, &store, &round_effects);
-                }
-
+                let mut committer = Committer::default();
+                // store those evicted from and contained in front dag
+                committer.extend_from_ahead(&back_rounds, &peer_schedule);
+                // restrict download depth if consensus is running
+                // (dag will not validate points until round changes and dag advances)
+                consensus_round.next().await;
+                committer.set_bottom(Consensus::history_bottom(consensus_round.get()));
                 committer
             }
         });
-        mem::replace(&mut self.committer_run, committer_init).abort();
 
-        // restore last known front dag round
+        // bcast filter will be init on round start
 
-        let dag_round = self.dag.top();
-        let mut point_dag_round = dag_round.clone();
-
-        let includes = FuturesUnordered::new();
-        for (info, status) in info_status {
-            if info.round() > start_round {
-                // if info.round() > start_info.round():
-                // * either consensus is on the same start_round(+1) and keeps broadcasting points
-                // * or consensus advanced further, and there's no need for start_round+1 includes
-                break;
+        match broadcast_points {
+            Some((last, keys, pre_last)) => {
+                if let Some(pre_last) = pre_last {
+                    self.round_task
+                        .init_prev_broadcast(pre_last, &round_effects);
+                }
+                // start point's inclusion state is pushed into collector during loop run
+                let incl_state = self.dag.top().insert_exact_sign(
+                    &last,
+                    Some(&keys),
+                    &self.round_task.state.store,
+                );
+                Some((last, incl_state))
             }
-            if point_dag_round.round() != info.round() {
-                match dag_round.scan(info.round()) {
-                    Some(found) => point_dag_round = found,
-                    None => panic!("dag was incorrectly extended: cannot restore point info"),
-                };
-            };
-            let inclusion_state = point_dag_round.restore_exact(
-                &info,
-                status,
-                &self.round_task.state.downloader,
-                &self.round_task.state.store,
-                &round_effects,
-            );
-            if info.round() == start_round {
-                tracing::info!("add inclusion_state {:?}", info.id().alt());
-                includes.push(inclusion_state);
+            None => {
+                // dag top is genesis round
+                self.round_task.collector.init(
+                    top_round,
+                    std::iter::once(future::ready(genesis_incl_state).boxed()).collect(),
+                );
+                None
             }
         }
-
-        drop(_span_guard);
-        let start_point = match start_info {
-            None => None,
-            Some(start_info) => tokio::task::spawn_blocking({
-                let store = self.round_task.state.store.clone();
-                move || store.get_point(start_info.round(), start_info.digest())
-            })
-            .instrument(round_effects.span().clone())
-            .await
-            .expect("load last own point from db"),
-        };
-
-        let start_point_id = start_point.as_ref().map(|point| point.id());
-        tracing::info!(
-            parent: round_effects.span(),
-            start_round = start_round.0,
-            start_point = start_point_id.as_ref().map(|point_id| debug(point_id.alt())),
-            "pre-run setup completed",
-        );
-        // engine or collector may jump to later round if it is determined by broadcast filter
-        self.consensus_round.set_max(start_round);
-        self.round_task.collector.init(start_round, includes);
-
-        // start_point's inclusion state is already pushed into collector, just a stub is enough
-        start_point.map(|a| (a, future::pending().boxed()))
     }
 
     pub async fn run(mut self) -> ! {
-        let mut start_point = self.pre_run().await;
+        let mut start_point_with_state = self.pre_run().await;
 
         // may be sparse when engine jumped over large amount of rounds
         // TODO new struct in `dag::commit` mod to:
@@ -375,11 +266,11 @@ impl Engine {
 
             let (collector_signal_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry);
 
-            let (own_point_fut, own_point_state) = match start_point.take() {
-                Some((point, own_point_state)) => {
-                    let point_fut = future::ready(Ok(Some(point)));
-                    (point_fut.boxed(), own_point_state)
-                }
+            let (own_point_fut, own_point_state) = match start_point_with_state.take() {
+                Some((point, state)) => (
+                    future::ready(Ok(Some(point))).boxed(),
+                    future::ready(state).boxed(),
+                ),
                 None => self.round_task.own_point_task(
                     &collector_signal_rx,
                     &current_dag_round,

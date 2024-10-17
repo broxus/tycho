@@ -178,7 +178,7 @@ fn make_network(
                             &top_known_anchor,
                             None,
                         );
-                        engine.init(&all_peers).await;
+                        engine.set_peers(&all_peers);
                         started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(

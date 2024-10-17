@@ -228,7 +228,7 @@ impl DagRound {
         })
     }
 
-    pub fn restore_exact(
+    pub fn _restore_exact(
         &self,
         info: &PointInfo,
         status: PointStatus,
@@ -246,7 +246,7 @@ impl DagRound {
         self.edit(&info.data().author, |loc| {
             let result_state = loc.state().clone();
             loc.get_or_init(digest, |state| {
-                DagPointFuture::new_restore(self, info, status, state, downloader, store, effects)
+                DagPointFuture::_new_restore(self, info, status, state, downloader, store, effects)
             })
             .clone()
             .map(|_| result_state)

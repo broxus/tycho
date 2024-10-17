@@ -4,6 +4,7 @@ use std::ops::Bound;
 use std::sync::atomic;
 use std::{array, cmp, mem};
 
+use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use itertools::Itertools;
 use rand::prelude::SliceRandom;
@@ -11,7 +12,7 @@ use rand::SeedableRng;
 use tycho_network::PeerId;
 use tycho_storage::point_status::PointStatus;
 
-use crate::dag::{DagRound, EnqueuedAnchor};
+use crate::dag::{DagRound, EnqueuedAnchor, InclusionState};
 use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::Consensus;
 use crate::engine::{Genesis, MempoolConfig};
@@ -52,13 +53,13 @@ impl DagBack {
         self.rounds.get(&round)
     }
 
-    pub fn fill_restore(
+    pub fn _fill_restore(
         &self,
         sorted: Vec<(PointInfo, PointStatus)>,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
-    ) {
+    ) -> Vec<(Round, PeerId, BoxFuture<'static, InclusionState>)> {
         assert!(!self.rounds.is_empty(), "must be initialized");
 
         assert!(
@@ -72,6 +73,7 @@ impl DagBack {
 
         // must be initialized
         let mut rounds_iter = self.rounds.iter().peekable();
+        let mut result = Vec::with_capacity(sorted.len());
 
         'sorted: for (info, status) in sorted {
             while let Some((round, dag_round)) = rounds_iter.peek() {
@@ -83,13 +85,16 @@ impl DagBack {
                         info.round(),
                         "dag is not contiguous: next dag round skips over point round"
                     );
-                    _ = dag_round.restore_exact(&info, status, downloader, store, effects);
+                    let incl_state =
+                        dag_round._restore_exact(&info, status, downloader, store, effects);
+                    result.push((**round, info.data().author, incl_state));
                     continue 'sorted;
                 }
             }
         }
 
         self.assert_len();
+        result
     }
 
     /// returns `true` if bottom remains the same (e.g. passing empty `front`)

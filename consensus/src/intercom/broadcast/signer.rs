@@ -10,8 +10,8 @@ use crate::models::Round;
 pub struct Signer;
 impl Signer {
     pub fn signature_response(
-        round: Round,
         author: &PeerId,
+        round: Round,
         top_dag_round: &DagRound,
         broadcast_filter: &BroadcastFilter,
         effects: &Effects<EngineContext>,

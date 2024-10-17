@@ -21,7 +21,7 @@ pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
 struct ResponderInner {
     // state and storage components go here
     broadcast_filter: BroadcastFilter,
-    top_dag_round: Option<DagRound>,
+    top_dag_round: DagRound,
     downloader: Downloader,
     store: MempoolStore,
     effects: Effects<EngineContext>,
@@ -31,14 +31,12 @@ impl Responder {
     pub fn update(
         &self,
         broadcast_filter: &BroadcastFilter,
-        top_dag_round: Option<&DagRound>,
+        top_dag_round: &DagRound,
         downloader: &Downloader,
         store: &MempoolStore,
         round_effects: &Effects<EngineContext>,
     ) {
-        if let Some(top_dag_round) = top_dag_round {
-            broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
-        }
+        broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
         // Note that `next_dag_round` for Signer should be advanced _after_ new points
         //  are moved from BroadcastFilter into DAG. Then Signer will look for points
         //  (of rounds greater than local engine round, including top dag round exactly)
@@ -50,7 +48,7 @@ impl Responder {
         //  others are being moved into Dag, all of them will be in DAG after one more round.
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
-            top_dag_round: top_dag_round.cloned(),
+            top_dag_round: top_dag_round.clone(),
             downloader: downloader.clone(),
             store: store.clone(),
             effects: round_effects.clone(),
@@ -84,12 +82,11 @@ impl Service<ServiceRequest> for Responder {
 impl Responder {
     fn handle_query(inner: Option<Arc<ResponderInner>>, req: &ServiceRequest) -> Option<Response> {
         let task_start = Instant::now();
-        let peer_id = req.metadata.peer_id;
 
         let (constructor, body) = try_handle_prefix(&req)
             .inspect_err(|e| {
                 tracing::error!(
-                    peer_id = display(peer_id.alt()),
+                    peer_id = display(req.metadata.peer_id.alt()),
                     error = debug(e),
                     "unexpected prefix",
                 );
@@ -100,44 +97,29 @@ impl Responder {
             BroadcastQuery as r => {
                 match inner {
                     None => {} // do nothing: sender has retry loop via signature request
-                    Some(inner) => match &inner.top_dag_round {
-                        None => {} // do nothing for now, will remove Option soon
-                        Some(top_dag_round) => {
-                            inner.broadcast_filter.add(
-                                &req.metadata.peer_id,
-                                &r.0,
-                                top_dag_round,
-                                &inner.downloader,
-                                &inner.store,
-                                &inner.effects,
-                            );
-                        }
-                    }
+                    Some(inner) => inner.broadcast_filter.add(
+                        &req.metadata.peer_id,
+                        &r.0,
+                        &inner.top_dag_round,
+                        &inner.downloader,
+                        &inner.store,
+                        &inner.effects,
+                    ),
                 };
                 let response = Response::from_tl(&BroadcastMpResponse);
                 EngineContext::broadcast_response_metrics(task_start.elapsed());
                 response
-
             },
             PointQuery as r => {
                 let response = match &inner {
                     None => PointByIdResponse::TryLater,
-                    Some(inner) => {
-                        let round = &inner.top_dag_round;
-                        let result = match round {
-                            None => PointByIdResponse::TryLater,
-                            Some(top_dag_round) => {
-                                Uploader::find(
-                                    &peer_id,
-                                    &r.0,
-                                    top_dag_round,
-                                    &inner.store,
-                                    &inner.effects,
-                                )
-                            }
-                        };
-                        result
-                    }
+                    Some(inner) => Uploader::find(
+                        &req.metadata.peer_id,
+                        &r.0,
+                        &inner.top_dag_round,
+                        &inner.store,
+                        &inner.effects,
+                    ),
                 };
                 let response_body = PointMpResponse(response);
                 let response = Response::from_tl(&response_body);
@@ -147,16 +129,13 @@ impl Responder {
             SignatureQuery as r => {
                 let response = match inner {
                     None => SignatureResponse::TryLater,
-                    Some(inner) => match &inner.top_dag_round {
-                        None => SignatureResponse::TryLater,
-                            Some(top_dag_round) =>
-                            Signer::signature_response(r.0,
-                        &peer_id,
-                        top_dag_round,
+                    Some(inner) => Signer::signature_response(
+                        &req.metadata.peer_id,
+                        r.0,
+                        &inner.top_dag_round,
                         &inner.broadcast_filter,
                         &inner.effects,
-                        ),
-                    },
+                    ),
                 };
                 let response_body = SignatureMpResponse(response);
                 let response = Response::from_tl(&response_body);

@@ -71,6 +71,34 @@ impl RoundTaskReady {
         }
     }
 
+    pub fn init_prev_broadcast(
+        &mut self,
+        prev_last_point: Point,
+        round_effects: &Effects<EngineContext>,
+    ) {
+        assert!(
+            self.prev_broadcast.is_none(),
+            "previous broadcast is already set"
+        );
+
+        let (bcaster_ready_tx, stub_rx) = oneshot::channel();
+        let (stub_tx, collector_signal_rx) = watch::channel(CollectorSignal::Finish);
+        let broadcaster = Broadcaster::new(
+            self.state.dispatcher.clone(),
+            prev_last_point,
+            self.state.peer_schedule.clone(),
+            bcaster_ready_tx,
+            collector_signal_rx,
+            round_effects,
+        );
+        let task = async move {
+            broadcaster.run_continue().await;
+            _ = stub_rx;
+            _ = stub_tx;
+        };
+        self.prev_broadcast = Some(tokio::spawn(task).abort_handle());
+    }
+
     pub fn own_point_task(
         &self,
         collector_signal_rx: &watch::Receiver<CollectorSignal>,
@@ -301,7 +329,7 @@ impl RoundTaskReady {
 
         self.state.responder.update(
             &self.state.broadcast_filter,
-            Some(next_dag_round),
+            next_dag_round,
             &self.state.downloader,
             &self.state.store,
             round_effects,

@@ -91,11 +91,9 @@ impl Commit {
     pub fn stored_history_bottom(commit: Round) -> Round {
         // oldest data to collate that is validatable and unique
         let round = (commit.0)
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
-            .saturating_sub(
-                (MempoolConfig::MAX_ANCHOR_DISTANCE as u32) // validatable by other peers
-                    .max(MempoolConfig::DEDUPLICATE_ROUNDS as u32), // unique
-            );
+            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)  // to discard above new bottom
+            .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32)
+            .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
         Round(round).max(Genesis::round())
     }
 }

@@ -164,7 +164,7 @@ impl DagPointFuture {
         })
     }
 
-    pub fn new_restore(
+    pub fn _new_restore(
         point_dag_round: &DagRound,
         info: &PointInfo,
         status: PointStatus,
