@@ -18,9 +18,7 @@ use tycho_collator::internal_queue::state::session_state::SessionStateImplFactor
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
-use tycho_collator::state_node::{
-    CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl,
-};
+use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
@@ -661,7 +659,8 @@ impl StateSubscriber for CollatorStateSubscriber {
         let state = self
             .collator_activation_state
             .load(Ordering::Acquire)
-            .try_into().unwrap();
+            .try_into()
+            .unwrap();
 
         self.adapter.handle_state(&cx.state, state)
     }
