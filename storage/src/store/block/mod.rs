@@ -1474,7 +1474,7 @@ mod tests {
             let block_meta = NewBlockMeta {
                 is_key_block: shard.is_masterchain() && seqno == 0,
                 gen_utime: 0,
-                mc_ref_seqno: seqno,
+                ref_by_mc_seqno: seqno,
             };
 
             let store_block_data = || {
@@ -1583,7 +1583,7 @@ mod tests {
                 let (handle, _) = block_handles.create_or_load_handle(&block_id, NewBlockMeta {
                     is_key_block: shard.is_masterchain() && seqno == 0,
                     gen_utime: 0,
-                    mc_ref_seqno: seqno,
+                    ref_by_mc_seqno: seqno,
                 });
 
                 for ty in ENTRY_TYPES {

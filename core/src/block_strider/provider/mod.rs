@@ -237,7 +237,7 @@ impl ProofChecker {
         let meta = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
-            mc_ref_seqno: mc_block_id.seqno,
+            ref_by_mc_seqno: mc_block_id.seqno,
         };
 
         let block_storage = self.storage.block_storage();

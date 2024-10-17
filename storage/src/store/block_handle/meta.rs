@@ -8,7 +8,7 @@ use crate::util::{StoredValue, StoredValueBuffer};
 pub struct NewBlockMeta {
     pub is_key_block: bool,
     pub gen_utime: u32,
-    pub mc_ref_seqno: u32,
+    pub ref_by_mc_seqno: u32,
 }
 
 impl NewBlockMeta {
@@ -16,7 +16,7 @@ impl NewBlockMeta {
         Self {
             is_key_block,
             gen_utime,
-            mc_ref_seqno: 0,
+            ref_by_mc_seqno: 0,
         }
     }
 }
@@ -45,7 +45,7 @@ impl BlockMeta {
                     IS_KEY_BLOCK_MASK
                 } else {
                     0
-                } | data.mc_ref_seqno as u64,
+                } | data.ref_by_mc_seqno as u64,
             ),
             gen_utime: data.gen_utime,
         }
@@ -65,7 +65,7 @@ impl BlockMeta {
         BlockFlags::from_bits_retain(flags as u32)
     }
 
-    pub fn mc_ref_seqno(&self) -> u32 {
+    pub fn ref_by_mc_seqno(&self) -> u32 {
         self.flags.load(Ordering::Acquire) as u32
     }
 
@@ -144,10 +144,10 @@ mod tests {
         let meta = BlockMeta::with_data(NewBlockMeta {
             is_key_block: true,
             gen_utime: 123456789,
-            mc_ref_seqno: 4311231,
+            ref_by_mc_seqno: 4311231,
         });
         assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
-        assert_eq!(meta.mc_ref_seqno(), 4311231);
+        assert_eq!(meta.ref_by_mc_seqno(), 4311231);
         assert_eq!(meta.gen_utime(), 123456789);
 
         let stored = meta.to_vec();
@@ -155,7 +155,7 @@ mod tests {
 
         let loaded = BlockMeta::from_slice(&stored);
         assert_eq!(loaded.flags(), BlockFlags::IS_KEY_BLOCK);
-        assert_eq!(loaded.mc_ref_seqno(), 4311231);
+        assert_eq!(loaded.ref_by_mc_seqno(), 4311231);
         assert_eq!(loaded.gen_utime(), 123456789);
 
         let updated = meta.add_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);

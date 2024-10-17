@@ -57,7 +57,7 @@ impl CollatorStdImpl {
         let config_address = &mc_data.config.address;
 
         // Compute a masterchain block seqno which will reference this block.
-        let mc_ref_seqno = if is_masterchain {
+        let ref_by_mc_seqno = if is_masterchain {
             // The block itself for the masterchain
             collation_data.block_id_short.seqno
         } else {
@@ -398,7 +398,7 @@ impl CollatorStdImpl {
         let collated_data = vec![];
 
         let block_candidate = Box::new(BlockCandidate {
-            mc_ref_seqno,
+            ref_by_mc_seqno,
             block: new_block,
             is_key_block: new_block_info.key_block,
             prev_blocks_ids: prev_shard_data.blocks_ids().clone(),

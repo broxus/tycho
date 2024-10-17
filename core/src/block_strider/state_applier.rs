@@ -225,7 +225,7 @@ where
             .store_block_data(block, archive_data, NewBlockMeta {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: mc_block_id.seqno,
+                ref_by_mc_seqno: mc_block_id.seqno,
             })
             .await?;
 

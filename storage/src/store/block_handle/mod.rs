@@ -359,7 +359,7 @@ mod tests {
         let meta = NewBlockMeta {
             is_key_block: false,
             gen_utime: 123,
-            mc_ref_seqno: 456,
+            ref_by_mc_seqno: 456,
         };
 
         {

@@ -114,7 +114,7 @@ impl BlockHandle {
         if self.inner.id.shard.is_masterchain() {
             self.inner.id.seqno
         } else {
-            self.inner.meta.mc_ref_seqno()
+            self.inner.meta.ref_by_mc_seqno()
         }
     }
 

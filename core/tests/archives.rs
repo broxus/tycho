@@ -96,7 +96,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
             .create_or_load_handle(zerostate.block_id(), NewBlockMeta {
                 is_key_block: zerostate.block_id().is_masterchain(),
                 gen_utime: zerostate.state().gen_utime,
-                mc_ref_seqno: 0,
+                ref_by_mc_seqno: 0,
             });
 
     storage
@@ -139,7 +139,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
                 .create_or_load_handle(state.block_id(), NewBlockMeta {
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
-                    mc_ref_seqno: 0,
+                    ref_by_mc_seqno: 0,
                 });
 
         storage

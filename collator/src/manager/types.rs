@@ -67,7 +67,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
         } = stuff;
 
         let BlockCandidate {
-            mc_ref_seqno,
+            ref_by_mc_seqno,
             block: block_stuff_aug,
             prev_blocks_ids,
             top_shard_blocks_ids,
@@ -76,7 +76,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
         } = candidate;
 
         Self {
-            mc_ref_seqno,
+            ref_by_mc_seqno,
             block_stuff_aug,
             queue_diff_aug,
             signatures,

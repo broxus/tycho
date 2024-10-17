@@ -421,7 +421,7 @@ impl StarterInner {
                 handle_storage.create_or_load_handle(state.block_id(), NewBlockMeta {
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
-                    mc_ref_seqno: 0,
+                    ref_by_mc_seqno: 0,
                 });
 
             let stored = state_storage
@@ -743,7 +743,7 @@ impl StarterInner {
                     let (handle, _) = block_handles.create_or_load_handle(block_id, NewBlockMeta {
                         is_key_block: block_id.is_masterchain(),
                         gen_utime: state.as_ref().gen_utime,
-                        mc_ref_seqno: mc_block_id.seqno,
+                        ref_by_mc_seqno: mc_block_id.seqno,
                     });
                     handle
                 }
@@ -942,7 +942,7 @@ impl InitBlock {
         let res = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
-            mc_ref_seqno: next_proof.proof().proof_for.seqno,
+            ref_by_mc_seqno: next_proof.proof().proof_for.seqno,
         };
 
         match self {

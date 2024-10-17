@@ -19,7 +19,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
             .create_or_load_handle(zerostate.block_id(), NewBlockMeta {
                 is_key_block: zerostate.block_id().is_masterchain(),
                 gen_utime: zerostate.state().gen_utime,
-                mc_ref_seqno: 0,
+                ref_by_mc_seqno: 0,
             });
 
     storage
@@ -38,7 +38,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
         let meta = NewBlockMeta {
             is_key_block: info.key_block,
             gen_utime: info.gen_utime,
-            mc_ref_seqno: block_id.seqno,
+            ref_by_mc_seqno: block_id.seqno,
         };
 
         let block_result = blocks

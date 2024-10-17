@@ -337,7 +337,7 @@ impl StateNodeAdapterStdImpl {
                 MaybeExistingHandle::New(NewBlockMeta {
                     is_key_block: block_info.key_block,
                     gen_utime: block_info.gen_utime,
-                    mc_ref_seqno: block.mc_ref_seqno,
+                    ref_by_mc_seqno: block.ref_by_mc_seqno,
                 }),
             )
             .await?;
