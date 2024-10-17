@@ -19,7 +19,7 @@ use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{
-    CollatorActivationState, StateNodeAdapter, StateNodeAdapterStdImpl,
+    CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl,
 };
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
@@ -515,7 +515,7 @@ impl Node {
             vec![],
         );
 
-        let collator_active = Arc::new(AtomicU8::new(CollatorActivationState::Historical as u8));
+        let collator_active = Arc::new(AtomicU8::new(CollatorSyncContext::Historical as u8));
         let collator_state_subscriber = CollatorStateSubscriber {
             collator_activation_state: collator_active.clone(),
             adapter: collation_manager.state_node_adapter().clone(),
@@ -529,8 +529,8 @@ impl Node {
 
         let initial_state = match self.storage.node_state().get_node_sync_state() {
             None => anyhow::bail!("Failed to determine node sync state"),
-            Some(NodeSyncState::PersistentState) => CollatorActivationState::Persistent,
-            Some(NodeSyncState::Blocks) => CollatorActivationState::Historical,
+            Some(NodeSyncState::PersistentState) => CollatorSyncContext::Persistent,
+            Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
         };
 
         collator_state_subscriber
@@ -640,7 +640,7 @@ impl BlockProvider for ActivateCollator {
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.collator_activation_state
-            .store(CollatorActivationState::Recent as u8, Ordering::Release);
+            .store(CollatorSyncContext::Recent as u8, Ordering::Release);
         futures_util::future::ready(None)
     }
 
@@ -661,11 +661,9 @@ impl StateSubscriber for CollatorStateSubscriber {
         let state = self
             .collator_activation_state
             .load(Ordering::Acquire)
-            .try_into();
-        match state {
-            Ok(state) => self.adapter.handle_state(&cx.state, state),
-            Err(e) => Box::pin(futures_util::future::err(e)),
-        }
+            .try_into().unwrap();
+
+        self.adapter.handle_state(&cx.state, state)
     }
 }
 

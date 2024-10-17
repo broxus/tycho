@@ -77,7 +77,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn handle_state(
         &self,
         state: &ShardStateStuff,
-        collator_state: CollatorActivationState,
+        collator_state: CollatorSyncContext,
     ) -> Result<()>;
     /// Loqd queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
@@ -209,7 +209,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn handle_state(
         &self,
         state: &ShardStateStuff,
-        _collator_state: CollatorActivationState,
+        _collator_state: CollatorSyncContext,
     ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
@@ -460,20 +460,20 @@ fn process_signatures(
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
-pub enum CollatorActivationState {
+pub enum CollatorSyncContext {
     Persistent = 0,
     Historical = 1,
     Recent = 2,
 }
 
-impl TryFrom<u8> for CollatorActivationState {
+impl TryFrom<u8> for CollatorSyncContext {
     type Error = anyhow::Error;
 
     fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
         match value {
-            0 => Ok(CollatorActivationState::Persistent),
-            1 => Ok(CollatorActivationState::Historical),
-            2 => Ok(CollatorActivationState::Recent),
+            0 => Ok(CollatorSyncContext::Persistent),
+            1 => Ok(CollatorSyncContext::Historical),
+            2 => Ok(CollatorSyncContext::Recent),
             i => anyhow::bail!("invalid CollatorActivationState value: {i}"),
         }
     }

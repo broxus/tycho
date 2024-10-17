@@ -15,7 +15,7 @@ use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{
-    CollatorActivationState, StateNodeAdapter, StateNodeAdapterStdImpl,
+    CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl,
 };
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{supported_capabilities, CollationConfig, MsgsExecutionParams};
@@ -52,7 +52,7 @@ impl StateSubscriber for StrangeBlockProvider {
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         self.adapter
-            .handle_state(&cx.state, CollatorActivationState::Recent)
+            .handle_state(&cx.state, CollatorSyncContext::Recent)
     }
 }
 
