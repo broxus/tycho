@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,7 +18,7 @@ use tycho_collator::internal_queue::state::session_state::SessionStateImplFactor
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
-use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
+use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
@@ -41,7 +41,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::Storage;
+use tycho_storage::{NodeSyncState, Storage};
 use tycho_util::cli::error::ResultExt;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::{resolve_public_ip, signal};
@@ -513,18 +513,25 @@ impl Node {
             vec![],
         );
 
-        let collator_active = Arc::new(AtomicBool::new(false));
         let collator_state_subscriber = CollatorStateSubscriber {
-            collator_active: collator_active.clone(),
+            sync_context: CollatorSyncContext::Historical.into(),
             adapter: collation_manager.state_node_adapter().clone(),
         };
 
-        let activate_collator = ActivateCollator { collator_active };
+        let activate_collator = ActivateCollator {
+            sync_context: collator_state_subscriber.sync_context.clone(),
+        };
 
         // Explicitly handle the initial state
+        let initial_state = match self.storage.node_state().get_node_sync_state() {
+            None => anyhow::bail!("Failed to determine node sync state"),
+            Some(NodeSyncState::PersistentState) => CollatorSyncContext::Persistent,
+            Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
+        };
+
         collator_state_subscriber
             .adapter
-            .handle_state(&mc_state)
+            .handle_state(&mc_state, initial_state)
             .await?;
 
         // NOTE: Make sure to drop the state after handling it
@@ -589,7 +596,7 @@ impl Node {
         );
 
         let block_strider = BlockStrider::builder()
-            .with_provider(activate_collator.chain(archive_block_provider).chain((
+            .with_provider(archive_block_provider.chain(activate_collator).chain((
                 blockchain_block_provider,
                 storage_block_provider,
                 collator_block_provider,
@@ -620,7 +627,7 @@ impl Node {
 }
 
 struct ActivateCollator {
-    collator_active: Arc<AtomicBool>,
+    sync_context: SharedSyncContext,
 }
 
 impl BlockProvider for ActivateCollator {
@@ -628,7 +635,7 @@ impl BlockProvider for ActivateCollator {
     type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        self.collator_active.store(true, Ordering::Release);
+        self.sync_context.store(CollatorSyncContext::Recent);
         futures_util::future::ready(None)
     }
 
@@ -638,7 +645,7 @@ impl BlockProvider for ActivateCollator {
 }
 
 struct CollatorStateSubscriber {
-    collator_active: Arc<AtomicBool>,
+    sync_context: SharedSyncContext,
     adapter: Arc<dyn StateNodeAdapter>,
 }
 
@@ -646,11 +653,8 @@ impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        if self.collator_active.load(Ordering::Acquire) {
-            self.adapter.handle_state(&cx.state)
-        } else {
-            Box::pin(async move { Ok(()) })
-        }
+        self.adapter
+            .handle_state(&cx.state, self.sync_context.load())
     }
 }
 
@@ -693,6 +697,25 @@ impl BroadcastListener for RpcMempoolAdapter {
 impl SelfBroadcastListener for RpcMempoolAdapter {
     async fn handle_message(&self, message: Bytes) {
         self.inner.send_external(message);
+    }
+}
+
+#[derive(Clone)]
+struct SharedSyncContext(Arc<AtomicU8>);
+
+impl SharedSyncContext {
+    fn store(&self, context: CollatorSyncContext) {
+        self.0.store(context as u8, Ordering::Release);
+    }
+
+    fn load(&self) -> CollatorSyncContext {
+        self.0.load(Ordering::Acquire).try_into().unwrap()
+    }
+}
+
+impl From<CollatorSyncContext> for SharedSyncContext {
+    fn from(value: CollatorSyncContext) -> Self {
+        Self(Arc::new(AtomicU8::new(value as u8)))
     }
 }
 

@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use everscale_types::models::*;
 use parking_lot::Mutex;
 
@@ -8,6 +10,11 @@ pub struct NodeStateStorage {
     db: BaseDb,
     last_mc_block_id: BlockIdCache,
     init_mc_block_id: BlockIdCache,
+}
+
+pub enum NodeSyncState {
+    PersistentState,
+    Blocks,
 }
 
 impl NodeStateStorage {
@@ -26,6 +33,17 @@ impl NodeStateStorage {
         }
 
         this
+    }
+
+    pub fn get_node_sync_state(&self) -> Option<NodeSyncState> {
+        let init = self.load_init_mc_block_id()?;
+        let last = self.load_last_mc_block_id()?;
+
+        match last.seqno.cmp(&init.seqno) {
+            Ordering::Equal => Some(NodeSyncState::PersistentState),
+            Ordering::Greater => Some(NodeSyncState::Blocks),
+            Ordering::Less => None,
+        }
     }
 
     pub fn store_last_mc_block_id(&self, id: &BlockId) {

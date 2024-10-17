@@ -74,7 +74,11 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Waits for the specified block by prev_id to be received and returns it
     async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
+    async fn handle_state(
+        &self,
+        state: &ShardStateStuff,
+        sync_ctx: CollatorSyncContext,
+    ) -> Result<()>;
     /// Loqd queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
 }
@@ -202,7 +206,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         self.wait_for_block_ext(block_id).await
     }
 
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
+    async fn handle_state(
+        &self,
+        state: &ShardStateStuff,
+        _sync_ctx: CollatorSyncContext,
+    ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
@@ -448,6 +456,27 @@ fn process_signatures(
         total_weight: sig_count as u64,
         signatures,
     })
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone)]
+pub enum CollatorSyncContext {
+    Persistent = 0,
+    Historical = 1,
+    Recent = 2,
+}
+
+impl TryFrom<u8> for CollatorSyncContext {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(CollatorSyncContext::Persistent),
+            1 => Ok(CollatorSyncContext::Historical),
+            2 => Ok(CollatorSyncContext::Recent),
+            i => anyhow::bail!("invalid CollatorActivationState value: {i}"),
+        }
+    }
 }
 
 struct PreparedProof {

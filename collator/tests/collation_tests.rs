@@ -14,7 +14,7 @@ use tycho_collator::internal_queue::state::session_state::SessionStateImplFactor
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
-use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
+use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{supported_capabilities, CollationConfig, MsgsExecutionParams};
 use tycho_collator::validator::ValidatorStdImpl;
@@ -49,7 +49,8 @@ impl StateSubscriber for StrangeBlockProvider {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter.handle_state(&cx.state)
+        self.adapter
+            .handle_state(&cx.state, CollatorSyncContext::Recent)
     }
 }
 

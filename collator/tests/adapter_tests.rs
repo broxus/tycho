@@ -10,7 +10,7 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
-    StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
+    CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::BlockStuffForSync;
@@ -235,7 +235,9 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 )
                 .unwrap();
 
-                let handle_block = adapter.handle_state(&state).await;
+                let handle_block = adapter
+                    .handle_state(&state, CollatorSyncContext::Recent)
+                    .await;
                 assert!(
                     handle_block.is_ok(),
                     "Block {i} should be handled after being added",
