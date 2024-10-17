@@ -184,6 +184,16 @@ impl_provider_tuple! {
     4: e = T4,
 }
 
+pub struct CheckProof<'a> {
+    pub mc_block_id: &'a BlockId,
+    pub block: &'a BlockStuff,
+    pub proof: &'a BlockProofStuffAug,
+    pub queue_diff: &'a QueueDiffStuffAug,
+
+    /// Whether to store `proof` and `queue_diff` if they are valid.
+    pub store_on_success: bool,
+}
+
 // TODO: Rename to something better since it checks proofs queue diffs now,
 //       and I don't want to parse block info twice to check queue diff separately.
 pub struct ProofChecker {
@@ -201,15 +211,17 @@ impl ProofChecker {
         }
     }
 
-    pub async fn check_proof(
-        &self,
-        block: &BlockStuff,
-        proof: &BlockProofStuffAug,
-        queue_diff: &QueueDiffStuffAug,
-        store_proof_on_success: bool,
-    ) -> Result<NewBlockMeta> {
+    pub async fn check_proof(&self, ctx: CheckProof<'_>) -> Result<NewBlockMeta> {
         // TODO: Add labels with shard?
         let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
+
+        let CheckProof {
+            mc_block_id,
+            block,
+            proof,
+            queue_diff,
+            store_on_success,
+        } = ctx;
 
         anyhow::ensure!(
             block.id() == &proof.proof().proof_for,
@@ -225,7 +237,7 @@ impl ProofChecker {
         let meta = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
-            mc_ref_seqno: is_masterchain.then(|| block.id().seqno),
+            ref_by_mc_seqno: mc_block_id.seqno,
         };
 
         let block_storage = self.storage.block_storage();
@@ -291,7 +303,7 @@ impl ProofChecker {
             }
         }
 
-        if store_proof_on_success {
+        if store_on_success {
             // Store proof
             let res = block_storage
                 .store_block_proof(proof, MaybeExistingHandle::New(meta))

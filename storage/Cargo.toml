@@ -16,7 +16,7 @@ bitflags = { workspace = true }
 bumpalo = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
-crc = { workspace = true }
+crc32c = { workspace = true }
 dashmap = { workspace = true }
 everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }
@@ -33,7 +33,7 @@ serde = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 sysinfo = { workspace = true }
-tempfile = { workspace = true, optional = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs", "io-util"] }
@@ -50,7 +50,6 @@ anyhow = { workspace = true, features = ["backtrace"] }
 bytesize = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 tycho-block-util = { workspace = true, features = ["test"] }
@@ -58,7 +57,7 @@ tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]
-test = ["dep:tempfile"]
+test = ["tycho-block-util/test"]
 
 [lints]
 workspace = true

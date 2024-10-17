@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use everscale_types::models::BlockId;
-use tycho_block_util::block::ShardHeights;
-use tycho_block_util::state::is_persistent_state;
+use tycho_block_util::block::{BlockStuff, ShardHeights};
 use tycho_util::FastDashMap;
 
 pub(crate) use self::handle::BlockDataGuard;
@@ -37,18 +36,24 @@ impl BlockHandleStorage {
         updated
     }
 
-    pub fn set_has_persistent_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().add_flags(BlockFlags::HAS_PERSISTENT_STATE);
+    pub fn set_has_persistent_shard_state(&self, handle: &BlockHandle) -> bool {
+        let updated = handle
+            .meta()
+            .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE);
         if updated {
             self.store_handle(handle);
         }
         updated
     }
 
-    pub fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_ref_seq_no: u32) {
-        if handle.set_mc_ref_seqno(mc_ref_seq_no) {
+    pub fn set_has_persistent_queue_state(&self, handle: &BlockHandle) -> bool {
+        let updated = handle
+            .meta()
+            .add_flags(BlockFlags::HAS_PERSISTENT_QUEUE_STATE);
+        if updated {
             self.store_handle(handle);
         }
+        updated
     }
 
     pub fn create_or_load_handle(
@@ -211,10 +216,8 @@ impl BlockHandleStorage {
 
         // Load previous key blocks and check if the `key_block` is for persistent state
         while let Some(prev_key_block) = get_key_block() {
-            if is_persistent_state(
-                key_block.meta().gen_utime(),
-                prev_key_block.meta().gen_utime(),
-            ) {
+            if BlockStuff::compute_is_persistent(key_block.gen_utime(), prev_key_block.gen_utime())
+            {
                 // Found
                 return Some(key_block);
             }
@@ -353,14 +356,13 @@ mod tests {
         let meta = NewBlockMeta {
             is_key_block: false,
             gen_utime: 123,
-            mc_ref_seqno: None,
+            ref_by_mc_seqno: 456,
         };
 
         {
             let (handle, status) = block_handles.create_or_load_handle(&block_id, meta);
             assert_eq!(status, HandleCreationStatus::Created);
 
-            block_handles.assign_mc_ref_seq_no(&handle, 456);
             assert_eq!(handle.mc_ref_seqno(), 456);
             assert!(!handle.is_key_block());
             assert!(!handle.is_applied());

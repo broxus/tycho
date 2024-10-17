@@ -28,8 +28,8 @@ use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
-    StateSubscriberContext, StorageBlockProvider,
+    PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StarterConfig,
+    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -232,6 +232,7 @@ pub struct Node {
 
     state_tracker: MinRefMcStateTracker,
 
+    starter_config: StarterConfig,
     rpc_config: Option<RpcConfig>,
     control_config: Option<ControlServerConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
@@ -358,6 +359,7 @@ impl Node {
             rpc_mempool_adapter,
             blockchain_rpc_client,
             state_tracker,
+            starter_config: node_config.starter,
             rpc_config: node_config.rpc,
             control_config: node_config.control,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
@@ -382,7 +384,6 @@ impl Node {
     /// Initialize the node and return the init block id.
     async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
-
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
@@ -390,6 +391,7 @@ impl Node {
                     self.storage.clone(),
                     self.blockchain_rpc_client.clone(),
                     self.zerostate,
+                    self.starter_config.clone(),
                 )
                 .cold_boot(zerostates.map(FileZerostateProvider))
                 .await?
@@ -540,6 +542,7 @@ impl Node {
         tracing::info!("collator started");
 
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
+        let ps_subscriber = PsSubscriber::new(self.storage.clone());
 
         // Create RPC
         // NOTE: This variable is used as a guard to abort the server future on drop.
@@ -607,7 +610,11 @@ impl Node {
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
-                        (collator_state_subscriber, rpc_state_subscriber),
+                        (
+                            collator_state_subscriber,
+                            rpc_state_subscriber,
+                            ps_subscriber,
+                        ),
                     ),
                     rpc_block_subscriber,
                     validator_subscriber,

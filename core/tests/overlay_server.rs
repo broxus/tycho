@@ -3,16 +3,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::BlockId;
+use everscale_types::boc::Boc;
+use everscale_types::models::{BlockId, ShardIdent};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
+use tycho_block_util::state::ShardStateStuff;
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, DataRequirement,
 };
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
-use tycho_storage::Storage;
+use tycho_storage::{MappedFile, NewBlockMeta, PersistentStateKind, Storage};
 
 use crate::network::TestNode;
 
@@ -255,6 +257,92 @@ async fn overlay_server_blocks() -> Result<()> {
             }
         }
     }
+
+    tracing::info!("done!");
+    Ok(())
+}
+
+#[tokio::test]
+async fn overlay_server_persistent_state() -> Result<()> {
+    tycho_util::test::init_logger("overlay_server_persistent_state", "info");
+
+    let (storage, _tmp_dir) = storage::init_storage().await?;
+
+    let shard_states = storage.shard_state_storage();
+    let persistent_states = storage.persistent_state_storage();
+
+    // Prepare zerostate
+    static ZEROSTATE_BOC: &[u8] = include_bytes!("../tests/data/zerostate.boc");
+    let zerostate_root = Boc::decode(ZEROSTATE_BOC)?;
+    let zerostate_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: *zerostate_root.repr_hash(),
+        file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
+    };
+
+    // Write zerostate to db
+    let (zerostate_handle, _) = storage
+        .block_handle_storage()
+        .create_or_load_handle(&zerostate_id, NewBlockMeta::zero_state(0, true));
+
+    let zerostate = ShardStateStuff::from_root(
+        &zerostate_id,
+        zerostate_root,
+        shard_states.min_ref_mc_state(),
+    )?;
+    shard_states
+        .store_state(&zerostate_handle, &zerostate)
+        .await?;
+
+    {
+        let mut zerostate_file = storage.temp_file_storage().unnamed_file().open()?;
+        std::io::copy(
+            &mut std::convert::identity(ZEROSTATE_BOC),
+            &mut zerostate_file,
+        )?;
+
+        persistent_states
+            .store_shard_state_file(0, &zerostate_handle, zerostate_file)
+            .await?;
+    }
+
+    assert!(zerostate_handle.has_persistent_shard_state());
+
+    persistent_states
+        .get_state_info(&zerostate_id, PersistentStateKind::Shard)
+        .unwrap();
+
+    // Prepare network
+    let nodes = network::make_network(storage.clone(), 10);
+
+    network::discover(&nodes).await?;
+
+    tracing::info!("making overlay requests...");
+
+    let node = nodes.first().unwrap();
+
+    let client = BlockchainRpcClient::builder()
+        .with_public_overlay_client(PublicOverlayClient::new(
+            node.network().clone(),
+            node.public_overlay().clone(),
+            Default::default(),
+        ))
+        .build();
+
+    let pending_state = client
+        .find_persistent_state(&zerostate_id, PersistentStateKind::Shard)
+        .await?;
+
+    let temp_file = client
+        .download_persistent_state(
+            pending_state,
+            storage.temp_file_storage().unnamed_file().open()?,
+        )
+        .await?;
+
+    let mapped = MappedFile::from_existing_file(temp_file)?;
+    assert_eq!(mapped.as_slice(), ZEROSTATE_BOC);
 
     tracing::info!("done!");
     Ok(())

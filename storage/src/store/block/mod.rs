@@ -129,7 +129,7 @@ impl BlockStorage {
 
             let data = match self.db.package_entries.get(key.to_vec())? {
                 Some(a) => a,
-                None => return Err(BlockStorageError::InvalidBlockData.into()),
+                None => return Err(BlockStorageError::BlockDataNotFound.into()),
             };
 
             self.spawn_split_block_data(&block_id, &data).await??;
@@ -301,10 +301,27 @@ impl BlockStorage {
     }
 
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        const BIG_DATA_THRESHOLD: usize = 1 << 20; // 1 MB
+
         let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
 
-        let raw_block = self.load_block_data_raw_ref(handle).await?;
-        BlockStuff::deserialize(handle.id(), raw_block.as_ref())
+        if !handle.has_data() {
+            return Err(BlockStorageError::BlockDataNotFound.into());
+        }
+        let FullBlockDataGuard { _lock, data } = self
+            .get_data_ref(handle, &PackageEntryKey::block(handle.id()))
+            .await?;
+
+        if data.len() > BIG_DATA_THRESHOLD {
+            BlockStuff::deserialize(handle.id(), data.as_ref())
+        } else {
+            let handle = handle.clone();
+
+            // SAFETY: `data` was created by the `self.db` RocksDB instance.
+            let owned_data =
+                unsafe { weedb::OwnedPinnableSlice::new(self.db.rocksdb().clone(), data) };
+            rayon_run(move || BlockStuff::deserialize(handle.id(), owned_data.as_ref())).await
+        }
     }
 
     pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
@@ -624,11 +641,12 @@ impl BlockStorage {
 
     /// Loads an archive chunk.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
-        if offset % ARCHIVE_CHUNK_SIZE != 0 {
+        let chunk_size = self.archive_chunk_size().get() as u64;
+        if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
-        let chunk_index = offset / ARCHIVE_CHUNK_SIZE;
+        let chunk_index = offset / chunk_size;
 
         let mut key = [0u8; tables::Archives::KEY_LEN];
         key[..4].copy_from_slice(&id.to_be_bytes());
@@ -659,13 +677,14 @@ impl BlockStorage {
     }
 
     pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Vec<u8>> {
-        if offset % BLOCK_DATA_CHUNK_SIZE != 0 {
+        let chunk_size = self.block_data_chunk_size().get();
+        if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
         let key = BlockDataEntryKey {
             block_id: block_id.into(),
-            chunk_index: offset / BLOCK_DATA_CHUNK_SIZE,
+            chunk_index: offset / chunk_size,
         };
 
         let chunk = self
@@ -820,15 +839,15 @@ impl BlockStorage {
 
         match self.db.package_entries.get(id.to_vec())? {
             Some(a) => Ok(a.to_vec()),
-            None => Err(BlockStorageError::InvalidBlockData.into()),
+            None => Err(BlockStorageError::PackageEntryNotFound.into()),
         }
     }
 
-    async fn get_data_ref<'a>(
+    async fn get_data_ref<'a, 'b: 'a>(
         &'a self,
-        handle: &'a BlockHandle,
+        handle: &'b BlockHandle,
         id: &PackageEntryKey,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
+    ) -> Result<FullBlockDataGuard<'a>> {
         let lock = match id.ty {
             ArchiveEntryType::Block => handle.block_data_lock(),
             ArchiveEntryType::Proof => handle.proof_data_lock(),
@@ -839,7 +858,7 @@ impl BlockStorage {
 
         match self.db.package_entries.get(id.to_vec())? {
             Some(data) => Ok(FullBlockDataGuard { _lock: lock, data }),
-            None => Err(BlockStorageError::InvalidBlockData.into()),
+            None => Err(BlockStorageError::PackageEntryNotFound.into()),
         }
     }
 
@@ -885,6 +904,7 @@ impl BlockStorage {
     fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
+        let chunk_size = self.archive_chunk_size().get() as u64;
 
         let span = tracing::Span::current();
         let is_running = Arc::new(AtomicBool::new(true));
@@ -906,7 +926,7 @@ impl BlockStorage {
                     .ok_or(BlockStorageError::ArchiveNotFound)?;
                 assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
-                let mut writer = ArchiveWriter::new(&db, archive_id, ARCHIVE_CHUNK_SIZE)?;
+                let mut writer = ArchiveWriter::new(&db, archive_id, chunk_size)?;
                 let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
 
                 // Write archive prefix
@@ -993,6 +1013,7 @@ impl BlockStorage {
         data: &[u8],
     ) -> JoinHandle<Result<()>> {
         let db = self.db.clone();
+        let chunk_size = self.block_data_chunk_size().get() as usize;
 
         let span = tracing::Span::current();
         let handle = tokio::task::spawn_blocking({
@@ -1007,7 +1028,7 @@ impl BlockStorage {
                 let mut compressed = Vec::new();
                 tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
 
-                let chunks = compressed.chunks(BLOCK_DATA_CHUNK_SIZE as usize);
+                let chunks = compressed.chunks(chunk_size);
                 for (index, chunk) in chunks.enumerate() {
                     let key = BlockDataEntryKey {
                         block_id,
@@ -1410,8 +1431,8 @@ enum BlockStorageError {
     BlockHandleIdMismatch,
     #[error("Block handle not found")]
     BlockHandleNotFound,
-    #[error("Invalid block data")]
-    InvalidBlockData,
+    #[error("Package entry not found")]
+    PackageEntryNotFound,
     #[error("Offset is outside of the archive slice")]
     InvalidOffset,
 }
@@ -1451,9 +1472,9 @@ mod tests {
                 .build(block_id);
 
             let block_meta = NewBlockMeta {
-                is_key_block: seqno == 0,
+                is_key_block: shard.is_masterchain() && seqno == 0,
                 gen_utime: 0,
-                mc_ref_seqno: Some(seqno),
+                ref_by_mc_seqno: seqno,
             };
 
             let store_block_data = || {
@@ -1560,9 +1581,9 @@ mod tests {
                 entry.push(block_id);
 
                 let (handle, _) = block_handles.create_or_load_handle(&block_id, NewBlockMeta {
-                    is_key_block: seqno == 0,
+                    is_key_block: shard.is_masterchain() && seqno == 0,
                     gen_utime: 0,
-                    mc_ref_seqno: None,
+                    ref_by_mc_seqno: seqno,
                 });
 
                 for ty in ENTRY_TYPES {

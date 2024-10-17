@@ -56,6 +56,15 @@ impl CollatorStdImpl {
         let is_masterchain = shard.is_masterchain();
         let config_address = &mc_data.config.address;
 
+        // Compute a masterchain block seqno which will reference this block.
+        let ref_by_mc_seqno = if is_masterchain {
+            // The block itself for the masterchain
+            collation_data.block_id_short.seqno
+        } else {
+            // And the next masterchain block for shards
+            mc_data.block_id.seqno + 1
+        };
+
         let mut processed_accounts_res = Ok(Default::default());
         let mut build_account_blocks_elapsed = Duration::ZERO;
         let mut in_msgs_res = Ok(Default::default());
@@ -389,6 +398,7 @@ impl CollatorStdImpl {
         let collated_data = vec![];
 
         let block_candidate = Box::new(BlockCandidate {
+            ref_by_mc_seqno,
             block: new_block,
             is_key_block: new_block_info.key_block,
             prev_blocks_ids: prev_shard_data.blocks_ids().clone(),

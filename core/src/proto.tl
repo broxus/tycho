@@ -1,7 +1,3 @@
----types---
-
-bigBytes ? = BigBytes;
-
 // Overlay
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -107,6 +103,7 @@ blockchain.keyBlockProof.notFound = blockchain.KeyBlockProof;
 *
 * @param id             archive id
 * @param size           archive size in bytes
+* @param chunk_size     chunk size in bytes
 */
 blockchain.archiveInfo.found
     id:long
@@ -126,13 +123,18 @@ blockchain.archiveInfo.tooNew = blockchain.ArchiveInfo;
 blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 
 /**
-* Node response when it has the requested persistent state
+* A successful response for the 'getPersistentStateInfo' query
 *
 * @param size           state file size in bytes
+* @param chunk_size     chunk size in bytes
 */
-blockchain.persistentStateInfo.found size:long = blockchain.PersistentStateInfo;
+blockchain.persistentStateInfo.found
+    size:long
+    chunk_size:long
+    = blockchain.PersistentStateInfo;
+
 /**
-* Node response when it doesn't have the requested state
+* An unsuccessul response for the 'getPersistentStateInfo' query
 */
 blockchain.persistentStateInfo.notFound = blockchain.PersistentStateInfo;
 
@@ -220,23 +222,42 @@ blockchain.getArchiveChunk
     = overlay.Response blockchain.Data;
 
 /**
-* Get persistent state info
+* Get persistent shard state info
 *
 * @param block_id       requested block id
 */
-blockchain.getPersistentStateInfo
+blockchain.getPersistentShardStateInfo
     block_id:blockchain.blockId
     = overlay.Response blockchain.PersistentStateInfo;
 
 /**
-* Get persisten state part
+* Get persistent shard state part
 *
 * @param block_id       requested block id
 * @param limit          max response size in bytes
 * @param offset         part offset in bytes
 */
-blockchain.getPersistentStatePart
+blockchain.getPersistentShardStateChunk
     block_id:blockchain.blockId
-    limit:int
+    offset:long
+    = overlay.Response blockchain.Data;
+
+/**
+* Get persistent queue state info
+*
+* @param block_id       requested block id
+*/
+blockchain.getPersistentQueueStateInfo
+    block_id:blockchain.blockId
+    = overlay.Response blockchain.PersistentStateInfo;
+
+/**
+* Get persistent queue state part
+*
+* @param block_id       requested block id
+* @param offset         part offset in bytes
+*/
+blockchain.getPersistentQueueStateChunk
+    block_id:blockchain.blockId
     offset:long
     = overlay.Response blockchain.Data;

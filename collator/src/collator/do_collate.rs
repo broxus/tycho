@@ -491,7 +491,7 @@ impl CollatorStdImpl {
             let meta = NewBlockMeta {
                 is_key_block,
                 gen_utime: collation_data.gen_utime,
-                mc_ref_seqno: None,
+                ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
             };
             let adapter = self.state_node_adapter.clone();
             let labels = labels.clone();

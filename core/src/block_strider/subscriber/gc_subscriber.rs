@@ -128,12 +128,13 @@ impl GcSubscriber {
             tracing::info!("manager stopped");
         }
 
-        let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
-        let mut last_known_pss_seqno = 0;
+        let persistent_states = storage.persistent_state_storage();
 
         let compute_offset = |gen_utime: u32| -> Duration {
-            let created_at = std::time::UNIX_EPOCH + Duration::from_secs(gen_utime as _);
-            (created_at + config.persistent_state_offset)
+            let usable_at = std::time::UNIX_EPOCH
+                + Duration::from_secs(gen_utime as _)
+                + BlockStuff::BOOT_OFFSET;
+            (usable_at + config.persistent_state_offset)
                 .duration_since(std::time::SystemTime::now())
                 .unwrap_or_default()
         };
@@ -143,21 +144,17 @@ impl GcSubscriber {
             let target_seqno = 'seqno: {
                 let wait_for_state_fut = async {
                     loop {
-                        let mut new_state_found = pin!(persistent_state_keeper.new_state_found());
-                        let Some(pss_handle) = persistent_state_keeper.current() else {
+                        let mut new_state_found =
+                            pin!(persistent_states.oldest_known_handle_changed());
+
+                        let Some(pss_handle) = persistent_states.load_oldest_known_handle() else {
                             // Wait for the new state
                             new_state_found.await;
                             continue;
                         };
 
-                        if pss_handle.id().seqno <= last_known_pss_seqno {
-                            // Wait for the new state
-                            new_state_found.await;
-                            continue;
-                        }
-
                         // Wait until it's safe to remove the archives.
-                        let time_to_wait = compute_offset(pss_handle.meta().gen_utime());
+                        let time_to_wait = compute_offset(pss_handle.gen_utime());
                         tokio::select! {
                             _ = tokio::time::sleep(time_to_wait) => break pss_handle.id().seqno,
                             _ = &mut new_state_found => continue,
@@ -166,11 +163,8 @@ impl GcSubscriber {
                 };
 
                 tokio::select! {
-                    // Wait for a timepoint until the reset persistent state
-                    seqno = wait_for_state_fut => {
-                        last_known_pss_seqno = seqno;
-                        break 'seqno seqno
-                    },
+                    // Wait until we can remove archives before that state
+                    seqno = wait_for_state_fut => break 'seqno seqno,
                     // Or handle the manual trigger
                     trigger = manual_rx.changed() => {
                         if trigger.is_err() {

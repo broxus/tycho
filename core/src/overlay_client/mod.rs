@@ -145,6 +145,10 @@ impl PublicOverlayClient {
 pub enum Error {
     #[error("no active neighbours found")]
     NoNeighbours,
+    #[error("no neighbour has the requested data")]
+    NotFound,
+    #[error("the requested data is too new")]
+    TooNew,
     #[error("network error: {0}")]
     NetworkError(#[source] anyhow::Error),
     #[error("invalid response: {0}")]
@@ -368,10 +372,7 @@ impl<A> QueryResponse<A> {
     }
 
     pub fn split(self) -> (QueryResponseHandle, A) {
-        let handle = QueryResponseHandle {
-            neighbour: self.neighbour,
-            roundtrip_ms: self.roundtrip_ms,
-        };
+        let handle = QueryResponseHandle::with_roundtrip_ms(self.neighbour, self.roundtrip_ms);
         (handle, self.data)
     }
 
@@ -424,6 +425,13 @@ pub struct QueryResponseHandle {
 }
 
 impl QueryResponseHandle {
+    pub fn with_roundtrip_ms(neighbour: Neighbour, roundtrip_ms: u64) -> Self {
+        Self {
+            neighbour,
+            roundtrip_ms,
+        }
+    }
+
     pub fn accept(self) -> Neighbour {
         self.track_request(true);
         self.neighbour

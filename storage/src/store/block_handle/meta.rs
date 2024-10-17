@@ -8,7 +8,7 @@ use crate::util::{StoredValue, StoredValueBuffer};
 pub struct NewBlockMeta {
     pub is_key_block: bool,
     pub gen_utime: u32,
-    pub mc_ref_seqno: Option<u32>,
+    pub ref_by_mc_seqno: u32,
 }
 
 impl NewBlockMeta {
@@ -16,7 +16,7 @@ impl NewBlockMeta {
         Self {
             is_key_block,
             gen_utime,
-            mc_ref_seqno: Some(0),
+            ref_by_mc_seqno: 0,
         }
     }
 }
@@ -45,7 +45,7 @@ impl BlockMeta {
                     IS_KEY_BLOCK_MASK
                 } else {
                     0
-                } | data.mc_ref_seqno.unwrap_or_default() as u64,
+                } | data.ref_by_mc_seqno as u64,
             ),
             gen_utime: data.gen_utime,
         }
@@ -65,7 +65,7 @@ impl BlockMeta {
         BlockFlags::from_bits_retain(flags as u32)
     }
 
-    pub fn mc_ref_seqno(&self) -> u32 {
+    pub fn ref_by_mc_seqno(&self) -> u32 {
         self.flags.load(Ordering::Acquire) as u32
     }
 
@@ -76,10 +76,6 @@ impl BlockMeta {
     pub(crate) fn add_flags(&self, flags: BlockFlags) -> bool {
         let flags = (flags.bits() as u64) << BLOCK_FLAGS_OFFSET;
         self.flags.fetch_or(flags, Ordering::Release) & flags != flags
-    }
-
-    pub(crate) fn set_mc_ref_seqno(&self, seqno: u32) -> u32 {
-        self.flags.fetch_or(seqno as u64, Ordering::Release) as u32
     }
 }
 
@@ -118,8 +114,10 @@ bitflags::bitflags! {
         const HAS_PROOF = 1 << 1;
         const HAS_QUEUE_DIFF = 1 << 2;
 
-        const HAS_STATE = 1 << 4;
-        const HAS_PERSISTENT_STATE = 1 << 5;
+        const HAS_STATE = 1 << 3;
+        const HAS_PERSISTENT_SHARD_STATE = 1 << 4;
+        const HAS_PERSISTENT_QUEUE_STATE = 1 << 5;
+
         const HAS_NEXT_1 = 1 << 6;
         const HAS_NEXT_2 = 1 << 7;
         const HAS_PREV_1 = 1 << 8;
@@ -146,10 +144,10 @@ mod tests {
         let meta = BlockMeta::with_data(NewBlockMeta {
             is_key_block: true,
             gen_utime: 123456789,
-            mc_ref_seqno: Some(4311231),
+            ref_by_mc_seqno: 4311231,
         });
         assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
-        assert_eq!(meta.mc_ref_seqno(), 4311231);
+        assert_eq!(meta.ref_by_mc_seqno(), 4311231);
         assert_eq!(meta.gen_utime(), 123456789);
 
         let stored = meta.to_vec();
@@ -157,7 +155,7 @@ mod tests {
 
         let loaded = BlockMeta::from_slice(&stored);
         assert_eq!(loaded.flags(), BlockFlags::IS_KEY_BLOCK);
-        assert_eq!(loaded.mc_ref_seqno(), 4311231);
+        assert_eq!(loaded.ref_by_mc_seqno(), 4311231);
         assert_eq!(loaded.gen_utime(), 123456789);
 
         let updated = meta.add_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);

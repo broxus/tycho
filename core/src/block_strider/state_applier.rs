@@ -165,7 +165,7 @@ where
         tracing::info!(id = ?cx.block.id(), "handling block");
 
         // Update metrics
-        let gen_utime = prepared.handle.meta().gen_utime() as f64;
+        let gen_utime = prepared.handle.gen_utime() as f64;
         let seqno = prepared.handle.id().seqno as f64;
         let now = tycho_util::time::now_millis() as f64 / 1000.0;
 
@@ -225,14 +225,9 @@ where
             .store_block_data(block, archive_data, NewBlockMeta {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: Some(mc_block_id.seqno),
+                ref_by_mc_seqno: mc_block_id.seqno,
             })
             .await?;
-
-        self.inner
-            .storage
-            .block_handle_storage()
-            .assign_mc_ref_seq_no(&res.handle, mc_block_id.seqno);
 
         Ok(res.handle)
     }

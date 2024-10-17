@@ -619,7 +619,7 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
                 .load_handle(&key_block_id)
                 .with_context(|| format!("key block not found: {key_block_id}"))?;
 
-            if handle.meta().gen_utime() <= utime {
+            if handle.gen_utime() <= utime {
                 break 'last_key_block handle;
             }
         }

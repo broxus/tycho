@@ -1,20 +1,32 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
+use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::Storage;
+use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
 
 mod cold_boot;
 
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarterConfig {
+    /// Choose persistent state which is at least this old.
+    ///
+    /// Default: None
+    #[serde(with = "serde_helpers::humantime")]
+    pub custom_boot_offset: Option<Duration>,
+}
+
 /// Bootstrapping utils.
-///
-/// TODO: Use it as a block provider.
+// TODO: Use it as a block provider?
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Starter {
@@ -26,14 +38,20 @@ impl Starter {
         storage: Storage,
         blockchain_rpc_client: BlockchainRpcClient,
         zerostate: ZerostateId,
+        config: StarterConfig,
     ) -> Self {
         Self {
             inner: Arc::new(StarterInner {
                 storage,
                 blockchain_rpc_client,
                 zerostate,
+                config,
             }),
         }
+    }
+
+    pub fn config(&self) -> &StarterConfig {
+        &self.inner.config
     }
 
     /// Boot type when the node has not yet started syncing
@@ -51,6 +69,7 @@ struct StarterInner {
     storage: Storage,
     blockchain_rpc_client: BlockchainRpcClient,
     zerostate: ZerostateId,
+    config: StarterConfig,
 }
 
 pub trait ZerostateProvider {

@@ -36,6 +36,14 @@ impl MinRefMcStateTracker {
 pub struct RefMcStateHandle(Arc<HandleInner>);
 
 impl RefMcStateHandle {
+    #[cfg(any(test, feature = "test"))]
+    pub fn new_untracked(mc_seqno: u32) -> Self {
+        Self(Arc::new(HandleInner {
+            min_ref_mc_state: Arc::new(Inner::default()),
+            mc_seqno,
+        }))
+    }
+
     pub fn tracker(&self) -> &MinRefMcStateTracker {
         MinRefMcStateTracker::wrap(&self.0.min_ref_mc_state)
     }

@@ -11,10 +11,12 @@ use tycho_block_util::state::ShardStateStuff;
 pub use self::futures::{OptionHandleFut, OptionPrepareFut};
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
+pub use self::ps_subscriber::PsSubscriber;
 
 mod futures;
 mod gc_subscriber;
 mod metrics_subscriber;
+mod ps_subscriber;
 
 // === trait BlockSubscriber ===
 

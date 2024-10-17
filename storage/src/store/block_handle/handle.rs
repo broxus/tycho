@@ -51,8 +51,16 @@ impl BlockHandle {
         &self.inner.id
     }
 
+    pub fn is_masterchain(&self) -> bool {
+        self.inner.id.is_masterchain()
+    }
+
     pub fn meta(&self) -> &BlockMeta {
         &self.inner.meta
+    }
+
+    pub fn gen_utime(&self) -> u32 {
+        self.inner.meta.gen_utime()
     }
 
     pub fn is_key_block(&self) -> bool {
@@ -96,18 +104,25 @@ impl BlockHandle {
         self.inner.meta.flags().contains(BlockFlags::HAS_STATE)
     }
 
-    pub fn has_persistent_state(&self) -> bool {
+    pub fn has_persistent_shard_state(&self) -> bool {
         self.inner
             .meta
             .flags()
-            .contains(BlockFlags::HAS_PERSISTENT_STATE)
+            .contains(BlockFlags::HAS_PERSISTENT_SHARD_STATE)
+    }
+
+    pub fn has_persistent_queue_state(&self) -> bool {
+        self.inner
+            .meta
+            .flags()
+            .contains(BlockFlags::HAS_PERSISTENT_QUEUE_STATE)
     }
 
     pub fn mc_ref_seqno(&self) -> u32 {
         if self.inner.id.shard.is_masterchain() {
             self.inner.id.seqno
         } else {
-            self.inner.meta.mc_ref_seqno()
+            self.inner.meta.ref_by_mc_seqno()
         }
     }
 
@@ -121,14 +136,6 @@ impl BlockHandle {
 
     pub(crate) fn queue_diff_data_lock(&self) -> &BlockDataLock {
         &self.inner.queue_diff_data_lock
-    }
-
-    pub(crate) fn set_mc_ref_seqno(&self, mc_seqno: u32) -> bool {
-        match self.meta().set_mc_ref_seqno(mc_seqno) {
-            0 => true,
-            prev_seqno if prev_seqno == mc_seqno => false,
-            _ => panic!("mc ref seqno already set"),
-        }
     }
 }
 

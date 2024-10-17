@@ -1,17 +1,14 @@
-#![allow(clippy::disallowed_types)]
+#![expect(clippy::disallowed_types)]
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
-/// Memory buffer that is mapped to a file
-pub struct MappedFile {
-    #[allow(unused)]
-    file: File,
-    length: usize,
-    ptr: *mut libc::c_void,
+/// Mutable memory buffer that is mapped to a file
+pub struct MappedFileMut {
+    inner: MappedFile,
 }
 
-impl MappedFile {
+impl MappedFileMut {
     /// Opens a file and maps it to memory. Resizes the file to `length` bytes.
     pub fn new<P: AsRef<Path>>(path: P, length: usize) -> std::io::Result<Self> {
         let file = std::fs::OpenOptions::new()
@@ -28,14 +25,103 @@ impl MappedFile {
 
     /// Opens an existing file and maps it to memory
     pub fn from_existing_file(file: File) -> std::io::Result<Self> {
+        MappedFile::from_existing_file_ext(file, libc::PROT_READ | libc::PROT_WRITE)
+            .map(|inner| Self { inner })
+    }
+
+    /// Mapped buffer length in bytes
+    pub fn length(&self) -> usize {
+        self.inner.length
+    }
+
+    /// Copies chunk of bytes to the specified buffer
+    ///
+    /// # Safety
+    /// The caller must take care that the buffer is not out of the mapped memory!
+    pub unsafe fn read_exact_at(&self, offset: usize, buffer: &mut [u8]) {
+        std::ptr::copy_nonoverlapping(
+            self.inner.ptr.cast::<u8>().add(offset),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        );
+    }
+
+    /// Copies buffer to the mapped memory
+    ///
+    /// # Safety
+    /// The caller must take care that the buffer is not out of the mapped memory!
+    pub unsafe fn write_all_at(&mut self, offset: usize, buffer: &[u8]) {
+        std::ptr::copy_nonoverlapping(
+            buffer.as_ptr(),
+            self.inner.ptr.cast::<u8>().add(offset),
+            buffer.len(),
+        );
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: ptr and length were initialized once on creation
+        unsafe { std::slice::from_raw_parts(self.inner.ptr.cast::<u8>(), self.inner.length) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: ptr and length were initialized once on creation
+        unsafe { std::slice::from_raw_parts_mut(self.inner.ptr.cast::<u8>(), self.inner.length) }
+    }
+}
+
+impl AsRef<MappedFile> for MappedFileMut {
+    fn as_ref(&self) -> &MappedFile {
+        &self.inner
+    }
+}
+
+impl AsRef<[u8]> for MappedFileMut {
+    fn as_ref(&self) -> &[u8] {
+        self.inner.as_slice()
+    }
+}
+
+impl AsMut<[u8]> for MappedFileMut {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+}
+
+impl std::ops::Deref for MappedFileMut {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for MappedFileMut {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+/// Memory buffer that is mapped to a file
+pub struct MappedFile {
+    length: usize,
+    ptr: *mut libc::c_void,
+}
+
+impl MappedFile {
+    /// Opens an existing file and maps it to memory
+    pub fn from_existing_file(file: File) -> std::io::Result<Self> {
+        Self::from_existing_file_ext(file, libc::PROT_READ)
+    }
+
+    fn from_existing_file_ext(file: File, prot: libc::c_int) -> std::io::Result<Self> {
         let length = file.metadata()?.len() as usize;
 
-        // SAFETY: File was opened successfully, file mode is RW, offset is aligned
+        // SAFETY: File was opened successfully, offset is aligned
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 length,
-                libc::PROT_READ | libc::PROT_WRITE,
+                prot,
                 libc::MAP_SHARED,
                 file.as_raw_fd(),
                 0,
@@ -50,7 +136,7 @@ impl MappedFile {
             return Err(std::io::Error::last_os_error());
         }
 
-        Ok(Self { file, length, ptr })
+        Ok(Self { length, ptr })
     }
 
     /// Mapped buffer length in bytes
@@ -64,20 +150,8 @@ impl MappedFile {
     /// The caller must take care that the buffer is not out of the mapped memory!
     pub unsafe fn read_exact_at(&self, offset: usize, buffer: &mut [u8]) {
         std::ptr::copy_nonoverlapping(
-            (self.ptr as *const u8).add(offset),
+            self.ptr.cast::<u8>().add(offset),
             buffer.as_mut_ptr(),
-            buffer.len(),
-        );
-    }
-
-    /// Copies buffer to the mapped memory
-    ///
-    /// # Safety
-    /// The caller must take care that the buffer is not out of the mapped memory!
-    pub unsafe fn write_all_at(&self, offset: usize, buffer: &[u8]) {
-        std::ptr::copy_nonoverlapping(
-            buffer.as_ptr(),
-            (self.ptr.cast::<u8>()).add(offset),
             buffer.len(),
         );
     }
@@ -85,6 +159,20 @@ impl MappedFile {
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: ptr and length were initialized once on creation
         unsafe { std::slice::from_raw_parts(self.ptr.cast::<u8>(), self.length) }
+    }
+}
+
+impl AsRef<[u8]> for MappedFile {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::Deref for MappedFile {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
     }
 }
 

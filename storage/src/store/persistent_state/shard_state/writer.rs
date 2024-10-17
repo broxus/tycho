@@ -1,4 +1,5 @@
 use std::collections::hash_map;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,18 +8,33 @@ use anyhow::{Context, Result};
 use everscale_types::cell::{CellDescriptor, HashBytes};
 use everscale_types::models::*;
 use smallvec::SmallVec;
+use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::FastHashMap;
 
-use crate::db::{BaseDb, FileDb, TempFile};
+use crate::db::{BaseDb, FileDb};
 
-pub struct StateWriter<'a> {
+pub struct ShardStateWriter<'a> {
     db: &'a BaseDb,
     states_dir: &'a FileDb,
     block_id: &'a BlockId,
 }
 
-impl<'a> StateWriter<'a> {
-    #[allow(unused)]
+impl<'a> ShardStateWriter<'a> {
+    pub const COMPRESSION_LEVEL: i32 = 9;
+
+    pub const FILE_EXTENSION: &'static str = "boc";
+
+    // Partially written BOC file.
+    const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
+
+    pub fn file_name(block_id: &BlockId) -> PathBuf {
+        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION)
+    }
+
+    pub fn temp_file_name(block_id: &BlockId) -> PathBuf {
+        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+    }
+
     pub fn new(db: &'a BaseDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
         Self {
             db,
@@ -27,8 +43,49 @@ impl<'a> StateWriter<'a> {
         }
     }
 
-    #[allow(unused)]
+    pub fn write_file(&self, mut boc_file: File, _is_cancelled: Option<&AtomicBool>) -> Result<()> {
+        let temp_file_name = Self::temp_file_name(self.block_id);
+        scopeguard::defer! {
+            self.states_dir.remove_file(&temp_file_name).ok();
+        }
+
+        boc_file.seek(SeekFrom::Start(0))?;
+
+        // Create states file
+        let compressed_file = self
+            .states_dir
+            .file(&temp_file_name)
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open()?;
+
+        let mut compressed_file = ZstdCompressedFile::new(
+            compressed_file,
+            Self::COMPRESSION_LEVEL,
+            FILE_BUFFER_LEN / 2,
+        )?;
+
+        std::io::copy(&mut boc_file, &mut compressed_file)?;
+
+        // Terminate the compressor and flush the file
+        compressed_file.finish()?;
+        compressed_file.flush()?;
+        drop(compressed_file);
+
+        // Atomically rename the file
+        self.states_dir
+            .file(&temp_file_name)
+            .rename(Self::file_name(self.block_id))
+            .map_err(Into::into)
+    }
+
     pub fn write(&self, root_hash: &HashBytes, is_cancelled: Option<&AtomicBool>) -> Result<()> {
+        let temp_file_name = Self::temp_file_name(self.block_id);
+        scopeguard::defer! {
+            self.states_dir.remove_file(&temp_file_name).ok();
+        }
+
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
         let mut intermediate = self
@@ -46,14 +103,15 @@ impl<'a> StateWriter<'a> {
             22 + offset_size * (1 + cell_count as usize) + (intermediate.total_size as usize);
 
         // Create states file
-        let mut file = self
+        let file = self
             .states_dir
-            .file(self.file_name())
+            .file(&temp_file_name)
             .create(true)
             .write(true)
             .truncate(true)
             .prealloc(file_size)
             .open()?;
+        let file = ZstdCompressedFile::new(file, Self::COMPRESSION_LEVEL, FILE_BUFFER_LEN / 2)?;
 
         // Write cells data in BOC format
         let mut buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN / 2, file);
@@ -91,7 +149,7 @@ impl<'a> StateWriter<'a> {
         // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
         for (i, &cell_size) in intermediate.cell_sizes.iter().rev().enumerate() {
-            if let Some(is_cancelled) = is_cancelled.as_ref() {
+            if let Some(is_cancelled) = is_cancelled {
                 if i % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
                     anyhow::bail!("Cell writing cancelled.")
                 }
@@ -122,17 +180,18 @@ impl<'a> StateWriter<'a> {
             buffer.write_all(&cell_buffer[..cell_size as usize])?;
         }
 
-        buffer.flush()?;
+        match buffer.into_inner() {
+            Ok(mut file) => {
+                file.finish()?;
+                file.flush()?;
+            }
+            Err(e) => return Err(e.into_error()).context("failed to flush the compressed buffer"),
+        }
 
-        Ok(())
-    }
-
-    pub fn remove(&self) -> Result<()> {
-        let file_name = self.file_name();
-        self.states_dir.remove_file(&file_name).context(format!(
-            "Failed to remove persistent state file {}",
-            self.states_dir.path().join(file_name).display()
-        ))
+        self.states_dir
+            .file(&temp_file_name)
+            .rename(Self::file_name(self.block_id))
+            .map_err(Into::into)
     }
 
     fn write_rev(
@@ -152,14 +211,7 @@ impl<'a> StateWriter<'a> {
             indices: SmallVec<[u32; 4]>,
         }
 
-        let mut file = self
-            .states_dir
-            .file(self.file_name().with_extension("temp"))
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open_as_temp()?;
+        let mut file = self.states_dir.unnamed_file().open()?;
 
         let raw = self.db.rocksdb().as_ref();
         let read_options = self.db.cells.read_config();
@@ -179,7 +231,7 @@ impl<'a> StateWriter<'a> {
         stack.push((iteration, StackItem::New(*root_hash)));
         indices.insert(*root_hash, (iteration, false));
 
-        let mut temp_file_buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN, &mut *file);
+        let mut temp_file_buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN, &mut file);
 
         while let Some((index, data)) = stack.pop() {
             if let Some(is_cancelled) = is_cancelled {
@@ -306,14 +358,10 @@ impl<'a> StateWriter<'a> {
             total_size,
         })
     }
-
-    fn file_name(&self) -> PathBuf {
-        PathBuf::from(self.block_id.to_string())
-    }
 }
 
 struct IntermediateState {
-    file: TempFile,
+    file: File,
     cell_sizes: Vec<u8>,
     total_size: u64,
 }

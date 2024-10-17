@@ -11,7 +11,7 @@ use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 use tycho_util::sync::rayon_run;
 
-use crate::block_strider::provider::{OptionalBlockStuff, ProofChecker};
+use crate::block_strider::provider::{CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
@@ -77,8 +77,18 @@ impl BlockchainBlockProvider {
                 .await
             {
                 Ok(res) => match res.data {
+                    Some(data)
+                        if data.block_id.shard != prev_block_id.shard
+                            || data.block_id.seqno != prev_block_id.seqno + 1 =>
+                    {
+                        res.neighbour.punish(PunishReason::Malicious);
+                        tracing::warn!("got response for an unknown block id");
+                    }
                     Some(data) => {
-                        let parsed = self.process_received_block(data, res.neighbour).await;
+                        let mc_block_id = data.block_id;
+                        let parsed = self
+                            .process_received_block(&mc_block_id, data, res.neighbour)
+                            .await;
                         if parsed.is_some() {
                             return parsed;
                         }
@@ -96,21 +106,28 @@ impl BlockchainBlockProvider {
         // TODO: Backoff?
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
 
+        let BlockIdRelation {
+            mc_block_id,
+            block_id,
+        } = block_id_relation;
+
         loop {
-            tracing::debug!(block_id = %block_id_relation.block_id, "get_block_full requested");
+            tracing::debug!(%block_id, "get_block_full requested");
             match self
                 .client
-                .get_block_full(&block_id_relation.block_id, DataRequirement::Expected)
+                .get_block_full(block_id, DataRequirement::Expected)
                 .await
             {
                 Ok(res) => match res.data {
                     Some(data) => {
-                        let parsed = self.process_received_block(data, res.neighbour).await;
+                        let parsed = self
+                            .process_received_block(mc_block_id, data, res.neighbour)
+                            .await;
                         if parsed.is_some() {
                             return parsed;
                         }
                     }
-                    None => tracing::warn!(%block_id_relation.block_id, "block not found"),
+                    None => tracing::warn!(%block_id, "block not found"),
                 },
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
@@ -121,6 +138,7 @@ impl BlockchainBlockProvider {
 
     async fn process_received_block(
         &self,
+        mc_block_id: &BlockId,
         block_full: BlockDataFull,
         neighbour: Neighbour,
     ) -> OptionalBlockStuff {
@@ -151,7 +169,13 @@ impl BlockchainBlockProvider {
                 let diff = WithArchiveData::new(diff, block_full.queue_diff_data);
                 if let Err(e) = self
                     .proof_checker
-                    .check_proof(&block, &proof, &diff, true)
+                    .check_proof(CheckProof {
+                        mc_block_id,
+                        block: &block,
+                        proof: &proof,
+                        queue_diff: &diff,
+                        store_on_success: true,
+                    })
                     .await
                 {
                     neighbour.punish(PunishReason::Malicious);
