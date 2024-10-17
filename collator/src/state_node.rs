@@ -77,7 +77,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn handle_state(
         &self,
         state: &ShardStateStuff,
-        collator_state: CollatorSyncContext,
+        sync_ctx: CollatorSyncContext,
     ) -> Result<()>;
     /// Loqd queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
@@ -209,7 +209,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn handle_state(
         &self,
         state: &ShardStateStuff,
-        _collator_state: CollatorSyncContext,
+        _sync_ctx: CollatorSyncContext,
     ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
