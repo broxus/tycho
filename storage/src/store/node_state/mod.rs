@@ -36,16 +36,13 @@ impl NodeStateStorage {
     }
 
     pub fn get_node_sync_state(&self) -> Option<NodeSyncState> {
-        let init_opt = self.load_init_mc_block_id();
-        let last_opt = self.load_last_mc_block_id();
+        let init = self.load_init_mc_block_id()?;
+        let last = self.load_last_mc_block_id()?;
 
-        match (init_opt, last_opt) {
-            (Some(init), Some(last)) => match last.seqno.cmp(&init.seqno) {
-                Ordering::Equal => Some(NodeSyncState::PersistentState),
-                Ordering::Greater => Some(NodeSyncState::Blocks),
-                Ordering::Less => None,
-            },
-            _ => None,
+        match last.seqno.cmp(&init.seqno) {
+            Ordering::Equal => Some(NodeSyncState::PersistentState),
+            Ordering::Greater => Some(NodeSyncState::Blocks),
+            Ordering::Less => None,
         }
     }
 
