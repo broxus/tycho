@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +13,8 @@ use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::{
-    BlockHandle, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta, PersistentStateKind,
-    Storage,
+    BlockHandle, FileBuilder, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
+    PersistentStateKind, Storage,
 };
 use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
@@ -608,21 +609,14 @@ impl StarterInner {
             State(ShardStateStuff),
         }
 
-        let rpc = &self.blockchain_rpc_client;
         let shard_states = self.storage.shard_state_storage();
         let persistent_states = self.storage.persistent_state_storage();
         let block_handles = self.storage.block_handle_storage();
 
         let temp = self.storage.temp_file_storage();
 
-        let mut state_file = temp.file(format!("state_{block_id}"));
+        let state_file = temp.file(format!("state_{block_id}"));
         let state_file_path = state_file.path().to_owned();
-
-        let mut temp_file = state_file.with_extension(TEMP_EXTENSION);
-        let temp_file_path = temp_file.path().to_owned();
-        scopeguard::defer! {
-            std::fs::remove_file(temp_file_path).ok();
-        };
 
         // NOTE: Intentionally dont spawn yet
         let remove_state_file = async move {
@@ -687,34 +681,16 @@ impl StarterInner {
         }
 
         // Try download the state
-        'attempt: for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
-            let file = loop {
-                if state_file.exists() {
-                    // Use the downloaded state file if it exists
-                    break state_file.read(true).open()?;
-                }
-
-                let try_download = async {
-                    let pending_state = rpc
-                        .find_persistent_state(block_id, PersistentStateKind::Shard)
-                        .await?;
-
-                    let output = temp_file.write(true).create(true).truncate(true).open()?;
-                    rpc.download_persistent_state(pending_state, output).await?;
-
-                    tokio::fs::rename(temp_file.path(), state_file.path()).await?;
-                    Ok::<_, anyhow::Error>(())
-                };
-
-                if let Err(e) = try_download.await {
+        for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
+            let file = match self
+                .download_persistent_state_file(block_id, PersistentStateKind::Shard, &state_file)
+                .await
+            {
+                Ok(file) => file,
+                Err(e) => {
                     tracing::error!(attempt, "failed to download persistent shard state: {e}");
-
-                    // TODO: backoff
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue 'attempt;
+                    continue;
                 }
-
-                // NOTE: Fill will be loaded on the next iteration of the inner loop
             };
 
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
@@ -756,18 +732,11 @@ impl StarterInner {
     ) -> Result<()> {
         let block_id = block_handle.id();
 
-        let rpc = &self.blockchain_rpc_client;
         let internal_queue = self.storage.internal_queue_storage();
         let temp = self.storage.temp_file_storage();
 
-        let mut state_file = temp.file(format!("queue_state_{block_id}"));
+        let state_file = temp.file(format!("queue_state_{block_id}"));
         let state_file_path = state_file.path().to_owned();
-
-        let mut temp_file = state_file.with_extension(TEMP_EXTENSION);
-        let temp_file_path = temp_file.path().to_owned();
-        scopeguard::defer! {
-            std::fs::remove_file(temp_file_path).ok();
-        };
 
         // NOTE: Intentionally dont spawn yet
         let remove_state_file = async move {
@@ -779,34 +748,16 @@ impl StarterInner {
             }
         };
 
-        'attempt: for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
-            let file = loop {
-                if state_file.exists() {
-                    // Use the downloaded state file if it exists
-                    break state_file.read(true).open()?;
-                }
-
-                let try_download = async {
-                    let pending_state = rpc
-                        .find_persistent_state(block_id, PersistentStateKind::Queue)
-                        .await?;
-
-                    let output = temp_file.write(true).create(true).truncate(true).open()?;
-                    rpc.download_persistent_state(pending_state, output).await?;
-
-                    tokio::fs::rename(temp_file.path(), state_file.path()).await?;
-                    Ok::<_, anyhow::Error>(())
-                };
-
-                if let Err(e) = try_download.await {
+        for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
+            let file = match self
+                .download_persistent_state_file(block_id, PersistentStateKind::Queue, &state_file)
+                .await
+            {
+                Ok(file) => file,
+                Err(e) => {
                     tracing::error!(attempt, "failed to download persistent queue state: {e}");
-
-                    // TODO: backoff
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue 'attempt;
+                    continue;
                 }
-
-                // NOTE: Fill will be loaded on the next iteration of the inner loop
             };
 
             internal_queue
@@ -820,6 +771,36 @@ impl StarterInner {
         }
 
         anyhow::bail!("ran out of attempts")
+    }
+
+    async fn download_persistent_state_file(
+        &self,
+        block_id: &BlockId,
+        kind: PersistentStateKind,
+        state_file: &FileBuilder,
+    ) -> Result<File> {
+        let mut temp_file = state_file.with_extension("temp");
+        let temp_file_path = temp_file.path().to_owned();
+        scopeguard::defer! {
+            std::fs::remove_file(temp_file_path).ok();
+        };
+
+        let rpc = &self.blockchain_rpc_client;
+        loop {
+            if state_file.exists() {
+                // Use the downloaded state file if it exists
+                return state_file.clone().read(true).open();
+            }
+
+            let pending_state = rpc.find_persistent_state(block_id, kind).await?;
+
+            let output = temp_file.write(true).create(true).truncate(true).open()?;
+            rpc.download_persistent_state(pending_state, output).await?;
+
+            tokio::fs::rename(temp_file.path(), state_file.path()).await?;
+
+            // NOTE: File will be loaded on the next iteration of the loop
+        }
     }
 }
 
@@ -954,5 +935,3 @@ impl InitBlock {
 
 const MAX_EMPTY_PROOF_RETRIES: usize = 10;
 const MAX_PERSISTENT_STATE_RETRIES: usize = 10;
-
-const TEMP_EXTENSION: &str = "temp";

@@ -15,7 +15,7 @@ use crate::global_config::ZerostateId;
 
 mod cold_boot;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StarterConfig {
     /// Choose persistent state which is at least this old.
@@ -23,14 +23,6 @@ pub struct StarterConfig {
     /// Default: None
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
-}
-
-impl Default for StarterConfig {
-    fn default() -> Self {
-        Self {
-            custom_boot_offset: None,
-        }
-    }
 }
 
 /// Bootstrapping utils.

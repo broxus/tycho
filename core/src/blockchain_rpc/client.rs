@@ -851,7 +851,7 @@ mod tests {
                 result.extend_from_slice(chunk);
                 Ok(())
             },
-            |result| Ok(result),
+            Ok,
         )
         .await?;
         assert_eq!(received, original_data);
