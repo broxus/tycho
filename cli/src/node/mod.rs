@@ -43,7 +43,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::Storage;
+use tycho_storage::{NodeSyncState, Storage};
 use tycho_util::cli::error::ResultExt;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::{resolve_public_ip, signal};
@@ -526,9 +526,16 @@ impl Node {
         };
 
         // Explicitly handle the initial state
+
+        let initial_state = match self.storage.node_state().get_node_sync_state() {
+            None => anyhow::bail!("Failed to determine node sync state"),
+            Some(NodeSyncState::PersistentState) => CollatorActivationState::Persistent,
+            Some(NodeSyncState::Blocks) => CollatorActivationState::Historical,
+        };
+
         collator_state_subscriber
             .adapter
-            .handle_state(&mc_state, CollatorActivationState::Persistent)
+            .handle_state(&mc_state, initial_state)
             .await?;
 
         // NOTE: Make sure to drop the state after handling it
