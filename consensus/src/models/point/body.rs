@@ -100,7 +100,7 @@ impl PointBody {
                         && self.data.anchor_trigger == self.data.anchor_proof
                         && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next)
                             .map_or(false, |anchor| anchor == *Genesis::id())
-                        && self.data.time == self.data.anchor_time
+                        && self.data.time == self.data.anchor_time.next()
                         && self.data.anchor_time == Genesis::time()
                 ))
                     // leader must maintain its chain of proofs,
@@ -108,6 +108,7 @@ impl PointBody {
                     // its decided later (using dag round data) whether current point belongs to leader
                     && !(self.data.anchor_proof == Link::ToSelf && self.evidence.is_empty())
                     && !(self.data.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
+                    && self.data.time > self.data.anchor_time
             }
 
             cmp::Ordering::Less => false,
@@ -123,7 +124,6 @@ impl PointBody {
             && !self.data.witness.contains_key(&self.data.author)
             && self.is_link_well_formed(AnchorStageRole::Trigger)
             && self.is_link_well_formed(AnchorStageRole::Proof)
-            && self.data.time >= self.data.anchor_time
             && match (
             self.data.anchor_round(AnchorStageRole::Proof, self.round),
             self.data.anchor_round(AnchorStageRole::Trigger, self.round)

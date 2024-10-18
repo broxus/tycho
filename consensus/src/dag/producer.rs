@@ -64,9 +64,9 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        // first produced point is reproducible
         let (time, anchor_time, payload) = if finished_round.round() == Genesis::round() {
-            (Genesis::time(), Genesis::time(), Vec::new())
+            // first produced point is reproducible
+            (Genesis::time().next(), Genesis::time(), Vec::new())
         } else {
             let (time, anchor_time) =
                 Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
@@ -217,12 +217,9 @@ impl Producer {
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
-        let mut time = UnixTime::now();
-
         let prev_info = includes
             .iter()
-            .find(|point| point.data().author == local_id)
-            .inspect(|info| time = info.data().time.max(time));
+            .find(|point| point.data().author == local_id);
 
         assert_eq!(
             prev_info.map(|prev| prev.digest()),
@@ -230,13 +227,11 @@ impl Producer {
             "included prev point digest does not match broadcasted one"
         );
 
-        match anchor_proof {
+        let anchor_time = match anchor_proof {
             Link::ToSelf => {
                 let point = prev_info.expect("anchor candidate should exist");
 
-                let anchor_time = point.data().time;
-
-                (time.max(anchor_time), anchor_time)
+                point.data().time
             }
             Link::Direct(through) | Link::Indirect { path: through, .. } => {
                 let (peer_id, through) = match through {
@@ -249,10 +244,15 @@ impl Producer {
                     .find(|point| point.data().author == peer_id)
                     .expect("path to anchor proof should exist in new point dependencies");
 
-                let anchor_time = point.data().anchor_time;
-
-                (time.max(anchor_time), anchor_time)
+                point.data().anchor_time
             }
-        }
+        };
+
+        let deps_time = match prev_info {
+            None => anchor_time,
+            Some(info) => anchor_time.max(info.data().time),
+        };
+
+        (UnixTime::now().max(deps_time.next()), anchor_time)
     }
 }

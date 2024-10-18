@@ -621,8 +621,8 @@ impl Verifier {
             prev_digest, proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
-        if info.data().time < proven.data().time {
-            // time must be non-decreasing by the same author
+        if info.data().time <= proven.data().time {
+            // time must be increasing by the same author until it stops referencing previous points
             return false;
         }
         if info.data().anchor_proof == Link::ToSelf && info.data().anchor_time != proven.data().time
