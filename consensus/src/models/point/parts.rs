@@ -120,6 +120,10 @@ impl UnixTime {
         )
     }
 
+    pub fn next(&self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
     pub fn as_u64(&self) -> u64 {
         self.0
     }

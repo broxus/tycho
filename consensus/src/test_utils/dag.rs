@@ -92,11 +92,16 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         .map(|point| point.anchor_id(AnchorStageRole::Trigger))
         .max_by_key(|anchor_id| anchor_id.round)
         .expect("last trigger must exist");
-    let time = prev_points
+    let max_prev_time = prev_points
         .iter()
         .map(|point| point.data().time)
-        .next() // all values are the same as in genesis
+        .max()
         .expect("prev time must exist");
+    let max_anchor_time = prev_points
+        .iter()
+        .map(|point| point.data().anchor_time)
+        .max()
+        .expect("prev anchor_time must exist");
     let includes = prev_points
         .iter()
         .map(|point| (point.data().author, *point.digest()))
@@ -109,7 +114,8 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             idx,
             peers,
             &includes,
-            time,
+            max_prev_time,
+            max_anchor_time,
             dag_round.anchor_stage(),
             &last_proof,
             &last_trigger,
@@ -155,7 +161,8 @@ fn point<const PEER_COUNT: usize>(
     idx: usize,
     peers: &[(PeerId, KeyPair); PEER_COUNT],
     includes: &BTreeMap<PeerId, Digest>,
-    time: UnixTime,
+    max_prev_time: UnixTime,
+    max_anchor_time: UnixTime,
     anchor_stage: Option<&AnchorStage>,
     last_proof: &PointId,
     last_trigger: &PointId,
@@ -206,14 +213,20 @@ fn point<const PEER_COUNT: usize>(
         AnchorStageRole::Trigger,
     );
 
+    let anchor_time = if anchor_proof == Link::ToSelf {
+        max_prev_time
+    } else {
+        max_anchor_time
+    };
+
     Point::new(&peers[idx].1, round, evidence, payload, PointData {
         author: peers[idx].0,
-        time,
+        time: max_prev_time.next(),
         includes: includes.clone(),
         witness: Default::default(),
         anchor_trigger,
         anchor_proof,
-        anchor_time: time,
+        anchor_time,
     })
 }
 
