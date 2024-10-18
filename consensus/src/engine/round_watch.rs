@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 
 use tokio::sync::watch;
 
-use crate::engine::{Genesis, MempoolConfig};
 use crate::models::Round;
 
 /// Marker trait to distinguish between data sources despite variable names
@@ -29,20 +28,6 @@ pub trait Source: Clone {}
 #[derive(Clone)]
 pub struct TopKnownAnchor;
 impl Source for TopKnownAnchor {}
-impl TopKnownAnchor {
-    pub fn adapter_history_bottom(top_known_anchor: Round) -> Round {
-        // oldest unique data to collate (including latest collated round)
-        let round = (top_known_anchor.0)
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)
-            .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
-        Round(round).max(Genesis::round())
-    }
-    pub fn silence_upper_bound(top_known_anchor: Round) -> Round {
-        // oldest unique data to collate (including latest collated round)
-        let round = (top_known_anchor.0).saturating_add(MempoolConfig::MAX_ANCHOR_DISTANCE as u32);
-        Round(round).max(Genesis::round())
-    }
-}
 
 /// Allows a node to drive consensus by collected dependencies with
 /// [`Collector`](crate::intercom::Collector)
@@ -61,20 +46,6 @@ impl TopKnownAnchor {
 #[derive(Clone)]
 pub struct Consensus;
 impl Source for Consensus {}
-impl Consensus {
-    pub fn history_bottom(consensus: Round) -> Round {
-        // enough to handle acceptable collator lag
-        let round = (consensus.0)
-            // before silent mode
-            .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32)
-            // before top known block in silent mode
-            .saturating_sub(MempoolConfig::ACCEPTABLE_COLLATOR_LAG as u32)
-            // oldest data to collate as unique
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32) // data to collate
-            .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32); // as unique
-        Round(round).max(Genesis::round())
-    }
-}
 
 /// Commit procedure is separated into info part in dag and storage part later in adapter.
 /// Commit is not finished, until payload data is read from storage, so it may be cleaned.
@@ -87,16 +58,6 @@ impl Consensus {
 #[derive(Clone)]
 pub struct Commit;
 impl Source for Commit {}
-impl Commit {
-    pub fn stored_history_bottom(commit: Round) -> Round {
-        // oldest data to collate that is validatable and unique
-        let round = (commit.0)
-            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32)  // to discard above new bottom
-            .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32)
-            .saturating_sub(MempoolConfig::DEDUPLICATE_ROUNDS as u32);
-        Round(round).max(Genesis::round())
-    }
-}
 
 #[derive(Clone)]
 pub struct RoundWatch<T: Source> {
