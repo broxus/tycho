@@ -16,7 +16,7 @@ use tycho_network::{PeerId, Request};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::{Verifier, VerifyError};
+use crate::dag::{DagFront, Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::MempoolConfig;
@@ -165,10 +165,8 @@ impl Downloader {
             }
         }
 
-        let consensus_round = self.inner.consensus_round.get().0;
-        let result = if point_id.round.0
-            >= consensus_round.saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
-        {
+        let consensus_round = self.inner.consensus_round.get();
+        let result = if point_id.round >= DagFront::default_front_bottom(consensus_round) {
             // for validation
             self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, effects)
                 .await

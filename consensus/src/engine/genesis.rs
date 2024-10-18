@@ -39,7 +39,7 @@ impl Genesis {
         hasher.update(&MempoolConfig::COMMIT_DEPTH.to_be_bytes());
         hasher.update(&MempoolConfig::PAYLOAD_BATCH_BYTES.to_be_bytes());
         hasher.update(&MempoolConfig::DEDUPLICATE_ROUNDS.to_be_bytes());
-        hasher.update(&MempoolConfig::MAX_ANCHOR_DISTANCE.to_be_bytes());
+        hasher.update(&MempoolConfig::MAX_CONSENSUS_LAG_ROUNDS.to_be_bytes());
         let overlay_id = hasher.finalize().into();
 
         let genesis_keys = KeyPair::from(&SecretKey::from_bytes(overlay_id));

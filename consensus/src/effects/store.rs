@@ -12,6 +12,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteBatch};
 
+use crate::dag::DagFront;
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::MempoolConfig;
@@ -179,9 +180,9 @@ impl MempoolStore {
         fn least_to_keep(consensus: Round, committed: Round) -> Round {
             Round(
                 // do not clean history that it can be requested by other peers
-                Consensus::history_bottom(consensus)
-                    // do not clean history until commit is finished (to reproduce after restart)
-                    .min(Commit::stored_history_bottom(committed))
+                DagFront::max_history_bottom(consensus)
+                    // do not clean history until commit is finished
+                    .min(DagFront::default_back_bottom(committed))
                     .0 // clean history no matter if top known anchor is far behind
                     .saturating_div(MempoolConfig::CLEAN_ROCKS_PERIOD as u32)
                     .saturating_mul(MempoolConfig::CLEAN_ROCKS_PERIOD as u32),

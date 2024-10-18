@@ -16,7 +16,7 @@ pub struct DagFront {
 impl Default for DagFront {
     fn default() -> Self {
         Self {
-            rounds: Vec::with_capacity(Self::MAX_TOTAL_DEPTH as usize + 1),
+            rounds: Vec::new(),
             last_back_bottom: Round::BOTTOM,
             has_pending_back_reset: false,
         }
@@ -24,13 +24,36 @@ impl Default for DagFront {
 }
 
 impl DagFront {
-    // next round, current round and witness round are above COMMIT_DEPTH for point validation
-    // also `-1` as value is subtracted from some top round (inclusive)
-    const MIN_FRONT_DEPTH: u32 = MempoolConfig::COMMIT_DEPTH as u32 + 3 - 1;
-    const RESET_DEPTH: u32 = Self::MIN_FRONT_DEPTH
-        + MempoolConfig::DEDUPLICATE_ROUNDS as u32
-        + MempoolConfig::MAX_ANCHOR_DISTANCE as u32;
-    const MAX_TOTAL_DEPTH: u32 = Self::RESET_DEPTH + MempoolConfig::ACCEPTABLE_COLLATOR_LAG as u32;
+    pub fn default_front_bottom(top_round: Round) -> Round {
+        // to validate for commit;
+        // notice that procedure happens at round start, before new local point's dependencies
+        // finished their validation, a new 'next' dag round will appear and so no `-1` below
+        let min_front_rounds = 3 // new current, includes and witness rounds to validate
+            + MempoolConfig::COMMIT_DEPTH as u32; // all committable history for every point
+
+        Round((top_round.0).saturating_sub(min_front_rounds)).max(Genesis::round())
+    }
+
+    pub fn default_back_bottom(top_round: Round) -> Round {
+        // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
+        // but collator may re-request TKA from collator, not only the next one
+        let reset_rounds = MempoolConfig::MAX_CONSENSUS_LAG_ROUNDS as u32 // to collate
+            + MempoolConfig::DEDUPLICATE_ROUNDS as u32 // to discard full anchor history after restart
+            + MempoolConfig::COMMIT_DEPTH as u32; // to discard incomplete anchor history after restart
+
+        Round((top_round.0).saturating_sub(reset_rounds)).max(Genesis::round())
+    }
+
+    pub fn max_history_bottom(top_round: Round) -> Round {
+        // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
+        // but collator may re-request TKA from collator, not only the next one
+        let max_total_rounds = MempoolConfig::MAX_CONSENSUS_LAG_ROUNDS as u32
+            + MempoolConfig::SYNC_SUPPORT_ROUNDS as u32 // to follow consensus during sync
+            + MempoolConfig::DEDUPLICATE_ROUNDS as u32 // to discard full anchor history after restart
+            + MempoolConfig::COMMIT_DEPTH as u32; // to discard incomplete anchor history after restart
+
+        Round((top_round.0).saturating_sub(max_total_rounds)).max(Genesis::round())
+    }
 
     pub fn init(&mut self, dag_bottom_round: DagRound) -> Committer {
         assert!(self.rounds.is_empty(), "DAG already initialized");
@@ -68,34 +91,37 @@ impl DagFront {
         committer: Option<&mut Committer>,
         peer_schedule: &PeerSchedule,
     ) -> Option<Round> {
-        //    RESET_DEPTH      front.top()
+        //    RESET_ROUNDS      front.top()
         //         ↓               ↓
         // |       :        =======|
         // ↑                   ↑
-        // MAX_TOTAL_DEPTH     MIN_FRONT_DEPTH for front.len()
+        // MAX_TOTAL_ROUNDS     MIN_FRONT_ROUNDS for front.len()
 
         // Normal: everything committed
-        // |       :        =======| front: must never be shorter than MIN_FRONT_DEPTH+1
+        // |       :        =======| front: must never be shorter than MIN_FRONT_ROUNDS
         // |       :          ---  | back: may be shorter than front and have older top
 
         // Normal: back is syncing to commit
         // |       :        =======| front: must be ahead of back without a gap (or may overlap)
-        // |     --:----------     | back: total len does not exceed MAX_TOTAL_DEPTH+1
+        // |     --:----------     | back: total len does not exceed MAX_TOTAL_ROUNDS
 
         // Normal: gap recovered by extending front
-        // |     --:--------=======| front: len may exceed MIN_FRONT_DEPTH+1 and MAX_RESET_DEPTH+1
-        // |  ---  :               | back: total len does not exceed MAX_TOTAL_DEPTH+1
+        // |     --:--------=======| front: len may exceed MIN_FRONT_ROUNDS and MAX_RESET_ROUNDS
+        // |  ---  :               | back: total len does not exceed MAX_TOTAL_ROUNDS
         // => should become (preserving data)
         // |       :        =======| front: shrinks itself
         // |  -----:---------------| back: of total len
 
-        // Unrecoverable gap: total len reaches MAX_TOTAL_DEPTH+1 (any scenario)
+        // Unrecoverable gap: total len reaches MAX_TOTAL_ROUNDS (any scenario)
         // (assume back is still lagging to commit if we don't know its status)
         // |       :   -----=======| front: no matter if overlaps or has a gap with back
-        // |-------:---            | back: front.top() - back.bottom() >= MAX_TOTAL_DEPTH
+        // |-------:---            | back: front.top() - back.bottom() >= MAX_TOTAL_ROUNDS
         // => should become (with reset of back bottom to drop trailing dag rounds and free mem)
         // |       :        =======| front: creates new dag round chain for back and shrinks itself
-        // |       :---------------| back: chain of MAX_RESET_DEPTH+1 passed from front
+        // |       :---------------| back: chain of MAX_RESET_ROUNDS passed from front
+        // Dropped tail gives local node time to download other's points as
+        // every node cleans its storage with advance of consensus rounds
+        // and points far behind consensus will not be downloaded after some time.
 
         if let Some(ref committer) = committer {
             // update if we can; if None - use old value;
@@ -105,11 +131,10 @@ impl DagFront {
             }
         }
 
-        if (new_top.0).saturating_sub(self.last_back_bottom.0) >= Self::MAX_TOTAL_DEPTH {
+        if Self::max_history_bottom(new_top) > self.last_back_bottom {
             // should drop validation tasks and restart them with new bottom to free memory
             self.rounds.clear();
-            let new_bottom_round =
-                Round(new_top.0.saturating_sub(Self::RESET_DEPTH)).max(Genesis::round());
+            let new_bottom_round = Self::default_back_bottom(new_top);
             self.rounds
                 .push(DagRound::new_bottom(new_bottom_round, peer_schedule));
             self.has_pending_back_reset = true;
@@ -136,17 +161,14 @@ impl DagFront {
                 );
                 new_full_history_bottom = Some(full_history_bottom);
             }
-            committer.extend_from_ahead(&self.drain_to_min_depth());
+            committer.extend_from_ahead(&self.drain_upto(Self::default_front_bottom(new_top)));
             committer.extend_from_ahead(&self.rounds);
         }
 
         new_full_history_bottom
     }
 
-    fn drain_to_min_depth(&mut self) -> Vec<DagRound> {
-        let new_bottom_round =
-            Round(self.top().round().0.saturating_sub(Self::MIN_FRONT_DEPTH)).max(Genesis::round());
-
+    fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
         let bottom = self.bottom_round();
 
         let amount = new_bottom_round.0.saturating_sub(bottom.0) as usize;

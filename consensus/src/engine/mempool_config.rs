@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::models::UnixTime;
+use crate::models::{Round, UnixTime};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 /// Prod config should use [`Full`], while [`Truncated`] is more friendly to human eyes
@@ -28,12 +28,26 @@ impl MempoolConfig {
     /// Zero turns off deduplication.
     pub const DEDUPLICATE_ROUNDS: u16 = if cfg!(feature = "test") { 20 } else { 140 };
 
-    /// The max expected distance (in rounds) between two anchor triggers. Defines both:
-    /// * max acceptable distance between consensus and the top known block,
-    ///   before local mempool enters silent mode (stops to produce points).
-    /// * max amount of rounds (behind peer's last commit, defined by an anchor trigger in points)
-    ///   a peer must respond with valid points if it directly referenced them
-    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 20 } else { 210 };
+    /// The max expected distance (in rounds) between two sequential top known anchors (TKA),
+    /// i.e. anchors from two sequential top known blocks (TKB, signed master chain blocks,
+    /// available to local node, and which state is not necessarily applied by local node). For
+    /// example, the last TKA=`1` and the config value is `210`, so the range `(2..=211).len() == 210`
+    /// is expected to contain a new committed anchor, i.e. some leader successfully completed
+    /// its 3 rounds in a row (collected 2F+1 signatures for the anchor trigger) and
+    /// there were 2 additional consensus rounds for the trigger to be delivered to all nodes.
+    /// So every collator is expected to create a block containing the new anchor and a greater
+    /// chain time. Until an updated TKA in range `(2..=211)` is received by the local mempool,
+    /// it will not produce a point at round `212` (wait in a "silent mode", probably consuming
+    /// other's broadcasts in case it's a local-only lag and consensus is still advancing).
+    /// For this example, corresponding config method returns `211`, the upper bound of `(2..=211)`.
+    /// Effectively defines negative feedback from block validation consensus to mempool consensus.
+    /// Also see [`TopKnownAnchor`](crate::engine::round_watch::TopKnownAnchor).
+    pub const MAX_CONSENSUS_LAG_ROUNDS: u16 = if cfg!(feature = "test") { 20 } else { 210 };
+
+    pub fn silent_after(top_known_anchor: Round) -> Round {
+        // collation will continue across epoch change, so no limit on current genesis round
+        Round((top_known_anchor.0).saturating_add(Self::MAX_CONSENSUS_LAG_ROUNDS as u32))
+    }
 
     // == Configs above must be globally same for consensus to run
     // ========
@@ -75,14 +89,10 @@ impl MempoolConfig {
     pub const CONCURRENT_DOWNLOADS: u16 = if cfg!(feature = "test") { 1 } else { 260 };
 
     /// Max distance (in rounds) behind consensus at which local mempool
-    /// in silent mode (see [`Self::MAX_ANCHOR_DISTANCE`])
-    /// is supposed to keep collation-ready history
-    /// (see [`Self::DEDUPLICATE_ROUNDS`] and [`Self::COMMIT_DEPTH`])
-    pub const ACCEPTABLE_COLLATOR_LAG: u16 = if cfg!(feature = "test") {
-        15
-    } else {
-        1_050 - Self::MAX_ANCHOR_DISTANCE
-    };
+    /// in silent mode (see [`Self::MAX_CONSENSUS_LAG_ROUNDS`]) is supposed to keep history;
+    /// provide means to collate optimistically when local node lags to get blocks signed;
+    /// provides data for syncing neighbours
+    pub const SYNC_SUPPORT_ROUNDS: u16 = if cfg!(feature = "test") { 15 } else { 840 };
 
     /// How often (in rounds) try to flush and delete obsolete data. Cannot be zero.
     /// Also affects WAL file size (more often flushes create more small files).
@@ -90,8 +100,8 @@ impl MempoolConfig {
 }
 
 const _: () = assert!(
-    MempoolConfig::MAX_ANCHOR_DISTANCE >= MempoolConfig::COMMIT_DEPTH as u16,
-    "invalid config: max acceptable anchor distance cannot be less than commit depth"
+    MempoolConfig::MAX_CONSENSUS_LAG_ROUNDS >= MempoolConfig::COMMIT_DEPTH as u16,
+    "invalid config: expected max consensus lag >= commit depth"
 );
 
 const _: () = assert!(
