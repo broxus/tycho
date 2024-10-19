@@ -15,8 +15,8 @@ use scopeguard::defer;
 use tycho_network::PeerId;
 
 use crate::mempool::{
-    ExternalMessage, MempoolAdapter, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
-    StateUpdateContext,
+    DebugStateUpdateContext, ExternalMessage, MempoolAdapter, MempoolAnchor, MempoolAnchorId,
+    MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 
@@ -165,7 +165,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "STUB: Processing state update from mc block {}: {:?}",
-            cx.mc_block_id.as_short_id(), cx,
+            cx.mc_block_id.as_short_id(), DebugStateUpdateContext(&cx),
         );
         Ok(())
     }

@@ -114,11 +114,13 @@ async fn test_collation_process_on_stubs() {
 
     let now = tycho_util::time::now_millis();
 
+    let (_, sync_context_rx) = tokio::sync::watch::channel(CollatorSyncContext::Historical);
+
     let manager = CollationManager::start(
         node_1_keypair.clone(),
         config,
         Arc::new(message_queue_adapter),
-        |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
+        |listener| StateNodeAdapterStdImpl::new(listener, storage.clone(), sync_context_rx.clone()),
         |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
         ValidatorStdImpl::new(
             validator_network,

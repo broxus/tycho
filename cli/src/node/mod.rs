@@ -9,6 +9,7 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
+use tokio::sync::watch;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
@@ -501,11 +502,21 @@ impl Node {
             self.validator_config,
         );
 
+        // Create a channel to notify collation manager when sync context changed
+        let sync_context = CollatorSyncContext::Historical;
+        let (sync_context_tx, sync_context_rx) = tokio::sync::watch::channel(sync_context);
+
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
             self.collation_config.clone(),
             Arc::new(message_queue_adapter),
-            |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
+            |listener| {
+                StateNodeAdapterStdImpl::new(
+                    listener,
+                    self.storage.clone(),
+                    sync_context_rx.clone(),
+                )
+            },
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
@@ -516,16 +527,17 @@ impl Node {
         );
 
         let collator_state_subscriber = CollatorStateSubscriber {
-            sync_context: CollatorSyncContext::Historical.into(),
+            sync_context: sync_context.into(),
             adapter: collation_manager.state_node_adapter().clone(),
         };
 
         let activate_collator = ActivateCollator {
             sync_context: collator_state_subscriber.sync_context.clone(),
+            sync_context_tx,
         };
 
         // Explicitly handle the initial state
-        let initial_state = match self.storage.node_state().get_node_sync_state() {
+        let initial_state_sync_context = match self.storage.node_state().get_node_sync_state() {
             None => anyhow::bail!("Failed to determine node sync state"),
             Some(NodeSyncState::PersistentState) => CollatorSyncContext::Persistent,
             Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
@@ -533,7 +545,7 @@ impl Node {
 
         collator_state_subscriber
             .adapter
-            .handle_state(&mc_state, initial_state)
+            .handle_state(&mc_state, initial_state_sync_context)
             .await?;
 
         // NOTE: Make sure to drop the state after handling it
@@ -635,6 +647,7 @@ impl Node {
 
 struct ActivateCollator {
     sync_context: SharedSyncContext,
+    sync_context_tx: watch::Sender<CollatorSyncContext>,
 }
 
 impl BlockProvider for ActivateCollator {
@@ -643,6 +656,14 @@ impl BlockProvider for ActivateCollator {
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.sync_context.store(CollatorSyncContext::Recent);
+        self.sync_context_tx.send_if_modified(|curr| {
+            if *curr != CollatorSyncContext::Recent {
+                *curr = CollatorSyncContext::Recent;
+                true
+            } else {
+                false
+            }
+        });
         futures_util::future::ready(None)
     }
 

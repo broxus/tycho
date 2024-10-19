@@ -18,8 +18,8 @@ use tycho_util::time::now_millis;
 use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
-    MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
-    StateUpdateContext,
+    DebugStateUpdateContext, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId,
+    MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 
@@ -180,7 +180,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "STUB: Processing state update from mc block {}: {:?}",
-            cx.mc_block_id.as_short_id(), cx,
+            cx.mc_block_id.as_short_id(), DebugStateUpdateContext(&cx),
         );
         Ok(())
     }

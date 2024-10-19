@@ -59,6 +59,29 @@ pub struct StateUpdateContext {
     pub next_validator_set: Option<(HashBytes, Arc<ValidatorSet>)>,
 }
 
+pub struct DebugStateUpdateContext<'a>(pub &'a StateUpdateContext);
+impl std::fmt::Debug for DebugStateUpdateContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateUpdateContext")
+            .field("mc_block_id", &self.0.mc_block_id.as_short_id())
+            .field("mempool_switch_round", &self.0.mempool_switch_round)
+            .field("mempool_config", &self.0.mempool_config)
+            .field(
+                "prev_validator_set.hash",
+                &self.0.prev_validator_set.as_ref().map(|s| s.0),
+            )
+            .field(
+                "current_validator_set.hash",
+                &self.0.current_validator_set.0,
+            )
+            .field(
+                "next_validator_set.hash",
+                &self.0.next_validator_set.as_ref().map(|s| s.0),
+            )
+            .finish()
+    }
+}
+
 #[async_trait]
 pub trait MempoolAdapter: Send + Sync + 'static {
     /// Process updates related to master block:
