@@ -14,7 +14,7 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::{Genesis, MempoolConfig};
+use crate::engine::{CachedConfig, Genesis};
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
@@ -172,7 +172,7 @@ impl RoundTaskReady {
         let consensus_round = current_dag_round.round(); // latest reliably detected consensus round
         let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
         let top_known_anchor = top_known_anchor_recv.get();
-        let silent_after = MempoolConfig::silent_after(top_known_anchor);
+        let silent_after = CachedConfig::silent_after(top_known_anchor);
         #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
         let wait_collator_ready = if true || consensus_round <= silent_after {
             future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
@@ -190,7 +190,7 @@ impl RoundTaskReady {
                     tokio::select! {
                         top_known_anchor = top_known_anchor_recv.next() => {
                             //  exit if ready to produce point: collator synced enough
-                            let silent_after = MempoolConfig::silent_after(top_known_anchor);
+                            let silent_after = CachedConfig::silent_after(top_known_anchor);
                             let exit = consensus_round <= silent_after;
                             tracing::info!(
                                 top_known_anchor = top_known_anchor.0,

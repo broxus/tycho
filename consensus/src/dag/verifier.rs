@@ -37,7 +37,7 @@ pub enum VerifyError {
     IllFormed,
 }
 
-// If any round exceeds dag depth, the arg point @ r+0 is considered valid by itself.
+// If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
 // Any point @ r+0 will be committed, only if it has valid proof @ r+1
 // included into valid anchor chain, i.e. validated by consensus.
 impl Verifier {
@@ -452,7 +452,7 @@ impl Verifier {
         // but validity of direct dependencies ('links through') ensures inclusion chain is valid.
         // If point under validation is so old, that any dependency download fails,
         // it will not be referenced by the current peer anyway, and it's ok to mark it as invalid
-        // until the current peer syncs its far outdated DAG (when the lag exceeds `DAG_DEPTH`).
+        // until the current peer makes a gap in its far outdated DAG.
         let anchor_trigger_id = info.anchor_id(AnchorStageRole::Trigger);
         let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
         let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);

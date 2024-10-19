@@ -11,7 +11,7 @@ use tycho_util::FastHashSet;
 use crate::dag::{DagRound, InclusionState};
 use crate::dyn_event;
 use crate::effects::{AltFormat, CollectorContext, Effects};
-use crate::engine::{Genesis, MempoolConfig};
+use crate::engine::{CachedConfig, Genesis};
 use crate::intercom::broadcast::dto::ConsensusEvent;
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
@@ -154,7 +154,7 @@ impl CollectorTask {
         from_bcast_filter: &mut mpsc::UnboundedReceiver<ConsensusEvent>,
         mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Result<(), Round> {
-        let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
+        let mut retry_interval = tokio::time::interval(CachedConfig::broadcast_retry());
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::models::{BlockId, ConsensusConfig, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_network::{OverlayId, PeerInfo};
 
@@ -12,6 +12,7 @@ use crate::proto::blockchain::OverlayIdData;
 pub struct GlobalConfig {
     pub bootstrap_peers: Vec<PeerInfo>,
     pub zerostate: ZerostateId,
+    pub mempool_override: Option<MempoolGlobalConfig>,
 }
 
 impl GlobalConfig {
@@ -49,4 +50,12 @@ impl ZerostateId {
             zerostate_file_hash: self.file_hash.0,
         }))
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MempoolGlobalConfig {
+    /// actual genesis round may be greater after alignment in config builder
+    pub start_round: u32,
+    pub genesis_time_millis: u64,
+    pub consensus_config: ConsensusConfig,
 }

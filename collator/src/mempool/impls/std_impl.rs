@@ -5,10 +5,13 @@ mod parser;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
+use everscale_types::models::ConsensusConfig;
+use parking_lot::lock_api::MutexGuard;
+use parking_lot::{Mutex, RawMutex};
 use tokio::sync::mpsc;
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
@@ -24,6 +27,8 @@ use crate::mempool::{
 use crate::tracing_targets;
 
 pub struct MempoolAdapterStdImpl {
+    config_builder: Mutex<MempoolConfigBuilder>,
+
     cache: Arc<Cache>,
 
     store: MempoolAdapterStore,
@@ -34,16 +39,24 @@ pub struct MempoolAdapterStdImpl {
 }
 
 impl MempoolAdapterStdImpl {
-    pub fn new(mempool_storage: &MempoolStorage) -> Self {
+    pub fn new(mempool_storage: &MempoolStorage, mempool_node_config: &MempoolNodeConfig) -> Self {
+        let mut config_builder = MempoolConfigBuilder::default();
+        config_builder.set_node_config(mempool_node_config);
+
         let (externals_tx, externals_rx) = mpsc::unbounded_channel();
 
         Self {
+            config_builder: Mutex::new(config_builder),
             cache: Default::default(),
             store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
             externals_tx,
             externals_rx: InputBuffer::new(externals_rx),
             top_known_anchor: RoundWatch::default(),
         }
+    }
+
+    pub fn config_builder(&self) -> MutexGuard<'_, RawMutex, MempoolConfigBuilder> {
+        self.config_builder.lock()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -54,11 +67,18 @@ impl MempoolAdapterStdImpl {
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
         peers: Vec<PeerId>,
-        mempool_start_round: Option<u32>,
-    ) {
+    ) -> Result<()> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
+
+        let (consensus_config, mempool_config) = {
+            let builder = self.config_builder.lock();
+            let consensus_config = builder
+                .get_consensus_config()
+                .ok_or(anyhow!("consensus config is not set"))?;
+            (consensus_config.clone(), builder.build()?)
+        };
 
         let mut engine = Engine::new(
             key_pair,
@@ -69,7 +89,7 @@ impl MempoolAdapterStdImpl {
             self.externals_rx.clone(),
             anchor_tx,
             &self.top_known_anchor,
-            mempool_start_round,
+            &mempool_config,
         );
 
         tokio::spawn(async move {
@@ -82,8 +102,11 @@ impl MempoolAdapterStdImpl {
         tokio::spawn(Self::handle_anchors_task(
             self.cache.clone(),
             self.store.clone(),
+            consensus_config,
             anchor_rx,
         ));
+
+        Ok(())
     }
 
     pub fn send_external(&self, message: Bytes) {
@@ -93,19 +116,19 @@ impl MempoolAdapterStdImpl {
     async fn handle_anchors_task(
         cache: Arc<Cache>,
         store: MempoolAdapterStore,
+        config: ConsensusConfig,
         mut anchor_rx: mpsc::UnboundedReceiver<CommitResult>,
     ) {
-        let mut parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
+        let mut parser = Parser::new(config.deduplicate_rounds);
         let mut first_after_gap = None;
         while let Some(commit) = anchor_rx.recv().await {
             let (anchor, history) = match commit {
                 CommitResult::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
-                    parser = Parser::new(MempoolConfig::DEDUPLICATE_ROUNDS);
+                    parser = Parser::new(config.deduplicate_rounds);
                     store.report_new_start(anchors_full_bottom);
                     first_after_gap = Some(
-                        (anchors_full_bottom.0)
-                            .saturating_add(MempoolConfig::DEDUPLICATE_ROUNDS as u32),
+                        (anchors_full_bottom.0).saturating_add(config.deduplicate_rounds as u32),
                     );
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,

@@ -33,7 +33,7 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
 };
-use tycho_core::global_config::{GlobalConfig, ZerostateId};
+use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::{
     DhtClient, DhtService, InboundRequestMeta, Network, OverlayService, PeerId, PeerResolver,
@@ -52,6 +52,7 @@ use crate::node::config::MetricsConfig;
 use crate::util::alloc::spawn_allocator_metrics_loop;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
+use crate::util::mempool::*;
 
 pub mod config;
 mod control;
@@ -103,11 +104,6 @@ pub struct CmdRun {
     /// list of zerostate files to import
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
-
-    /// Round of a new consensus genesis
-    #[allow(clippy::option_option)]
-    #[clap(long)]
-    pub mempool_start_round: Option<Option<u32>>,
 
     /// Last know applied master block seqno to recover from
     #[allow(clippy::option_option)]
@@ -176,11 +172,9 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        let mempool_start_round = self.mempool_start_round.unwrap_or_default();
         let from_mc_block_seqno = self.from_mc_block_seqno.unwrap_or_default();
 
-        node.run(&init_block_id, mempool_start_round, from_mc_block_seqno)
-            .await?;
+        node.run(&init_block_id, from_mc_block_seqno).await?;
 
         Ok(())
     }
@@ -240,6 +234,7 @@ pub struct Node {
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
     internal_queue_config: QueueConfig,
+    mempool_config_override: Option<MempoolGlobalConfig>,
 }
 
 impl Node {
@@ -316,7 +311,10 @@ impl Node {
         let zerostate = global_config.zerostate;
 
         let rpc_mempool_adapter = RpcMempoolAdapter {
-            inner: Arc::new(MempoolAdapterStdImpl::new(storage.mempool_storage())),
+            inner: Arc::new(MempoolAdapterStdImpl::new(
+                storage.mempool_storage(),
+                &node_config.mempool,
+            )),
         };
 
         let blockchain_rpc_service = BlockchainRpcService::builder()
@@ -366,6 +364,7 @@ impl Node {
             collation_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
+            mempool_config_override: global_config.mempool_override,
         })
     }
 
@@ -405,12 +404,7 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    async fn run(
-        self,
-        last_block_id: &BlockId,
-        mempool_start_round: Option<u32>,
-        last_mc_block_seqno: Option<u32>,
-    ) -> Result<()> {
+    async fn run(self, last_block_id: &BlockId, last_mc_block_seqno: Option<u32>) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage
@@ -432,14 +426,18 @@ impl Node {
 
         // Run mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
+        set_mempool_config(
+            &mut mempool_adapter.config_builder(),
+            &mc_state,
+            self.mempool_config_override.as_ref(),
+        )?;
         mempool_adapter.run(
             self.keypair.clone(),
             self.dht_client.network(),
             &self.peer_resolver,
             &self.overlay_service,
             get_validator_peer_ids(&mc_state)?,
-            mempool_start_round,
-        );
+        )?;
 
         // Create RPC
         let (rpc_block_subscriber, rpc_state_subscriber) = if let Some(config) = &self.rpc_config {
@@ -485,6 +483,10 @@ impl Node {
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
         // drop uncommitted queue state on recovery reset
+        let mempool_start_round = self
+            .mempool_config_override
+            .as_ref()
+            .map(|conf| conf.start_round);
         if matches!(mempool_start_round, Some(round_id) if round_id > 0) {
             message_queue_adapter.clear_session_state()?;
         }

@@ -17,9 +17,9 @@ use crate::effects::{
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::Genesis;
+use crate::engine::{CachedConfig, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round, UnixTime};
+use crate::models::{AnchorData, CommitResult, Point, PointInfo};
 
 pub struct Engine {
     dag: DagFront,
@@ -42,13 +42,11 @@ impl Engine {
         input_buffer: InputBuffer,
         committed_info_tx: mpsc::UnboundedSender<CommitResult>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        genesis_round: Option<u32>,
+        config: &MempoolConfig,
     ) -> Self {
         // mostly everything depends on genesis - must init at the first line
-        let (genesis, overlay_id) = Genesis::init(
-            Round(genesis_round.unwrap_or_default()),
-            UnixTime::from_millis(0),
-        );
+        // MempoolConfig::init(&global_config);
+        let (genesis, overlay_id) = CachedConfig::init(config);
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(Genesis::round());

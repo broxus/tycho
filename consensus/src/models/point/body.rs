@@ -5,7 +5,7 @@ use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::engine::{Genesis, MempoolConfig};
+use crate::engine::{CachedConfig, Genesis};
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
 use crate::models::proto_utils::evidence_btree_map;
 use crate::models::{PeerCount, UnixTime};
@@ -33,7 +33,7 @@ pub struct ShortPointBody {
 }
 
 impl PointBody {
-    pub const fn max_byte_size() -> usize {
+    pub fn max_byte_size(payload_batch_bytes: usize) -> usize {
         // 4 bytes of PointBody tag
         // 4 bytes of Round
         // payload bytes_max_size_hint
@@ -65,12 +65,12 @@ impl PointBody {
 
         4 + Round::MAX_TL_SIZE
             + tl_proto::bytes_max_size_hint(EXT_IN_BOC_MIN)
-                * (1 + MempoolConfig::PAYLOAD_BATCH_BYTES / EXT_IN_BOC_MIN)
+                * (1 + payload_batch_bytes / EXT_IN_BOC_MIN)
             + point_data_size
             + evidence_size
     }
     pub fn make_digest(&self) -> Digest {
-        let mut data = Vec::<u8>::with_capacity(Self::max_byte_size());
+        let mut data = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
         self.write_to(&mut data);
         Digest::new(data.as_ref())
     }
@@ -114,7 +114,7 @@ impl PointBody {
             cmp::Ordering::Less => false,
         };
         is_special_ok
-            && MempoolConfig::PAYLOAD_BATCH_BYTES >= self.payload.iter().map(|x| x.len()).sum()
+            && CachedConfig::payload_batch_bytes() >= self.payload.iter().map(|x| x.len()).sum()
             // proof for previous point consists of digest and 2F++ evidences
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
             && self.evidence.is_empty() != self.data.includes.contains_key(&self.data.author)

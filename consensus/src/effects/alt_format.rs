@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display, Formatter, Result};
 
 use tycho_network::PeerId;
 
-use crate::engine::{LogFlavor, MempoolConfig};
+use crate::engine::{CachedConfig, LogFlavor};
 use crate::models::{DagPoint, Digest, PointId, Signature};
 
 /// Display implementations to be used as fields in structured logs,
@@ -22,7 +22,7 @@ pub trait AltFormat {
 impl AltFormat for PeerId {}
 impl Display for AltFmt<'_, PeerId> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match MempoolConfig::LOG_FLAVOR {
+        match CachedConfig::log_flavor() {
             LogFlavor::Full => write!(f, "{}", self.0),
             LogFlavor::Truncated => write!(f, "{:.4}", self.0),
         }
@@ -32,7 +32,7 @@ impl Display for AltFmt<'_, PeerId> {
 impl AltFormat for Digest {}
 impl Display for AltFmt<'_, Digest> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match MempoolConfig::LOG_FLAVOR {
+        match CachedConfig::log_flavor() {
             LogFlavor::Full => write!(f, "{}", self.0),
             LogFlavor::Truncated => write!(f, "{:.4}", self.0),
         }
@@ -42,7 +42,7 @@ impl Display for AltFmt<'_, Digest> {
 impl AltFormat for Signature {}
 impl Display for AltFmt<'_, Signature> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match MempoolConfig::LOG_FLAVOR {
+        match CachedConfig::log_flavor() {
             LogFlavor::Full => write!(f, "{}", self.0),
             LogFlavor::Truncated => write!(f, "{:.4}", self.0),
         }
@@ -52,7 +52,7 @@ impl Display for AltFmt<'_, Signature> {
 impl AltFormat for PointId {}
 impl Debug for AltFmt<'_, PointId> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match MempoolConfig::LOG_FLAVOR {
+        match CachedConfig::log_flavor() {
             LogFlavor::Full => write!(f, "{:?}", self.0),
             LogFlavor::Truncated => write!(
                 f,

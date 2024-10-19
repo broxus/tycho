@@ -11,7 +11,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::commit::back::DagBack;
 use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 use crate::models::{AnchorData, AnchorStageRole, Round};
 
 pub struct Committer {
@@ -42,7 +42,7 @@ impl Committer {
         );
         self.dag.init(bottom_round);
         self.full_history_bottom =
-            Round((bottom_round.round().0).saturating_add(MempoolConfig::COMMIT_DEPTH as u32));
+            Round((bottom_round.round().0).saturating_add(CachedConfig::commit_history_rounds()));
         self.full_history_bottom // hidden in other cases
     }
 
@@ -144,10 +144,9 @@ impl Committer {
         // tracing::warn!("anchor_chain {:?}", self.anchor_chain.alt());
 
         while let Some(next) = self.anchor_chain.next() {
-            // Note every next "little anchor candidate that could" must have at least full dag depth
             // in case previous anchor was triggered directly - rounds are already dropped
             self.dag.drain_upto(Round(
-                (next.anchor.round().0).saturating_sub(MempoolConfig::COMMIT_DEPTH as _),
+                (next.anchor.round().0).saturating_sub(CachedConfig::commit_history_rounds()),
             ));
             let Some(uncommitted) = self
                 .dag
@@ -243,9 +242,9 @@ mod test {
     use crate::dag::dag_location::DagLocation;
     use crate::dag::DagFront;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
-    use crate::engine::Genesis;
-    use crate::models::{AnchorData, AnchorStageRole, Round, UnixTime};
+    use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::test_utils;
+    use crate::test_utils::default_test_config;
 
     const PEER_COUNT: usize = 3;
 
@@ -253,7 +252,7 @@ mod test {
     async fn test_commit_with_gap() {
         let stub_store = MempoolStore::no_read_stub();
 
-        let (genesis, _) = Genesis::init(Round(1), UnixTime::from_millis(0));
+        let (genesis, _) = CachedConfig::init(&default_test_config());
 
         let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
             let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));

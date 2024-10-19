@@ -9,8 +9,8 @@ pub mod test_utils;
 pub mod prelude {
     pub use crate::effects::MempoolAdapterStore;
     pub use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
-    #[cfg(feature = "test")]
-    pub use crate::engine::Genesis;
-    pub use crate::engine::{Engine, InputBuffer, MempoolConfig};
-    pub use crate::models::{AnchorData, CommitResult, Point, PointInfo};
+    pub use crate::engine::{
+        Engine, InputBuffer, MempoolConfig, MempoolConfigBuilder, MempoolNodeConfig,
+    };
+    pub use crate::models::{AnchorData, CommitResult, PointInfo};
 }
