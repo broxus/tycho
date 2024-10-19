@@ -1,9 +1,43 @@
+use std::num::NonZeroU8;
+
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
+use everscale_types::models::ConsensusConfig;
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayConfig,
     OverlayService, PeerId, PeerInfo, PeerResolver, PeerResolverConfig, Router, ToSocket,
 };
 use tycho_util::time::now_sec;
+
+use crate::engine::{MempoolConfig, MempoolConfigBuilder, MempoolNodeConfig};
+
+pub fn default_test_config() -> MempoolConfig {
+    let consensus_config = ConsensusConfig {
+        clock_skew_millis: 5 * 1000,
+        payload_batch_bytes: 768 * 1024,
+        commit_history_rounds: 20,
+        deduplicate_rounds: 20,
+        max_consensus_lag_rounds: 20,
+        payload_buffer_bytes: 50 * 1024 * 1024,
+        broadcast_retry_millis: 150,
+        download_retry_millis: 25,
+        download_peers: 2,
+        download_tasks: 1,
+        sync_support_rounds: 15,
+    };
+
+    let node_config = MempoolNodeConfig {
+        log_truncate_long_values: true,
+        clean_db_period_rounds: NonZeroU8::new(10).unwrap(),
+        cache_future_broadcasts_rounds: NonZeroU8::new(105).unwrap(),
+    };
+
+    let mut builder = MempoolConfigBuilder::default();
+    builder.set_genesis(0, 0);
+    builder.set_consensus_config(&consensus_config);
+    builder.set_node_config(&node_config);
+
+    builder.build().unwrap()
+}
 
 pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option<u32>) -> PeerInfo {
     let peer_id = PeerId::from(keypair.public_key);

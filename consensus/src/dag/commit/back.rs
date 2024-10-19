@@ -11,7 +11,7 @@ use tycho_network::PeerId;
 
 use crate::dag::{DagRound, EnqueuedAnchor};
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::{Genesis, MempoolConfig};
+use crate::engine::{CachedConfig, Genesis};
 use crate::models::{AnchorStageRole, Digest, Link, PointId, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
@@ -103,8 +103,8 @@ impl DagBack {
     }
 
     pub fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
-        // strictly `COMMIT_DEPTH` rounds will precede the current one, which is +1 to the new length
-        // let new_bottom_round = Round((current.0).saturating_sub(MempoolConfig::COMMIT_DEPTH as u32));
+        // strictly `COMMIT_ROUNDS` will precede the current one, which is +1 to the new length
+        // let new_bottom_round = Round((current.0).saturating_sub(MempoolConfig::COMMIT_ROUNDS as u32));
 
         let bottom_round = self.bottom_round(); // assures that dag is contiguous
         let amount = new_bottom_round.0.saturating_sub(bottom_round.0) as usize;
@@ -314,7 +314,7 @@ impl DagBack {
         }
         let history_limit = Round(
             (anchor.round().0)
-                .saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
+                .saturating_sub(CachedConfig::commit_history_rounds())
                 // do not commit genesis - we may place some arbitrary payload in it
                 .max(Genesis::round().next().0),
         );
@@ -363,7 +363,7 @@ impl DagBack {
             }
             r.rotate_left(1); // [empty r_0, r-1, r-2] => [r-1 as r+0, r-2 as r-1, empty as r-2]
         }
-        // we should commit first anchors at commit depth rounds above bottom, discarding them
+        // we should commit first anchors at COMMIT_ROUNDS from bottom (inclusive), discarding them
         // (because some history may be lost) in adapter when bottom is not genesis
         // (in case dag bottom is moved after a large gap or severe collator lag behind consensus);
         // note inclusive bound (`bottom`, not `after`) because anchor payload not committed

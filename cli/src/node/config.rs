@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tycho_collator::internal_queue::queue::QueueConfig;
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::ValidatorStdImplConfig;
+use tycho_consensus::prelude::MempoolNodeConfig;
 use tycho_control::ControlServerConfig;
 use tycho_core::block_strider::{
     ArchiveBlockProviderConfig, BlockchainBlockProviderConfig, StarterConfig,
@@ -73,6 +74,8 @@ pub struct NodeConfig {
 
     pub collator: CollationConfig,
 
+    pub mempool: MempoolNodeConfig,
+
     pub internal_queue: QueueConfig,
 
     pub validator: ValidatorStdImplConfig,
@@ -107,6 +110,7 @@ impl Default for NodeConfig {
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
             archive_block_provider: ArchiveBlockProviderConfig::default(),
             collator: CollationConfig::default(),
+            mempool: MempoolNodeConfig::default(),
             validator: ValidatorStdImplConfig::default(),
             rpc: Some(RpcConfig::default()),
             control: None,

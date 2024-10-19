@@ -21,7 +21,7 @@ pub struct WeakDagRound(Weak<DagRoundInner>);
 
 #[derive(Clone)]
 /// do not pass to backwards-recursive async tasks
-/// (where `DAG_DEPTH` is just a logical limit, but is not explicitly applicable)
+/// (where gag length is just a logical limit, but is not explicitly applicable)
 /// to prevent severe memory leaks of a whole DAG round
 /// (in case congested tokio runtime reorders futures), use [`WeakDagRound`] for that
 pub struct DagRound(Arc<DagRoundInner>);

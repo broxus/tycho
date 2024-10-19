@@ -330,7 +330,7 @@ impl DagPointFuture {
         if let DagPointFutureType::Validate { certified, .. }
         | DagPointFutureType::Load { certified, .. } = &self.0
         {
-            // FIXME limit by validation depth
+            // FIXME limit dependencies by COMMIT_ROUNDS (including bottom, excluding this as top)
             if let Some(oneshot) = certified.take() {
                 // TODO store status when taken or follow only in-mem recursion?
                 // receiver is dropped upon completion

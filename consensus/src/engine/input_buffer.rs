@@ -5,7 +5,7 @@ use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 
 trait InputBufferInner: Send {
     fn fetch_inner(&mut self, only_fresh: bool) -> Vec<Bytes>;
@@ -70,7 +70,7 @@ impl InputBufferData {
             .iter()
             .take_while(|elem| {
                 taken_bytes += elem.len();
-                taken_bytes <= MempoolConfig::PAYLOAD_BATCH_BYTES
+                taken_bytes <= CachedConfig::payload_batch_bytes()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -81,14 +81,14 @@ impl InputBufferData {
     fn add(&mut self, payload: Bytes) {
         let payload_bytes = payload.len();
         assert!(
-            payload_bytes <= MempoolConfig::PAYLOAD_BUFFER_BYTES,
+            payload_bytes <= CachedConfig::payload_buffer_bytes(),
             "cannot buffer too large message of {payload_bytes} bytes: \
             increase config value of PAYLOAD_BUFFER_BYTES={} \
             or filter out insanely large messages prior sending them to mempool",
-            MempoolConfig::PAYLOAD_BUFFER_BYTES
+            CachedConfig::payload_buffer_bytes()
         );
 
-        let max_data_bytes = MempoolConfig::PAYLOAD_BUFFER_BYTES - payload_bytes;
+        let max_data_bytes = CachedConfig::payload_buffer_bytes() - payload_bytes;
         let data_bytes_pre = self.data_bytes;
         if self.data_bytes > max_data_bytes {
             let to_drop = self
@@ -186,7 +186,7 @@ mod stub {
             }
             let step =
                 (self.fetch_count.get() / self.payload_step).min(self.steps_until_full.get());
-            let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
+            let msg_count = (CachedConfig::payload_batch_bytes() * step)
                 / self.steps_until_full
                 / EXTERNAL_MSG_MAX_BYTES;
             let mut result = Vec::with_capacity(msg_count);

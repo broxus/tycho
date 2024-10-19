@@ -20,12 +20,6 @@ while [[ $# -gt 0 ]]; do
           exit 1
         fi
       ;;
-      --mempool-start-round)
-        mempool_start_round=$2
-        shift # past argument
-        if [ "$#" -gt 0 ]; then shift;
-        fi
-      ;;
       *) # positional
         if ! [ -z "$N" ]; then
             echo "ERROR: Too many args"
@@ -48,5 +42,5 @@ RUST_BACKTRACE=1 cargo run --bin tycho --features=debug -- debug mempool \
     --keys "${base_dir}/keys${N}.json" \
     --config "${base_dir}/config${N}.json" \
     --global-config "${base_dir}/global-config.json" \
-    --logger-config "${root_dir}/logger.json" \
-    --mempool-start-round ${mempool_start_round}
+    --import-zerostate "${base_dir}/zerostate.boc" \
+    --logger-config "${root_dir}/logger.json"

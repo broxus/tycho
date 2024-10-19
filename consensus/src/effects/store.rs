@@ -15,7 +15,7 @@ use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteB
 use crate::dag::DagFront;
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
@@ -184,8 +184,8 @@ impl MempoolStore {
                     // do not clean history until commit is finished
                     .min(DagFront::default_back_bottom(committed))
                     .0 // clean history no matter if top known anchor is far behind
-                    .saturating_div(MempoolConfig::CLEAN_ROCKS_PERIOD as u32)
-                    .saturating_mul(MempoolConfig::CLEAN_ROCKS_PERIOD as u32),
+                    .saturating_div(CachedConfig::clean_rocks_period())
+                    .saturating_mul(CachedConfig::clean_rocks_period()),
             )
         }
 
@@ -259,7 +259,7 @@ impl MempoolStoreImpl for MempoolStorage {
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
 
-        let mut buffer = Vec::<u8>::with_capacity(Point::max_byte_size());
+        let mut buffer = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
         point.write_to(&mut buffer);
         batch.put_cf(&points_cf, key.as_slice(), &buffer);
 

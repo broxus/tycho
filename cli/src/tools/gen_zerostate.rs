@@ -632,15 +632,17 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
     // Param 29
     params.set_consensus_config(&ConsensusConfig {
-        new_catchain_ids: true,
-        round_candidates: 3.try_into().unwrap(),
-        next_candidate_delay_ms: 2000,
-        consensus_timeout_ms: 16000,
-        fast_attempts: 3,
-        attempt_duration: 8,
-        catchain_max_deps: 4,
-        max_block_bytes: 2097152,
-        max_collated_bytes: 2097152,
+        clock_skew_millis: 5 * 1000,
+        payload_batch_bytes: 768 * 1024,
+        commit_history_rounds: 20,
+        deduplicate_rounds: 140,
+        max_consensus_lag_rounds: 210,
+        payload_buffer_bytes: 50 * 1024 * 1024,
+        broadcast_retry_millis: 150,
+        download_retry_millis: 25,
+        download_peers: 2,
+        download_tasks: 260,
+        sync_support_rounds: 840,
     })?;
 
     // Param 31

@@ -13,7 +13,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcasterContext, Effects, EngineContext};
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -164,7 +164,7 @@ impl Broadcaster {
     }
 
     pub async fn run_continue(mut self) {
-        let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
+        let mut retry_interval = tokio::time::interval(CachedConfig::broadcast_retry());
         retry_interval.reset_immediately();
         for peer in mem::take(&mut self.bcast_peers) {
             self.broadcast(&peer);
