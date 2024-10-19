@@ -3,20 +3,23 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use everscale_crypto::ed25519;
 use tokio::sync::mpsc;
-use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
+use tycho_block_util::state::ShardStateStuff;
+use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore, MempoolConfigBuilder};
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer};
-use tycho_core::global_config::GlobalConfig;
+use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
+use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
 use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
-use tycho_storage::Storage;
+use tycho_storage::{NewBlockMeta, Storage};
 use tycho_util::cli::error::ResultExt;
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::{resolve_public_ip, signal};
 
 use crate::node::config::{NodeConfig, NodeKeys};
+use crate::util::mempool::set_mempool_config;
 
 /// run a node
 #[derive(Parser)]
@@ -37,10 +40,9 @@ pub struct CmdRun {
     #[clap(long)]
     logger_config: Option<PathBuf>,
 
-    /// Round of a new consensus genesis
-    #[allow(clippy::option_option)]
+    /// list of zerostate files to import
     #[clap(long)]
-    mempool_start_round: Option<Option<u32>>,
+    import_zerostate: Option<Vec<PathBuf>>,
 
     /// step is an amount of points produced by node for payload to grow in size
     #[arg(short, long, default_value_t = 0)]
@@ -99,10 +101,12 @@ impl CmdRun {
             Mempool::new(socket_addr, keys, node_config, global_config).await?
         };
 
+        let mc_zerostate = mempool.load_zerostate(self.import_zerostate).await?;
+
         let input_buffer = InputBuffer::new_stub(self.payload_step, self.steps_until_full);
 
         let (engine, anchor_consumer) = mempool
-            .boot(input_buffer, self.mempool_start_round.unwrap_or_default())
+            .boot(input_buffer, mc_zerostate)
             .await
             .wrap_err("failed to init mempool")?;
 
@@ -119,12 +123,17 @@ impl CmdRun {
 struct Mempool {
     keypair: Arc<ed25519::KeyPair>,
 
+    zerostate: ZerostateId,
+
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
     storage: Storage,
 
     all_peers: Vec<PeerId>,
+
+    config_builder: MempoolConfigBuilder,
+    config_override: Option<MempoolGlobalConfig>,
 }
 
 impl Mempool {
@@ -176,31 +185,44 @@ impl Mempool {
             .build()
             .await
             .wrap_err("failed to create storage")?;
+
         tracing::info!(
             root_dir = %storage.root().path().display(),
             "initialized storage"
         );
 
+        let mut config_builder = MempoolConfigBuilder::default();
+        config_builder.set_node_config(&node_config.mempool);
+
         Ok(Self {
             keypair,
+            zerostate: global_config.zerostate,
             dht_client,
             peer_resolver,
             overlay_service,
             all_peers,
             storage,
+            config_builder,
+            config_override: global_config.mempool_override,
         })
     }
 
     pub async fn boot(
-        self,
+        mut self,
         input_buffer: InputBuffer,
-        mempool_start_round: Option<u32>,
+        zerostate: ShardStateStuff,
     ) -> Result<(Engine, AnchorConsumer)> {
         let local_id = self.dht_client.network().peer_id();
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let mut anchor_consumer = AnchorConsumer::default();
         anchor_consumer.add(*local_id, committed_rx);
+
+        set_mempool_config(
+            &mut self.config_builder,
+            &zerostate,
+            self.config_override.as_ref(),
+        )?;
 
         let mut engine = Engine::new(
             self.keypair.clone(),
@@ -214,7 +236,7 @@ impl Mempool {
             input_buffer,
             committed_tx,
             anchor_consumer.top_known_anchor(),
-            mempool_start_round,
+            &self.config_builder.build()?,
         );
 
         engine.set_peers(&self.all_peers);
@@ -222,5 +244,35 @@ impl Mempool {
         tracing::info!("mempool engine initialized");
 
         Ok((engine, anchor_consumer))
+    }
+
+    async fn load_zerostate(
+        &self,
+        import_zerostate: Option<Vec<PathBuf>>,
+    ) -> Result<ShardStateStuff> {
+        let mc_zerostate = import_zerostate
+            .map(FileZerostateProvider)
+            .context("no zerostates provided")?
+            .load_zerostates(self.storage.shard_state_storage().min_ref_mc_state())
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .find(|state| state.block_id() == &self.zerostate.as_block_id())
+            .context("no masterchain zerostate provided")?;
+
+        let (mc_zerostate_handle, _) = self.storage.block_handle_storage().create_or_load_handle(
+            mc_zerostate.block_id(),
+            NewBlockMeta {
+                is_key_block: true,
+                gen_utime: mc_zerostate.as_ref().gen_utime,
+                ref_by_mc_seqno: 0,
+            },
+        );
+
+        self.storage
+            .shard_state_storage()
+            .store_state(&mc_zerostate_handle, &mc_zerostate)
+            .await?;
+
+        Ok(mc_zerostate)
     }
 }

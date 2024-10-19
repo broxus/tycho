@@ -7,7 +7,7 @@ use futures_util::FutureExt;
 
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
 
 /// If DAG location exists, it must have non-empty `versions` map;
@@ -142,7 +142,7 @@ impl Signable {
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if valid.info.data().time < (UnixTime::now() + MempoolConfig::CLOCK_SKEW) {
+            if valid.info.data().time < (UnixTime::now() + CachedConfig::clock_skew()) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {

@@ -9,7 +9,7 @@ use crate::dag::{DagRound, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::{Consensus, RoundWatch};
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
 
@@ -96,8 +96,6 @@ impl BroadcastFilterInner {
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
-        // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=2
-
         let PointId {
             author,
             round,
@@ -240,7 +238,7 @@ impl BroadcastFilterInner {
         // but engine_round must be set to the greatest value under lock
         let top_round = top_dag_round.round();
         let engine_round = top_round.prev(); // cannot add one more `.prev()`
-        let limit = (top_round.0).saturating_add(MempoolConfig::CACHE_AHEAD_ENGINE_ROUNDS as u32);
+        let limit = (top_round.0).saturating_add(CachedConfig::cache_future_broadcasts_rounds());
 
         // Drain points in historical order that cannot be neither included nor signed,
         // thus out of Collector's interest and needed for validation and commit only.

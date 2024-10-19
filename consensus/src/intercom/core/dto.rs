@@ -1,5 +1,6 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
+use crate::engine::CachedConfig;
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
@@ -19,7 +20,7 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         let size = packet.len();
-        if size > Point::max_byte_size() + 4usize {
+        if size > CachedConfig::point_max_bytes() + 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -105,7 +106,7 @@ where
         }
 
         let size = packet.len();
-        if size > Point::max_byte_size() + 4usize {
+        if size > CachedConfig::point_max_bytes() + 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }

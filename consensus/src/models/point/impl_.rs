@@ -73,14 +73,16 @@ impl Point {
         ShortPoint::read_from_bytes(data.as_ref())
     }
 
-    pub const fn max_byte_size() -> usize {
+    pub fn max_byte_size(payload_batch_bytes: usize) -> usize {
         // 4 bytes of Point tag
         // 32 bytes of Digest
         // 64 bytes of Signature
 
         // Point body size
 
-        4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES + PointBody::max_byte_size()
+        4 + Digest::MAX_TL_BYTES
+            + Signature::MAX_TL_BYTES
+            + PointBody::max_byte_size(payload_batch_bytes)
     }
 
     pub fn new(
@@ -244,6 +246,7 @@ mod tests {
     use tycho_util::sync::rayon_run;
 
     use super::*;
+    use crate::engine::CachedConfig;
     use crate::models::{PointInfo, Through, UnixTime};
 
     const PEERS: usize = 100;
@@ -453,7 +456,7 @@ mod tests {
             body: point_body.clone(),
         }));
 
-        let mut data = Vec::<u8>::with_capacity(Point::max_byte_size());
+        let mut data = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
         point.write_to(&mut data);
         let byte_size = data.len();
 
@@ -509,7 +512,7 @@ mod tests {
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
             let point = point.clone();
-            let mut data = Vec::<u8>::with_capacity(Point::max_byte_size());
+            let mut data = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
             point.write_to(&mut data);
             byte_size = data.len();
             // data.freeze();

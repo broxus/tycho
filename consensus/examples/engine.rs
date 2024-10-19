@@ -10,7 +10,7 @@ use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
-use tycho_consensus::prelude::{Engine, Genesis, InputBuffer, MempoolAdapterStore};
+use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
@@ -109,6 +109,8 @@ fn make_network(
         .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()], None)))
         .collect::<Vec<_>>();
 
+    let mempool_config = default_test_config();
+
     let mut handles = vec![];
 
     let started = Arc::new(tokio::sync::Semaphore::new(0));
@@ -124,6 +126,7 @@ fn make_network(
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let top_known_anchor = anchor_consumer.top_known_anchor().clone();
         let commit_round = anchor_consumer.commit_round().clone();
+        let mempool_config = mempool_config.clone();
         let started = started.clone();
         anchor_consumer.add(peer_id, committed_rx);
         let handle = std::thread::Builder::new()
@@ -176,7 +179,7 @@ fn make_network(
                             InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             committed_tx.clone(),
                             &top_known_anchor,
-                            None,
+                            &mempool_config,
                         );
                         engine.set_peers(&all_peers);
                         started.add_permits(1);
@@ -207,7 +210,7 @@ fn make_network(
                     anchor_consumer
                         .top_known_anchor()
                         // may be uninit until engine started
-                        .set_max(Genesis::round());
+                        .set_max_raw(mempool_config.genesis_round());
                     tokio::try_join!(
                         anchor_consumer.check().map(|_| Err::<(), ()>(())),
                         run_guard.until_any_dropped()

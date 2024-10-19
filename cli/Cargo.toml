@@ -57,7 +57,7 @@ tycho-network = { workspace = true }
 tycho-rpc = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["cli"] }
-tycho-consensus = { workspace = true, features = ["test"], optional = true }
+tycho-consensus = { workspace = true }
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }
@@ -71,7 +71,7 @@ rustc_version = { workspace = true }
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:metrics"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
-debug = ["dep:tycho-consensus"]
+debug = ["tycho-consensus/test"]
 
 [lints]
 workspace = true

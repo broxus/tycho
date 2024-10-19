@@ -19,7 +19,7 @@ use tycho_util::FastHashMap;
 use crate::dag::{DagFront, Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::MempoolConfig;
+use crate::engine::CachedConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId, Round};
@@ -51,8 +51,8 @@ struct ExponentialQuery;
 impl DownloadType for ExponentialQuery {
     fn next_peers(attempt: u8, available_peers: usize) -> usize {
         // result increases exponentially
-        (MempoolConfig::DOWNLOAD_PEERS as usize)
-            .saturating_mul((MempoolConfig::DOWNLOAD_PEERS as usize).saturating_pow(attempt as u32))
+        CachedConfig::download_peers()
+            .saturating_mul(CachedConfig::download_peers().saturating_pow(attempt as u32))
             .min(available_peers)
     }
 }
@@ -61,10 +61,8 @@ impl DownloadType for ExponentialQuery {
 struct LinearQuery;
 impl DownloadType for LinearQuery {
     fn next_peers(attempt: u8, available_peers: usize) -> usize {
-        (MempoolConfig::DOWNLOAD_PEERS as usize)
-            .saturating_add(
-                (MempoolConfig::DOWNLOAD_PEERS as usize).saturating_mul(attempt as usize),
-            )
+        CachedConfig::download_peers()
+            .saturating_add(CachedConfig::download_peers().saturating_mul(attempt as usize))
             .min(available_peers)
     }
 }
@@ -78,7 +76,7 @@ struct Limiter {
 impl Limiter {
     fn enter(&mut self, round: Round) -> Option<Arc<Semaphore>> {
         // cannot be strict equality: at least one is always allowed, others are concurrent to it
-        if self.running <= MempoolConfig::CONCURRENT_DOWNLOADS {
+        if self.running <= CachedConfig::download_tasks() {
             self.running += 1;
             None
         } else {
@@ -201,7 +199,7 @@ impl Downloader {
             (undone_peers.clone(), author_state, guard.updates())
         };
         let peer_count = PeerCount::try_from(undone_peers.len())
-            .expect("validator set is unknown, must keep prev epoch's set for DAG_DEPTH rounds");
+            .expect("validator set is unknown, must keep prev epoch's set for sync");
         let undone_peers = undone_peers
             .iter()
             // query author no matter if it is scheduled for the next round or not;
@@ -233,7 +231,7 @@ impl Downloader {
             undone_peers,
             downloading: FuturesUnordered::new(),
             attempt: 0,
-            interval: tokio::time::interval(MempoolConfig::DOWNLOAD_INTERVAL),
+            interval: tokio::time::interval(CachedConfig::download_retry()),
         };
         let downloaded = task
             .run(dependers_rx, verified_broadcast)
@@ -412,7 +410,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 if status.is_depender {
                     // if points are persisted in storage - it's a ban;
                     // else - peer evicted this point from its cache, as the point
-                    // is at least DAG_DEPTH rounds older than current consensus round
+                    // is at least DAG_ROUNDS older than current consensus round
                     self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                     // FIXME remove next line when storage is ready
                     self.reliably_not_found = self.reliably_not_found.saturating_add(1);
