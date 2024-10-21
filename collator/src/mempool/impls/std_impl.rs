@@ -279,15 +279,12 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
         let mut config_guard = self.unapplied_config.lock();
 
-        let (skip, set_current) = match config_guard.state_update_ctx.as_ref() {
-            Some(old_cx) => {
-                let skip = old_cx.mempool_switch_round >= new_cx.mempool_switch_round;
-                let set_current =
-                    !skip && old_cx.current_validator_set.0 != new_cx.current_validator_set.0;
-                (skip, set_current)
-            }
-            None => (false, true),
-        };
+        let skip = config_guard
+            .state_update_ctx
+            .as_ref()
+            .map_or(false, |old_cx| {
+                old_cx.mempool_switch_round >= new_cx.mempool_switch_round
+            });
 
         if skip {
             tracing::info!(
@@ -308,10 +305,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        if set_current {
-            let subset = compute_subset(&new_cx, &new_cx.current_validator_set.1)?;
-            engine.set_next_peers(&subset, Some(new_cx.mempool_switch_round));
-        }
+        let subset = compute_subset(&new_cx, &new_cx.current_validator_set.1)?;
+        engine.set_next_peers(&subset, Some(new_cx.mempool_switch_round));
 
         if let Some(next_set) = &new_cx.next_validator_set {
             let subset = compute_subset(&new_cx, &next_set.1)?;
