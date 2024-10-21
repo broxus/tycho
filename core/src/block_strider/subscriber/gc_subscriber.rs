@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
-use tycho_storage::{BlocksGcType, Storage};
+use tycho_storage::{ArchivesGcConfig, BlocksGcType, PersistentStateStorage, Storage};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
@@ -130,41 +130,13 @@ impl GcSubscriber {
 
         let persistent_states = storage.persistent_state_storage();
 
-        let compute_offset = |gen_utime: u32| -> Duration {
-            let usable_at = std::time::UNIX_EPOCH
-                + Duration::from_secs(gen_utime as _)
-                + BlockStuff::BOOT_OFFSET;
-            (usable_at + config.persistent_state_offset)
-                .duration_since(std::time::SystemTime::now())
-                .unwrap_or_default()
-        };
-
+        let mut prev_target_seqno = 0;
         'outer: loop {
             // Wait for a target seqno
             let target_seqno = 'seqno: {
-                let wait_for_state_fut = async {
-                    loop {
-                        let mut new_state_found =
-                            pin!(persistent_states.oldest_known_handle_changed());
-
-                        let Some(pss_handle) = persistent_states.load_oldest_known_handle() else {
-                            // Wait for the new state
-                            new_state_found.await;
-                            continue;
-                        };
-
-                        // Wait until it's safe to remove the archives.
-                        let time_to_wait = compute_offset(pss_handle.gen_utime());
-                        tokio::select! {
-                            _ = tokio::time::sleep(time_to_wait) => break pss_handle.id().seqno,
-                            _ = &mut new_state_found => continue,
-                        }
-                    }
-                };
-
                 tokio::select! {
                     // Wait until we can remove archives before that state
-                    seqno = wait_for_state_fut => break 'seqno seqno,
+                    seqno = Self::wait_for_state(&config, persistent_states) => break 'seqno seqno,
                     // Or handle the manual trigger
                     trigger = manual_rx.changed() => {
                         if trigger.is_err() {
@@ -179,15 +151,60 @@ impl GcSubscriber {
                     continue 'outer;
                 };
 
-                tick.adjust(trigger)
+                tick.adjust_seqno(trigger)
             };
+            if target_seqno == prev_target_seqno {
+                // nothing changed, continue to wait for the next trigger
+                if target_seqno != 0 {
+                    tracing::debug!(
+                        target_seqno,
+                        "target seqno hasn't changed, skipping archive removal."
+                    );
+                } else {
+                    // network just started, pss seqno will be 0 for a while
+                    tokio::time::sleep(config.persistent_state_offset).await;
+                }
+
+                continue;
+            }
+
+            // save that we tried to remove archives before this state
+            prev_target_seqno = target_seqno;
 
             if let Err(e) = storage
                 .block_storage()
                 .remove_outdated_archives(target_seqno)
                 .await
             {
-                tracing::error!("failed to remove outdated archives: {e:?}");
+                tracing::error!(target_seqno, "failed to remove outdated archives: {e:?}");
+            }
+        }
+    }
+
+    async fn wait_for_state(
+        config: &ArchivesGcConfig,
+        persistent_states: &PersistentStateStorage,
+    ) -> u32 {
+        loop {
+            let mut new_state_found = pin!(persistent_states.oldest_known_handle_changed());
+
+            let Some(pss_handle) = persistent_states.load_oldest_known_handle() else {
+                // Wait for the new state and load it in the next loop iteration
+                new_state_found.await;
+                continue;
+            };
+
+            let usable_at = std::time::UNIX_EPOCH
+                + Duration::from_secs(pss_handle.gen_utime() as _)
+                + BlockStuff::BOOT_OFFSET;
+            let time_to_wait = (usable_at + config.persistent_state_offset)
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default();
+
+            // Wait until it's safe to remove the archives or a new state is found
+            tokio::select! {
+                _ = tokio::time::sleep(time_to_wait) => break pss_handle.id().seqno,
+                _ = &mut new_state_found => continue,
             }
         }
     }
@@ -230,7 +247,7 @@ impl GcSubscriber {
                     };
 
                     // Compute the target masterchain block seqno
-                    let target_seqno = tick.adjust(trigger);
+                    let target_seqno = tick.adjust_seqno(trigger);
                     if target_seqno == 0 {
                         continue;
                     }
@@ -268,7 +285,7 @@ impl GcSubscriber {
                         }
                     }
 
-                    // NOTE: You should update this in other branches as well,
+                    // NOTE: You should update this in other branches as well
                     // if we want to debounce other types of GC.
                     last_tiggered_at = Some(Instant::now());
                     target_seqno
@@ -354,8 +371,8 @@ impl GcSubscriber {
                         tracing::debug!("no manual trigger available, continuing");
                         continue;
                     };
-                    tracing::info!(seqno = tick.adjust(trigger), "manual GC triggered");
-                    tick.adjust(trigger)
+                    tracing::info!(seqno = tick.adjust_seqno(trigger), "manual GC triggered");
+                    tick.adjust_seqno(trigger)
                 }
                 GcSource::Schedule => {
                     // Make sure to sleep between the ticks
@@ -446,7 +463,7 @@ struct Tick {
 }
 
 impl Tick {
-    fn adjust(&self, trigger: ManualGcTrigger) -> u32 {
+    fn adjust_seqno(&self, trigger: ManualGcTrigger) -> u32 {
         match trigger {
             ManualGcTrigger::Exact(seqno) => seqno,
             ManualGcTrigger::Distance(distance) => self.mc_block_id.seqno.saturating_sub(distance),
