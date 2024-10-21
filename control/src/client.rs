@@ -197,9 +197,12 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
-    pub async fn list_blocks(&self, limit: u32, offset: u32) -> ClientResult<Vec<BlockId>> {
+    pub async fn list_blocks(
+        &self,
+        continuation: Option<BlockId>,
+    ) -> ClientResult<BlockListResponse> {
         self.inner
-            .get_block_ids(current_context(), BlockListRequest { limit, offset })
+            .get_block_ids(current_context(), BlockListRequest { continuation })
             .await?
             .map_err(Into::into)
     }

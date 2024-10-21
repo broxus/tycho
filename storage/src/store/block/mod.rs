@@ -29,7 +29,7 @@ pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId
 use crate::db::*;
 use crate::util::*;
 use crate::{
-    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
+    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta,
     HandleCreationStatus, NewBlockMeta,
 };
 
@@ -332,27 +332,76 @@ impl BlockStorage {
             .await
     }
 
-    pub async fn list_blocks(&self, limit: u32, offset: u32) -> Result<Vec<BlockId>> {
+    pub async fn list_blocks(
+        &self,
+        continuation: Option<BlockId>,
+    ) -> Result<(Vec<BlockId>, Option<BlockId>)> {
+        const MAX_BYTES_READ: usize = 1 << 20; // 1 MB
+
+        // TODO: make easier without additional buffer
+        let mut buf = vec![];
+        let mode = match continuation {
+            Some(continuation) => {
+                let continuation = PartialBlockId::from(continuation);
+                buf.extend(continuation.to_vec());
+                IteratorMode::From(buf.as_slice(), rocksdb::Direction::Forward)
+            }
+            None => IteratorMode::Start,
+        };
+
+        let process_item = |key: &[u8], block_data: &[u8]| -> Result<Option<BlockId>> {
+            let id = PackageEntryKey::from_slice(key);
+
+            if id.ty != ArchiveEntryType::Block {
+                return Ok(None);
+            }
+
+            let meta_data = self
+                .db
+                .block_handles
+                .get(id.block_id.root_hash.as_slice())?
+                .ok_or(BlockStorageError::BlockHandleNotFound)?;
+
+            let meta = BlockMeta::from_slice(meta_data.as_ref());
+            if !meta.flags().contains(BlockFlags::HAS_ALL_BLOCK_PARTS) {
+                return Ok(None);
+            }
+
+            let file_hash = Boc::file_hash_blake(block_data);
+            let block_id = id.block_id.make_full(file_hash);
+
+            Ok(Some(block_id))
+        };
+
         let package_entries = &self.db.package_entries;
 
-        let blocks = package_entries
-            .iterator(IteratorMode::Start)
-            .filter_map(|item| {
-                let (key, _) = item.ok()?;
-                let id = PackageEntryKey::from_slice(&key);
-                if id.ty != ArchiveEntryType::Block {
-                    return None;
+        let mut bytes = 0;
+        let mut blocks = Vec::new();
+
+        let mut iter = package_entries.iterator(mode);
+
+        while let Some(item) = iter.next() {
+            let (key, block_data) = item?;
+            bytes += block_data.len();
+
+            if let Some(block_id) = process_item(&key, &block_data)? {
+                blocks.push(block_id);
+
+                if bytes > MAX_BYTES_READ {
+                    // Find the next valid block for continuation
+                    for item in iter.by_ref() {
+                        let (key, block_data) = item?;
+                        if let Some(next_block_id) = process_item(&key, &block_data)? {
+                            return Ok((blocks, Some(next_block_id)));
+                        }
+                    }
+
+                    break;
                 }
-                let block_data = self.db.package_entries.get(key).expect("db is dead")?;
-                let file_hash = Boc::file_hash_blake(block_data);
+            }
+        }
 
-                Some(id.block_id.make_full(file_hash))
-            })
-            .skip(offset as usize)
-            .take(limit as usize)
-            .collect();
-
-        Ok(blocks)
+        Ok((blocks, None))
     }
 
     pub fn list_archive_ids(&self) -> Vec<u32> {

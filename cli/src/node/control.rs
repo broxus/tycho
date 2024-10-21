@@ -352,24 +352,26 @@ pub struct CmdListBlocks {
     sock: Option<PathBuf>,
     #[clap(long)]
     human_readable: bool,
-    #[clap(short, long, default_value = "1000")]
-    limit: u32,
-    #[clap(short, long, default_value = "0")]
-    offset: u32,
+    #[clap(short, long, allow_hyphen_values(true))]
+    continuation: Option<BlockId>,
 }
 
 impl CmdListBlocks {
     pub fn run(self) -> Result<()> {
         control_rt(self.sock, move |client| async move {
-            let blocks = client.list_blocks(self.limit, self.offset).await?;
+            let blocks = client.list_blocks(self.continuation).await?;
             if self.human_readable {
-                if blocks.is_empty() {
+                if blocks.blocks.is_empty() {
                     println!("No blocks found");
                 } else {
                     println!("Blocks:");
-                    for block in blocks {
+                    for block in blocks.blocks {
                         println!("{}", block);
                     }
+                    println!(
+                        "Continuation: {:?}",
+                        blocks.continuation.map(|block| block.to_string())
+                    );
                 }
             } else {
                 print_json(blocks)?;

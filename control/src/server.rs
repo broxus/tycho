@@ -2,7 +2,6 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -295,10 +294,13 @@ impl proto::ControlServer for ControlServer {
         self,
         _: tarpc::context::Context,
         req: proto::BlockListRequest,
-    ) -> ServerResult<Vec<BlockId>> {
+    ) -> ServerResult<proto::BlockListResponse> {
         let storage = self.inner.storage.block_storage();
-        let res = storage.list_blocks(req.limit, req.offset).await?;
-        Ok(res)
+        let (blocks, continuation) = storage.list_blocks(req.continuation).await?;
+        Ok(proto::BlockListResponse {
+            blocks,
+            continuation,
+        })
     }
 }
 
