@@ -173,8 +173,8 @@ impl RoundTaskReady {
         let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
         let top_known_anchor = top_known_anchor_recv.get();
         let silent_after = CachedConfig::silent_after(top_known_anchor);
-        #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
-        let wait_collator_ready = if true || consensus_round <= silent_after {
+        // FIXME this must be `<=`, changed to `<` until mempool restart is done to support epoch changes
+        let wait_collator_ready = if consensus_round < silent_after {
             future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
         } else {
             tracing::info!(
@@ -191,7 +191,7 @@ impl RoundTaskReady {
                         top_known_anchor = top_known_anchor_recv.next() => {
                             //  exit if ready to produce point: collator synced enough
                             let silent_after = CachedConfig::silent_after(top_known_anchor);
-                            let exit = consensus_round <= silent_after;
+                            let exit = consensus_round < silent_after;
                             tracing::info!(
                                 top_known_anchor = top_known_anchor.0,
                                 silent_after = silent_after.0,

@@ -578,7 +578,10 @@ impl CollatorStdImpl {
         // prev_state_extra.flags is checked in the McStateExtra::load_from
 
         // 5. update validator_info
-        let max_anchor_distance = 210; // TODO: get from blockchain config
+        let max_consensus_lag = config
+            .params
+            .get_consensus_config()?
+            .max_consensus_lag_rounds as u32;
         let mut validator_info = None;
         if is_key_block {
             // check if validator set changed by the cells hash
@@ -594,7 +597,10 @@ impl CollatorStdImpl {
                     .as_ref()
                     .map(|ext_upto| ext_upto.processed_to.0)
                     .unwrap_or_default();
-                let next_session_seqno = prev_processed_to_anchor + max_anchor_distance;
+                // `+1` because it will be the first mempool round in the new session,
+                // while `prev_processed_to_anchor` is a round in the ending session,
+                // and there is exactly `max_consensus_lag` rounds between them
+                let next_session_seqno = prev_processed_to_anchor + max_consensus_lag + 1;
 
                 // calculate next validator subset and hash
                 let current_vset = current_vset.parse::<ValidatorSet>()?;
