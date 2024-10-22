@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::Span;
 
 use crate::effects::AltFormat;
-use crate::models::{Digest, PointId, PointInfo, Round};
+use crate::models::{Digest, Point, PointId, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
 pub trait EffectsContext {}
@@ -131,7 +131,7 @@ pub struct ValidateContext {
 }
 impl EffectsContext for ValidateContext {}
 impl Effects<ValidateContext> {
-    pub fn new(parent: &Effects<EngineContext>, info: &PointInfo) -> Self {
+    pub fn new(parent: &Effects<EngineContext>, point: &Point) -> Self {
         parent.new_child(
             ValidateContext {
                 parent_effects: parent.clone(),
@@ -139,9 +139,9 @@ impl Effects<ValidateContext> {
             || {
                 tracing::error_span!(
                     "validate",
-                    author = display(info.data().author.alt()),
-                    round = info.round().0,
-                    digest = display(info.digest().alt()),
+                    author = display(point.data().author.alt()),
+                    round = point.round().0,
+                    digest = display(point.digest().alt()),
                 )
             },
         )
@@ -151,7 +151,7 @@ impl Effects<ValidateContext> {
     // to produce shorter logs (skip intermediate validation spans).
     // Notice that current engine round may advance while this spans
     // will still report the round that initialized the current chain
-    pub fn deeper(&self, info: &PointInfo) -> Self {
-        Self::new(&self.context.parent_effects, info)
+    pub fn deeper(&self, point: &Point) -> Self {
+        Self::new(&self.context.parent_effects, point)
     }
 }

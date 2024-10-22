@@ -1,3 +1,4 @@
+use std::cmp;
 use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
@@ -15,7 +16,7 @@ use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPoint, ValidPoint,
+    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, ValidPoint,
 };
 
 // Note on equivocation.
@@ -42,11 +43,11 @@ pub enum VerifyError {
 // included into valid anchor chain, i.e. validated by consensus.
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
-    pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
+    pub fn verify(point: &Point) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
         let result = if !point.is_integrity_ok() {
             Err(VerifyError::BadSig)
-        } else if !(point.is_well_formed() && Self::is_peer_usage_ok(point, peer_schedule)) {
+        } else if !point.is_well_formed() {
             Err(VerifyError::IllFormed)
         } else {
             Ok(())
@@ -56,11 +57,9 @@ impl Verifier {
     }
 
     /// must be called iff [`Self::verify`] succeeded
-    #[allow(clippy::too_many_arguments)] // TODO smt
     pub async fn validate(
-        info: PointInfo,               // @ r+0
-        prev_proof: Option<PrevPoint>, // @ r+0
-        r_0: WeakDagRound,             // r+0
+        point: Point,      // @ r+0
+        r_0: WeakDagRound, // r+0
         downloader: Downloader,
         store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
@@ -69,41 +68,44 @@ impl Verifier {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = effects.span().enter();
 
-        // for genesis point it's sufficient to be well-formed and pass integrity check,
-        // it cannot be validated against AnchorStage (as it knows nothing about genesis)
-        // and cannot contain dependencies
-        assert!(
-            info.round() >= Genesis::round(),
-            "Coding error: can only validate points older than genesis"
-        );
-        if info.round() == Genesis::round() {
-            return if info.id() == *Genesis::id() {
-                DagPoint::Trusted(ValidPoint::new(info))
-            } else {
-                tracing::error!("unknown point at genesis round: {:?}", info.id().alt());
-                DagPoint::IllFormed(Arc::new(info.id()))
-            };
+        match point.round().cmp(&Genesis::round().next()) {
+            cmp::Ordering::Less => {
+                // for genesis point it's sufficient to be well-formed and pass integrity check,
+                // it cannot be validated against AnchorStage (as it knows nothing about genesis)
+                // and cannot contain dependencies
+                panic!("Coding error: can only validate points older than genesis")
+            }
+            cmp::Ordering::Equal => {
+                // dependency check for first point is a part of well-formness check
+                let dag_point = DagPoint::Trusted(ValidPoint::new(&point));
+                return ValidateContext::validated(dag_point);
+            }
+            cmp::Ordering::Greater => {
+                if !Self::is_peer_usage_ok(&point, downloader.peer_schedule()) {
+                    return DagPoint::IllFormed(Arc::new(point.id()));
+                }
+            }
         }
 
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot (in)validate point, no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new(info));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new(&point));
             return ValidateContext::validated(dag_point);
         };
         assert_eq!(
             r_0.round(),
-            info.round(),
+            point.round(),
             "Coding error: dag round mismatches point round"
         );
 
         let mut dependencies = Vec::with_capacity(
-            info.data().includes.len() + info.data().witness.len() + 2, // +2 for anchor fields
+            point.data().includes.len() + point.data().witness.len() + 2, // +2 for anchor fields
         );
 
-        if !(Self::is_self_links_ok(&info, &r_0)
+        if !(Self::is_self_links_ok(&point, &r_0)
             && Self::add_anchor_link_if_ok(
                 AnchorStageRole::Proof,
-                &info,
+                &point,
                 &r_0,
                 &downloader,
                 &store,
@@ -112,7 +114,7 @@ impl Verifier {
             )
             && Self::add_anchor_link_if_ok(
                 AnchorStageRole::Trigger,
-                &info,
+                &point,
                 &r_0,
                 &downloader,
                 &store,
@@ -120,18 +122,18 @@ impl Verifier {
                 &mut dependencies,
             ))
         {
-            return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
+            return ValidateContext::validated(DagPoint::IllFormed(Arc::new(point.id())));
         }
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot (in)validate point's 'includes', no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new(info));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new(&point));
             return ValidateContext::validated(dag_point);
         };
 
         let mut proven_vertex_dep = None;
         Self::gather_deps(
-            &info,
+            &point,
             &r_1,
             &downloader,
             &store,
@@ -140,7 +142,7 @@ impl Verifier {
             &mut proven_vertex_dep,
         );
 
-        let mut signatures_fut = std::pin::pin!(match prev_proof {
+        let mut signatures_fut = std::pin::pin!(match point.prev_proof() {
             None => future::Either::Left(future::ready(true)),
             Some(proof) => future::Either::Right(
                 rayon_run(move || proof.signatures_match()).instrument(effects.span().clone()),
@@ -148,9 +150,9 @@ impl Verifier {
         });
 
         let mut is_unique_in_loc_fut = std::pin::pin!(Self::is_unique_in_loc(
-            info.clone(),
-            r_0.view(&info.data().author, |loc| {
-                let other_versions = Self::versions_except(loc, Some(info.digest()));
+            point.clone(),
+            r_0.view(&point.data().author, |loc| {
+                let other_versions = Self::versions_except(loc, Some(point.digest()));
                 (loc.bad_sig_in_broadcast, other_versions)
             })
         )
@@ -158,16 +160,17 @@ impl Verifier {
 
         let mut is_valid_fut = std::pin::pin!({
             // peer has to jump over a round if it had some invalid point in prev loc
-            let other_versions = r_1.view(&info.data().author, |loc| {
+            let other_versions = r_1.view(&point.data().author, |loc| {
                 // do not add same prev_digest twice - it is added as one of 'includes'
-                Self::versions_except(loc, info.data().prev_digest())
+                Self::versions_except(loc, point.data().prev_digest())
             });
             let deps_and_prev = dependencies
                 .iter()
                 .cloned()
                 // do not extend listed dependencies as they may become trusted by consensus
                 .chain(other_versions.into_iter().flatten());
-            Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(effects.span().clone())
+            Self::is_valid(point.clone(), deps_and_prev.collect())
+                .instrument(effects.span().clone())
         });
 
         // drop strong links before await
@@ -225,20 +228,21 @@ impl Verifier {
                 // here "trust consensus" call chain resolves;
                 // ignore other flags, though it looks like a race condition:
                 // follow majority's decision now, otherwise will follow it via sync
-                DagPoint::Trusted(ValidPoint::new(info)),
+                DagPoint::Trusted(ValidPoint::new(&point)),
                 tracing::Level::INFO,
             ),
             (false, Some(true), Some(true), Some(true)) => (
-                DagPoint::Trusted(ValidPoint::new(info)),
+                DagPoint::Trusted(ValidPoint::new(&point)),
                 tracing::Level::TRACE,
             ),
             (false, Some(true), Some(true), Some(false)) => (
-                DagPoint::Suspicious(ValidPoint::new(info)),
+                DagPoint::Suspicious(ValidPoint::new(&point)),
                 tracing::Level::WARN,
             ),
-            (false, Some(false), _, _) | (false, _, Some(false), _) => {
-                (DagPoint::Invalid(info), tracing::Level::ERROR)
-            }
+            (false, Some(false), _, _) | (false, _, Some(false), _) => (
+                DagPoint::Invalid(PointInfo::from(&point)),
+                tracing::Level::ERROR,
+            ),
             (false, _, _, _) => {
                 let _guard = effects.span().enter();
                 unreachable!(
@@ -262,20 +266,20 @@ impl Verifier {
     }
 
     fn is_self_links_ok(
-        info: &PointInfo,     // @ r+0
+        point: &Point,        // @ r+0
         dag_round: &DagRound, // r+0
     ) -> bool {
         // existence of proofs in leader points is a part of point's well-form-ness check
         match &dag_round.anchor_stage() {
             // no one may link to self
             None => {
-                info.data().anchor_proof != Link::ToSelf
-                    && info.data().anchor_trigger != Link::ToSelf
+                point.data().anchor_proof != Link::ToSelf
+                    && point.data().anchor_trigger != Link::ToSelf
             }
             // leader must link to own point while others must not
             Some(stage) => {
-                (stage.leader == info.data().author)
-                    == (info.anchor_link(stage.role) == &Link::ToSelf)
+                (stage.leader == point.data().author)
+                    == (point.anchor_link(stage.role) == &Link::ToSelf)
             }
         }
     }
@@ -283,14 +287,14 @@ impl Verifier {
     /// the only method that scans the DAG deeper than 2 rounds
     fn add_anchor_link_if_ok(
         link_field: AnchorStageRole,
-        info: &PointInfo,     // @ r+0
+        point: &Point,        // @ r+0
         dag_round: &DagRound, // start with r+0
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<ValidateContext>,
         dependencies: &mut Vec<DagPointFuture>,
     ) -> bool {
-        let linked_id = info.anchor_id(link_field);
+        let linked_id = point.anchor_id(link_field);
 
         let Some(round) = dag_round.scan(linked_id.round) else {
             // too old indirect reference does not invalidate the point,
@@ -313,7 +317,7 @@ impl Verifier {
         };
 
         #[allow(clippy::match_same_arms)] // for comments
-        match info.anchor_link(link_field) {
+        match point.anchor_link(link_field) {
             Link::ToSelf => {
                 // do not search in DAG the point that is currently under validation;
                 // link's destination is already checked by AnchorStage above, cannot be reordered
@@ -326,7 +330,7 @@ impl Verifier {
                 dependencies.push(round.add_dependency_exact(
                     &linked_id.author,
                     &linked_id.digest,
-                    &info.data().author,
+                    &point.data().author,
                     downloader,
                     store,
                     effects,
@@ -348,8 +352,8 @@ impl Verifier {
     }
 
     fn gather_deps(
-        info: &PointInfo, // @ r+0
-        r_1: &DagRound,   // r-1
+        point: &Point,  // @ r+0
+        r_1: &DagRound, // r-1
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<ValidateContext>,
@@ -362,14 +366,15 @@ impl Verifier {
         }
 
         // integrity check passed, so includes contain author's prev point proof
-        let includes = info
+        let includes = point
             .data()
             .includes
             .iter()
             .map(|(author, digest)| (r_1, author, digest));
 
         let witness = r_2_opt.iter().flat_map(|r_2| {
-            info.data()
+            point
+                .data()
                 .witness
                 .iter()
                 .map(move |(author, digest)| (r_2, author, digest))
@@ -379,7 +384,7 @@ impl Verifier {
             let shared = dag_round.add_dependency_exact(
                 author,
                 digest,
-                &info.data().author,
+                &point.data().author,
                 downloader,
                 store,
                 effects,
@@ -388,7 +393,7 @@ impl Verifier {
             // it's sufficient to check only author to get prev (proven) point from well-formed one:
             // * includes map contains same author at most once - and it matches proven point
             // * witness map cannot contain same author
-            if author == info.data().author {
+            if author == point.data().author {
                 *proven_vertex_dep = Some(shared.clone());
             }
 
@@ -396,10 +401,7 @@ impl Verifier {
         }
     }
 
-    async fn is_unique_in_loc(
-        info: PointInfo,
-        loc_data: Option<(bool, Vec<DagPointFuture>)>,
-    ) -> bool {
+    async fn is_unique_in_loc(point: Point, loc_data: Option<(bool, Vec<DagPointFuture>)>) -> bool {
         let Some((broadcasted_bad_sig, other_versions)) = loc_data else {
             return true;
         };
@@ -410,17 +412,17 @@ impl Verifier {
         while let Some(dag_point) = other_versions.next().await {
             assert_eq!(
                 dag_point.author(),
-                info.data().author,
+                point.data().author,
                 "this method checks only points by the same author"
             );
             assert_eq!(
                 dag_point.round(),
-                info.round(),
+                point.round(),
                 "this method checks only points at the same round"
             );
             assert_ne!(
                 dag_point.digest(),
-                info.digest(),
+                point.digest(),
                 "impossible to validate the same point multiple times concurrently"
             );
             match dag_point {
@@ -440,32 +442,28 @@ impl Verifier {
     }
 
     /// check only direct dependencies and location for previous point (let it jump over round)
-    async fn is_valid(
-        info: PointInfo,
-        mut deps_and_prev: FuturesUnordered<DagPointFuture>,
-    ) -> bool {
+    async fn is_valid(point: Point, mut deps_and_prev: FuturesUnordered<DagPointFuture>) -> bool {
         // point is well-formed if we got here, so point.proof matches point.includes
-        let prev_digest_in_point = info.data().prev_digest();
-        let prev_round = info.round().prev();
+        let prev_digest_in_point = point.data().prev_digest();
+        let prev_round = point.round().prev();
 
         // Indirect dependencies may be evicted from memory and not participate in this check,
         // but validity of direct dependencies ('links through') ensures inclusion chain is valid.
         // If point under validation is so old, that any dependency download fails,
         // it will not be referenced by the current peer anyway, and it's ok to mark it as invalid
         // until the current peer makes a gap in its far outdated DAG.
-        let anchor_trigger_id = info.anchor_id(AnchorStageRole::Trigger);
-        let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
-        let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);
-        let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
+        let anchor_trigger_id = point.anchor_id(AnchorStageRole::Trigger);
+        let anchor_proof_id = point.anchor_id(AnchorStageRole::Proof);
+        let anchor_trigger_link_id = point.anchor_link_id(AnchorStageRole::Trigger);
+        let anchor_proof_link_id = point.anchor_link_id(AnchorStageRole::Proof);
 
-        let info = &info;
         while let Some(dag_point) = deps_and_prev.next().await {
-            if dag_point.round() == prev_round && dag_point.author() == info.data().author {
+            if dag_point.round() == prev_round && dag_point.author() == point.data().author {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         match dag_point {
                             DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                                if !Self::is_proof_ok(info, &valid.info) {
+                                if !Self::is_proof_ok(&point, &valid.info) {
                                     return false;
                                 } // else ok continue
                             }
@@ -523,7 +521,7 @@ impl Verifier {
                             return false;
                         }
                         if valid_point_id == anchor_proof_link_id
-                            && valid.info.data().anchor_time != info.data().anchor_time
+                            && valid.info.data().anchor_time != point.data().anchor_time
                         {
                             // anchor candidate's time is not inherited from its proof
                             return false;
@@ -543,77 +541,90 @@ impl Verifier {
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
     ) -> bool {
-        if point.round() == Genesis::round() {
-            // `is_well_formed()` ensured that genesis has empty includes, witness and evidence
-            return true;
-        }
         let [
-            witness_peers/* @ r-2 */ ,
-            includes_peers /* @ r-1 */ ,
-            proof_peers /* @ r+0 */
+            proof_peers, // @ r+0
+            includes_peers, // @ r-1
+            witness_peers, //  @ r-2
         ] = peer_schedule.atomic().peers_for_array([
-                point.round().prev().prev(),
-                point.round().prev(),
-                point.round(),
-            ]);
-        for peer_id in point.data().witness.keys() {
-            if !witness_peers.contains(peer_id) {
-                return false;
-            }
-        }
-        let includes_peer_count = if point.round().prev() == Genesis::round() {
-            PeerCount::GENESIS
-        } else {
-            match PeerCount::try_from(includes_peers.len()) {
-                Ok(peer_count) => peer_count,
-                // reject the point in case we don't know validators for its round
-                Err(_) => return false,
-            }
-        };
-        if point.data().includes.len() < includes_peer_count.majority() {
-            return false;
-        };
-        for peer_id in point.data().includes.keys() {
-            if !includes_peers.contains(peer_id) {
-                return false;
-            }
-        }
-        if point.evidence().is_empty() {
-            return true;
-        }
+            point.round(),
+            point.round().prev(),
+            point.round().prev().prev(),
+        ]);
+
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
-
-        let Ok(proof_peer_count) = PeerCount::try_from(proof_peers.len()) else {
-            return false;
-        };
-        if point.evidence().len() < proof_peer_count.majority_of_others() {
-            return false;
-        }
-        for peer_id in point.evidence().keys() {
-            if !proof_peers.contains(peer_id) {
+        match PeerCount::try_from(proof_peers.len()).map(|total| total.majority_of_others()) {
+            Ok(_) if point.evidence().is_empty() => {
+                // ok, continue check; point is well-formed so does not have prev point
+            }
+            Ok(required) => {
+                let mut peers = point.evidence().keys();
+                if peers.len() < required {
+                    tracing::error!("not enough evidence peers: {} < {required}", peers.len());
+                    return false;
+                } else if !peers.all(|id| proof_peers.contains(id)) {
+                    tracing::error!("wrong peer in evidence list");
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::error!("unusable evidence peer set: {e}");
                 return false;
             }
         }
+
+        match PeerCount::try_from(includes_peers.len()).map(|total| total.majority()) {
+            Ok(required) => {
+                let mut peers = point.data().includes.keys();
+                if peers.len() < required {
+                    tracing::error!("not enough includes points: {} < {required}", peers.len());
+                    return false;
+                } else if !peers.all(|id| includes_peers.contains(id)) {
+                    tracing::error!("wrong peer in list of includes");
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::error!("unusable includes peer set: {e}");
+                return false;
+            }
+        }
+
+        match PeerCount::try_from(witness_peers.len()) {
+            Ok(_) => {
+                let mut peers = point.data().witness.keys();
+                if !peers.all(|peer| witness_peers.contains(peer)) {
+                    tracing::error!("wrong peer in witness list");
+                    return false;
+                }
+            }
+            Err(_) if point.round().prev().prev() == Genesis::round() => {
+                // ok, as Genesis cannot be in witness, already checked for point to be well-formed
+            }
+            Err(e) => {
+                tracing::error!("unusable witness peer set: {e}");
+                return false;
+            }
+        };
         true
     }
 
     /// blame author and every dependent point's author
     fn is_proof_ok(
-        info: &PointInfo,   // @ r+0
+        point: &Point,      // @ r+0
         proven: &PointInfo, // @ r-1
     ) -> bool {
         assert_eq!(
-            info.data().author,
+            point.data().author,
             proven.data().author,
             "Coding error: mismatched authors of proof and its vertex"
         );
         assert_eq!(
-            info.round().prev(),
+            point.round().prev(),
             proven.round(),
             "Coding error: mismatched rounds of proof and its vertex"
         );
-        let prev_digest = info
+        let prev_digest = point
             .data()
             .prev_digest()
             .expect("Coding error: passed point doesn't contain proof for a given vertex");
@@ -621,11 +632,12 @@ impl Verifier {
             prev_digest, proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
-        if info.data().time <= proven.data().time {
+        if point.data().time <= proven.data().time {
             // time must be increasing by the same author until it stops referencing previous points
             return false;
         }
-        if info.data().anchor_proof == Link::ToSelf && info.data().anchor_time != proven.data().time
+        if point.data().anchor_proof == Link::ToSelf
+            && point.data().anchor_time != proven.data().time
         {
             // anchor proof must inherit its candidate's time
             return false;

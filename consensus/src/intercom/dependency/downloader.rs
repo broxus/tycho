@@ -145,6 +145,10 @@ impl Downloader {
         }
     }
 
+    pub fn peer_schedule(&self) -> &PeerSchedule {
+        &self.inner.peer_schedule
+    }
+
     pub async fn run(
         &self,
         point_id: &PointId,
@@ -434,7 +438,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 None
             }
             Some(point) => {
-                match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
+                match Verifier::verify(&point) {
                     Err(error @ VerifyError::BadSig) => {
                         // reliable peer won't return unverifiable point
                         self.unreliable_peers = self.unreliable_peers.saturating_add(1);

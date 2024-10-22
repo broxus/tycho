@@ -105,7 +105,7 @@ impl BroadcastFilterInner {
         let verified_result = if sender != author {
             None // sender is not author
         } else {
-            Some(Verifier::verify(point, &self.peer_schedule))
+            Some(Verifier::verify(point))
         };
 
         let (is_threshold_reached, duplicates) = if let Some(verified) = &verified_result {

@@ -17,8 +17,8 @@ use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
-    Signature, Through, UnixTime,
+    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature, Through,
+    UnixTime,
 };
 
 pub fn make_dag_parts<const PEER_COUNT: usize>(
@@ -60,7 +60,6 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 pub async fn populate_points<const PEER_COUNT: usize>(
     dag_round: &DagRound,
     peers: &[(PeerId, KeyPair); PEER_COUNT],
-    peer_schedule: &PeerSchedule,
     downloader: &Downloader,
     store: &MempoolStore,
     effects: &Effects<EngineContext>,
@@ -128,13 +127,11 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             panic!("Point hash is not valid");
         };
 
-        Verifier::verify(point, peer_schedule).expect("well-formed point");
+        Verifier::verify(point).expect("well-formed point");
         let (_, certified_tx) = oneshot::channel();
-        let info = PointInfo::from(point);
-        let effects = Effects::<ValidateContext>::new(effects, &info);
+        let effects = Effects::<ValidateContext>::new(effects, point);
         Verifier::validate(
-            info,
-            point.prev_proof(),
+            point.clone(),
             dag_round.downgrade(),
             downloader.clone(),
             store.clone(),

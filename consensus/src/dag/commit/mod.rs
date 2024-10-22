@@ -286,7 +286,6 @@ mod test {
             test_utils::populate_points(
                 dag.top(),
                 &peers,
-                &peer_schedule,
                 &stub_downloader,
                 &stub_store,
                 &engine_effects,
