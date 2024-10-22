@@ -42,6 +42,7 @@ impl Engine {
         input_buffer: InputBuffer,
         committed_info_tx: mpsc::UnboundedSender<CommitResult>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
+        bootstrap_peers: &[PeerId],
         config: &MempoolConfig,
     ) -> Self {
         // mostly everything depends on genesis - must init at the first line
@@ -62,8 +63,7 @@ impl Engine {
 
         let dispatcher = Dispatcher::new(network, &private_overlay);
         let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
-
-        peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
+        peer_schedule.set_next_peers(bootstrap_peers, Some(Genesis::round().next()));
 
         genesis.verify_hash().expect("Failed to verify genesis");
         Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
@@ -127,13 +127,6 @@ impl Engine {
             effects,
             init_task: Some(init_task),
         }
-    }
-
-    pub fn set_peers(&mut self, current_peers: &[PeerId]) {
-        self.round_task
-            .state
-            .peer_schedule
-            .set_epoch(current_peers, Genesis::round().next(), true);
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
@@ -204,7 +197,7 @@ impl Engine {
         }
     }
 
-    pub async fn run(mut self) -> ! {
+    pub async fn run(mut self) {
         let mut start_point_with_state = self.pre_run().await;
         let mut full_history_bottom = None;
         loop {
