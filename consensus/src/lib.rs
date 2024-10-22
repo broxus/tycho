@@ -10,7 +10,7 @@ pub mod prelude {
     pub use crate::effects::MempoolAdapterStore;
     pub use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
     pub use crate::engine::{
-        Engine, InputBuffer, MempoolConfig, MempoolConfigBuilder, MempoolNodeConfig,
+        Engine, EngineHandle, InputBuffer, MempoolConfig, MempoolConfigBuilder, MempoolNodeConfig,
     };
     pub use crate::models::{AnchorData, CommitResult, PointInfo};
 }
