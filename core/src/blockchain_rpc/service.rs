@@ -10,6 +10,7 @@ use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, Se
 use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::tl::BytesLike;
 
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
@@ -404,7 +405,10 @@ impl<B> Inner<B> {
         }
     }
 
-    async fn handle_get_block_full(&self, req: &rpc::GetBlockFull) -> overlay::Response<BlockFull> {
+    async fn handle_get_block_full(
+        &self,
+        req: &rpc::GetBlockFull,
+    ) -> overlay::Response<BlockFull<BytesLike<impl AsRef<[u8]>>>> {
         let label = [("method", "getBlockFull")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -420,7 +424,7 @@ impl<B> Inner<B> {
     async fn handle_get_next_block_full(
         &self,
         req: &rpc::GetNextBlockFull,
-    ) -> overlay::Response<BlockFull> {
+    ) -> overlay::Response<BlockFull<BytesLike<impl AsRef<[u8]>>>> {
         let label = [("method", "getNextBlockFull")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -447,13 +451,17 @@ impl<B> Inner<B> {
         }
     }
 
-    fn handle_get_block_data_chunk(&self, req: &rpc::GetBlockDataChunk) -> overlay::Response<Data> {
+    fn handle_get_block_data_chunk(
+        &self,
+        req: &rpc::GetBlockDataChunk,
+    ) -> overlay::Response<Data<BytesLike<impl AsRef<[u8]>>>> {
         let label = [("method", "getBlockDataChunk")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
         let block_storage = self.storage.block_storage();
         match block_storage.get_block_data_chunk(&req.block_id, req.offset) {
-            Ok(data) => overlay::Response::Ok(Data { data: data.into() }),
+            Ok(Some(data)) => overlay::Response::Ok(Data { data: data.into() }),
+            Ok(None) => overlay::Response::Err(NOT_FOUND_ERROR_CODE),
             Err(e) => {
                 tracing::warn!("get_block_data_chunk failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
@@ -464,7 +472,7 @@ impl<B> Inner<B> {
     async fn handle_get_key_block_proof(
         &self,
         req: &rpc::GetKeyBlockProof,
-    ) -> overlay::Response<KeyBlockProof> {
+    ) -> overlay::Response<KeyBlockProof<BytesLike<impl AsRef<[u8]>>>> {
         let label = [("method", "getKeyBlockProof")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -534,7 +542,7 @@ impl<B> Inner<B> {
     async fn handle_get_archive_chunk(
         &self,
         req: &rpc::GetArchiveChunk,
-    ) -> overlay::Response<Data> {
+    ) -> overlay::Response<Data<BytesLike<impl AsRef<[u8]>>>> {
         let label = [("method", "getArchiveChunk")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -599,41 +607,50 @@ impl<B> Inner<B> {
 }
 
 impl<B> Inner<B> {
-    async fn get_block_full(&self, block_id: &BlockId) -> anyhow::Result<BlockFull> {
+    async fn get_block_full(
+        &self,
+        block_id: &BlockId,
+    ) -> anyhow::Result<BlockFull<BytesLike<impl AsRef<[u8]>>>> {
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
-        Ok(match block_handle_storage.load_handle(block_id) {
-            Some(handle) if handle.has_all_block_parts() => {
-                let data_chunk_size = block_storage.block_data_chunk_size();
-                let data = block_storage.get_block_data_chunk(block_id, 0)?;
-                let data_size = if data.len() < data_chunk_size.get() as usize {
-                    // NOTE: Skip one RocksDB read for relatively small blocks
-                    //       Average block size is 4KB, while the chunk size is 1MB.
-                    data.len() as u32
-                } else {
-                    block_storage.get_block_data_size(block_id)?
-                };
+        let handle = match block_handle_storage.load_handle(block_id) {
+            Some(handle) if handle.has_all_block_parts() => handle,
+            _ => return Ok(BlockFull::NotFound),
+        };
 
-                let block = BlockData {
-                    data: data.into(),
-                    size: NonZeroU32::new(data_size).expect("shouldn't happen"),
-                    chunk_size: data_chunk_size,
-                };
+        let Some(data) = block_storage.get_block_data_chunk(block_id, 0)? else {
+            return Ok(BlockFull::NotFound);
+        };
 
-                let (proof, queue_diff) = tokio::join!(
-                    block_storage.load_block_proof_raw(&handle),
-                    block_storage.load_queue_diff_raw(&handle)
-                );
-
-                BlockFull::Found {
-                    block_id: *block_id,
-                    block,
-                    proof: proof?.into(),
-                    queue_diff: queue_diff?.into(),
-                }
+        let data_chunk_size = block_storage.block_data_chunk_size();
+        let data_size = if data.len() < data_chunk_size.get() as usize {
+            // NOTE: Skip one RocksDB read for relatively small blocks
+            //       Average block size is 4KB, while the chunk size is 1MB.
+            data.len() as u32
+        } else {
+            match block_storage.get_block_data_size(block_id)? {
+                Some(size) => size,
+                None => return Ok(BlockFull::NotFound),
             }
-            _ => BlockFull::NotFound,
+        };
+
+        let block = BlockData {
+            data: data.into(),
+            size: NonZeroU32::new(data_size).expect("shouldn't happen"),
+            chunk_size: data_chunk_size,
+        };
+
+        let (proof, queue_diff) = tokio::join!(
+            block_storage.load_block_proof_raw(&handle),
+            block_storage.load_queue_diff_raw(&handle)
+        );
+
+        Ok(BlockFull::Found {
+            block_id: *block_id,
+            block,
+            proof: proof?.into(),
+            queue_diff: queue_diff?.into(),
         })
     }
 

@@ -245,7 +245,7 @@ async fn archives() -> Result<()> {
             .block_storage()
             .get_archive_chunk(archive_id, offset as u64)
             .await?;
-        expected_archive_data.extend(chunk);
+        expected_archive_data.extend_from_slice(&chunk);
     }
     assert_eq!(archive_data, expected_archive_data);
 
@@ -453,7 +453,7 @@ async fn check_archive(
             .block_storage()
             .get_archive_chunk(archive_id, offset as u64)
             .await?;
-        got_archive.extend(chunk);
+        got_archive.extend_from_slice(&chunk);
     }
 
     let original_decompressed = decompress(original_archive);
