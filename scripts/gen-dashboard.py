@@ -809,6 +809,11 @@ def storage() -> RowPanel:
             "tycho_storage_load_block_data_time_count",
             "Number of load_block_data calls",
         ),
+        create_percent_panel(
+            "tycho_storage_block_cache_hit_total",
+            "tycho_storage_load_block_total",
+            "Block cache hit ratio",
+        ),
     ]
     return create_row("Storage", metrics)
 
