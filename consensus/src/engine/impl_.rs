@@ -19,7 +19,7 @@ use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::engine::{CachedConfig, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{AnchorData, CommitResult, Point, PointInfo};
+use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
 
 pub struct Engine {
     dag: DagFront,
@@ -29,6 +29,17 @@ pub struct Engine {
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
     init_task: Option<JoinTask<InclusionState>>,
+}
+
+#[derive(Clone)]
+pub struct EngineHandle {
+    peer_schedule: PeerSchedule,
+}
+impl EngineHandle {
+    pub fn set_next_peers(&self, next_peers: &[PeerId], next_round: Option<u32>) {
+        self.peer_schedule
+            .set_next_peers(next_peers, next_round.map(Round));
+    }
 }
 
 impl Engine {
@@ -126,6 +137,12 @@ impl Engine {
             round_task,
             effects,
             init_task: Some(init_task),
+        }
+    }
+
+    pub fn get_handle(&self) -> EngineHandle {
+        EngineHandle {
+            peer_schedule: self.round_task.state.peer_schedule.clone(),
         }
     }
 

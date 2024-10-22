@@ -1345,7 +1345,8 @@ where
         let cx = StateUpdateContext {
             mc_block_id: mc_data.block_id,
             mempool_switch_round: mc_data.validator_info.catchain_seqno,
-            mempool_config: mc_data.config.get_catchain_config()?,
+            catchain_config: mc_data.config.get_catchain_config()?,
+            consensus_config: mc_data.config.get_consensus_config()?,
             prev_validator_set,
             current_validator_set,
             next_validator_set,
