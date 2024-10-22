@@ -1,3 +1,5 @@
+use anyhow::anyhow;
+
 #[derive(Clone, Copy)]
 pub struct PeerCount(u8);
 
@@ -8,11 +10,11 @@ impl std::fmt::Debug for PeerCount {
 }
 
 impl TryFrom<usize> for PeerCount {
-    type Error = &'static str;
+    type Error = anyhow::Error;
     fn try_from(total_peers: usize) -> Result<Self, Self::Error> {
         // may occur if peer_schedule is empty
         if total_peers < 3 {
-            Err("not enough nodes to run consensus")
+            Err(anyhow!("{total_peers} peers not enough to run consensus"))
         } else {
             // ceil up to 3F+1 and scale down to 1F,
             // assuming the least possible amount of nodes is not in validator set
