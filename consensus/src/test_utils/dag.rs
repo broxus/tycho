@@ -40,10 +40,9 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let local_keys = Arc::new(peers[0].1);
 
     let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
-    peer_schedule.set_next_peers(
-        &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        Some(genesis.round().next()),
-    );
+    peer_schedule.set_next_peers(&peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(), false);
+    peer_schedule.set_next_start(genesis.round().next());
+    peer_schedule.apply_scheduled(genesis.round().next());
 
     let stub_consensus_round = RoundWatch::<Consensus>::default();
     let stub_downloader =

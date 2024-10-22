@@ -1,19 +1,27 @@
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
 use parking_lot::lock_api::{RwLockReadGuard, RwLockWriteGuard};
 use parking_lot::{RawRwLock, RwLock};
+use rand::thread_rng;
 use tokio::sync::broadcast;
-use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesEvent};
+use tokio::task::AbortHandle;
+use tycho_network::{
+    KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
+    PrivateOverlayEntriesReadGuard,
+};
+use tycho_util::FastHashSet;
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::Genesis;
 use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
-use crate::intercom::peer_schedule::utils;
 use crate::models::Round;
 // As validators are elected for wall-clock time range,
 // the round of validator set switch is not known beforehand
@@ -39,13 +47,11 @@ impl PeerSchedule {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
         }));
-        {
-            let peer_schedule = this.clone();
-            let mut guard = this.write();
-            guard.set_next_peers(&[Genesis::id().author], &peer_schedule, false);
-            guard.set_next_start(Genesis::round(), &peer_schedule);
-            guard.apply_next_start(&peer_schedule);
-        }
+
+        this.set_next_peers(&[Genesis::id().author], false);
+        this.set_next_start(Genesis::round());
+        this.apply_scheduled(Genesis::round());
+
         this
     }
 
@@ -53,19 +59,80 @@ impl PeerSchedule {
         self.0.locked.read()
     }
 
-    pub(super) fn write(&self) -> RwLockWriteGuard<'_, RawRwLock, PeerScheduleLocked> {
+    fn write(&self) -> RwLockWriteGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.write()
     }
 
-    pub fn set_next_peers(&self, next_peers: &[PeerId], next_round: Option<Round>) {
-        let mut guard = self.write();
-        let peer_schedule = self.clone();
+    pub fn set_next_peers(&self, peers: &[PeerId], update_overlay: bool) {
+        let mut locked = self.write();
+        let all_resolved = {
+            let local_id = locked.local_id;
+            let entries = if update_overlay {
+                let to_remove = self.atomic().next_to_remove(peers);
+                locked.update_resolve(self, &to_remove, peers)
+            } else {
+                locked.overlay.read_entries()
+            };
+            entries
+                .iter()
+                .filter(|a| a.resolver_handle.is_resolved() && a.peer_id != local_id)
+                .map(|a| a.peer_id)
+                .collect::<FastHashSet<_>>()
+        };
 
-        guard.set_next_peers(next_peers, &peer_schedule, true);
-        if let Some(next_round) = next_round {
-            guard.set_next_start(next_round, &peer_schedule);
-            guard.apply_next_start(&peer_schedule);
+        locked.data.set_next_peers(peers, all_resolved);
+        // atomic part is updated under lock too
+        self.update_atomic(|stateless| stateless.set_next_peers(peers));
+    }
+
+    // `false` if next round is outdated
+    pub fn set_next_start(&self, next_round: Round) -> bool {
+        if next_round <= self.atomic().cur_epoch_start {
+            return false; // ignore outdated
         }
+        let mut locked = self.write();
+        locked.data.next_epoch_start = Some(next_round);
+        // atomic part is updated under lock too
+        self.update_atomic(|stateless| stateless.next_epoch_start = Some(next_round));
+        true
+    }
+
+    /// on peer set change
+    pub fn apply_scheduled(&self, top_dag_round: Round) {
+        if (self.atomic().next_epoch_start).map_or(true, |next| next < top_dag_round) {
+            return;
+        }
+        let mut locked = self.write();
+        tracing::debug!(
+            "peer schedule before rotation at {top_dag_round:?}: {:?} {:?}",
+            self.atomic(),
+            locked.data,
+        );
+        let to_forget = locked.data.forget_previous();
+        locked.data.rotate();
+        locked.update_resolve(self, &to_forget, &[]);
+        // atomic part is updated under lock too
+        self.update_atomic(|stateless| {
+            stateless.forget_previous();
+            stateless.rotate();
+        });
+        tracing::info!(
+            "peer schedule rotated at {top_dag_round:?}: {:?} {:?}",
+            self.atomic(),
+            locked.data,
+        );
+    }
+
+    /// after successful sync to current epoch
+    /// and validating all points from previous peer set
+    /// free some memory and ignore overlay updates
+    #[allow(dead_code)] // TODO use on change of validator set
+    pub fn forget_previous(&self) {
+        let mut locked = self.write();
+        let to_forget = locked.data.forget_previous();
+        locked.update_resolve(self, &to_forget, &[]);
+        // atomic part is updated under lock too
+        self.update_atomic(|stateless| stateless.forget_previous());
     }
 
     /// in-time snapshot if consistency with peer state is not needed;
@@ -75,7 +142,7 @@ impl PeerSchedule {
     }
 
     /// atomic part is updated under write lock
-    pub fn update_atomic<F>(&self, fun: F)
+    fn update_atomic<F>(&self, fun: F)
     where
         F: FnOnce(&mut PeerScheduleStateless),
     {
@@ -92,12 +159,12 @@ impl PeerSchedule {
             let (rx, resolved_waiters) = {
                 let entries = guard.overlay.read_entries();
                 let rx = entries.subscribe();
-                (rx, utils::resolved_waiters(&local_id, &entries))
+                (rx, Self::resolved_waiters(&local_id, &entries))
             };
             if let Some(handle) = &guard.abort_resolve_peers {
                 handle.abort();
             }
-            guard.abort_resolve_peers = utils::new_resolve_task(self.clone(), resolved_waiters);
+            guard.abort_resolve_peers = self.clone().new_resolve_task(resolved_waiters);
             (local_id, rx)
         };
 
@@ -109,14 +176,13 @@ impl PeerSchedule {
                     if restart {
                         let resolved_waiters = {
                             let entries = guard.overlay.read_entries();
-                            utils::resolved_waiters(&local_id, &entries)
+                            Self::resolved_waiters(&local_id, &entries)
                         };
                         // with fewer peers to await, because you cannot find and remove one task
                         if let Some(handle) = &guard.abort_resolve_peers {
                             handle.abort();
                         }
-                        guard.abort_resolve_peers =
-                            utils::new_resolve_task(self.clone(), resolved_waiters);
+                        guard.abort_resolve_peers = self.clone().new_resolve_task(resolved_waiters);
                     }
                     drop(guard);
                     tracing::info!(
@@ -147,6 +213,42 @@ impl PeerSchedule {
                     );
                 }
             }
+        }
+    }
+
+    pub(super) fn resolved_waiters(
+        local_id: &PeerId,
+        entries: &PrivateOverlayEntriesReadGuard<'_>,
+    ) -> FuturesUnordered<impl Future<Output = KnownPeerHandle> + Sized + Send + 'static> {
+        let fut = FuturesUnordered::new();
+        for entry in entries.choose_multiple(&mut thread_rng(), entries.len()) {
+            // skip updates on self
+            if !(entry.peer_id == local_id || entry.resolver_handle.is_resolved()) {
+                let handle = entry.resolver_handle.clone();
+                fut.push(async move { handle.wait_resolved().await });
+            }
+        }
+        fut
+    }
+
+    pub(super) fn new_resolve_task(
+        self,
+        mut resolved_waiters: FuturesUnordered<
+            impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
+        >,
+    ) -> Option<AbortHandle> {
+        tracing::info!("restart resolve task");
+        if resolved_waiters.is_empty() {
+            None
+        } else {
+            let join = tokio::spawn(async move {
+                while let Some(known_peer_handle) = resolved_waiters.next().await {
+                    _ = self
+                        .write()
+                        .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
+                }
+            });
+            Some(join.abort_handle())
         }
     }
 }

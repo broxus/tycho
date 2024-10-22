@@ -37,8 +37,13 @@ pub struct EngineHandle {
 }
 impl EngineHandle {
     pub fn set_next_peers(&self, next_peers: &[PeerId], next_round: Option<u32>) {
-        self.peer_schedule
-            .set_next_peers(next_peers, next_round.map(Round));
+        if let Some(next) = next_round {
+            if !self.peer_schedule.set_next_start(Round(next)) {
+                tracing::trace!("cannot schedule outdated round {next} and set");
+                return;
+            }
+        }
+        self.peer_schedule.set_next_peers(next_peers, true);
     }
 }
 
@@ -74,7 +79,9 @@ impl Engine {
 
         let dispatcher = Dispatcher::new(network, &private_overlay);
         let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
-        peer_schedule.set_next_peers(bootstrap_peers, Some(Genesis::round().next()));
+        peer_schedule.set_next_peers(bootstrap_peers, true);
+        peer_schedule.set_next_start(Genesis::round().next());
+        peer_schedule.apply_scheduled(Genesis::round().next());
 
         genesis.verify_hash().expect("Failed to verify genesis");
         Verifier::verify(&genesis).expect("genesis failed to verify");
