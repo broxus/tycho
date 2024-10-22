@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, BlockIdShort};
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
@@ -199,7 +199,7 @@ impl ControlClient {
 
     pub async fn list_blocks(
         &self,
-        continuation: Option<BlockId>,
+        continuation: Option<BlockIdShort>,
     ) -> ClientResult<BlockListResponse> {
         self.inner
             .get_block_ids(current_context(), BlockListRequest { continuation })

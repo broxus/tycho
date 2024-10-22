@@ -14,6 +14,13 @@ pub struct PartialBlockId {
 }
 
 impl PartialBlockId {
+    pub fn as_short_id(&self) -> BlockIdShort {
+        BlockIdShort {
+            shard: self.shard,
+            seqno: self.seqno,
+        }
+    }
+
     pub fn make_full(&self, file_hash: HashBytes) -> BlockId {
         BlockId {
             shard: self.shard,
@@ -40,41 +47,6 @@ impl From<&BlockId> for PartialBlockId {
             shard: value.shard,
             seqno: value.seqno,
             root_hash: value.root_hash,
-        }
-    }
-}
-
-impl StoredValue for PartialBlockId {
-    const SIZE_HINT: usize = 4 + 8 + 4 + 32;
-
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        let mut result = [0; Self::SIZE_HINT];
-        result[..4].copy_from_slice(&self.shard.workchain().to_be_bytes());
-        result[4..12].copy_from_slice(&self.shard.prefix().to_be_bytes());
-        result[12..16].copy_from_slice(&self.seqno.to_be_bytes());
-        result[16..48].copy_from_slice(self.root_hash.as_slice());
-        buffer.write_raw_slice(&result);
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self
-    where
-        Self: Sized,
-    {
-        assert_eq!(reader.len(), Self::SIZE_HINT, "invalid package entry");
-
-        let workchain = i32::from_be_bytes(reader[..4].try_into().unwrap());
-        let prefix = u64::from_be_bytes(reader[4..12].try_into().unwrap());
-        let seqno = u32::from_be_bytes(reader[12..16].try_into().unwrap());
-        let root_hash = HashBytes::from_slice(&reader[16..48]);
-
-        *reader = &reader[Self::SIZE_HINT..];
-
-        Self {
-            shard: ShardIdent::new(workchain, prefix).expect("invalid shard ident"),
-            seqno,
-            root_hash,
         }
     }
 }

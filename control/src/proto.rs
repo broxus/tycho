@@ -1,6 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, BlockIdShort};
 use serde::{Deserialize, Serialize};
 use tycho_core::block_strider::ManualGcTrigger;
 
@@ -91,11 +91,11 @@ pub struct ArchiveSliceResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockListRequest {
-    pub continuation: Option<BlockId>,
+    pub continuation: Option<BlockIdShort>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockListResponse {
     pub blocks: Vec<BlockId>,
-    pub continuation: Option<BlockId>,
+    pub continuation: Option<BlockIdShort>,
 }

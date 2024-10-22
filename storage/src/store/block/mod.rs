@@ -22,14 +22,13 @@ use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::FastHashSet;
-use weedb::rocksdb::IteratorMode;
-use weedb::{rocksdb, OwnedPinnableSlice};
+use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
 use crate::db::*;
 use crate::util::*;
 use crate::{
-    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta,
+    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
     HandleCreationStatus, NewBlockMeta,
 };
 
@@ -334,74 +333,71 @@ impl BlockStorage {
 
     pub async fn list_blocks(
         &self,
-        continuation: Option<BlockId>,
-    ) -> Result<(Vec<BlockId>, Option<BlockId>)> {
-        const MAX_BYTES_READ: usize = 1 << 20; // 1 MB
+        continuation: Option<BlockIdShort>,
+    ) -> Result<(Vec<BlockId>, Option<BlockIdShort>)> {
+        const LIMIT: usize = 1000; // Max blocks per response
+        const MAX_BYTES: usize = 1 << 20; // 1 MB processed per response
 
-        // TODO: make easier without additional buffer
-        let mut buf = vec![];
-        let mode = match continuation {
-            Some(continuation) => {
-                let continuation = PartialBlockId::from(continuation);
-                buf.extend(continuation.to_vec());
-                IteratorMode::From(buf.as_slice(), rocksdb::Direction::Forward)
+        let continuation = continuation.map(|block_id| {
+            PackageEntryKey::block(&BlockId {
+                shard: block_id.shard,
+                seqno: block_id.seqno,
+                root_hash: HashBytes::ZERO,
+                file_hash: HashBytes::ZERO,
+            })
+            .to_vec()
+        });
+
+        let mut iter = {
+            let mut readopts = rocksdb::ReadOptions::default();
+            tables::PackageEntries::read_options(&mut readopts);
+            if let Some(key) = &continuation {
+                readopts.set_iterate_lower_bound(key.as_slice());
             }
-            None => IteratorMode::Start,
+            self.db
+                .rocksdb()
+                .raw_iterator_cf_opt(&self.db.package_entries.cf(), readopts)
         };
 
-        let process_item = |key: &[u8], block_data: &[u8]| -> Result<Option<BlockId>> {
-            let id = PackageEntryKey::from_slice(key);
-
-            if id.ty != ArchiveEntryType::Block {
-                return Ok(None);
-            }
-
-            let meta_data = self
-                .db
-                .block_handles
-                .get(id.block_id.root_hash.as_slice())?
-                .ok_or(BlockStorageError::BlockHandleNotFound)?;
-
-            let meta = BlockMeta::from_slice(meta_data.as_ref());
-            if !meta.flags().contains(BlockFlags::HAS_ALL_BLOCK_PARTS) {
-                return Ok(None);
-            }
-
-            let file_hash = Boc::file_hash_blake(block_data);
-            let block_id = id.block_id.make_full(file_hash);
-
-            Ok(Some(block_id))
-        };
-
-        let package_entries = &self.db.package_entries;
+        // NOTE: Despite setting the lower bound we must still seek to the exact key.
+        match continuation {
+            None => iter.seek_to_first(),
+            Some(key) => iter.seek(key),
+        }
 
         let mut bytes = 0;
         let mut blocks = Vec::new();
 
-        let mut iter = package_entries.iterator(mode);
-
-        while let Some(item) = iter.next() {
-            let (key, block_data) = item?;
-            bytes += block_data.len();
-
-            if let Some(block_id) = process_item(&key, &block_data)? {
-                blocks.push(block_id);
-
-                if bytes > MAX_BYTES_READ {
-                    // Find the next valid block for continuation
-                    for item in iter.by_ref() {
-                        let (key, block_data) = item?;
-                        if let Some(next_block_id) = process_item(&key, &block_data)? {
-                            return Ok((blocks, Some(next_block_id)));
-                        }
-                    }
-
-                    break;
+        let continuation = loop {
+            let (key, value) = match iter.item() {
+                Some(item) => item,
+                None => {
+                    iter.status()?;
+                    break None;
                 }
-            }
-        }
+            };
 
-        Ok((blocks, None))
+            let id = PackageEntryKey::from_slice(key);
+            if id.ty != ArchiveEntryType::Block {
+                // Ignore non-block entries
+                iter.next();
+                continue;
+            }
+
+            if blocks.len() >= LIMIT || bytes >= MAX_BYTES {
+                break Some(id.block_id.as_short_id());
+            }
+
+            let file_hash = Boc::file_hash_blake(value);
+            let block_id = id.block_id.make_full(file_hash);
+
+            bytes += value.len();
+            blocks.push(block_id);
+
+            iter.next();
+        };
+
+        Ok((blocks, continuation))
     }
 
     pub fn list_archive_ids(&self) -> Vec<u32> {
