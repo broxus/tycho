@@ -195,10 +195,13 @@ impl BroadcastFilterInner {
         };
 
         if is_threshold_reached {
+            // notify collector after max consensus round is updated
+            // so engine will be consistent after collector finishes and exits
+            self.consensus_round.set_max(round);
+            // do not apply peer schedule changes as DagBack may be not ready validating smth old
             self.output
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
-            self.consensus_round.set_max(round);
         }
 
         // we should ban a peer that broadcasts its rounds out of order,

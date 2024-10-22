@@ -5,4 +5,3 @@ mod impl_;
 mod locked;
 mod stateful;
 mod stateless;
-mod utils;

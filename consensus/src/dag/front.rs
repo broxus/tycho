@@ -131,6 +131,11 @@ impl DagFront {
             }
         }
 
+        // FIXME should call peer_schedule.forget_previos(self.last_back_bottom) here
+        //   and allow peer schedule to have more than one previous subset
+        //   as dag bottom must be moved and old rounds dropped before subset is forgotten
+        peer_schedule.apply_scheduled(new_top);
+
         if Self::max_history_bottom(new_top) > self.last_back_bottom {
             // should drop validation tasks and restart them with new bottom to free memory
             self.rounds.clear();

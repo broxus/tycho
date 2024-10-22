@@ -2,13 +2,11 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
 use tokio::task::AbortHandle;
 use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesReadGuard};
-use tycho_util::FastHashSet;
 
 use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::stateful::PeerScheduleStateful;
-use crate::intercom::peer_schedule::utils;
 use crate::intercom::PeerSchedule;
-use crate::models::{PeerCount, Round};
+use crate::models::PeerCount;
 
 pub struct PeerScheduleLocked {
     /// Keypair may be changed only with node restart, and is known before validator elections.
@@ -50,58 +48,7 @@ impl PeerScheduleLocked {
         is_applied
     }
 
-    pub(super) fn set_next_peers(
-        &mut self,
-        peers: &[PeerId],
-        parent: &PeerSchedule,
-        update_overlay: bool,
-    ) {
-        let all_resolved = {
-            let local_id = self.local_id;
-            let entries = if update_overlay {
-                let to_remove = parent.atomic().next_to_remove(peers);
-                self.update_resolve(parent, &to_remove, peers)
-            } else {
-                self.overlay.read_entries()
-            };
-            entries
-                .iter()
-                .filter(|a| a.resolver_handle.is_resolved() && a.peer_id != local_id)
-                .map(|a| a.peer_id)
-                .collect::<FastHashSet<_>>()
-        };
-
-        self.data.set_next_peers(peers, all_resolved);
-        // atomic part is updated under lock too
-        parent.update_atomic(|stateless| stateless.set_next_peers(peers));
-    }
-
-    pub fn set_next_start(&mut self, round: Round, parent: &PeerSchedule) {
-        self.data.set_next_start(round);
-        // atomic part is updated under lock too
-        parent.update_atomic(|stateless| stateless.set_next_start(round));
-    }
-
-    /// on epoch change
-    pub fn apply_next_start(&mut self, parent: &PeerSchedule) {
-        let to_forget = self.data.rotate();
-        self.update_resolve(parent, &to_forget, &[]);
-        // atomic part is updated under lock too
-        parent.update_atomic(|stateless| stateless.rotate());
-    }
-
-    /// after successful sync to current epoch
-    /// and validating all points from previous peer set
-    /// free some memory and ignore overlay updates
-    #[allow(dead_code)] // TODO use on change of validator set
-    pub fn forget_previous(&mut self, parent: &PeerSchedule) {
-        let to_forget = self.data.forget_previous();
-        self.update_resolve(parent, &to_forget, &[]);
-        // atomic part is updated under lock too
-        parent.update_atomic(|stateless| stateless.forget_previous());
-    }
-
-    fn update_resolve(
+    pub(super) fn update_resolve(
         &mut self,
         parent: &PeerSchedule,
         to_remove: &[PeerId],
@@ -117,11 +64,11 @@ impl PeerScheduleLocked {
             }
             entries.downgrade()
         };
-        let resolved_waiters = utils::resolved_waiters(&self.local_id, &entries);
+        let resolved_waiters = PeerSchedule::resolved_waiters(&self.local_id, &entries);
         if let Some(handle) = &self.abort_resolve_peers {
             handle.abort();
         }
-        self.abort_resolve_peers = utils::new_resolve_task(parent.clone(), resolved_waiters);
+        self.abort_resolve_peers = parent.clone().new_resolve_task(resolved_waiters);
         entries
     }
 }

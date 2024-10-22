@@ -5,6 +5,7 @@ use everscale_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
+use crate::effects::AltFormat;
 use crate::models::Round;
 
 #[derive(Clone)]
@@ -15,8 +16,8 @@ pub struct PeerScheduleStateless {
     peer_vecs: [Arc<Vec<PeerId>>; 3],
     peer_sets: [Arc<FastHashSet<PeerId>>; 3],
     prev_epoch_start: Round,
-    cur_epoch_start: Round,
-    next_epoch_start: Option<Round>,
+    pub(super) cur_epoch_start: Round,
+    pub(super) next_epoch_start: Option<Round>,
     empty_vec: Arc<Vec<PeerId>>,
     empty_set: Arc<FastHashSet<PeerId>>,
 }
@@ -72,7 +73,7 @@ impl PeerScheduleStateless {
     }
 
     pub fn peers_for(&self, round: Round) -> &Arc<FastHashSet<PeerId>> {
-        if self.next_epoch_start.map_or(false, |r| round >= r) {
+        let result = if self.next_epoch_start.map_or(false, |r| round >= r) {
             &self.peer_sets[2]
         } else if round >= self.cur_epoch_start {
             &self.peer_sets[1]
@@ -80,11 +81,15 @@ impl PeerScheduleStateless {
             &self.peer_sets[0]
         } else {
             &self.empty_set
+        };
+        if result.is_empty() {
+            tracing::error!("empty peer set for {round:?}: {self:?}");
         }
+        result
     }
 
     pub fn peers_ordered_for(&self, round: Round) -> &Arc<Vec<PeerId>> {
-        if self.next_epoch_start.map_or(false, |r| round >= r) {
+        let result = if self.next_epoch_start.map_or(false, |r| round >= r) {
             &self.peer_vecs[2]
         } else if round >= self.cur_epoch_start {
             &self.peer_vecs[1]
@@ -92,7 +97,11 @@ impl PeerScheduleStateless {
             &self.peer_vecs[0]
         } else {
             &self.empty_vec
+        };
+        if result.is_empty() {
+            tracing::error!("empty peer set for {round:?}: {self:?}");
         }
+        result
     }
 
     /// to keep already active resolve handles
@@ -113,21 +122,27 @@ impl PeerScheduleStateless {
         self.peer_vecs[2] = Arc::new(peers.to_vec());
     }
 
-    pub(super) fn set_next_start(&mut self, round: Round) {
-        _ = self.next_epoch_start.replace(round);
-    }
-
     /// on epoch change
     pub(super) fn rotate(&mut self) {
+        assert!(
+            self.peer_sets[0].is_empty() && self.peer_vecs[0].is_empty(),
+            "previous peer set was not cleaned; {self:?}"
+        );
         // make next from previous
         let next = self
             .next_epoch_start
+            .ok_or_else(|| format!("{self:?}"))
             .expect("attempt to change epoch, but next epoch start is not set");
+
+        assert!(
+            next > self.cur_epoch_start,
+            "next start is not in future {self:?}"
+        );
+
         self.prev_epoch_start = self.cur_epoch_start;
         self.cur_epoch_start = next;
         self.next_epoch_start = None; // makes next epoch peers inaccessible for reads
 
-        self.forget_previous(); // in case it was not called manually earlier
         self.peer_sets.rotate_left(1);
         self.peer_vecs.rotate_left(1);
     }
@@ -135,5 +150,23 @@ impl PeerScheduleStateless {
     pub(super) fn forget_previous(&mut self) {
         self.peer_sets[0] = Default::default();
         self.peer_vecs[0] = Default::default();
+    }
+}
+
+impl std::fmt::Debug for PeerScheduleStateless {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PeerScheduleStateless { ")?;
+
+        write!(f, "prev: {{ start: {}, ", self.prev_epoch_start.0)?;
+        write!(f, "{} }}, ", self.peer_vecs[0].as_slice().alt())?;
+
+        write!(f, "current: {{ start: {}, ", self.cur_epoch_start.0)?;
+        write!(f, "{} }}, ", self.peer_vecs[1].as_slice().alt())?;
+
+        let next_epoch_start = self.next_epoch_start.map(|a| a.0);
+        write!(f, "next: {{ start: {:?}, ", next_epoch_start)?;
+        write!(f, "{} }} ", self.peer_vecs[2].as_slice().alt())?;
+
+        f.write_str("}")
     }
 }

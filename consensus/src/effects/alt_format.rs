@@ -29,6 +29,20 @@ impl Display for AltFmt<'_, PeerId> {
     }
 }
 
+impl AltFormat for [PeerId] {}
+impl Display for AltFmt<'_, [PeerId]> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str("[")?;
+        if let Some((last, others)) = self.0.split_last() {
+            for el in others {
+                write!(f, " {},", &el.alt())?;
+            }
+            write!(f, " {} ", &last.alt())?;
+        }
+        f.write_str("]")
+    }
+}
+
 impl AltFormat for Digest {}
 impl Display for AltFmt<'_, Digest> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
