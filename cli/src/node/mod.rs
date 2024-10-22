@@ -9,13 +9,13 @@ use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
 use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::{MempoolAdapterStdImpl, StateUpdateContext};
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
@@ -36,7 +36,7 @@ use tycho_core::blockchain_rpc::{
 use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::{
-    DhtClient, DhtService, InboundRequestMeta, Network, OverlayService, PeerId, PeerResolver,
+    DhtClient, DhtService, InboundRequestMeta, Network, OverlayService, PeerResolver,
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
@@ -52,7 +52,6 @@ use crate::node::config::MetricsConfig;
 use crate::util::alloc::spawn_allocator_metrics_loop;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
-use crate::util::mempool::*;
 
 pub mod config;
 mod control;
@@ -426,17 +425,18 @@ impl Node {
 
         // Run mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
-        set_mempool_config(
-            &mut mempool_adapter.config_builder(),
-            &mc_state,
-            self.mempool_config_override.as_ref(),
-        )?;
+        mempool_adapter.set_update_ctx(StateUpdateContext::uncached_from(&mc_state)?);
+        if let Some(global) = self.mempool_config_override.as_ref() {
+            mempool_adapter.override_config(|config| {
+                config.set_consensus_config(&global.consensus_config);
+                config.set_genesis(global.start_round, global.genesis_time_millis);
+            });
+        }
         mempool_adapter.run(
             self.keypair.clone(),
             self.dht_client.network(),
             &self.peer_resolver,
             &self.overlay_service,
-            get_validator_peer_ids(&mc_state)?,
         )?;
 
         // Create RPC
@@ -706,14 +706,4 @@ impl SelfBroadcastListener for RpcMempoolAdapter {
     async fn handle_message(&self, message: Bytes) {
         self.inner.send_external(message);
     }
-}
-
-fn get_validator_peer_ids(mc_state: &ShardStateStuff) -> Result<Vec<PeerId>> {
-    let config = mc_state.config_params()?;
-    let validator_set = config.params.get_current_validator_set()?.list;
-
-    Ok(validator_set
-        .into_iter()
-        .map(|x| PeerId(x.public_key.0))
-        .collect::<Vec<_>>())
 }

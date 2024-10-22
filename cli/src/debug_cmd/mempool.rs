@@ -19,7 +19,6 @@ use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::{resolve_public_ip, signal};
 
 use crate::node::config::{NodeConfig, NodeKeys};
-use crate::util::mempool::set_mempool_config;
 
 /// run a node
 #[derive(Parser)]
@@ -218,11 +217,21 @@ impl Mempool {
         let mut anchor_consumer = AnchorConsumer::default();
         anchor_consumer.add(*local_id, committed_rx);
 
-        set_mempool_config(
-            &mut self.config_builder,
-            &zerostate,
-            self.config_override.as_ref(),
-        )?;
+        match self.config_override.as_ref() {
+            None => {
+                let config = zerostate.config_params()?;
+                self.config_builder
+                    .set_consensus_config(&config.params.get_consensus_config()?);
+                // FIXME load genesis data from McStateExtra
+                self.config_builder.set_genesis(0, 0);
+            }
+            Some(global) => {
+                self.config_builder
+                    .set_consensus_config(&global.consensus_config);
+                self.config_builder
+                    .set_genesis(global.start_round, global.genesis_time_millis);
+            }
+        };
 
         let engine = Engine::new(
             self.keypair.clone(),
