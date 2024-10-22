@@ -41,8 +41,8 @@ async fn test_add_and_get_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let (_, sync_context_rx) = tokio::sync::watch::channel(CollatorSyncContext::Historical);
-    let adapter = StateNodeAdapterStdImpl::new(listener, mock_storage, sync_context_rx);
+    let adapter =
+        StateNodeAdapterStdImpl::new(listener, mock_storage, CollatorSyncContext::Historical);
 
     // Test adding a block
 
@@ -94,8 +94,8 @@ async fn test_storage_accessors() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let (_, sync_context_rx) = tokio::sync::watch::channel(CollatorSyncContext::Historical);
-    let adapter = StateNodeAdapterStdImpl::new(listener, storage.clone(), sync_context_rx);
+    let adapter =
+        StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical);
 
     let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
 
@@ -113,8 +113,8 @@ async fn test_add_and_get_next_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let (_, sync_context_rx) = tokio::sync::watch::channel(CollatorSyncContext::Historical);
-    let adapter = StateNodeAdapterStdImpl::new(listener, mock_storage, sync_context_rx);
+    let adapter =
+        StateNodeAdapterStdImpl::new(listener, mock_storage, CollatorSyncContext::Historical);
 
     // Test adding a block
     let prev_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 1);
@@ -169,11 +169,10 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let (_, sync_context_rx) = tokio::sync::watch::channel(CollatorSyncContext::Historical);
     let adapter = Arc::new(StateNodeAdapterStdImpl::new(
         listener.clone(),
         storage.clone(),
-        sync_context_rx,
+        CollatorSyncContext::Historical,
     ));
 
     let empty_block = get_empty_block();
@@ -211,6 +210,8 @@ async fn test_add_read_handle_1000_blocks_parallel() {
         })
     };
 
+    adapter.set_sync_context(CollatorSyncContext::Recent);
+
     // Task 2: Retrieving and handling 1000 blocks
     let handle_blocks = {
         let adapter = adapter.clone();
@@ -243,9 +244,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 )
                 .unwrap();
 
-                let handle_block = adapter
-                    .handle_state(&state, CollatorSyncContext::Recent)
-                    .await;
+                let handle_block = adapter.handle_state(&state).await;
                 assert!(
                     handle_block.is_ok(),
                     "Block {i} should be handled after being added",

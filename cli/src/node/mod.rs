@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -501,8 +500,12 @@ impl Node {
             self.validator_config,
         );
 
-        // Create a channel to notify collation manager when sync context changed
-        let sync_context = CollatorSyncContext::Historical;
+        // Explicitly handle the initial state
+        let sync_context = match self.storage.node_state().get_node_sync_state() {
+            None => anyhow::bail!("Failed to determine node sync state"),
+            Some(NodeSyncState::PersistentState) => CollatorSyncContext::Persistent,
+            Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
+        };
 
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
@@ -517,28 +520,10 @@ impl Node {
             #[cfg(test)]
             vec![],
         );
-
-        let collator_state_subscriber = CollatorStateSubscriber {
-            sync_context: sync_context.into(),
+        let collator = CollatorStateSubscriber {
             adapter: collation_manager.state_node_adapter().clone(),
         };
-
-        let activate_collator = ActivateCollator {
-            sync_context: collator_state_subscriber.sync_context.clone(),
-            adapter: collation_manager.state_node_adapter().clone(),
-        };
-
-        // Explicitly handle the initial state
-        let initial_state_sync_context = match self.storage.node_state().get_node_sync_state() {
-            None => anyhow::bail!("Failed to determine node sync state"),
-            Some(NodeSyncState::PersistentState) => CollatorSyncContext::Persistent,
-            Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
-        };
-
-        collator_state_subscriber
-            .adapter
-            .handle_state(&mc_state, initial_state_sync_context)
-            .await?;
+        collator.adapter.handle_state(&mc_state).await?;
 
         // NOTE: Make sure to drop the state after handling it
         drop(mc_state);
@@ -603,22 +588,24 @@ impl Node {
         );
 
         let block_strider = BlockStrider::builder()
-            .with_provider(archive_block_provider.chain(activate_collator).chain((
-                blockchain_block_provider,
-                storage_block_provider,
-                collator_block_provider,
-            )))
+            .with_provider(
+                collator
+                    .new_sync_point(CollatorSyncContext::Historical)
+                    .chain(archive_block_provider)
+                    .chain(collator.new_sync_point(CollatorSyncContext::Recent))
+                    .chain((
+                        blockchain_block_provider,
+                        storage_block_provider,
+                        collator_block_provider,
+                    )),
+            )
             .with_state(strider_state)
             .with_block_subscriber(
                 (
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
-                        (
-                            collator_state_subscriber,
-                            rpc_state_subscriber,
-                            ps_subscriber,
-                        ),
+                        (collator, rpc_state_subscriber, ps_subscriber),
                     ),
                     rpc_block_subscriber,
                     validator_subscriber,
@@ -637,19 +624,17 @@ impl Node {
     }
 }
 
-struct ActivateCollator {
-    sync_context: SharedSyncContext,
+struct SetSyncContext {
     adapter: Arc<dyn StateNodeAdapter>,
+    ctx: CollatorSyncContext,
 }
 
-impl BlockProvider for ActivateCollator {
+impl BlockProvider for SetSyncContext {
     type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
     type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        self.sync_context.store(CollatorSyncContext::Recent);
-        self.adapter
-            .handle_sync_context_update(CollatorSyncContext::Recent);
+        self.adapter.set_sync_context(self.ctx);
         futures_util::future::ready(None)
     }
 
@@ -659,16 +644,23 @@ impl BlockProvider for ActivateCollator {
 }
 
 struct CollatorStateSubscriber {
-    sync_context: SharedSyncContext,
     adapter: Arc<dyn StateNodeAdapter>,
+}
+
+impl CollatorStateSubscriber {
+    fn new_sync_point(&self, ctx: CollatorSyncContext) -> SetSyncContext {
+        SetSyncContext {
+            adapter: self.adapter.clone(),
+            ctx,
+        }
+    }
 }
 
 impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter
-            .handle_state(&cx.state, self.sync_context.load())
+        self.adapter.handle_state(&cx.state)
     }
 }
 
@@ -711,25 +703,6 @@ impl BroadcastListener for RpcMempoolAdapter {
 impl SelfBroadcastListener for RpcMempoolAdapter {
     async fn handle_message(&self, message: Bytes) {
         self.inner.send_external(message);
-    }
-}
-
-#[derive(Clone)]
-struct SharedSyncContext(Arc<AtomicU8>);
-
-impl SharedSyncContext {
-    fn store(&self, context: CollatorSyncContext) {
-        self.0.store(context as u8, Ordering::Release);
-    }
-
-    fn load(&self) -> CollatorSyncContext {
-        self.0.load(Ordering::Acquire).try_into().unwrap()
-    }
-}
-
-impl From<CollatorSyncContext> for SharedSyncContext {
-    fn from(value: CollatorSyncContext) -> Self {
-        Self(Arc::new(AtomicU8::new(value as u8)))
     }
 }
 

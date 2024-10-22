@@ -78,15 +78,11 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Waits for the specified block by prev_id to be received and returns it
     async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
-    async fn handle_state(
-        &self,
-        state: &ShardStateStuff,
-        sync_context: CollatorSyncContext,
-    ) -> Result<()>;
+    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
     /// Load queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
     /// Handle sync context update
-    fn handle_sync_context_update(&self, sync_context: CollatorSyncContext);
+    fn set_sync_context(&self, sync_context: CollatorSyncContext);
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -262,12 +258,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         self.wait_for_block_ext(block_id).await
     }
 
-    async fn handle_state(
-        &self,
-        state: &ShardStateStuff,
-        sync_context: CollatorSyncContext,
-    ) -> Result<()> {
+    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
+
+        let sync_context = *self.sync_context_tx.borrow();
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: block {}", state.block_id());
         let block_id = *state.block_id();
@@ -347,7 +341,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         }
     }
 
-    fn handle_sync_context_update(&self, sync_context: CollatorSyncContext) {
+    fn set_sync_context(&self, sync_context: CollatorSyncContext) {
         self.sync_context_tx.send_if_modified(|curr| {
             if *curr != sync_context {
                 *curr = sync_context;
@@ -626,25 +620,11 @@ fn process_signatures(
     })
 }
 
-#[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CollatorSyncContext {
-    Persistent = 0,
-    Historical = 1,
-    Recent = 2,
-}
-
-impl TryFrom<u8> for CollatorSyncContext {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
-        match value {
-            0 => Ok(CollatorSyncContext::Persistent),
-            1 => Ok(CollatorSyncContext::Historical),
-            2 => Ok(CollatorSyncContext::Recent),
-            i => anyhow::bail!("invalid CollatorActivationState value: {i}"),
-        }
-    }
+    Persistent,
+    Historical,
+    Recent,
 }
 
 struct PreparedProof {
