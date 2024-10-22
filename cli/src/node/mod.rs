@@ -15,7 +15,7 @@ use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFact
 use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
 use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::{MempoolAdapterStdImpl, StateUpdateContext};
+use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
@@ -311,6 +311,10 @@ impl Node {
 
         let rpc_mempool_adapter = RpcMempoolAdapter {
             inner: Arc::new(MempoolAdapterStdImpl::new(
+                keypair.clone(),
+                &network,
+                &peer_resolver,
+                &overlay_service,
                 storage.mempool_storage(),
                 &node_config.mempool,
             )),
@@ -423,21 +427,14 @@ impl Node {
             validator_subscriber.update_validator_set(&current_validator_set);
         }
 
-        // Run mempool adapter
+        // Create mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
-        mempool_adapter.set_update_ctx(StateUpdateContext::uncached_from(&mc_state)?);
         if let Some(global) = self.mempool_config_override.as_ref() {
             mempool_adapter.override_config(|config| {
                 config.set_consensus_config(&global.consensus_config);
                 config.set_genesis(global.start_round, global.genesis_time_millis);
             });
         }
-        mempool_adapter.run(
-            self.keypair.clone(),
-            self.dht_client.network(),
-            &self.peer_resolver,
-            &self.overlay_service,
-        )?;
 
         // Create RPC
         let (rpc_block_subscriber, rpc_state_subscriber) = if let Some(config) = &self.rpc_config {
