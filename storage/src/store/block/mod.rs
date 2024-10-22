@@ -22,8 +22,8 @@ use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::FastHashSet;
-use weedb::rocksdb;
 use weedb::rocksdb::IteratorMode;
+use weedb::{rocksdb, OwnedPinnableSlice};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
 use crate::db::*;
@@ -324,7 +324,7 @@ impl BlockStorage {
         }
     }
 
-    pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
+    pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
@@ -453,7 +453,7 @@ impl BlockStorage {
         BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref())
     }
 
-    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
+    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
         if !handle.has_proof() {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
@@ -520,7 +520,7 @@ impl BlockStorage {
         QueueDiffStuff::deserialize(handle.id(), raw_diff.as_ref())
     }
 
-    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
+    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
         if !handle.has_queue_diff() {
             return Err(BlockStorageError::QueueDiffNotFound.into());
         }
@@ -640,7 +640,7 @@ impl BlockStorage {
     }
 
     /// Loads an archive chunk.
-    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
+    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<OwnedPinnableSlice> {
         let chunk_size = self.archive_chunk_size().get() as u64;
         if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
@@ -658,7 +658,8 @@ impl BlockStorage {
             .get(key.as_slice())?
             .ok_or(BlockStorageError::ArchiveNotFound)?;
 
-        Ok(chunk.to_vec())
+        // SAFETY: A value was received from the same RocksDB instance.
+        Ok(unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), chunk) })
     }
 
     pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<Option<u32>> {
@@ -675,7 +676,11 @@ impl BlockStorage {
         Ok(size)
     }
 
-    pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Option<Vec<u8>>> {
+    pub fn get_block_data_chunk(
+        &self,
+        block_id: &BlockId,
+        offset: u32,
+    ) -> Result<Option<OwnedPinnableSlice>> {
         let chunk_size = self.block_data_chunk_size().get();
         if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
@@ -686,13 +691,10 @@ impl BlockStorage {
             chunk_index: offset / chunk_size,
         };
 
-        let chunk = self
-            .db
-            .block_data_entries
-            .get(key.to_vec())?
-            .map(|x| x.to_vec());
-
-        Ok(chunk)
+        Ok(self.db.block_data_entries.get(key.to_vec())?.map(|value| {
+            // SAFETY: A value was received from the same RocksDB instance.
+            unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }
+        }))
     }
 
     // === GC stuff ===
@@ -827,7 +829,11 @@ impl BlockStorage {
         Ok(())
     }
 
-    async fn get_data(&self, handle: &BlockHandle, id: &PackageEntryKey) -> Result<Vec<u8>> {
+    async fn get_data(
+        &self,
+        handle: &BlockHandle,
+        id: &PackageEntryKey,
+    ) -> Result<OwnedPinnableSlice> {
         let _lock = match id.ty {
             ArchiveEntryType::Block => handle.block_data_lock(),
             ArchiveEntryType::Proof => handle.proof_data_lock(),
@@ -837,7 +843,8 @@ impl BlockStorage {
         .await;
 
         match self.db.package_entries.get(id.to_vec())? {
-            Some(a) => Ok(a.to_vec()),
+            // SAFETY: A value was received from the same RocksDB instance.
+            Some(value) => Ok(unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }),
             None => Err(BlockStorageError::PackageEntryNotFound.into()),
         }
     }
