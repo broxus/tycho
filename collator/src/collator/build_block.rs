@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -492,9 +492,49 @@ impl CollatorStdImpl {
         // prev_state_extra.flags is checked in the McStateExtra::load_from
 
         // 5. update validator_info
-        // TODO: check `create_mc_state_extra()` for a reference implementation
-        // STUB: currently we do not use validator_info and just do nothing there
-        let validator_info = prev_state_extra.validator_info;
+        let max_anchor_distance = 210; // TODO: get from blockchain config
+        let mut validator_info = None;
+        if is_key_block {
+            // check if validator set changed by the cells hash
+            // NOTE: We intentionaly use current validator set from previous config
+            //       instead of just using the `prev_vset`.
+            let prev_vset = prev_config.get_current_validator_set_raw()?;
+            let current_vset = config.get_current_validator_set_raw()?;
+            if current_vset.repr_hash() != prev_vset.repr_hash() {
+                // calc next mempool switch round (identifies next session_seqno)
+                let prev_processed_to_anchor = prev_shard_data
+                    .processed_upto()
+                    .externals
+                    .as_ref()
+                    .map(|ext_upto| ext_upto.processed_to.0)
+                    .unwrap_or_default();
+                let next_session_seqno = prev_processed_to_anchor + max_anchor_distance;
+
+                // calculate next validator subset and hash
+                let current_vset = current_vset.parse::<ValidatorSet>()?;
+                let subset_config = config.get_catchain_config()?;
+                let (_, validator_list_hash_short) = current_vset.compute_subset(
+                    working_state.next_block_id_short.shard,
+                    &subset_config,
+                    next_session_seqno,
+                ).ok_or_else(|| anyhow!(
+                    "Error calculating subset of validators for next session (shard_id = {}, next_session_seqno = {})",
+                    working_state.next_block_id_short.shard,
+                    next_session_seqno,
+                ))?;
+
+                validator_info = Some(ValidatorInfo {
+                    validator_list_hash_short,
+                    // TODO: rename field in types
+                    catchain_seqno: next_session_seqno,
+                    nx_cc_updated: true,
+                });
+            }
+        }
+        let validator_info = validator_info.unwrap_or(ValidatorInfo {
+            nx_cc_updated: false,
+            ..prev_state_extra.validator_info
+        });
 
         // 6. update prev_blocks (add prev block's id to the dictionary)
         let prev_is_key_block = collation_data.block_id_short.seqno == 1 // prev block is a keyblock if it is a zerostate

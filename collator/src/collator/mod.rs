@@ -9,7 +9,9 @@ use everscale_types::models::*;
 use futures_util::future::Future;
 use mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
@@ -103,7 +105,7 @@ pub trait CollatorEventListener: Send + Sync {
     /// Process new collated shard or master block
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()>;
     /// Process collator stopped event
-    async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()>;
+    async fn on_collator_stopped(&self, collation_session_id: CollationSessionId) -> Result<()>;
 }
 
 // COLLATOR
@@ -111,12 +113,13 @@ pub trait CollatorEventListener: Send + Sync {
 #[async_trait]
 pub trait Collator: Send + Sync + 'static {
     /// Enqueue collator stop task
-    async fn enqueue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
+    async fn enqueue_stop(&self) -> Result<()>;
     /// Enqueue update McData if newer, reset PrevData and run next collation attempt
     async fn enqueue_resume_collation(
         &self,
         mc_data: Arc<McData>,
         reset: bool,
+        collation_session: Arc<CollationSessionInfo>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()>;
     /// Enqueue next attemt to collate block
@@ -155,8 +158,10 @@ impl CollatorFactory for CollatorStdImplFactory {
 
 #[async_trait]
 impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
-    async fn enqueue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
-        todo!()
+    async fn enqueue_stop(&self) -> Result<()> {
+        let cancel_token = self.cancel_token().clone();
+        self.enqueue_task(method_to_queued_async_closure!(stop_collator, cancel_token))
+            .await
     }
 
     /// Enqueue update McData if newer, reset PrevData if required and run next collation attempt
@@ -164,12 +169,14 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         &self,
         mc_data: Arc<McData>,
         reset: bool,
+        collation_session: Arc<CollationSessionInfo>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
         self.enqueue_task(method_to_queued_async_closure!(
             resume_collation,
             mc_data,
             reset,
+            collation_session,
             prev_blocks_ids
         ))
         .await
@@ -227,15 +234,11 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         mempool_start_round: Option<MempoolAnchorId>,
     ) -> AsyncQueuedDispatcher<Self> {
-        let next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
+        let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "(next_block_id={}): collator starting...", next_block_info,
         );
-
-        // create dispatcher for own async tasks queue
-        let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
 
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
@@ -261,7 +264,9 @@ impl CollatorStdImpl {
             mempool_start_round,
         };
 
-        AsyncQueuedDispatcher::run(processor, receiver);
+        // create dispatcher for own async tasks queue
+        let dispatcher =
+            AsyncQueuedDispatcher::create(processor, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
         tracing::trace!(target: tracing_targets::COLLATOR,
             "(next_block_id={}): collator tasks queue dispatcher started", next_block_info,
         );
@@ -288,15 +293,12 @@ impl CollatorStdImpl {
         dispatcher
     }
 
-    pub fn calc_next_block_id_short(prev_blocks_ids: &[BlockId]) -> BlockIdShort {
-        debug_assert!(!prev_blocks_ids.is_empty());
-
-        let shard = prev_blocks_ids[0].shard;
-        let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
-        BlockIdShort {
-            shard,
-            seqno: max_prev_seqno + 1,
-        }
+    async fn stop_collator(&mut self, dispatcher_cancel_token: CancellationToken) -> Result<()> {
+        self.listener
+            .on_collator_stopped(self.collation_session.id())
+            .await?;
+        dispatcher_cancel_token.cancel();
+        Ok(())
     }
 
     // Initialize collator working state then run collation
@@ -392,7 +394,7 @@ impl CollatorStdImpl {
             //      We can produce incorrect shard block and then ignore it.
             //      Or we can try to specify last imported anchor id as a start round.
             //      Currently we do not cancel shard collator init because from block should be correct.
-            Some(mempool_start_round) => {
+            Some(mempool_start_round) if mempool_start_round > 0 => {
                 let import_init_anchors = if processed_to_anchor_id <= mempool_start_round {
                     if processed_to_anchor_id < mempool_start_round
                         && self.shard_id.is_masterchain()
@@ -465,11 +467,15 @@ impl CollatorStdImpl {
         &mut self,
         mc_data: Arc<McData>,
         reset: bool,
+        collation_session: Arc<CollationSessionInfo>,
         new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
+
+        // update collation session info to refer to a correct subset in collated block
+        self.collation_session = collation_session;
 
         // previously wait when all state store tasks finished
         if !self.store_new_state_tasks.is_empty() {
@@ -510,7 +516,7 @@ impl CollatorStdImpl {
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
 
-            self.next_block_info = Self::calc_next_block_id_short(&new_prev_blocks_ids);
+            self.next_block_info = calc_next_block_id_short(&new_prev_blocks_ids);
 
             tracing::info!(target: tracing_targets::COLLATOR,
                 mc_data_block_id = %mc_data.block_id.as_short_id(),
@@ -719,7 +725,7 @@ impl CollatorStdImpl {
             let (prev_shard_data, usage_tree) =
                 PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
-            let next_block_id_short = Self::calc_next_block_id_short(prev_shard_data.blocks_ids());
+            let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
 
             Ok(Box::new(WorkingState {
                 next_block_id_short,
@@ -806,7 +812,7 @@ impl CollatorStdImpl {
 
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
-        let next_block_id_short = Self::calc_next_block_id_short(prev_shard_data.blocks_ids());
+        let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
 
         Ok(Box::new(WorkingState {
             next_block_id_short,

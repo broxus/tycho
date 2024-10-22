@@ -7,7 +7,8 @@ use everscale_types::boc::BocRepr;
 use everscale_types::merkle::MerkleProof;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tokio::sync::broadcast;
+use parking_lot::Mutex;
+use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
@@ -45,6 +46,9 @@ pub trait StateNodeEventListener: Send + Sync {
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()>;
     /// When new block was received and applied from blockchain
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()>;
+    // /// When sync context updated, e.g. block strider finished processing archives
+    // /// and started listen for new blocks from collator or blockchain.
+    // async fn on_sync_context_update(&self, sync_context: CollatorSyncContext) -> Result<()>;
 }
 
 #[async_trait]
@@ -74,13 +78,11 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Waits for the specified block by prev_id to be received and returns it
     async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
-    async fn handle_state(
-        &self,
-        state: &ShardStateStuff,
-        sync_ctx: CollatorSyncContext,
-    ) -> Result<()>;
-    /// Loqd queue diff
+    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
+    /// Load queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
+    /// Handle sync context update
+    fn set_sync_context(&self, sync_context: CollatorSyncContext);
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -88,19 +90,69 @@ pub struct StateNodeAdapterStdImpl {
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
+
+    sync_context_tx: watch::Sender<CollatorSyncContext>,
+
+    delayed_state_notifier: DelayedStateNotifier,
 }
 
 impl StateNodeAdapterStdImpl {
-    pub fn new(listener: Arc<dyn StateNodeEventListener>, storage: Storage) -> Self {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
-
+    pub fn new(
+        listener: Arc<dyn StateNodeEventListener>,
+        storage: Storage,
+        initial_sync_context: CollatorSyncContext,
+    ) -> Self {
+        let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
         let (broadcaster, _) = broadcast::channel(10000);
-        Self {
+        let adapter = Self {
             listener,
             storage,
             blocks: Default::default(),
             broadcaster,
-        }
+            sync_context_tx,
+            delayed_state_notifier: DelayedStateNotifier::default(),
+        };
+
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Start watching for sync context updates");
+
+        tokio::spawn({
+            let listener = adapter.listener.clone();
+            let delayed_state_notifier = adapter.delayed_state_notifier.clone();
+            async move {
+                while sync_context_rx.changed().await.is_ok() {
+                    let sync_ctx = *sync_context_rx.borrow();
+
+                    delayed_state_notifier
+                        .send_delayed_if(listener.clone(), |delayed_sync_ctx| {
+                            // send last delayed Persistent or Historical state when sync switched to recent blocks
+                            let check = sync_ctx == CollatorSyncContext::Recent
+                                && delayed_sync_ctx != CollatorSyncContext::Recent;
+                            if check {
+                                tracing::debug!(
+                                    target: tracing_targets::STATE_NODE_ADAPTER,
+                                    sync_ctx = ?sync_ctx,
+                                    delayed_sync_ctx = ?delayed_sync_ctx,
+                                    "handle_sync_context_update: will process delayed state",
+                                );
+                            } else {
+                                tracing::debug!(
+                                    target: tracing_targets::STATE_NODE_ADAPTER,
+                                    sync_ctx = ?sync_ctx,
+                                    delayed_sync_ctx = ?delayed_sync_ctx,
+                                    "handle_sync_context_update: will not process delayed state",
+                                );
+                            }
+                            check
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
+
+        adapter
     }
 }
 
@@ -206,14 +258,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         self.wait_for_block_ext(block_id).await
     }
 
-    async fn handle_state(
-        &self,
-        state: &ShardStateStuff,
-        _sync_ctx: CollatorSyncContext,
-    ) -> Result<()> {
+    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block state: {}", state.block_id().as_short_id());
+        let sync_context = *self.sync_context_tx.borrow();
+
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: block {}", state.block_id());
         let block_id = *state.block_id();
 
         let mut to_split = Vec::new();
@@ -244,16 +294,26 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 false
             };
 
-            match has_block {
-                false => {
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block state handled external: {}", block_id);
-                    self.listener.on_block_accepted_external(state).await?;
-                }
-                true => {
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block state handled: {}", block_id);
-                    self.listener.on_block_accepted(state).await?;
-                }
-            }
+            self.delayed_state_notifier
+                .send_or_delay(
+                    self.listener.clone(),
+                    state.clone(),
+                    !has_block,
+                    sync_context,
+                    |sync_ctx| {
+                        let check = sync_ctx == CollatorSyncContext::Recent;
+                        if !check {
+                            tracing::debug!(
+                                target: tracing_targets::STATE_NODE_ADAPTER,
+                                block_id = %state.block_id().as_short_id(),
+                                sync_ctx = ?sync_context,
+                                "handle_state: will delay state",
+                            );
+                        }
+                        check
+                    },
+                )
+                .await?;
         }
 
         for (shard, seqno) in &to_split {
@@ -279,6 +339,17 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             }
             _ => Ok(None),
         }
+    }
+
+    fn set_sync_context(&self, sync_context: CollatorSyncContext) {
+        self.sync_context_tx.send_if_modified(|curr| {
+            if *curr != sync_context {
+                *curr = sync_context;
+                true
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -360,6 +431,94 @@ impl StateNodeAdapterStdImpl {
         );
 
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct DelayedStateContext {
+    pub state: ShardStateStuff,
+    pub is_external: bool,
+    pub sync_context: CollatorSyncContext,
+}
+
+#[derive(Default, Clone)]
+struct DelayedStateNotifier {
+    inner: Arc<Mutex<Option<DelayedStateContext>>>,
+}
+impl DelayedStateNotifier {
+    pub async fn send_delayed_if<F>(
+        &self,
+        listener: Arc<dyn StateNodeEventListener>,
+        check_should_send: F,
+    ) -> Result<()>
+    where
+        F: Fn(CollatorSyncContext) -> bool,
+    {
+        let state_cx = {
+            let mut guard = self.inner.lock();
+            match guard.as_ref() {
+                Some(state_cx) if check_should_send(state_cx.sync_context) => guard.take(),
+                _ => None,
+            }
+        };
+
+        // do nothing if no delayed state
+        // do nothing if should not send according to check
+
+        Self::send_impl(listener, state_cx).await
+    }
+
+    pub async fn send_or_delay<F>(
+        &self,
+        listener: Arc<dyn StateNodeEventListener>,
+        state: ShardStateStuff,
+        is_external: bool,
+        sync_context: CollatorSyncContext,
+        check_should_send: F,
+    ) -> Result<()>
+    where
+        F: Fn(CollatorSyncContext) -> bool,
+    {
+        let state_cx = DelayedStateContext {
+            state,
+            is_external,
+            sync_context,
+        };
+
+        let state_cx = {
+            let mut guard = self.inner.lock();
+            if check_should_send(state_cx.sync_context) {
+                guard.take();
+                Some(state_cx)
+            } else {
+                guard.replace(state_cx);
+                None
+            }
+        };
+
+        // send if needed according to check
+
+        Self::send_impl(listener, state_cx).await
+    }
+
+    async fn send_impl(
+        listener: Arc<dyn StateNodeEventListener>,
+        state_cx: Option<DelayedStateContext>,
+    ) -> Result<()> {
+        let Some(DelayedStateContext {
+            state, is_external, ..
+        }) = state_cx
+        else {
+            return Ok(());
+        };
+
+        if is_external {
+            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled external: {}", state.block_id());
+            listener.on_block_accepted_external(&state).await
+        } else {
+            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled own: {}", state.block_id());
+            listener.on_block_accepted(&state).await
+        }
     }
 }
 
@@ -461,25 +620,11 @@ fn process_signatures(
     })
 }
 
-#[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CollatorSyncContext {
-    Persistent = 0,
-    Historical = 1,
-    Recent = 2,
-}
-
-impl TryFrom<u8> for CollatorSyncContext {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
-        match value {
-            0 => Ok(CollatorSyncContext::Persistent),
-            1 => Ok(CollatorSyncContext::Historical),
-            2 => Ok(CollatorSyncContext::Recent),
-            i => anyhow::bail!("invalid CollatorActivationState value: {i}"),
-        }
-    }
+    Persistent,
+    Historical,
+    Recent,
 }
 
 struct PreparedProof {

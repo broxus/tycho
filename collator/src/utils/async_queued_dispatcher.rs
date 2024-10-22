@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use metrics::atomics::AtomicU64;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use super::task_descr::{TaskDesc, TaskResponder};
 use crate::tracing_targets;
@@ -20,6 +21,7 @@ type AsyncTaskDesc<W, R> = TaskDesc<
 pub struct AsyncQueuedDispatcher<W, R = ()> {
     task_id_counter: Arc<AtomicU64>,
     tasks_queue: mpsc::Sender<AsyncTaskDesc<W, R>>,
+    cancel_token: CancellationToken,
 }
 
 impl<W, R> Clone for AsyncQueuedDispatcher<W, R> {
@@ -27,6 +29,7 @@ impl<W, R> Clone for AsyncQueuedDispatcher<W, R> {
         Self {
             task_id_counter: self.task_id_counter.clone(),
             tasks_queue: self.tasks_queue.clone(),
+            cancel_token: self.cancel_token.clone(),
         }
     }
 }
@@ -41,58 +44,86 @@ where
         let dispatcher = Self {
             task_id_counter: Arc::new(AtomicU64::default()),
             tasks_queue: sender,
+            cancel_token: CancellationToken::new(),
         };
         (dispatcher, receiver)
     }
 
-    pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
+    pub fn run(&self, mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
+        let cancel_token = self.cancel_token.clone();
         tokio::spawn(async move {
-            while let Some(task) = receiver.recv().await {
-                tracing::trace!(
-                    target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
-                    "Task #{} ({}): received",
-                    task.id(),
-                    task.get_descr());
-                let (task_id, task_descr) = (task.id(), task.get_descr());
-                let (func, responder) = task.extract();
-                tracing::trace!(
-                    target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
-                    "Task #{} ({}): executing...", task_id, &task_descr,
-                );
-                let future = func(worker);
-                let (updated_worker, res) = future.await;
-                tracing::trace!(
-                    target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
-                    "Task #{} ({}): executed", task_id, &task_descr,
-                );
-                worker = updated_worker;
-                if let Some(res) = responder.respond(res) {
-                    // no responder, or no receiver can handle result, should panic if task result is Error
-                    if let Err(err) = res {
-                        panic!(
-                            "Task #{} ({}): result error! {:?}",
-                            task_id, &task_descr, err,
-                        )
+            loop {
+                tokio::select! {
+                    res = receiver.recv() => {
+                        let Some(task) = res else {
+                            tracing::info!(
+                                target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                                "Tasks receiver channel closed",
+                            );
+                            break;
+                        };
+                        tracing::trace!(
+                            target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                            "Task #{} ({}): received",
+                            task.id(),
+                            task.get_descr(),
+                        );
+                        let (task_id, task_descr) = (task.id(), task.get_descr());
+                        let (func, responder) = task.extract();
+                        tracing::trace!(
+                            target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                            "Task #{} ({}): executing...", task_id, &task_descr,
+                        );
+                        let future = func(worker);
+                        let (updated_worker, res) = future.await;
+                        tracing::trace!(
+                            target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                            "Task #{} ({}): executed", task_id, &task_descr,
+                        );
+                        worker = updated_worker;
+                        if let Some(res) = responder.respond(res) {
+                            // no responder, or no receiver can handle result, should panic if task result is Error
+                            if let Err(err) = res {
+                                panic!(
+                                    "Task #{} ({}): result error! {:?}",
+                                    task_id, &task_descr, err,
+                                )
+                            }
+                        } else {
+                            tracing::trace!(
+                                target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                                "Task #{} ({}): result responded", task_id, &task_descr,
+                            );
+                        }
+
+                        if cancel_token.is_cancelled() {
+                            break;
+                        }
+                    },
+                    _ = cancel_token.cancelled() => {
+                        break;
                     }
-                } else {
-                    tracing::trace!(
-                        target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
-                        "Task #{} ({}): result responded", task_id, &task_descr,
-                    );
                 }
             }
+            tracing::info!(
+                target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                "Dispatcher stopped",
+            );
         });
     }
 
+    pub fn stop(&self) {
+        self.cancel_token.cancel();
+    }
+
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
     pub fn create(worker: W, queue_buffer_size: usize) -> Self {
-        let (sender, receiver) = mpsc::channel(queue_buffer_size);
-
-        Self::run(worker, receiver);
-
-        Self {
-            task_id_counter: Arc::new(AtomicU64::default()),
-            tasks_queue: sender,
-        }
+        let (dispatcher, receiver) = Self::new(queue_buffer_size);
+        dispatcher.run(worker, receiver);
+        dispatcher
     }
 
     async fn _enqueue_task(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {

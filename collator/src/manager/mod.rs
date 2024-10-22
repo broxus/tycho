@@ -1,20 +1,22 @@
 use std::collections::{hash_map, BTreeMap, VecDeque};
 use std::sync::Arc;
 
+use ahash::HashMapExt;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
     BlockId, BlockIdShort, ExternalsProcessedUpto, ProcessedUptoInfo, ShardHashes, ShardIdent,
+    ValidatorDescription,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tracing::Instrument;
-use tycho_block_util::block::ValidatorSubsetInfo;
+use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
     ActiveCollator, BlockCacheEntry, BlockCacheEntryData, BlockSeqno, CollatorState,
     McBlockSubgraph,
@@ -29,6 +31,7 @@ use crate::collator::{
 use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+    StateUpdateContext,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
@@ -40,6 +43,7 @@ use crate::types::{
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
+use crate::utils::vset_cache::ValidatorSetCache;
 use crate::validator::{AddSession, ValidationStatus, Validator};
 use crate::{method_to_async_closure, tracing_targets};
 
@@ -101,6 +105,9 @@ where
     last_processed_mc_block_id: Mutex<Option<BlockId>>,
 
     chain_times_sync_state: Mutex<ChainTimesSyncState>,
+
+    /// Cache for validator sets from config
+    validator_set_cache: ValidatorSetCache,
 
     /// Round of a new consensus genesis
     mempool_start_round: Option<u32>,
@@ -308,6 +315,8 @@ where
 
             chain_times_sync_state: Default::default(),
 
+            validator_set_cache: Default::default(),
+
             mempool_start_round,
             from_mc_block_seqno,
 
@@ -510,13 +519,13 @@ where
                 // run sync if all collators cancelled or waiting
                 self.ready_to_sync.notified().await;
 
-                let all_not_active = self
+                let has_active = self
                     .active_collators
                     .iter()
-                    .all(|ac| ac.state != CollatorState::Active);
-                if all_not_active {
+                    .any(|ac| ac.state == CollatorState::Active);
+                if !has_active {
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "collator cancelled or waiting in every shard and masterchain, \
+                        "no active collators in shards and masterchain, \
                         will run sync to last applied mc block",
                     );
 
@@ -642,16 +651,28 @@ where
 
         self.ready_to_sync.notified().await;
 
-        // find session related to this block by shard
-        let Some(session_info) = self
+        // find collation session related to this block by session id
+        let session_info = match self
             .active_collation_sessions
             .read()
             .get(&block_id.shard)
             .cloned()
-        else {
-            anyhow::bail!(
-                "There is no active collation session for the shard that block belongs to"
-            );
+        {
+            Some(session_info) if session_info.id() == collation_result.collation_session_id => {
+                session_info
+            }
+            _ => {
+                // otherwise skip block because we have synced to a newer mc block
+                // and found out that we should not collated at all
+                tracing::warn!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "There is no active session related to collated block. Skipped",
+                );
+
+                self.set_collator_state(&block_id.shard, CollatorState::Waiting);
+
+                return Ok(());
+            }
         };
 
         let candidate_chain_time = collation_result.candidate.chain_time;
@@ -756,14 +777,15 @@ where
 
                 self.set_collator_state(&block_id.shard, CollatorState::Cancelled);
 
-                // run sync if all collators cancelled or waiting and we have applied mc blocks
-                let all_not_active = self
+                // run sync if all collators cancelled, or waiting, or there are no collators
+                // and we have applied mc blocks
+                let has_active = self
                     .active_collators
                     .iter()
-                    .all(|ac| ac.state != CollatorState::Active);
-                if all_not_active {
+                    .any(|ac| ac.state == CollatorState::Active);
+                if !has_active {
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "sync_to_applied_mc_block: collator cancelled or waiting in every shard, \
+                        "sync_to_applied_mc_block: no active collators in shards and master, \
                         will run sync to last applied mc block",
                     );
 
@@ -794,15 +816,8 @@ where
                     )
                     .await?;
                 } else {
-                    // otherwise execute master block processing routines
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "Will notify mempool and refresh collation sessions",
-                    );
-
-                    Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &block_id)
-                        .await?;
-
-                    self.refresh_collation_sessions(collation_result.mc_data.unwrap(), false)
+                    // otherwise execute master state update processing routines
+                    self.process_mc_state_update(collation_result.mc_data.unwrap(), false)
                         .await?;
                 }
             } else {
@@ -883,18 +898,19 @@ where
                 if store_res.last_collated_mc_block_id.is_some()
                     || last_processed_mc_block_id_opt.is_some()
                 {
-                    // should wait for next collated mc block when collators are active
-                    // but when all were cancelled or waiting, we can process last received mc block
-                    let all_not_active = self
+                    // Should wait for next collated mc block when collators are active
+                    // but when all were cancelled or waiting, we can process last received mc block.
+                    // Also can process last received mc block when no active collators
+                    let has_active = self
                         .active_collators
                         .iter()
-                        .all(|ac| ac.state != CollatorState::Active);
-                    if all_not_active {
+                        .any(|ac| ac.state == CollatorState::Active);
+                    if !has_active {
                         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                             last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                             last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
                             "check_should_sync: should sync to last applied mc block \
-                            when all collators were cancelled or waiting",
+                            when all collators were cancelled, or waiting, or ther are no collators",
                         );
                         true
                     } else {
@@ -1106,16 +1122,6 @@ where
 
             // if it is last one then commit diffs, notify mempool and refresh collation sessions
             if is_last {
-                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                    "Will notify mempool and refresh collation sessions with HARD RESET",
-                );
-
-                Self::notify_mempool_about_mc_block(
-                    self.mpool_adapter.clone(),
-                    &mc_block_entry.block_id,
-                )
-                .await?;
-
                 self.commit_block_queue_diff(
                     &mc_block_entry.block_id,
                     &mc_block_entry.top_shard_blocks_info,
@@ -1154,7 +1160,7 @@ where
                     .handle_top_processed_to_anchor(top_processed_to_anchor_id)
                     .await?;
 
-                self.refresh_collation_sessions(mc_data, true).await?;
+                self.process_mc_state_update(mc_data, true).await?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1308,18 +1314,58 @@ where
         .await
     }
 
-    /// Get shards info from the master state,
-    /// then start missing sessions for these shards, or refresh existing.
-    /// For each shard run collation process if current node is included in collators subset.
+    async fn process_mc_state_update(
+        &self,
+        mc_data: Arc<McData>,
+        reset_collators: bool,
+    ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            reset_collators,
+            "Will notify mempool and refresh collation sessions",
+        );
+
+        self.notify_mc_state_update_to_mempool(mc_data.clone())
+            .await?;
+
+        self.refresh_collation_sessions(mc_data, reset_collators)
+            .await
+    }
+
+    async fn notify_mc_state_update_to_mempool(&self, mc_data: Arc<McData>) -> Result<()> {
+        let prev_validator_set = self
+            .validator_set_cache
+            .get_prev_validator_set(&mc_data.config)?;
+        let current_validator_set = self
+            .validator_set_cache
+            .get_current_validator_set(&mc_data.config)?;
+        let next_validator_set = self
+            .validator_set_cache
+            .get_next_validator_set(&mc_data.config)?;
+
+        let cx = StateUpdateContext {
+            mc_block_id: mc_data.block_id,
+            mempool_switch_round: mc_data.validator_info.catchain_seqno,
+            mempool_config: mc_data.config.get_catchain_config()?,
+            prev_validator_set,
+            current_validator_set,
+            next_validator_set,
+        };
+
+        self.mpool_adapter.handle_mc_state_update(cx).await
+    }
+
+    /// Get shards and validator set info from the master state,
+    /// then start missing collation sessions, finish outdated, resume actual.
+    /// Start/stop/resume collators and validators.
     #[tracing::instrument(skip_all)]
-    pub async fn refresh_collation_sessions(
+    async fn refresh_collation_sessions(
         &self,
         mc_data: Arc<McData>,
         reset_collators: bool,
     ) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Trying to refresh collation sessions by mc stat ({})...",
+            "Trying to refresh collation sessions by mc state ({})...",
             mc_data.block_id.as_short_id(),
         );
 
@@ -1369,13 +1415,71 @@ where
         }
 
         // find out the actual collation session seqno from master state
-        let new_session_seqno = mc_data.validator_info.catchain_seqno;
+        let current_session_seqno = mc_data.validator_info.catchain_seqno;
 
         // we need full validators set to define the subset for each session and to check if current node should collate
         let full_validators_set = mc_data.config.get_current_validator_set()?;
-        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "full_validators_set {:?}", full_validators_set);
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+            "full_validators_set: since={}, until={}, main={}, total_weight={}, list={:?}",
+            full_validators_set.utime_since, full_validators_set.utime_until,
+            full_validators_set.main, full_validators_set.total_weight,
+            DebugIter(full_validators_set.list.iter().map(|i| i.public_key)),
+        );
+        let subset_config = mc_data.config.get_catchain_config()?;
+        let mut subset_cache = FastHashMap::new();
+        let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
+            hash_map::Entry::Occupied(entry) => {
+                let (subset, hash_short): &(Arc<FastHashMap<[u8; 32], ValidatorDescription>>, u32) =
+                    entry.get();
+                anyhow::Result::<_>::Ok((subset.clone(), *hash_short))
+            }
+            hash_map::Entry::Vacant(entry) => {
+                let (subset, hash_short) = full_validators_set
+                    .compute_subset(shard_id, &subset_config, current_session_seqno)
+                    .ok_or(anyhow!(
+                        "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
+                        shard_id,
+                        current_session_seqno,
+                    ))?;
 
-        // compare with active sessions and detect new sessions to start and outdated sessions to finish
+                // TEST: override with test subset with test keypairs defined on test run
+                #[cfg(feature = "test")]
+                let subset = if self.test_validators_keypairs.is_empty() {
+                    subset
+                } else {
+                    let mut test_subset = vec![];
+                    for (i, keypair) in self.test_validators_keypairs.iter().enumerate() {
+                        let val_descr = &subset[i];
+                        test_subset.push(everscale_types::models::ValidatorDescription {
+                            public_key: keypair.public_key.to_bytes().into(),
+                            adnl_addr: val_descr.adnl_addr,
+                            weight: val_descr.weight,
+                            mc_seqno_since: val_descr.mc_seqno_since,
+                            prev_total_weight: val_descr.prev_total_weight,
+                        });
+                    }
+                    test_subset
+                };
+                #[cfg(feature = "test")]
+                tracing::warn!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "FOR TEST: overrided subset of validators to collate shard {}: {:?}",
+                    shard_id,
+                    subset,
+                );
+
+                let subset: FastHashMap<_, _> = subset
+                    .into_iter()
+                    .map(|vldr| (vldr.public_key.into(), vldr))
+                    .collect();
+                let subset = Arc::new(subset);
+
+                entry.insert((subset.clone(), hash_short));
+                Ok((subset, hash_short))
+            }
+        };
+
+        // detect sessions and collators to start and to finish
         let mut sessions_to_keep = Vec::new();
         let mut sessions_to_start = Vec::new();
         let mut to_finish_sessions = Vec::new();
@@ -1383,145 +1487,102 @@ where
         {
             let mut active_collation_sessions_guard = self.active_collation_sessions.write();
             let mut missed_shards_ids: FastHashSet<_> = active_shards_ids.into_iter().collect();
-            for (shard_ident, block_ids) in new_shards_info {
-                missed_shards_ids.remove(&shard_ident);
-                match active_collation_sessions_guard.entry(shard_ident) {
+            for (shard_id, block_ids) in new_shards_info {
+                missed_shards_ids.remove(&shard_id);
+
+                // check if current node is in subset
+                let (subset, _) = get_validator_subset(shard_id)?;
+                let local_pubkey = find_us_in_collators_set(&self.keypair, &subset);
+
+                if local_pubkey.is_none() {
+                    tracing::debug!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        public_key = %self.keypair.public_key,
+                        "Current node was not authorized to collate shard {}",
+                        shard_id,
+                    );
+                }
+
+                match active_collation_sessions_guard.entry(shard_id) {
                     hash_map::Entry::Occupied(entry) => {
-                        let existing_session = entry.get();
-                        if existing_session.seqno() >= new_session_seqno {
-                            sessions_to_keep.push((
-                                shard_ident,
-                                existing_session.clone(),
-                                block_ids,
-                            ));
+                        let existing_session_info = entry.get().clone();
+                        if local_pubkey.is_some() {
+                            if existing_session_info.seqno() >= current_session_seqno {
+                                sessions_to_keep.push((shard_id, existing_session_info, block_ids));
+                            } else {
+                                to_finish_sessions.push(entry.remove());
+                                sessions_to_start.push((shard_id, block_ids));
+                            }
                         } else {
-                            to_finish_sessions.push((
-                                shard_ident,
-                                new_session_seqno,
-                                entry.remove(),
-                            ));
-                            sessions_to_start.push((shard_ident, block_ids));
+                            to_finish_sessions.push(entry.remove());
+                            if let Some((_, collator)) = self.active_collators.remove(&shard_id) {
+                                to_stop_collators.push((existing_session_info, collator));
+                            }
                         }
                     }
                     hash_map::Entry::Vacant(_) => {
-                        sessions_to_start.push((shard_ident, block_ids));
+                        if local_pubkey.is_some() {
+                            sessions_to_start.push((shard_id, block_ids));
+                        }
                     }
                 }
             }
 
-            // if we still have some active sessions that do not match with new shards
+            // if we still have some active sessions that do not match with new shards and validator subset
             // then we need to finish them and stop their collators
             for shard_id in missed_shards_ids {
-                // TODO: we should remove session from active and add to finished in one atomic operation
-                //      to not to miss session on processing block candidate that could be from old session
-                if let Some(current_active_session) =
+                if let Some(existing_session_info) =
                     active_collation_sessions_guard.remove(&shard_id)
                 {
-                    to_finish_sessions.push((shard_id, new_session_seqno, current_active_session));
+                    to_finish_sessions.push(existing_session_info.clone());
                     if let Some((_, collator)) = self.active_collators.remove(&shard_id) {
-                        to_stop_collators.push((shard_id, new_session_seqno, collator));
+                        to_stop_collators.push((existing_session_info, collator));
                     }
                 }
             }
         }
 
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Will keep existing collation sessions: {:?}",
-            DebugIter(sessions_to_keep.iter().map(|(shard_ident, _, _)| shard_ident)),
-        );
         if !sessions_to_start.is_empty() {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will start new collation sessions: {:?}",
-                DebugIter(sessions_to_start.iter().map(|(k, _)| k)),
+                DebugIter(sessions_to_start.iter().map(|(s, _)| (s, current_session_seqno))),
             );
         }
 
-        let cc_config = mc_data.config.get_catchain_config()?;
-
-        // update master state in existing collators and resume collation
-        for (shard_id, _, prev_blocks_ids) in sessions_to_keep {
-            // if there is no active collator then current node does not collate this shard
-            // so we do not need to do anything
-            let collator = {
-                let Some(mut active_collator) = self.active_collators.get_mut(&shard_id) else {
-                    continue;
-                };
-                active_collator.state = CollatorState::Active;
-                active_collator.collator.clone()
-            };
-
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Resuming collation attempts in {}",
-                shard_id,
-            );
-            collator
-                .enqueue_resume_collation(mc_data.clone(), reset_collators, prev_blocks_ids)
-                .await?;
-        }
-
-        // we may have sessions to finish, collators to stop, and sessions to start
-        // additionally we may have some active collators
-        // for each new session we should check if current node should collate,
-        // then stop collators if should not, otherwise start missing collators
+        // we may have sessions to finish, collators to stop, and sessions to start,
+        // and we start missing collators for new sessions
         for (shard_id, prev_blocks_ids) in sessions_to_start {
-            let (subset, hash_short) = full_validators_set
-                .compute_subset(shard_id, &cc_config, new_session_seqno)
-                .ok_or(anyhow!(
-                    "Error calculating subset of collators for the session (shard_id = {}, seqno = {})",
-                    shard_id,
-                    new_session_seqno,
-                ))?;
-
-            // TEST: override with test subset with test keypairs defined on test run
-            #[cfg(feature = "test")]
-            let subset = if self.test_validators_keypairs.is_empty() {
-                subset
-            } else {
-                let mut test_subset = vec![];
-                for (i, keypair) in self.test_validators_keypairs.iter().enumerate() {
-                    let val_descr = &subset[i];
-                    test_subset.push(everscale_types::models::ValidatorDescription {
-                        public_key: keypair.public_key.to_bytes().into(),
-                        adnl_addr: val_descr.adnl_addr,
-                        weight: val_descr.weight,
-                        mc_seqno_since: val_descr.mc_seqno_since,
-                        prev_total_weight: val_descr.prev_total_weight,
-                    });
-                }
-                test_subset
-            };
-            #[cfg(feature = "test")]
-            tracing::warn!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "FOR TEST: overrided subset of validators to collate shard {}: {:?}",
-                shard_id,
-                subset,
-            );
-
-            let local_pubkey_opt = find_us_in_collators_set(&self.keypair, &subset);
+            let (subset, hash_short) = get_validator_subset(shard_id)?;
 
             let new_session_info = Arc::new(CollationSessionInfo::new(
-                shard_id.workchain(),
-                new_session_seqno,
+                shard_id,
+                current_session_seqno,
                 ValidatorSubsetInfo {
-                    validators: subset,
+                    validators: subset.values().cloned().collect(),
                     short_hash: hash_short,
                 },
                 Some(self.keypair.clone()),
             ));
 
-            if let Some(_local_pubkey) = local_pubkey_opt {
-                let prev_seqno = prev_blocks_ids.iter().map(|b| b.seqno).max().unwrap_or(0);
+            let next_block_id_short = calc_next_block_id_short(&prev_blocks_ids);
 
-                if !self.active_collators.contains_key(&shard_id) {
+            match self.active_collators.entry(shard_id) {
+                DashMapEntry::Occupied(_) => {
                     tracing::info!(
                         target: tracing_targets::COLLATION_MANAGER,
-                        "There is no active collator for collation session {}. Will start it",
-                        shard_id,
+                        "Active collator exists for collation session {:?}. Will resume it",
+                        new_session_info.id(),
                     );
+                    sessions_to_keep.push((shard_id, new_session_info.clone(), prev_blocks_ids));
+                }
+                DashMapEntry::Vacant(entry) => {
+                    tracing::info!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "There is no active collator for collation session {:?}. Will start it",
+                        new_session_info.id(),
+                    );
+
                     let collator = self
                         .collator_factory
                         .start(CollatorContext {
@@ -1538,99 +1599,121 @@ where
                         })
                         .await;
 
-                    self.active_collators.insert(shard_id, ActiveCollator {
+                    entry.insert(ActiveCollator {
                         collator: Arc::new(collator),
                         state: CollatorState::Active,
                     });
                 }
-
-                // notify validator, it will start overlay initialization
-
-                let session_id = new_session_info.seqno();
-
-                // need to add session only for masterchain blocks, shard block are not being validated
-                if shard_id.is_masterchain() {
-                    self.validator.add_session(AddSession {
-                        shard_ident: shard_id,
-                        session_id,
-                        start_block_seqno: prev_seqno + 1,
-                        validators: &new_session_info.collators().validators,
-                    })?;
-                }
-            } else {
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "Node was not athorized to collate shard {}",
-                    shard_id,
-                );
-                if let Some((_, active_collator)) = self.active_collators.remove(&shard_id) {
-                    to_stop_collators.push((shard_id, new_session_seqno, active_collator));
-                }
             }
 
-            // TODO: possibly do not need to store collation sessions if we do not collate in them
+            // need to add validation session only for masterchain blocks, shard blocks are not being validated
+            if shard_id.is_masterchain() {
+                self.validator.add_session(AddSession {
+                    shard_ident: shard_id,
+                    session_id: new_session_info.seqno(),
+                    start_block_seqno: next_block_id_short.seqno,
+                    validators: &new_session_info.collators().validators,
+                })?;
+            }
+
             self.active_collation_sessions
                 .write()
                 .insert(shard_id, new_session_info);
+        }
+
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Will keep existing collation sessions: {:?}",
+            DebugIter(sessions_to_keep.iter().map(|(_, s, _)| s.id())),
+        );
+
+        // update master state in existing collators and resume collation
+        for (shard_id, new_session_info, prev_blocks_ids) in sessions_to_keep {
+            let collator = {
+                let Some(mut active_collator) = self.active_collators.get_mut(&shard_id) else {
+                    bail!(
+                        "Collator for shard should exist for active session {:?}",
+                        new_session_info.id(),
+                    )
+                };
+                active_collator.state = CollatorState::Active;
+                active_collator.collator.clone()
+            };
+
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Resuming collation attempts in shard session {:?}",
+                new_session_info.id(),
+            );
+            collator
+                .enqueue_resume_collation(
+                    mc_data.clone(),
+                    reset_collators,
+                    new_session_info,
+                    prev_blocks_ids,
+                )
+                .await?;
         }
 
         if !to_finish_sessions.is_empty() {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will finish outdated collation sessions: {:?}",
-                DebugIter(to_finish_sessions.iter().map(|(s, seq, _)| (s, seq))),
+                DebugIter(to_finish_sessions.iter().map(|s| s.id())),
             );
         }
 
         // enqueue outdated sessions finish tasks
-        for (shard_ident, session_seqno, session_info) in to_finish_sessions {
-            let finish_key = (shard_ident, session_seqno);
+        for session_info in to_finish_sessions {
             self.collation_sessions_to_finish
-                .insert(finish_key, session_info.clone());
-            self.finish_collation_session(session_info, finish_key)
-                .await?;
+                .insert(session_info.id(), session_info.clone());
+            self.finish_collation_session(session_info).await?;
         }
 
         if !to_stop_collators.is_empty() {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will stop collators for sessions that we do not serve: {:?}",
-                DebugIter(to_stop_collators.iter().map(|(s, seq, _)| (s, seq))),
+                DebugIter(to_stop_collators.iter().map(|(s, _)| s.id())),
             );
         }
 
         // enqueue dangling collators stop tasks
-        for (shard_ident, session_seqno, active_collator) in to_stop_collators {
-            let stop_key = (shard_ident, session_seqno);
-            active_collator.collator.enqueue_stop(stop_key).await?;
-            self.collators_to_stop.insert(stop_key, active_collator);
+        for (session_info, active_collator) in to_stop_collators {
+            let collator = active_collator.collator.clone();
+            self.collators_to_stop
+                .insert(session_info.id(), active_collator);
+            collator.enqueue_stop().await?;
         }
 
         Ok(())
 
-        // finally we will have initialized `active_collation_sessions` and `active_collators`
-        // which run async block collations processes
+        // finally we will have initialized `active_collation_sessions`
+        // and `active_collators` which run async block collations processes
     }
 
     /// Execute collation session finalization routines
     pub async fn finish_collation_session(
         &self,
-        _session_info: Arc<CollationSessionInfo>,
-        finish_key: CollationSessionId,
+        collation_session: Arc<CollationSessionInfo>,
     ) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "finish_collation_session: {:?}", finish_key,
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "finish_collation_session: {:?}", collation_session.id(),
         );
-        self.collation_sessions_to_finish.remove(&finish_key);
+        self.collation_sessions_to_finish
+            .remove(&collation_session.id());
         Ok(())
     }
 
     /// Remove stopped collator from cache
-    pub async fn handle_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "process_collator_stopped: {:?}", stop_key,
+    pub async fn handle_collator_stopped(
+        &self,
+        collation_session_id: CollationSessionId,
+    ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "handle_collator_stopped: {:?}", collation_session_id,
         );
-        self.collators_to_stop.remove(&stop_key);
+        self.collators_to_stop.remove(&collation_session_id);
         Ok(())
     }
 
@@ -1638,14 +1721,6 @@ where
         if let Some(mut active_collator) = self.active_collators.get_mut(shard_id) {
             active_collator.state = state;
         }
-    }
-
-    /// Send master state related to master block to mempool (it may perform gc or nodes rotation)
-    async fn notify_mempool_about_mc_block(
-        mpool_adapter: Arc<dyn MempoolAdapter>,
-        mc_block_id: &BlockId,
-    ) -> Result<()> {
-        mpool_adapter.on_new_mc_state(mc_block_id).await
     }
 
     /// Set master block lates chain time to calc next interval for master block collation.

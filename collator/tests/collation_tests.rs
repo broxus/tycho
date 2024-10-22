@@ -49,8 +49,7 @@ impl StateSubscriber for StrangeBlockProvider {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter
-            .handle_state(&cx.state, CollatorSyncContext::Recent)
+        self.adapter.handle_state(&cx.state)
     }
 }
 
@@ -118,7 +117,9 @@ async fn test_collation_process_on_stubs() {
         node_1_keypair.clone(),
         config,
         Arc::new(message_queue_adapter),
-        |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
+        |listener| {
+            StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical)
+        },
         |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
         ValidatorStdImpl::new(
             validator_network,
