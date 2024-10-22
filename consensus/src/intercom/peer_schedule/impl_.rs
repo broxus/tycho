@@ -64,6 +64,13 @@ impl PeerSchedule {
         guard.set_next_peers(next_peers, &peer_schedule, true);
         if let Some(next_round) = next_round {
             guard.set_next_start(next_round, &peer_schedule);
+        }
+    }
+
+    pub fn apply_scheduled(&self, top_dag_round: Round) {
+        if (self.atomic().get_next_start()).map_or(false, |r| r <= top_dag_round) {
+            let mut guard = self.write();
+            let peer_schedule = self.clone();
             guard.apply_next_start(&peer_schedule);
         }
     }

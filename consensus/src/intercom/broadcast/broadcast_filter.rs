@@ -195,10 +195,11 @@ impl BroadcastFilterInner {
         };
 
         if is_threshold_reached {
+            self.consensus_round.set_max(round);
+            self.peer_schedule.apply_scheduled(round);
             self.output
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
-            self.consensus_round.set_max(round);
         }
 
         // we should ban a peer that broadcasts its rounds out of order,

@@ -117,6 +117,10 @@ impl PeerScheduleStateless {
         _ = self.next_epoch_start.replace(round);
     }
 
+    pub(super) fn get_next_start(&self) -> Option<Round> {
+        self.next_epoch_start
+    }
+
     /// on epoch change
     pub(super) fn rotate(&mut self) {
         // make next from previous
