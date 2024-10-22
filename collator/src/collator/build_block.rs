@@ -496,13 +496,11 @@ impl CollatorStdImpl {
         let mut validator_info = None;
         if is_key_block {
             // check if validator set changed by the cells hash
-            let old_curr_set_raw = prev_config
-                .get_raw_or(ConfigParam35::ID, ConfigParam34::ID)?
-                .unwrap();
-            let mut new_curr_set_raw = config
-                .get_raw_or(ConfigParam35::ID, ConfigParam34::ID)?
-                .unwrap();
-            if new_curr_set_raw.cell().repr_hash() != old_curr_set_raw.cell().repr_hash() {
+            let prev_vset = prev_config
+                .get_prev_validator_set_raw()?
+                .unwrap_or_default();
+            let current_vset = config.get_current_validator_set()?;
+            if current_vset.repr_hash() != prev_vset.repr_hash() {
                 // calc next mempool switch round (identifies next session_seqno)
                 let prev_processed_to_anchor = prev_shard_data
                     .processed_upto()
@@ -513,9 +511,9 @@ impl CollatorStdImpl {
                 let next_session_seqno = prev_processed_to_anchor + max_anchor_distance;
 
                 // calculate next validator subset and hash
-                let new_curr_val_set = ValidatorSet::load_from(&mut new_curr_set_raw)?;
+                let current_vset = current_vset.parse::<ValidatorSet>()?;
                 let subset_config = config.get_catchain_config()?;
-                let (_, validator_list_hash_short) = new_curr_val_set.compute_subset(
+                let (_, validator_list_hash_short) = current_vset.compute_subset(
                     working_state.next_block_id_short.shard,
                     &subset_config,
                     next_session_seqno,

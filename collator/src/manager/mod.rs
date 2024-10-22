@@ -43,7 +43,7 @@ use crate::types::{
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
-use crate::utils::vldr_set_cache::ValidatorSetCache;
+use crate::utils::vset_cache::ValidatorSetCache;
 use crate::validator::{AddSession, ValidationStatus, Validator};
 use crate::{method_to_async_closure, tracing_targets};
 
