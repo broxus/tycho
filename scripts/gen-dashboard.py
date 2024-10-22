@@ -160,6 +160,44 @@ def create_counter_panel(
     )
 
 
+def create_percent_panel(
+    metric1: str,
+    metric2: str,
+    title: str,
+    group_by_labels: List[str] = ["instance"],
+    label_selectors: List[str] = [],
+    unit_format: str = UNITS.PERCENT_FORMAT,
+) -> Panel:
+    """
+    create a panel showing the percentage of metric1 to metric2, grouped by specified labels.
+
+    Args:
+        metric1 (str): The first metric (numerator).
+        metric2 (str): The second metric (denominator).
+        title (str): Title of the panel.
+        group_by_labels (List[str]): Labels to group by and match on.
+        label_selectors (List[str]): Additional label selectors for both metrics.
+        unit_format (str, optional): Format for the unit display. defaults to UNITS.PERCENT_FORMAT.
+
+    Returns:
+        Panel: A timeseries panel object showing the percentage.
+    """
+    expr1 = expr_sum_rate(
+        metric1, label_selectors=label_selectors, by_labels=group_by_labels
+    )
+    expr2 = expr_sum_rate(
+        metric2, label_selectors=label_selectors, by_labels=group_by_labels
+    )
+
+    percent_expr = expr_operator(expr_operator(expr1, "/", expr2), "*", "100")
+
+    legend_format = "{{" + "}} - {{".join(group_by_labels) + "}}"
+
+    percent_target = target(percent_expr, legend_format=legend_format)
+
+    return timeseries_panel(title=title, targets=[percent_target], unit=unit_format)
+
+
 def create_heatmap_panel(
     metric_name,
     title,
@@ -173,7 +211,7 @@ def create_heatmap_panel(
         color=heatmap_color_warm(),
         tooltip=Tooltip(),
         label_selectors=labels,
-        rate_interval="10s" #todo: update this if scrape interval changes
+        rate_interval="10s",  # todo: update this if scrape interval changes
     )
 
 
@@ -1255,7 +1293,7 @@ def collator_misc_operations_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_collator_handle_validated_master_block_time",
-            "Handle validated master block"
+            "Handle validated master block",
         ),
         create_heatmap_panel(
             "tycho_collator_commit_queue_diffs_time",
@@ -1305,7 +1343,8 @@ def collator_commit_block_metrics() -> RowPanel:
 def collator_state_adapter_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_state_adapter_prepare_block_proof_time", "Prepare block proof"
+            "tycho_collator_state_adapter_prepare_block_proof_time",
+            "Prepare block proof",
         ),
         create_heatmap_panel(
             "tycho_collator_state_adapter_save_block_proof_time", "Save block proof"
@@ -1313,12 +1352,8 @@ def collator_state_adapter_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_state_store_state_root_time", "Store state root"
         ),
-        create_heatmap_panel(
-            "tycho_collator_state_load_state_time", "Load state"
-        ),
-        create_heatmap_panel(
-            "tycho_collator_state_load_block_time", "Load block"
-        ),
+        create_heatmap_panel("tycho_collator_state_load_state_time", "Load state"),
+        create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel(
             "tycho_collator_state_load_queue_diff_time", "Load queue diff"
         ),
@@ -1688,7 +1723,9 @@ def mempool_storage() -> RowPanel:
             "Get point raw",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_store_get_status_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_store_get_status_count", range_selector="$__interval"
+            ),
             "Get status count (total at moment)",
         ),
         create_heatmap_panel(
