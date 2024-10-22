@@ -14,6 +14,13 @@ pub struct PartialBlockId {
 }
 
 impl PartialBlockId {
+    pub fn as_short_id(&self) -> BlockIdShort {
+        BlockIdShort {
+            shard: self.shard,
+            seqno: self.seqno,
+        }
+    }
+
     pub fn make_full(&self, file_hash: HashBytes) -> BlockId {
         BlockId {
             shard: self.shard,

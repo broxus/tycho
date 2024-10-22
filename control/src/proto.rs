@@ -1,6 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, BlockIdShort};
 use serde::{Deserialize, Serialize};
 use tycho_core::block_strider::ManualGcTrigger;
 
@@ -45,7 +45,7 @@ pub trait ControlServer {
     async fn get_archive_ids() -> ServerResult<Vec<ArchiveInfo>>;
 
     /// Returns list of all block ids.
-    async fn get_block_ids(req: BlockListRequest) -> ServerResult<Vec<BlockId>>;
+    async fn get_block_ids(req: BlockListRequest) -> ServerResult<BlockListResponse>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +91,11 @@ pub struct ArchiveSliceResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockListRequest {
-    pub limit: u32,
-    pub offset: u32,
+    pub continuation: Option<BlockIdShort>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockListResponse {
+    pub blocks: Vec<BlockId>,
+    pub continuation: Option<BlockIdShort>,
 }

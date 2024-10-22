@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -345,6 +346,7 @@ impl CmdDumpArchive {
     }
 }
 
+/// Fetches the list of all stored block ids.
 #[derive(Parser)]
 pub struct CmdListBlocks {
     /// Unix socket path to connect to.
@@ -352,29 +354,56 @@ pub struct CmdListBlocks {
     sock: Option<PathBuf>,
     #[clap(long)]
     human_readable: bool,
-    #[clap(short, long, default_value = "1000")]
-    limit: u32,
-    #[clap(short, long, default_value = "0")]
-    offset: u32,
 }
 
 impl CmdListBlocks {
     pub fn run(self) -> Result<()> {
         control_rt(self.sock, move |client| async move {
-            let blocks = client.list_blocks(self.limit, self.offset).await?;
-            if self.human_readable {
-                if blocks.is_empty() {
-                    println!("No blocks found");
-                } else {
-                    println!("Blocks:");
-                    for block in blocks {
-                        println!("{}", block);
-                    }
-                }
+            let (json_start, json_pfx, json_end) = if std::io::stdin().is_terminal() {
+                ("{\n  \"blocks\": [", "\n    ", "\n  ]\n}")
             } else {
-                print_json(blocks)?;
+                ("{\"blocks\":[", "", "]}")
+            };
+
+            if !self.human_readable {
+                print!("{json_start}");
             }
 
+            let mut is_first = true;
+            let mut print_response = |blocks: Vec<BlockId>| -> std::io::Result<()> {
+                let mut stdout = std::io::stdout().lock();
+
+                for block_id in blocks {
+                    let is_first = std::mem::take(&mut is_first);
+
+                    if self.human_readable {
+                        let pfx = if is_first { "Blocks:\n" } else { "" };
+                        writeln!(stdout, "{pfx}{block_id}")?;
+                    } else {
+                        let sep = if is_first { "" } else { "," };
+                        write!(stdout, "{sep}{json_pfx}\"{block_id}\"")?;
+                    }
+                }
+
+                stdout.flush()
+            };
+
+            let mut continuation = None;
+            loop {
+                let res = client.list_blocks(continuation).await?;
+                print_response(res.blocks)?;
+
+                continuation = res.continuation;
+                if continuation.is_none() {
+                    break;
+                }
+            }
+
+            if self.human_readable && is_first {
+                println!("No blocks found");
+            } else if !self.human_readable {
+                println!("{json_end}");
+            }
             Ok(())
         })
     }

@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, BlockIdShort};
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
@@ -197,9 +197,12 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
-    pub async fn list_blocks(&self, limit: u32, offset: u32) -> ClientResult<Vec<BlockId>> {
+    pub async fn list_blocks(
+        &self,
+        continuation: Option<BlockIdShort>,
+    ) -> ClientResult<BlockListResponse> {
         self.inner
-            .get_block_ids(current_context(), BlockListRequest { limit, offset })
+            .get_block_ids(current_context(), BlockListRequest { continuation })
             .await?
             .map_err(Into::into)
     }
