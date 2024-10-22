@@ -28,7 +28,7 @@ pub trait BlockchainConfigExt {
     /// Returns a cell with the current validator set.
     ///
     /// Uses [`ConfigParam35`] (temp validators) or [`ConfigParam34`] (current validators).
-    fn get_current_validator_set(&self) -> Result<Cell, Error> {
+    fn get_current_validator_set_raw(&self) -> Result<Cell, Error> {
         match self.get_raw_cell(ConfigParam35::ID)? {
             None => self.get_raw_cell(ConfigParam34::ID)?,
             set => set,
@@ -39,7 +39,7 @@ pub trait BlockchainConfigExt {
     /// Returns a cell with the next validator set.
     ///
     /// Uses [`ConfigParam37`] (temp next validators) or [`ConfigParam36`] (next validators).
-    fn get_next_validator_set(&self) -> Result<Option<Cell>, Error> {
+    fn get_next_validator_set_raw(&self) -> Result<Option<Cell>, Error> {
         match self.get_raw_cell(ConfigParam37::ID)? {
             None => self.get_raw_cell(ConfigParam36::ID),
             set => Ok(set),

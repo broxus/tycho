@@ -47,8 +47,8 @@ impl ValidatorSetCache {
     ) -> Result<Option<(HashBytes, Arc<ValidatorSet>)>> {
         let Some(vset) = match ty {
             VsetType::Prev => config.get_prev_validator_set_raw(),
-            VsetType::Current => config.get_current_validator_set().map(Some),
-            VsetType::Next => config.get_next_validator_set(),
+            VsetType::Current => config.get_current_validator_set_raw().map(Some),
+            VsetType::Next => config.get_next_validator_set_raw(),
         }?
         else {
             return Ok(None);

@@ -496,10 +496,10 @@ impl CollatorStdImpl {
         let mut validator_info = None;
         if is_key_block {
             // check if validator set changed by the cells hash
-            let prev_vset = prev_config
-                .get_prev_validator_set_raw()?
-                .unwrap_or_default();
-            let current_vset = config.get_current_validator_set()?;
+            // NOTE: We intentionaly use current validator set from previous config
+            //       instead of just using the `prev_vset`.
+            let prev_vset = prev_config.get_current_validator_set_raw()?;
+            let current_vset = config.get_current_validator_set_raw()?;
             if current_vset.repr_hash() != prev_vset.repr_hash() {
                 // calc next mempool switch round (identifies next session_seqno)
                 let prev_processed_to_anchor = prev_shard_data
@@ -517,7 +517,7 @@ impl CollatorStdImpl {
                     working_state.next_block_id_short.shard,
                     &subset_config,
                     next_session_seqno,
-                ).ok_or(anyhow!(
+                ).ok_or_else(|| anyhow!(
                     "Error calculating subset of validators for next session (shard_id = {}, next_session_seqno = {})",
                     working_state.next_block_id_short.shard,
                     next_session_seqno,
