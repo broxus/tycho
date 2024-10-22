@@ -9,7 +9,6 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
-use tokio::sync::watch;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
@@ -504,19 +503,12 @@ impl Node {
 
         // Create a channel to notify collation manager when sync context changed
         let sync_context = CollatorSyncContext::Historical;
-        let (sync_context_tx, sync_context_rx) = tokio::sync::watch::channel(sync_context);
 
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
             self.collation_config.clone(),
             Arc::new(message_queue_adapter),
-            |listener| {
-                StateNodeAdapterStdImpl::new(
-                    listener,
-                    self.storage.clone(),
-                    sync_context_rx.clone(),
-                )
-            },
+            |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone(), sync_context),
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
@@ -533,7 +525,7 @@ impl Node {
 
         let activate_collator = ActivateCollator {
             sync_context: collator_state_subscriber.sync_context.clone(),
-            sync_context_tx,
+            adapter: collation_manager.state_node_adapter().clone(),
         };
 
         // Explicitly handle the initial state
@@ -647,7 +639,7 @@ impl Node {
 
 struct ActivateCollator {
     sync_context: SharedSyncContext,
-    sync_context_tx: watch::Sender<CollatorSyncContext>,
+    adapter: Arc<dyn StateNodeAdapter>,
 }
 
 impl BlockProvider for ActivateCollator {
@@ -656,14 +648,8 @@ impl BlockProvider for ActivateCollator {
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.sync_context.store(CollatorSyncContext::Recent);
-        self.sync_context_tx.send_if_modified(|curr| {
-            if *curr != CollatorSyncContext::Recent {
-                *curr = CollatorSyncContext::Recent;
-                true
-            } else {
-                false
-            }
-        });
+        self.adapter
+            .handle_sync_context_update(CollatorSyncContext::Recent);
         futures_util::future::ready(None)
     }
 

@@ -83,8 +83,10 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         state: &ShardStateStuff,
         sync_context: CollatorSyncContext,
     ) -> Result<()>;
-    /// Loqd queue diff
+    /// Load queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
+    /// Handle sync context update
+    fn handle_sync_context_update(&self, sync_context: CollatorSyncContext);
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -93,6 +95,8 @@ pub struct StateNodeAdapterStdImpl {
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
 
+    sync_context_tx: watch::Sender<CollatorSyncContext>,
+
     delayed_state_notifier: DelayedStateNotifier,
 }
 
@@ -100,14 +104,16 @@ impl StateNodeAdapterStdImpl {
     pub fn new(
         listener: Arc<dyn StateNodeEventListener>,
         storage: Storage,
-        sync_context_receiver: watch::Receiver<CollatorSyncContext>,
+        initial_sync_context: CollatorSyncContext,
     ) -> Self {
+        let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
         let (broadcaster, _) = broadcast::channel(10000);
         let adapter = Self {
             listener,
             storage,
             blocks: Default::default(),
             broadcaster,
+            sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
         };
 
@@ -116,10 +122,9 @@ impl StateNodeAdapterStdImpl {
         tokio::spawn({
             let listener = adapter.listener.clone();
             let delayed_state_notifier = adapter.delayed_state_notifier.clone();
-            let mut sync_ctx_rx = sync_context_receiver;
             async move {
-                while sync_ctx_rx.changed().await.is_ok() {
-                    let sync_ctx = *sync_ctx_rx.borrow();
+                while sync_context_rx.changed().await.is_ok() {
+                    let sync_ctx = *sync_context_rx.borrow();
 
                     delayed_state_notifier
                         .send_delayed_if(listener.clone(), |delayed_sync_ctx| {
@@ -340,6 +345,17 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             }
             _ => Ok(None),
         }
+    }
+
+    fn handle_sync_context_update(&self, sync_context: CollatorSyncContext) {
+        self.sync_context_tx.send_if_modified(|curr| {
+            if *curr != sync_context {
+                *curr = sync_context;
+                true
+            } else {
+                false
+            }
+        });
     }
 }
 
