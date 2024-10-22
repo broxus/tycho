@@ -80,7 +80,7 @@ impl MempoolAdapterStdImpl {
             (consensus_config.clone(), builder.build()?)
         };
 
-        let mut engine = Engine::new(
+        let engine = Engine::new(
             key_pair,
             network,
             peer_resolver,
@@ -89,11 +89,11 @@ impl MempoolAdapterStdImpl {
             self.externals_rx.clone(),
             anchor_tx,
             &self.top_known_anchor,
+            &peers,
             &mempool_config,
         );
 
         tokio::spawn(async move {
-            engine.set_peers(&peers);
             engine.run().await;
         });
 

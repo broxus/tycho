@@ -15,7 +15,6 @@ use tycho_util::FastHashMap;
 use crate::dag::{AnchorStage, DagRound, Verifier};
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::round_watch::{Consensus, RoundWatch};
-use crate::engine::Genesis;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
@@ -41,17 +40,14 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let local_keys = Arc::new(peers[0].1);
 
     let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
+    peer_schedule.set_next_peers(
+        &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        Some(genesis.round().next()),
+    );
 
     let stub_consensus_round = RoundWatch::<Consensus>::default();
     let stub_downloader =
         Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
-
-    peer_schedule.set_epoch(&[Genesis::id().author], Genesis::round(), false);
-    peer_schedule.set_epoch(
-        &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        genesis.round().next(),
-        false,
-    );
 
     let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
 

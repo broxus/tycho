@@ -1,7 +1,7 @@
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
 use tokio::task::AbortHandle;
-use tycho_network::{PeerId, PrivateOverlay};
+use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesReadGuard};
 use tycho_util::FastHashSet;
 
 use crate::intercom::dto::PeerState;
@@ -50,34 +50,23 @@ impl PeerScheduleLocked {
         is_applied
     }
 
-    pub fn set_next_peers(
+    pub(super) fn set_next_peers(
         &mut self,
         peers: &[PeerId],
         parent: &PeerSchedule,
         update_overlay: bool,
     ) {
         let all_resolved = {
+            let local_id = self.local_id;
             let entries = if update_overlay {
-                let entries = {
-                    let mut entries = self.overlay.write_entries();
-                    for peer_id in peers {
-                        entries.insert(peer_id);
-                    }
-                    entries.downgrade()
-                };
-                let resolved_waiters = utils::resolved_waiters(&self.local_id, &entries);
-                if let Some(handle) = &self.abort_resolve_peers {
-                    handle.abort();
-                }
-                self.abort_resolve_peers =
-                    utils::new_resolve_task(parent.clone(), resolved_waiters);
-                entries
+                let to_remove = parent.atomic().next_to_remove(peers);
+                self.update_resolve(parent, &to_remove, peers)
             } else {
                 self.overlay.read_entries()
             };
             entries
                 .iter()
-                .filter(|a| a.resolver_handle.is_resolved() && a.peer_id != self.local_id)
+                .filter(|a| a.resolver_handle.is_resolved() && a.peer_id != local_id)
                 .map(|a| a.peer_id)
                 .collect::<FastHashSet<_>>()
         };
@@ -95,7 +84,8 @@ impl PeerScheduleLocked {
 
     /// on epoch change
     pub fn apply_next_start(&mut self, parent: &PeerSchedule) {
-        self.data.rotate();
+        let to_forget = self.data.rotate();
+        self.update_resolve(parent, &to_forget, &[]);
         // atomic part is updated under lock too
         parent.update_atomic(|stateless| stateless.rotate());
     }
@@ -105,8 +95,33 @@ impl PeerScheduleLocked {
     /// free some memory and ignore overlay updates
     #[allow(dead_code)] // TODO use on change of validator set
     pub fn forget_previous(&mut self, parent: &PeerSchedule) {
-        self.data.forget_previous();
+        let to_forget = self.data.forget_previous();
+        self.update_resolve(parent, &to_forget, &[]);
         // atomic part is updated under lock too
         parent.update_atomic(|stateless| stateless.forget_previous());
+    }
+
+    fn update_resolve(
+        &mut self,
+        parent: &PeerSchedule,
+        to_remove: &[PeerId],
+        to_add: &[PeerId],
+    ) -> PrivateOverlayEntriesReadGuard<'_> {
+        let entries = {
+            let mut entries = self.overlay.write_entries();
+            for peer_id in to_remove {
+                entries.remove(peer_id);
+            }
+            for peer_id in to_add {
+                entries.insert(peer_id);
+            }
+            entries.downgrade()
+        };
+        let resolved_waiters = utils::resolved_waiters(&self.local_id, &entries);
+        if let Some(handle) = &self.abort_resolve_peers {
+            handle.abort();
+        }
+        self.abort_resolve_peers = utils::new_resolve_task(parent.clone(), resolved_waiters);
+        entries
     }
 }

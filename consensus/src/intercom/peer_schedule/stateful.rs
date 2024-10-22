@@ -120,7 +120,8 @@ impl PeerScheduleStateful {
     }
 
     /// on epoch change
-    pub(super) fn rotate(&mut self) {
+    #[must_use]
+    pub(super) fn rotate(&mut self) -> Vec<PeerId> {
         // make next from previous
         let next = self
             .next_epoch_start
@@ -129,19 +130,29 @@ impl PeerScheduleStateful {
         self.cur_epoch_start = next;
         self.next_epoch_start = None; // makes next epoch peers inaccessible for reads
 
-        self.forget_previous(); // in case it was not called manually earlier
+        // in case it was not called manually earlier
+        let to_forget = self.forget_previous();
+
         self.peers_state.rotate_left(1);
+
+        to_forget
     }
 
-    pub(super) fn forget_previous(&mut self) {
+    /// on epoch change
+    #[must_use]
+    pub(super) fn forget_previous(&mut self) -> Vec<PeerId> {
+        let mut to_forget = Vec::new();
         for (peer_id, state) in mem::take(&mut self.peers_state[0]).iter() {
-            if *state == PeerState::Resolved
-                && !self.peers_state[1].contains_key(peer_id)
+            if !self.peers_state[1].contains_key(peer_id)
                 && !self.peers_state[2].contains_key(peer_id)
             {
-                self.all_resolved.remove(peer_id);
-                self.broadcast_receivers.remove(peer_id);
+                to_forget.push(*peer_id);
+                if *state == PeerState::Resolved {
+                    self.all_resolved.remove(peer_id);
+                    self.broadcast_receivers.remove(peer_id);
+                }
             }
         }
+        to_forget
     }
 }
