@@ -31,11 +31,30 @@ struct UnappliedConfig {
     engine_handle: Option<EngineHandle>,
 }
 
+impl UnappliedConfig {
+    pub fn set_update_ctx(&mut self, state_update_ctx: StateUpdateContext) {
+        // update consensus config if new genesis is later
+        if self.builder.set_genesis(
+            state_update_ctx.mempool_genesis_round,
+            state_update_ctx.mempool_genesis_millis,
+        ) {
+            self.builder
+                .set_consensus_config(&state_update_ctx.consensus_config);
+        }
+
+        self.state_update_ctx = Some(state_update_ctx);
+    }
+}
+
 pub struct MempoolAdapterStdImpl {
     unapplied_config: Mutex<UnappliedConfig>,
 
     cache: Arc<Cache>,
 
+    key_pair: Arc<KeyPair>,
+    network: Network,
+    peer_resolver: PeerResolver,
+    overlay_service: OverlayService,
     store: MempoolAdapterStore,
 
     externals_rx: InputBuffer,
@@ -44,7 +63,14 @@ pub struct MempoolAdapterStdImpl {
 }
 
 impl MempoolAdapterStdImpl {
-    pub fn new(mempool_storage: &MempoolStorage, mempool_node_config: &MempoolNodeConfig) -> Self {
+    pub fn new(
+        key_pair: Arc<KeyPair>,
+        network: &Network,
+        peer_resolver: &PeerResolver,
+        overlay_service: &OverlayService,
+        mempool_storage: &MempoolStorage,
+        mempool_node_config: &MempoolNodeConfig,
+    ) -> Self {
         let mut config_builder = MempoolConfigBuilder::default();
         config_builder.set_node_config(mempool_node_config);
 
@@ -57,6 +83,10 @@ impl MempoolAdapterStdImpl {
                 engine_handle: None,
             }),
             cache: Default::default(),
+            key_pair,
+            network: network.clone(),
+            peer_resolver: peer_resolver.clone(),
+            overlay_service: overlay_service.clone(),
             store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
             externals_tx,
             externals_rx: InputBuffer::new(externals_rx),
@@ -66,12 +96,7 @@ impl MempoolAdapterStdImpl {
 
     pub fn set_update_ctx(&self, state_update_ctx: StateUpdateContext) {
         let mut config_guard = self.unapplied_config.lock();
-        config_guard
-            .builder
-            .set_consensus_config(&state_update_ctx.consensus_config);
-        // TODO set genesis from state update
-        config_guard.builder.set_genesis(0, 0);
-        config_guard.state_update_ctx = Some(state_update_ctx);
+        config_guard.set_update_ctx(state_update_ctx);
     }
 
     /// **Warning:** only to apply changes from `GlobalConfig` json after mempool crash
@@ -83,15 +108,9 @@ impl MempoolAdapterStdImpl {
         fun(&mut guard.builder);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn run(
-        self: &Arc<Self>,
-        key_pair: Arc<KeyPair>,
-        network: &Network,
-        peer_resolver: &PeerResolver,
-        overlay_service: &OverlayService,
-    ) -> Result<()> {
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
+    /// Runs mempool engine
+    pub fn run(&self) -> Result<()> {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
 
@@ -102,7 +121,7 @@ impl MempoolAdapterStdImpl {
             .as_ref()
             .ok_or(anyhow!("consensus config is not set"))?;
         let mempool_config = config_guard.builder.build()?;
-        let consensus_config = last_state_update.consensus_config.clone();
+        let consensus_config = config_guard.builder.get_consensus_config().unwrap().clone();
 
         let prev_peers = last_state_update
             .prev_validator_set
@@ -116,10 +135,10 @@ impl MempoolAdapterStdImpl {
         )?;
 
         let engine = Engine::new(
-            key_pair,
-            network,
-            peer_resolver,
-            overlay_service,
+            self.key_pair.clone(),
+            &self.network,
+            &self.peer_resolver,
+            &self.overlay_service,
             &self.store,
             self.externals_rx.clone(),
             anchor_tx,
@@ -151,14 +170,14 @@ impl MempoolAdapterStdImpl {
             engine.run().await;
         });
 
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
-
         tokio::spawn(Self::handle_anchors_task(
             self.cache.clone(),
             self.store.clone(),
             consensus_config,
             anchor_rx,
         ));
+
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool started");
 
         Ok(())
     }
@@ -277,7 +296,22 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             new_cx.mc_block_id.as_short_id(), DebugStateUpdateContext(&new_cx),
         );
 
+        // NOTE: on the first call mempool engine will not be running
+        //      and `state_update_ctx` will be `None`
+
         let mut config_guard = self.unapplied_config.lock();
+
+        let Some(engine) = config_guard.engine_handle.as_ref() else {
+            tracing::info!(
+                "Will start mempool with state update from mc block {}: {:?}",
+                new_cx.mc_block_id.as_short_id(),
+                DebugStateUpdateContext(&new_cx),
+            );
+            config_guard.set_update_ctx(new_cx);
+            drop(config_guard);
+
+            return self.run();
+        };
 
         let skip = config_guard
             .state_update_ctx
@@ -292,16 +326,6 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 new_cx.mc_block_id.as_short_id(),
                 DebugStateUpdateContext(&new_cx),
             );
-            return Ok(());
-        };
-
-        let Some(engine) = config_guard.engine_handle.as_ref() else {
-            tracing::info!(
-                "Queued state update from mc block {}: {:?} to apply on mempool start",
-                new_cx.mc_block_id.as_short_id(),
-                DebugStateUpdateContext(&new_cx),
-            );
-            config_guard.state_update_ctx = Some(new_cx);
             return Ok(());
         };
 

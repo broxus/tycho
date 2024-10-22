@@ -265,18 +265,33 @@ impl MempoolConfigBuilder {
         self
     }
 
-    pub fn set_genesis(&mut self, start_round: u32, time_millis: u64) -> &mut Self {
+    pub fn set_genesis(&mut self, start_round: u32, time_millis: u64) -> bool {
         // Must be (divisible by 4)+1, ie 1,5,9 etc., see `crate::dag::AnchorStage::of()`
         let aligned_start = ((start_round + 2) / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
         assert!(
             aligned_start > Round::BOTTOM.0,
             "aligned genesis round is too low and will make code panic"
         );
-        self.genesis_data = Some(GenesisData {
-            round: aligned_start,
-            time_millis,
-        });
-        self
+
+        let mut updated = false;
+
+        if let Some(genesis) = &mut self.genesis_data {
+            if genesis.time_millis < time_millis {
+                genesis.round = aligned_start;
+                genesis.time_millis = time_millis;
+
+                updated = true;
+            }
+        } else {
+            self.genesis_data = Some(GenesisData {
+                round: aligned_start,
+                time_millis,
+            });
+
+            updated = true;
+        }
+
+        updated
     }
 
     pub fn get_consensus_config(&self) -> Option<&ConsensusConfig> {
