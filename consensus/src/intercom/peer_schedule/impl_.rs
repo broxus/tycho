@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesEvent};
 
 use crate::effects::{AltFmt, AltFormat};
+use crate::engine::Genesis;
 use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
@@ -34,27 +35,37 @@ struct PeerScheduleInner {
 impl PeerSchedule {
     pub fn new(local_keys: Arc<KeyPair>, overlay: PrivateOverlay) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
-        Self(Arc::new(PeerScheduleInner {
+        let this = Self(Arc::new(PeerScheduleInner {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
-        }))
+        }));
+        {
+            let peer_schedule = this.clone();
+            let mut guard = this.write();
+            guard.set_next_peers(&[Genesis::id().author], &peer_schedule, false);
+            guard.set_next_start(Genesis::round(), &peer_schedule);
+            guard.apply_next_start(&peer_schedule);
+        }
+        this
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.read()
     }
 
-    pub fn write(&self) -> RwLockWriteGuard<'_, RawRwLock, PeerScheduleLocked> {
+    pub(super) fn write(&self) -> RwLockWriteGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.write()
     }
 
-    pub fn set_epoch(&self, next_peers: &[PeerId], next_round: Round, update_overlay: bool) {
+    pub fn set_next_peers(&self, next_peers: &[PeerId], next_round: Option<Round>) {
         let mut guard = self.write();
         let peer_schedule = self.clone();
 
-        guard.set_next_peers(next_peers, &peer_schedule, update_overlay);
-        guard.set_next_start(next_round, &peer_schedule);
-        guard.apply_next_start(&peer_schedule);
+        guard.set_next_peers(next_peers, &peer_schedule, true);
+        if let Some(next_round) = next_round {
+            guard.set_next_start(next_round, &peer_schedule);
+            guard.apply_next_start(&peer_schedule);
+        }
     }
 
     /// in-time snapshot if consistency with peer state is not needed;

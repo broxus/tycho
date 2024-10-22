@@ -52,7 +52,7 @@ impl ShortPoint {
 impl Debug for Point {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Point")
-            .field("body", self.data())
+            .field("body", &self.0.body)
             .field("digest", self.digest())
             .field("signature", self.signature())
             .finish()

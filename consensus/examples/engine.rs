@@ -167,7 +167,7 @@ fn make_network(
                         }
                         let (mock_storage, _tmp_dir) =
                             Storage::new_temp().await.expect("new storage");
-                        let mut engine = Engine::new(
+                        let engine = Engine::new(
                             key_pair,
                             dht_client.network(),
                             &peer_resolver,
@@ -179,9 +179,9 @@ fn make_network(
                             InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             committed_tx.clone(),
                             &top_known_anchor,
+                            &all_peers,
                             &mempool_config,
                         );
-                        engine.set_peers(&all_peers);
                         started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(

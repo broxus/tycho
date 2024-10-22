@@ -130,7 +130,7 @@ struct Mempool {
     overlay_service: OverlayService,
     storage: Storage,
 
-    all_peers: Vec<PeerId>,
+    bootstrap_peers: Vec<PeerId>,
 
     config_builder: MempoolConfigBuilder,
     config_override: Option<MempoolGlobalConfig>,
@@ -159,23 +159,23 @@ impl Mempool {
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
         let local_id: PeerId = keypair.public_key.into();
 
-        let all_peers = global_config
+        let bootstrap_peers = global_config
             .bootstrap_peers
             .iter()
             .map(|info| info.id)
             .collect::<Vec<_>>();
 
-        let mut bootstrap_peers = 0usize;
+        let mut peer_count = 0usize;
         for peer in global_config.bootstrap_peers {
             let is_new = dht_client.add_peer(Arc::new(peer))?;
-            bootstrap_peers += is_new as usize;
+            peer_count += is_new as usize;
         }
 
         tracing::info!(
             %local_id,
             %local_addr,
             %public_addr,
-            bootstrap_peers,
+            bootstrap_peers = peer_count,
             "initialized network"
         );
 
@@ -200,7 +200,7 @@ impl Mempool {
             dht_client,
             peer_resolver,
             overlay_service,
-            all_peers,
+            bootstrap_peers,
             storage,
             config_builder,
             config_override: global_config.mempool_override,
@@ -224,7 +224,7 @@ impl Mempool {
             self.config_override.as_ref(),
         )?;
 
-        let mut engine = Engine::new(
+        let engine = Engine::new(
             self.keypair.clone(),
             self.dht_client.network(),
             &self.peer_resolver,
@@ -236,10 +236,9 @@ impl Mempool {
             input_buffer,
             committed_tx,
             anchor_consumer.top_known_anchor(),
+            &self.bootstrap_peers,
             &self.config_builder.build()?,
         );
-
-        engine.set_peers(&self.all_peers);
 
         tracing::info!("mempool engine initialized");
 
