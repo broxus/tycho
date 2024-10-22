@@ -77,7 +77,7 @@ impl Engine {
         peer_schedule.set_next_peers(bootstrap_peers, Some(Genesis::round().next()));
 
         genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
+        Verifier::verify(&genesis).expect("genesis failed to verify");
 
         let store = MempoolStore::new(
             mempool_adapter_store,

@@ -16,7 +16,7 @@ use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::Genesis;
 use crate::intercom::{DownloadResult, Downloader};
-use crate::models::{DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
+use crate::models::{DagPoint, Digest, Point, PointId, ValidPoint};
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -112,27 +112,25 @@ impl DagPointFuture {
         effects: &Effects<EngineContext>,
     ) -> Self {
         let point_dag_round = point_dag_round.downgrade();
-        let info = PointInfo::from(point);
         let point = point.clone();
         let state = state.clone();
         let downloader = downloader.clone();
         let store = store.clone();
-        let validate_effects = Effects::<ValidateContext>::new(effects, &info);
+        let validate_effects = Effects::<ValidateContext>::new(effects, &point);
 
         let (certified_tx, certified_rx) = oneshot::channel();
         let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
         let once_certified_tx_clone = once_certified_tx.clone();
 
         let task = async move {
-            let prev_proof = point.prev_proof();
             let point_id = point.id();
             let stored_fut = tokio::task::spawn_blocking({
+                let point = point.clone();
                 let store = store.clone();
                 move || store.insert_point(&point, &PointStatus::default())
             });
             let validated_fut = Verifier::validate(
-                info,
-                prev_proof,
+                point,
                 point_dag_round,
                 downloader,
                 store.clone(),
@@ -261,19 +259,14 @@ impl DagPointFuture {
                 }
             };
 
-            let info = PointInfo::from(&verified);
-            let prev_proof = verified.prev_proof();
-            drop(verified);
-
-            let deeper_effects = effects.deeper(&info);
+            let deeper_effects = effects.deeper(&verified);
             tracing::trace!(
                 parent: deeper_effects.span(),
                 "downloaded, start validating",
             );
 
             let validated_fut = Verifier::validate(
-                info,
-                prev_proof,
+                verified,
                 point_dag_round,
                 downloader,
                 store.clone(),

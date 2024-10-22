@@ -7,6 +7,7 @@ use futures_util::{future, FutureExt, TryFutureExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tracing::Instrument;
+use tycho_util::futures::JoinTask;
 
 use crate::dag::{DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{
@@ -19,7 +20,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
 };
-use crate::models::{Link, Point, PointInfo, Round};
+use crate::models::{Link, Point, Round};
 
 pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
@@ -281,7 +282,6 @@ impl RoundTaskReady {
                     let self_check = Self::expect_own_trusted_point(
                         own_point_round,
                         own_point.clone(),
-                        peer_schedule.clone(),
                         downloader,
                         store,
                         round_effects.clone(),
@@ -298,7 +298,7 @@ impl RoundTaskReady {
                     prev_bcast.inspect(|task| task.abort());
                     let new_prev_bcast = tokio::spawn(broadcaster.run_continue()).abort_handle();
                     // join the check, just not to miss it; it must have completed already
-                    self_check.await.expect("verify own produced point");
+                    self_check.await;
                     Some((new_prev_bcast, new_last_own_point))
                 } else {
                     // drop(collector_signal_rx); // goes out of scope
@@ -346,24 +346,21 @@ impl RoundTaskReady {
     fn expect_own_trusted_point(
         point_round: WeakDagRound,
         point: Point,
-        peer_schedule: PeerSchedule,
         downloader: Downloader,
         store: MempoolStore,
         effects: Effects<EngineContext>,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
+    ) -> JoinTask<()> {
+        JoinTask::new(async move {
             point.verify_hash().expect("Failed to verify own point");
 
-            if let Err(err) = Verifier::verify(&point, &peer_schedule) {
+            if let Err(err) = Verifier::verify(&point) {
                 let _guard = effects.span().enter();
                 panic!("Failed to verify own point: {err:?} {:?}", point)
             }
             let (_, do_not_certify_tx) = oneshot::channel();
-            let info = PointInfo::from(&point);
-            let validate_effects = Effects::<ValidateContext>::new(&effects, &info);
+            let validate_effects = Effects::<ValidateContext>::new(&effects, &point);
             let dag_point = Verifier::validate(
-                info,
-                point.prev_proof(),
+                point.clone(),
                 point_round,
                 downloader,
                 store,
