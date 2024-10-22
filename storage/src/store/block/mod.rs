@@ -21,7 +21,7 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
-use tycho_util::FastHashSet;
+use tycho_util::{FastDashMap, FastHashSet};
 use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
@@ -34,8 +34,12 @@ use crate::{
 
 mod package_entry;
 
+const METRIC_LOAD_BLOCK_TOTAL: &str = "tycho_storage_load_block_total";
+const METRIC_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_block_cache_hit_total";
+
 pub struct BlockStorage {
     db: BaseDb,
+    block_cache: Arc<BlockCache>,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
@@ -56,6 +60,7 @@ impl BlockStorage {
             db,
             block_handle_storage,
             block_connection_storage,
+            block_cache: Arc::new(Default::default()),
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
@@ -127,7 +132,7 @@ impl BlockStorage {
             };
 
             let data = match self.db.package_entries.get(key.to_vec())? {
-                Some(a) => a,
+                Some(data) => data,
                 None => return Err(BlockStorageError::BlockDataNotFound.into()),
             };
 
@@ -266,7 +271,7 @@ impl BlockStorage {
         // NOTE: Any amount of blocks can be stored concurrently,
         // but the subscription lock can be acquired only while
         // no block data is being stored.
-        let _guard = self.store_block_data.read().await;
+        let guard = self.store_block_data.read().await;
 
         let block_id = block.id();
         let (handle, status) = self
@@ -292,6 +297,11 @@ impl BlockStorage {
         // TODO: only notify subscribers if `updated`?
         self.block_subscriptions.notify(block_id, block);
 
+        drop(guard);
+
+        // Update block cache
+        self.block_cache.insert(*block_id, block.clone());
+
         Ok(StoreBlockResult {
             handle,
             updated,
@@ -300,6 +310,8 @@ impl BlockStorage {
     }
 
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        metrics::counter!(METRIC_LOAD_BLOCK_TOTAL).increment(1);
+
         const BIG_DATA_THRESHOLD: usize = 1 << 20; // 1 MB
 
         let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
@@ -307,6 +319,13 @@ impl BlockStorage {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
+
+        // Fast path - lookup in cache
+        if let Some(block) = self.block_cache.get(handle.id()) {
+            metrics::counter!(METRIC_BLOCK_CACHE_HIT_TOTAL).increment(1);
+            return Ok(block.clone());
+        }
+
         let FullBlockDataGuard { _lock, data } = self
             .get_data_ref(handle, &PackageEntryKey::block(handle.id()))
             .await?;
@@ -776,6 +795,8 @@ impl BlockStorage {
             .block_handle_storage
             .gc_handles_cache(mc_seqno, &shard_heights);
 
+        let total_cached_blocks_removed = self.gc_blocks_cache(mc_seqno, &shard_heights);
+
         let span = tracing::Span::current();
         let db = self.db.clone();
         let BlockGcStats {
@@ -789,6 +810,7 @@ impl BlockStorage {
 
         tracing::info!(
             total_cached_handles_removed,
+            total_cached_blocks_removed,
             mc_entries_removed,
             total_entries_removed,
             "finished blocks GC"
@@ -1101,6 +1123,28 @@ impl BlockStorage {
         });
 
         handle
+    }
+
+    pub fn gc_blocks_cache(&self, mc_seqno: u32, shard_heights: &ShardHeights) -> usize {
+        let mut total_removed = 0;
+
+        self.block_cache.retain(|block_id, _| {
+            let is_masterchain = block_id.is_masterchain();
+
+            if is_masterchain && block_id.seqno >= mc_seqno
+                || !is_masterchain
+                    && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
+            {
+                // Keep only the latest blocks
+                true
+            } else {
+                // Remove all outdated
+                total_removed += 1;
+                false
+            }
+        });
+
+        total_removed
     }
 }
 
@@ -1465,6 +1509,8 @@ struct PreparedArchiveId {
     is_new: bool,
     to_commit: Option<u32>,
 }
+
+type BlockCache = FastDashMap<BlockId, BlockStuff>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
