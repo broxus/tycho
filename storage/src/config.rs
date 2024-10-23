@@ -204,16 +204,23 @@ pub enum BlocksGcType {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BlocksCacheConfig {
+    /// Entry TTL.
+    ///
+    /// Default: `5 min`.
     #[serde(with = "serde_helpers::humantime")]
     pub ttl: Duration,
-    pub max_capacity: ByteSize,
+
+    /// Cache capacity in bytes.
+    ///
+    /// Default: `500 MB`.
+    pub size: ByteSize,
 }
 
 impl Default for BlocksCacheConfig {
     fn default() -> Self {
         Self {
             ttl: Duration::from_secs(300),
-            max_capacity: ByteSize::gib(1),
+            size: ByteSize::mb(500),
         }
     }
 }

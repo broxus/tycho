@@ -192,6 +192,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     &block_id,
                     empty_block.block().clone(),
                     empty_block.root_cell().clone(),
+                    empty_block.data_size(),
                 ));
                 let queue_diff_aug =
                     QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
@@ -273,5 +274,6 @@ pub fn get_empty_block() -> BlockStuffAug {
         ..Default::default()
     };
 
-    BlockStuff::from_block_and_root(&block_id, block, root).with_archive_data(block_data.as_slice())
+    BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
+        .with_archive_data(block_data.as_slice())
 }

@@ -21,7 +21,7 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashSet, FastHasherState};
 use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
@@ -39,7 +39,7 @@ const METRIC_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_block_cache_hit_total"
 
 pub struct BlockStorage {
     db: BaseDb,
-    blocks_cache: Arc<BlocksCache>,
+    blocks_cache: BlocksCache,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
@@ -57,12 +57,19 @@ impl BlockStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
     ) -> Self {
-        let blocks_cache = Arc::new(
-            moka::sync::Cache::builder()
-                .time_to_live(config.ttl)
-                .max_capacity(config.max_capacity.as_u64())
-                .build(),
-        );
+        fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
+            const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
+
+            std::mem::size_of::<BlockId>() as u32
+                + BLOCK_STUFF_OVERHEAD
+                + value.data_size().try_into().unwrap_or(u32::MAX)
+        }
+
+        let blocks_cache = moka::sync::Cache::builder()
+            .time_to_live(config.ttl)
+            .max_capacity(config.size.as_u64())
+            .weigher(weigher)
+            .build_with_hasher(Default::default());
 
         Self {
             db,
@@ -1493,7 +1500,7 @@ struct PreparedArchiveId {
     to_commit: Option<u32>,
 }
 
-type BlocksCache = moka::sync::Cache<BlockId, BlockStuff>;
+type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {

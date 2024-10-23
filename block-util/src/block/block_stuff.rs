@@ -40,6 +40,8 @@ impl BlockStuff {
     pub fn new_empty(shard: ShardIdent, seqno: u32) -> Self {
         use everscale_types::merkle::MerkleUpdate;
 
+        const DATA_SIZE: usize = 1024; // ~1 KB of data for an empty block.
+
         let block_info = BlockInfo {
             shard,
             seqno,
@@ -68,10 +70,10 @@ impl BlockStuff {
             file_hash,
         };
 
-        Self::from_block_and_root(&block_id, block, root)
+        Self::from_block_and_root(&block_id, block, root, DATA_SIZE)
     }
 
-    pub fn from_block_and_root(id: &BlockId, block: Block, root: Cell) -> Self {
+    pub fn from_block_and_root(id: &BlockId, block: Block, root: Cell, data_size: usize) -> Self {
         debug_assert_eq!(&id.root_hash, root.repr_hash());
 
         Self {
@@ -82,6 +84,7 @@ impl BlockStuff {
                 block_info: Default::default(),
                 block_extra: Default::default(),
                 block_mc_extra: Default::default(),
+                data_size,
             }),
         }
     }
@@ -112,12 +115,17 @@ impl BlockStuff {
                 block_info: Default::default(),
                 block_extra: Default::default(),
                 block_mc_extra: Default::default(),
+                data_size: data.len(),
             }),
         })
     }
 
     pub fn root_cell(&self) -> &Cell {
         &self.inner.root
+    }
+
+    pub fn data_size(&self) -> usize {
+        self.inner.data_size
     }
 
     pub fn with_archive_data<A>(self, data: A) -> WithArchiveData<Self>
@@ -277,4 +285,5 @@ pub struct Inner {
     block_info: OnceLock<Result<BlockInfo, everscale_types::error::Error>>,
     block_extra: OnceLock<Result<BlockExtra, everscale_types::error::Error>>,
     block_mc_extra: OnceLock<Result<McBlockExtra, everscale_types::error::Error>>,
+    data_size: usize,
 }
