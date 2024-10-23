@@ -21,7 +21,7 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
-use tycho_util::{FastDashMap, FastHashSet};
+use tycho_util::FastHashSet;
 use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
@@ -29,7 +29,7 @@ use crate::db::*;
 use crate::util::*;
 use crate::{
     BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
-    HandleCreationStatus, NewBlockMeta,
+    BlocksCacheConfig, HandleCreationStatus, NewBlockMeta,
 };
 
 mod package_entry;
@@ -39,7 +39,7 @@ const METRIC_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_block_cache_hit_total"
 
 pub struct BlockStorage {
     db: BaseDb,
-    block_cache: Arc<BlockCache>,
+    blocks_cache: Arc<BlocksCache>,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
@@ -53,14 +53,22 @@ impl BlockStorage {
 
     pub fn new(
         db: BaseDb,
+        config: BlocksCacheConfig,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
     ) -> Self {
+        let blocks_cache = Arc::new(
+            moka::sync::Cache::builder()
+                .time_to_live(config.ttl)
+                .max_capacity(config.max_capacity.as_u64())
+                .build(),
+        );
+
         Self {
             db,
+            blocks_cache,
             block_handle_storage,
             block_connection_storage,
-            block_cache: Arc::new(Default::default()),
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
@@ -300,7 +308,7 @@ impl BlockStorage {
         drop(guard);
 
         // Update block cache
-        self.block_cache.insert(*block_id, block.clone());
+        self.blocks_cache.insert(*block_id, block.clone());
 
         Ok(StoreBlockResult {
             handle,
@@ -321,7 +329,7 @@ impl BlockStorage {
         }
 
         // Fast path - lookup in cache
-        if let Some(block) = self.block_cache.get(handle.id()) {
+        if let Some(block) = self.blocks_cache.get(handle.id()) {
             metrics::counter!(METRIC_BLOCK_CACHE_HIT_TOTAL).increment(1);
             return Ok(block.clone());
         }
@@ -795,8 +803,6 @@ impl BlockStorage {
             .block_handle_storage
             .gc_handles_cache(mc_seqno, &shard_heights);
 
-        let total_cached_blocks_removed = self.gc_blocks_cache(mc_seqno, &shard_heights);
-
         let span = tracing::Span::current();
         let db = self.db.clone();
         let BlockGcStats {
@@ -810,7 +816,6 @@ impl BlockStorage {
 
         tracing::info!(
             total_cached_handles_removed,
-            total_cached_blocks_removed,
             mc_entries_removed,
             total_entries_removed,
             "finished blocks GC"
@@ -1123,28 +1128,6 @@ impl BlockStorage {
         });
 
         handle
-    }
-
-    pub fn gc_blocks_cache(&self, mc_seqno: u32, shard_heights: &ShardHeights) -> usize {
-        let mut total_removed = 0;
-
-        self.block_cache.retain(|block_id, _| {
-            let is_masterchain = block_id.is_masterchain();
-
-            if is_masterchain && block_id.seqno >= mc_seqno
-                || !is_masterchain
-                    && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
-            {
-                // Keep only the latest blocks
-                true
-            } else {
-                // Remove all outdated
-                total_removed += 1;
-                false
-            }
-        });
-
-        total_removed
     }
 }
 
@@ -1510,7 +1493,7 @@ struct PreparedArchiveId {
     to_commit: Option<u32>,
 }
 
-type BlockCache = FastDashMap<BlockId, BlockStuff>;
+type BlocksCache = moka::sync::Cache<BlockId, BlockStuff>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {

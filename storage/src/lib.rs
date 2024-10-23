@@ -121,10 +121,12 @@ impl StorageBuilder {
 
         let temp_file_storage = TempFileStorage::new(&file_db)?;
 
+        let blocks_cache_config = self.config.blocks_cache;
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
         let block_storage = Arc::new(BlockStorage::new(
             base_db.clone(),
+            blocks_cache_config,
             block_handle_storage.clone(),
             block_connection_storage.clone(),
         ));

@@ -42,6 +42,9 @@ pub struct StorageConfig {
     ///
     /// Blocks GC is disabled if this field is `None`.
     pub blocks_gc: Option<BlocksGcConfig>,
+
+    /// Blocks cache config.
+    pub blocks_cache: BlocksCacheConfig,
 }
 
 impl StorageConfig {
@@ -55,6 +58,7 @@ impl StorageConfig {
             archives_gc: None,
             states_gc: None,
             blocks_gc: None,
+            blocks_cache: BlocksCacheConfig::default(),
         }
     }
 }
@@ -106,6 +110,7 @@ impl Default for StorageConfig {
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
+            blocks_cache: BlocksCacheConfig::default(),
         }
     }
 }
@@ -194,4 +199,21 @@ pub enum BlocksGcType {
     BeforePreviousKeyBlock,
     /// Remove all blocks before the previous persistent state.
     BeforePreviousPersistentState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlocksCacheConfig {
+    #[serde(with = "serde_helpers::humantime")]
+    pub ttl: Duration,
+    pub max_capacity: ByteSize,
+}
+
+impl Default for BlocksCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(300),
+            max_capacity: ByteSize::gib(1),
+        }
+    }
 }
