@@ -1344,10 +1344,8 @@ where
 
         let cx = StateUpdateContext {
             mc_block_id: mc_data.block_id,
-            mempool_switch_round: mc_data.validator_info.catchain_seqno,
-            mempool_genesis_round: 0,
-            mempool_genesis_millis: 0,
-            catchain_config: mc_data.config.get_catchain_config()?,
+            consensus_info: mc_data.consensus_info,
+            shuffle_validators: mc_data.config.get_catchain_config()?.shuffle_mc_validators,
             consensus_config: mc_data.config.get_consensus_config()?,
             prev_validator_set,
             current_validator_set,
@@ -1428,7 +1426,7 @@ where
             full_validators_set.main, full_validators_set.total_weight,
             DebugIter(full_validators_set.list.iter().map(|i| i.public_key)),
         );
-        let subset_config = mc_data.config.get_catchain_config()?;
+        let collation_config = mc_data.config.get_catchain_config()?;
         let mut subset_cache = FastHashMap::new();
         let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
             hash_map::Entry::Occupied(entry) => {
@@ -1438,10 +1436,10 @@ where
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
-                    .compute_subset(shard_id, &subset_config, current_session_seqno)
+                    .compute_mc_subset(current_session_seqno, collation_config.shuffle_mc_validators)
                     .ok_or(anyhow!(
                         "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
-                        shard_id,
+                        ShardIdent::MASTERCHAIN,
                         current_session_seqno,
                     ))?;
 

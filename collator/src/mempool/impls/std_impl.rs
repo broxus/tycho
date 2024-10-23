@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{ConsensusConfig, ValidatorSet};
+use everscale_types::models::{BlockId, ConsensusConfig, ValidatorSet};
 use parking_lot::lock_api::MutexGuard;
 use parking_lot::{Mutex, RawMutex};
 use tokio::sync::mpsc;
@@ -109,12 +109,21 @@ impl MempoolAdapterStdImpl {
         let prev_peers = last_state_update
             .prev_validator_set
             .as_ref()
-            .map(|(_, prev_set)| compute_subset(last_state_update, prev_set))
+            .map(|(_, prev_set)| {
+                compute_peers_subset(
+                    prev_set,
+                    &last_state_update.mc_block_id,
+                    last_state_update.consensus_info.prev_config_round,
+                    last_state_update.shuffle_validators,
+                )
+            })
             .transpose()?;
 
-        let current_peers = compute_subset(
-            last_state_update,
+        let current_peers = compute_peers_subset(
             &last_state_update.current_validator_set.1,
+            &last_state_update.mc_block_id,
+            last_state_update.consensus_info.config_update_round,
+            last_state_update.shuffle_validators,
         )?;
 
         let engine = Engine::new(
@@ -134,13 +143,14 @@ impl MempoolAdapterStdImpl {
         let handle = engine.get_handle();
 
         if prev_peers.is_some() {
-            handle.set_next_peers(&current_peers, Some(last_state_update.mempool_switch_round));
+            handle.set_next_peers(
+                &current_peers,
+                Some(last_state_update.consensus_info.config_update_round),
+            );
         }
 
-        if let Some((_, next_set)) = last_state_update.next_validator_set.as_ref() {
-            let next_peers = compute_subset(last_state_update, next_set)?;
-            handle.set_next_peers(&next_peers, None);
-        }
+        // NOTE: do not try to calculate subset from next set
+        //      because it is impossible without known future session_update_round
 
         tokio::spawn(async move {
             engine.run().await;
@@ -232,19 +242,17 @@ impl MempoolAdapterStdImpl {
     }
 }
 
-fn compute_subset(cx: &StateUpdateContext, validator_set: &ValidatorSet) -> Result<Vec<PeerId>> {
-    let Some((list, _)) = validator_set.compute_subset(
-        cx.mc_block_id.shard,
-        &cx.catchain_config,
-        // FIXME round at which current set is applied from next - so cannot shuffle prev epoch,
-        //   also cannot determine which peers to broadcast to before round is determined
-        //   => have to use previous switch round to shuffle current subset
-        //      or use this to shuffle current validator set only
-        0, // cx.mempool_switch_round,
-    ) else {
+fn compute_peers_subset(
+    validator_set: &ValidatorSet,
+    mc_block_id: &BlockId,
+    session_update_round: u32,
+    shuffle_validators: bool,
+) -> Result<Vec<PeerId>> {
+    let Some((list, _)) = validator_set.compute_mc_subset(session_update_round, shuffle_validators)
+    else {
         bail!(
             "Mempool peer set is empty after shuffle, mc_block_id: {}",
-            cx.mc_block_id
+            mc_block_id,
         )
     };
     let result = list
@@ -286,7 +294,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             );
 
             if let Some((round, time)) = (config_guard.builder.get_genesis())
-                .filter(|(_, time)| *time > new_cx.mempool_genesis_millis)
+                .filter(|(_, time)| *time > new_cx.consensus_info.genesis_millis)
             {
                 // Note: assume that global config is applied to mempool adapter
                 //   before collator is run in synchronous code, so this method is called later
@@ -295,8 +303,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     "Using genesis override: round {round} time {time}"
                 );
             } else {
-                (config_guard.builder)
-                    .set_genesis(new_cx.mempool_genesis_round, new_cx.mempool_genesis_millis);
+                (config_guard.builder).set_genesis(
+                    new_cx.consensus_info.genesis_round,
+                    new_cx.consensus_info.genesis_millis,
+                );
                 (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
             }
 
@@ -305,9 +315,14 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        if (config_guard.state_update_ctx.as_ref()).map_or(false, |old_cx| {
-            old_cx.mempool_switch_round >= new_cx.mempool_switch_round
-        }) {
+        if config_guard
+            .state_update_ctx
+            .as_ref()
+            .map_or(false, |old_cx| {
+                old_cx.consensus_info.config_update_round
+                    >= new_cx.consensus_info.config_update_round
+            })
+        {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 "Skipped old state update from mc block {}: {:?}",
@@ -317,13 +332,16 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        let subset = compute_subset(&new_cx, &new_cx.current_validator_set.1)?;
-        engine.set_next_peers(&subset, Some(new_cx.mempool_switch_round));
+        let subset = compute_peers_subset(
+            &new_cx.current_validator_set.1,
+            &new_cx.mc_block_id,
+            new_cx.consensus_info.config_update_round,
+            new_cx.shuffle_validators,
+        )?;
+        engine.set_next_peers(&subset, Some(new_cx.consensus_info.config_update_round));
 
-        if let Some(next_set) = &new_cx.next_validator_set {
-            let subset = compute_subset(&new_cx, &next_set.1)?;
-            engine.set_next_peers(&subset, None);
-        }
+        // NOTE: do not try to calculate subset from next set
+        //      because it is impossible without known future session_update_round
 
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
