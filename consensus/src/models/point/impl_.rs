@@ -248,6 +248,7 @@ mod tests {
     use super::*;
     use crate::engine::CachedConfig;
     use crate::models::{PointInfo, Through, UnixTime};
+    use crate::test_utils::default_test_config;
 
     const PEERS: usize = 100;
     const MSG_COUNT: usize = 1;
@@ -320,6 +321,8 @@ mod tests {
 
     #[test]
     pub fn check_serialize() {
+        CachedConfig::init(&default_test_config());
+
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
         let digest = point_body.make_digest();
@@ -348,6 +351,8 @@ mod tests {
 
     #[test]
     pub fn check_sig() {
+        CachedConfig::init(&default_test_config());
+
         let (digest, data) = sig_data();
 
         let timer = Instant::now();
@@ -375,6 +380,8 @@ mod tests {
 
     #[tokio::test]
     pub async fn check_sig_on_rayon() {
+        CachedConfig::init(&default_test_config());
+
         let (digest, data) = sig_data();
 
         let timer = Instant::now();
@@ -400,6 +407,8 @@ mod tests {
 
     #[test]
     pub fn check_new_point() {
+        CachedConfig::init(&default_test_config());
+
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
         let digest = point_body.make_digest();
@@ -445,6 +454,8 @@ mod tests {
 
     #[test]
     pub fn massive_point_deserialization() {
+        CachedConfig::init(&default_test_config());
+
         let point_key_pair = new_key_pair();
         let point_payload = MSG_COUNT * MSG_BYTES;
 
@@ -478,6 +489,8 @@ mod tests {
 
     #[test]
     pub fn point_to_short_point() {
+        CachedConfig::init(&default_test_config());
+
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
         let digest = point_body.make_digest();
@@ -497,6 +510,8 @@ mod tests {
 
     #[test]
     pub fn massive_point_serialization() {
+        CachedConfig::init(&default_test_config());
+
         let point_key_pair = new_key_pair();
         let timer = Instant::now();
         let point_payload = MSG_COUNT * MSG_BYTES;
