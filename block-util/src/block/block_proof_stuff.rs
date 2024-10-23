@@ -60,6 +60,12 @@ impl BlockProofStuff {
                     validator_list_hash_short: 0,
                     catchain_seqno: 0,
                 },
+                consensus_info: ConsensusInfo {
+                    config_update_round: 0,
+                    prev_config_round: 0,
+                    genesis_round: 0,
+                    genesis_millis: 0,
+                },
                 signature_count: 0,
                 total_weight: 0,
                 signatures: Dict::new(),
@@ -226,6 +232,20 @@ impl BlockProofStuff {
         Ok((virt_block, info))
     }
 
+    fn check_consensus_info(&self, mc_consensus_info: &ConsensusInfo) -> Result<()> {
+        let Some(signatures) = self.inner.proof.signatures.as_ref() else {
+            anyhow::bail!("proof doesn't have signatures to check");
+        };
+
+        anyhow::ensure!(
+            &signatures.consensus_info == mc_consensus_info,
+            "block consensus info does not match master state consensus info (found: {:?}, expected: {:?}", 
+            signatures.consensus_info, mc_consensus_info,
+        );
+
+        Ok(())
+    }
+
     fn check_signatures(&self, subset: &ValidatorSubsetInfo) -> Result<()> {
         // Prepare
         let Some(signatures) = self.inner.proof.signatures.as_ref() else {
@@ -334,7 +354,7 @@ impl BlockProofStuff {
             (validator_set, catchain_config)
         };
 
-        self.calc_validators_subset_standard(&validator_set, &catchain_config)
+        self.calc_validators_subset_standard(&validator_set, catchain_config.shuffle_mc_validators)
     }
 
     fn process_prev_key_block_proof(
@@ -366,13 +386,13 @@ impl BlockProofStuff {
             (validator_set, catchain_config)
         };
 
-        self.calc_validators_subset_standard(&validator_set, &catchain_config)
+        self.calc_validators_subset_standard(&validator_set, catchain_config.shuffle_mc_validators)
     }
 
     fn calc_validators_subset_standard(
         &self,
         validator_set: &ValidatorSet,
-        catchain_config: &CatchainConfig,
+        shuffle_validators: bool,
     ) -> Result<ValidatorSubsetInfo> {
         let cc_seqno = self
             .inner
@@ -382,7 +402,7 @@ impl BlockProofStuff {
             .map(|s| s.validator_info.catchain_seqno)
             .unwrap_or_default();
 
-        ValidatorSubsetInfo::compute_standard(validator_set, self.id(), catchain_config, cc_seqno)
+        ValidatorSubsetInfo::compute_standard(validator_set, cc_seqno, shuffle_validators)
     }
 }
 
@@ -468,6 +488,8 @@ pub fn check_with_master_state(
         pre_check_key_block_proof(virt_block)?;
     }
 
+    proof.check_consensus_info(&master_state.state_extra()?.consensus_info)?;
+
     let subset = proof.process_given_state(master_state, virt_block_info)?;
     proof.check_signatures(&subset)
 }
@@ -511,12 +533,11 @@ pub struct ValidatorSubsetInfo {
 impl ValidatorSubsetInfo {
     pub fn compute_standard(
         validator_set: &ValidatorSet,
-        block_id: &BlockId,
-        catchain_config: &CatchainConfig,
         cc_seqno: u32,
+        shuffle_validators: bool,
     ) -> Result<Self> {
         let Some((validators, short_hash)) =
-            validator_set.compute_subset(block_id.shard, catchain_config, cc_seqno)
+            validator_set.compute_mc_subset(cc_seqno, shuffle_validators)
         else {
             anyhow::bail!("failed to compute a validator subset");
         };
