@@ -65,7 +65,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
 
     let root = CellBuilder::build_from(&master_block)?;
     let data = everscale_types::boc::Boc::encode_rayon(&root);
-    let block_stuff = BlockStuff::from_block_and_root(&master_id, master_block, root);
+    let block_stuff = BlockStuff::from_block_and_root(&master_id, master_block, root, data.len());
     let handle = storage
         .block_storage()
         .store_block_data(&block_stuff, &ArchiveData::New(data.into()), meta_data)

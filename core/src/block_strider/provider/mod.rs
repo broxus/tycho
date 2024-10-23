@@ -411,7 +411,7 @@ mod test {
             ..Default::default()
         };
 
-        BlockStuff::from_block_and_root(&block_id, block, root)
+        BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
             .with_archive_data(block_data.as_slice())
     }
 

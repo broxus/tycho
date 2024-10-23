@@ -167,6 +167,7 @@ async fn archives() -> Result<()> {
         archives_gc: Some(ArchivesGcConfig::default()),
         states_gc: None,
         blocks_gc: None,
+        blocks_cache: Default::default(),
     };
 
     let zerostate_data = utils::read_file("zerostate.boc")?;
@@ -273,6 +274,7 @@ async fn heavy_archives() -> Result<()> {
         archives_gc: Some(ArchivesGcConfig::default()),
         states_gc: None,
         blocks_gc: None,
+        blocks_cache: Default::default(),
     };
 
     let zerostate_path = integration_test_path.join("zerostate.boc");

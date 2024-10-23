@@ -337,7 +337,7 @@ impl CollatorStdImpl {
 
             build_block_elapsed = histogram.finish();
 
-            let block = BlockStuff::from_block_and_root(&block_id, block, root);
+            let block = BlockStuff::from_block_and_root(&block_id, block, root, data.len());
 
             (
                 WithArchiveData::new(block, data),
