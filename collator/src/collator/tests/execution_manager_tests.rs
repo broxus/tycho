@@ -206,6 +206,7 @@ fn gen_stub_working_state(
                 catchain_seqno: 1,
                 nx_cc_updated: false,
             },
+            consensus_info: Default::default(),
             processed_upto: ProcessedUptoInfoStuff {
                 internals: [
                     (ShardIdent::new_full(-1), InternalsProcessedUptoStuff {

@@ -58,6 +58,7 @@ async fn test_add_and_get_block() {
         signatures: Default::default(),
         prev_blocks_ids: Vec::new(),
         top_shard_blocks_ids: Vec::new(),
+        consensus_info: Default::default(),
     };
     adapter.accept_block(block).await.unwrap();
 
@@ -131,6 +132,7 @@ async fn test_add_and_get_next_block() {
         signatures: Default::default(),
         prev_blocks_ids: vec![*prev_block_id],
         top_shard_blocks_ids: Vec::new(),
+        consensus_info: Default::default(),
     };
     adapter.accept_block(block).await.unwrap();
 
@@ -204,6 +206,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     signatures: Default::default(),
                     prev_blocks_ids: Vec::new(),
                     top_shard_blocks_ids: Vec::new(),
+                    consensus_info: Default::default(),
                 };
                 let accept_result = adapter.accept_block(block).await;
                 assert!(accept_result.is_ok(), "Block {} should be accepted", i);

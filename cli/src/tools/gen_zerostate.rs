@@ -367,11 +367,11 @@ impl ZerostateConfig {
             }));
         }
 
-        let curr_validator_set = self.params.get_current_validator_set()?;
-        let subset_config = self.params.get_catchain_config()?;
+        let curr_vset = self.params.get_current_validator_set()?;
+        let collation_config = self.params.get_catchain_config()?;
         let session_seqno = 0;
-        let (_, validator_list_hash_short) = curr_validator_set
-            .compute_subset(ShardIdent::MASTERCHAIN, &subset_config, session_seqno)
+        let (_, validator_list_hash_short) = curr_vset
+            .compute_mc_subset(session_seqno, collation_config.shuffle_mc_validators)
             .ok_or(anyhow::anyhow!(
                 "Error calculating subset of validators in zerostate (shard_id = {}, session_seqno = {})",
                 ShardIdent::MASTERCHAIN, session_seqno,
@@ -383,6 +383,12 @@ impl ZerostateConfig {
                 validator_list_hash_short,
                 catchain_seqno: session_seqno,
                 nx_cc_updated: true,
+            },
+            consensus_info: ConsensusInfo {
+                config_update_round: session_seqno,
+                prev_config_round: session_seqno,
+                genesis_round: 0,
+                genesis_millis: 0,
             },
             prev_blocks: AugDict::new(),
             after_key_block: true,

@@ -364,7 +364,7 @@ impl CollatorStdImpl {
             },
         );
 
-        let mc_data = mc_state_extra.map(|extra| {
+        let new_mc_data = mc_state_extra.map(|extra| {
             let prev_key_block_seqno = if extra.after_key_block {
                 new_block_id.seqno
             } else if let Some(block_ref) = &extra.last_key_block {
@@ -387,6 +387,7 @@ impl CollatorStdImpl {
                 shards: extra.shards,
                 config: extra.config,
                 validator_info: extra.validator_info,
+                consensus_info: extra.consensus_info,
 
                 processed_upto: collation_data.processed_upto.clone(),
 
@@ -415,6 +416,9 @@ impl CollatorStdImpl {
             value_flow,
             created_by: collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
+            consensus_info: new_mc_data
+                .as_ref()
+                .map_or_else(|| mc_data.consensus_info, |mcd| mcd.consensus_info),
         });
 
         let total_elapsed = histogram.finish();
@@ -436,7 +440,7 @@ impl CollatorStdImpl {
             collation_data,
             working_state,
             block_candidate,
-            mc_data,
+            mc_data: new_mc_data,
             new_state_root,
             new_observable_state,
         })
@@ -491,7 +495,9 @@ impl CollatorStdImpl {
         // 4. check extension flags
         // prev_state_extra.flags is checked in the McStateExtra::load_from
 
-        // 5. update validator_info
+        // 5. update validator_info and consensus_info
+        let mut consensus_info = prev_state_extra.consensus_info;
+        // TODO: update genesis info from the mempool global config
         let max_consensus_lag = config
             .params
             .get_consensus_config()?
@@ -504,7 +510,7 @@ impl CollatorStdImpl {
             let prev_vset = prev_config.get_current_validator_set_raw()?;
             let current_vset = config.get_current_validator_set_raw()?;
             if current_vset.repr_hash() != prev_vset.repr_hash() {
-                // calc next mempool switch round (identifies next session_seqno)
+                // calc next session update round
                 let prev_processed_to_anchor = prev_shard_data
                     .processed_upto()
                     .externals
@@ -514,25 +520,29 @@ impl CollatorStdImpl {
                 // `+1` because it will be the first mempool round in the new session,
                 // while `prev_processed_to_anchor` is a round in the ending session,
                 // and there is exactly `max_consensus_lag` rounds between them
-                let next_session_seqno = prev_processed_to_anchor + max_consensus_lag + 1;
+                let session_update_round = prev_processed_to_anchor + max_consensus_lag + 1;
+
+                // currently we simultaneously update session_seqno in collation and session_update_round in consesus
+                if consensus_info.config_update_round < session_update_round {
+                    consensus_info.prev_config_round = consensus_info.config_update_round;
+                    consensus_info.config_update_round = session_update_round;
+                }
 
                 // calculate next validator subset and hash
                 let current_vset = current_vset.parse::<ValidatorSet>()?;
-                let subset_config = config.get_catchain_config()?;
-                let (_, validator_list_hash_short) = current_vset.compute_subset(
-                    working_state.next_block_id_short.shard,
-                    &subset_config,
-                    next_session_seqno,
+                let (_, validator_list_hash_short) = current_vset.compute_mc_subset(
+                    session_update_round,
+                    cc_config.shuffle_mc_validators,
                 ).ok_or_else(|| anyhow!(
-                    "Error calculating subset of validators for next session (shard_id = {}, next_session_seqno = {})",
-                    working_state.next_block_id_short.shard,
-                    next_session_seqno,
+                    "Error calculating subset of validators for next session (shard_id = {}, session_seqno = {})",
+                    ShardIdent::MASTERCHAIN,
+                    session_update_round,
                 ))?;
 
                 validator_info = Some(ValidatorInfo {
                     validator_list_hash_short,
                     // TODO: rename field in types
-                    catchain_seqno: next_session_seqno,
+                    catchain_seqno: session_update_round,
                     nx_cc_updated: true,
                 });
             }
@@ -603,6 +613,7 @@ impl CollatorStdImpl {
             shards,
             config,
             validator_info,
+            consensus_info,
             prev_blocks,
             after_key_block: is_key_block,
             last_key_block,
