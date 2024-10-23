@@ -1,8 +1,9 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
+use everscale_types::boc::de::BocHeader;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
@@ -70,10 +71,16 @@ impl BlockStuff {
             file_hash,
         };
 
-        Self::from_block_and_root(&block_id, block, root, DATA_SIZE)
+        Self::from_block_and_root(&block_id, block, root, DATA_SIZE, 0)
     }
 
-    pub fn from_block_and_root(id: &BlockId, block: Block, root: Cell, data_size: usize) -> Self {
+    pub fn from_block_and_root(
+        id: &BlockId,
+        block: Block,
+        root: Cell,
+        data_size: usize,
+        uniq_cells: usize,
+    ) -> Self {
         debug_assert_eq!(&id.root_hash, root.repr_hash());
 
         Self {
@@ -85,6 +92,7 @@ impl BlockStuff {
                 block_extra: Default::default(),
                 block_mc_extra: Default::default(),
                 data_size,
+                uniq_cells,
             }),
         }
     }
@@ -100,7 +108,13 @@ impl BlockStuff {
     }
 
     pub fn deserialize(id: &BlockId, data: &[u8]) -> Result<Self> {
-        let root = Boc::decode(data)?;
+        let root = BocHeader::decode(data, &Default::default())?;
+        let uniq_cells = root.cells().len();
+        let root = root.finalize(&mut Cell::empty_context())?;
+        let root = root
+            .get(0)
+            .context("Invalid blocK: failed to get root cell")?;
+
         anyhow::ensure!(
             &id.root_hash == root.repr_hash(),
             "root_hash mismatch for {id}"
@@ -116,6 +130,7 @@ impl BlockStuff {
                 block_extra: Default::default(),
                 block_mc_extra: Default::default(),
                 data_size: data.len(),
+                uniq_cells,
             }),
         })
     }
@@ -126,6 +141,10 @@ impl BlockStuff {
 
     pub fn data_size(&self) -> usize {
         self.inner.data_size
+    }
+
+    pub fn num_uniq_cells(&self) -> usize {
+        self.inner.uniq_cells
     }
 
     pub fn with_archive_data<A>(self, data: A) -> WithArchiveData<Self>
@@ -286,4 +305,5 @@ pub struct Inner {
     block_extra: OnceLock<Result<BlockExtra, everscale_types::error::Error>>,
     block_mc_extra: OnceLock<Result<McBlockExtra, everscale_types::error::Error>>,
     data_size: usize,
+    uniq_cells: usize,
 }

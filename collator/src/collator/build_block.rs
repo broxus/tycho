@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
+use everscale_types::boc::ser::BocHeader;
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -327,7 +328,12 @@ impl CollatorStdImpl {
             // TODO: Check (assert) whether the serialized block contains usage cells
             let root = CellBuilder::build_from(&block)?;
 
-            let data = everscale_types::boc::Boc::encode_rayon(&root);
+            let mut data = Vec::with_capacity(50_000_000); // todo: config based on some metrics
+            let header = BocHeader::<ahash::RandomState>::with_root(root.as_ref());
+            header.encode_rayon(&mut data);
+
+            let num_uniq_cells = header.compute_stats().total_cells_size; // todo: expose root.len() in everscale_types
+
             let block_id = BlockId {
                 shard: collation_data.block_id_short.shard,
                 seqno: collation_data.block_id_short.seqno,
@@ -337,7 +343,13 @@ impl CollatorStdImpl {
 
             build_block_elapsed = histogram.finish();
 
-            let block = BlockStuff::from_block_and_root(&block_id, block, root, data.len());
+            let block = BlockStuff::from_block_and_root(
+                &block_id,
+                block,
+                root,
+                data.len(),
+                num_uniq_cells as usize,
+            );
 
             (
                 WithArchiveData::new(block, data),
