@@ -389,9 +389,12 @@ impl StateNodeAdapterStdImpl {
     }
 
     async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
-        let PreparedProof { proof, block_info } =
-            prepare_block_proof(&block.block_stuff_aug.data, &block.signatures)
-                .context("failed to prepare block proof")?;
+        let PreparedProof { proof, block_info } = prepare_block_proof(
+            &block.block_stuff_aug.data,
+            &block.consensus_info,
+            &block.signatures,
+        )
+        .context("failed to prepare block proof")?;
 
         let _histogram =
             HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
@@ -529,6 +532,7 @@ impl DelayedStateNotifier {
 )]
 fn prepare_block_proof(
     block_stuff: &BlockStuff,
+    consensus_info: &ConsensusInfo,
     signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
@@ -565,6 +569,7 @@ fn prepare_block_proof(
         Some(process_signatures(
             block_info.gen_validator_list_hash_short,
             block_info.gen_catchain_seqno,
+            consensus_info,
             signatures,
         )?)
     } else {
@@ -583,7 +588,8 @@ fn prepare_block_proof(
 
 fn process_signatures(
     gen_validator_list_hash_short: u32,
-    gen_catchain_seqno: u32,
+    gen_session_seqno: u32,
+    consensus_info: &ConsensusInfo,
     block_signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<everscale_types::models::block::BlockSignatures> {
     use everscale_types::dict;
@@ -612,8 +618,9 @@ fn process_signatures(
     Ok(everscale_types::models::block::BlockSignatures {
         validator_info: ValidatorBaseInfo {
             validator_list_hash_short: gen_validator_list_hash_short,
-            catchain_seqno: gen_catchain_seqno,
+            catchain_seqno: gen_session_seqno,
         },
+        consensus_info: *consensus_info,
         signature_count: sig_count,
         total_weight: sig_count as u64,
         signatures,

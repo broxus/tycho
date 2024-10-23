@@ -231,6 +231,7 @@ pub struct McData {
     pub shards: ShardHashes,
     pub config: BlockchainConfig,
     pub validator_info: ValidatorInfo,
+    pub consensus_info: ConsensusInfo,
 
     pub processed_upto: ProcessedUptoInfoStuff,
 
@@ -265,6 +266,7 @@ impl McData {
             shards: extra.shards.clone(),
             config: extra.config.clone(),
             validator_info: extra.validator_info,
+            consensus_info: extra.consensus_info,
 
             processed_upto: state.processed_upto.load()?.try_into()?,
 
@@ -300,6 +302,7 @@ pub struct BlockCandidate {
     pub value_flow: ValueFlow,
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
+    pub consensus_info: ConsensusInfo,
 }
 
 #[derive(Default, Clone)]
@@ -349,6 +352,8 @@ pub struct BlockStuffForSync {
     pub signatures: FastHashMap<PeerId, ArcSignature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
+
+    pub consensus_info: ConsensusInfo,
 }
 
 /// (`ShardIdent`, seqno)

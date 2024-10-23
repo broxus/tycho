@@ -72,6 +72,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             prev_blocks_ids,
             top_shard_blocks_ids,
             queue_diff_aug,
+            consensus_info,
             ..
         } = candidate;
 
@@ -82,6 +83,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             signatures,
             prev_blocks_ids,
             top_shard_blocks_ids,
+            consensus_info,
         }
     }
 }
