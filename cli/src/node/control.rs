@@ -128,7 +128,7 @@ impl CmdGcStates {
     }
 }
 
-/// Memory profiler commands.
+/// Manage memory profiler.
 #[derive(Subcommand)]
 pub enum CmdMemProfiler {
     Start(CmdProfilerStart),
@@ -234,6 +234,7 @@ impl CmdFindArchive {
     }
 }
 
+/// Fetch the list of all stored archive ids.
 #[derive(Parser)]
 pub struct CmdListArchives {
     /// Unix socket path to connect to.
@@ -346,7 +347,7 @@ impl CmdDumpArchive {
     }
 }
 
-/// Fetches the list of all stored block ids.
+/// Fetch the list of all stored block ids.
 #[derive(Parser)]
 pub struct CmdListBlocks {
     /// Unix socket path to connect to.

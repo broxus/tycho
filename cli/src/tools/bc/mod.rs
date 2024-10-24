@@ -177,7 +177,7 @@ impl SetElectorCode {
 #[derive(clap::Args)]
 struct KeyArgs {
     /// message ttl
-    #[clap(long, default_value_t = DEFAULT_TTL)]
+    #[clap(long, value_parser, default_value_t = DEFAULT_TTL)]
     ttl: u32,
 
     /// secret key (reads from stdin if only flag is provided)
