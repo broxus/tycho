@@ -83,6 +83,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
     /// Handle sync context update
     fn set_sync_context(&self, sync_context: CollatorSyncContext);
+    fn load_init_block_id(&self) -> Option<BlockId>;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -350,6 +351,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 false
             }
         });
+    }
+
+    fn load_init_block_id(&self) -> Option<BlockId> {
+        self.storage.node_state().load_init_mc_block_id()
     }
 }
 

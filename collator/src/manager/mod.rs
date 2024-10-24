@@ -1041,6 +1041,25 @@ where
                     continue;
                 }
 
+                let init_mc_block_id = self.state_node_adapter.load_init_block_id();
+
+                if let Some(init_mc_block_id) = init_mc_block_id {
+                    if prev_block_id.is_masterchain() {
+                        if prev_block_id.seqno <= init_mc_block_id.seqno {
+                            continue;
+                        }
+                    } else {
+                        let prev_shard_block_handle = self
+                            .state_node_adapter
+                            .load_block_handle(&prev_block_id)
+                            .await?
+                            .unwrap();
+                        if prev_shard_block_handle.mc_ref_seqno() <= init_mc_block_id.seqno {
+                            continue;
+                        }
+                    }
+                }
+
                 let Some(queue_diff_stuff) =
                     self.state_node_adapter.load_diff(&prev_block_id).await?
                 else {
