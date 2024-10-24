@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
@@ -52,13 +52,41 @@ use crate::node::config::MetricsConfig;
 use crate::util::alloc::spawn_allocator_metrics_loop;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
+use crate::BaseArgs;
 
 pub mod config;
 mod control;
 
+const SERVICE_NAME: &str = "tycho-node";
+
+/// Manage node.
+#[derive(Parser)]
+pub struct Cmd {
+    #[clap(subcommand)]
+    cmd: SubCmd,
+}
+
+impl Cmd {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        match self.cmd {
+            SubCmd::Run(cmd) => cmd.run(args),
+            SubCmd::InitConfig(cmd) => cmd.run(),
+            SubCmd::Control(cmd) => cmd.run(),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum SubCmd {
+    Run(CmdRun),
+    InitConfig(CmdInitConfig),
+    #[clap(flatten)]
+    Control(CmdControl),
+}
+
 /// Generate a default node config.
 #[derive(Parser)]
-pub struct CmdInitConfig {
+struct CmdInitConfig {
     /// path to the output file
     output: PathBuf,
 
@@ -68,7 +96,7 @@ pub struct CmdInitConfig {
 }
 
 impl CmdInitConfig {
-    pub fn run(self) -> Result<()> {
+    fn run(self) -> Result<()> {
         if self.output.exists() && !self.force {
             anyhow::bail!("config file already exists, use --force to overwrite");
         }
@@ -81,24 +109,24 @@ impl CmdInitConfig {
 
 /// Run a Tycho node.
 #[derive(Parser)]
-pub struct CmdRun {
-    /// path to the node config
+struct CmdRun {
+    /// Path to the node config. Default: `$TYCHO_HOME/config.json`
     #[clap(long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
-    /// path to the global config
+    /// Path to the global config. Default: `$TYCHO_HOME/global-config.json`
     #[clap(long)]
-    global_config: PathBuf,
+    global_config: Option<PathBuf>,
 
-    /// path to the node keys
+    /// Path to the node keys. Default: `$TYCHO_HOME/keys.json`
     #[clap(long)]
-    keys: PathBuf,
+    keys: Option<PathBuf>,
 
-    /// path to the logger config
+    /// Path to the logger config.
     #[clap(long)]
     logger_config: Option<PathBuf>,
 
-    /// list of zerostate files to import
+    /// List of zerostate files to import.
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
 
@@ -109,9 +137,13 @@ pub struct CmdRun {
 }
 
 impl CmdRun {
-    pub fn run(self) -> Result<()> {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        let config_path = self
+            .config
+            .clone()
+            .unwrap_or_else(|| args.home.join("config.json"));
         let node_config =
-            NodeConfig::from_file(&self.config).wrap_err("failed to load node config")?;
+            NodeConfig::from_file(config_path).wrap_err("failed to load node config")?;
 
         rayon::ThreadPoolBuilder::new()
             .stack_size(8 * 1024 * 1024)
@@ -125,7 +157,7 @@ impl CmdRun {
             .worker_threads(node_config.threads.tokio_workers)
             .build()?
             .block_on(async move {
-                let run_fut = tokio::spawn(self.run_impl(node_config));
+                let run_fut = tokio::spawn(self.run_impl(args, node_config));
                 let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
                 tokio::select! {
                     res = run_fut => res.unwrap(),
@@ -140,7 +172,7 @@ impl CmdRun {
             })
     }
 
-    async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
+    async fn run_impl(self, args: BaseArgs, node_config: NodeConfig) -> Result<()> {
         init_logger(&node_config.logger, self.logger_config)?;
         set_abort_with_tracing();
 
@@ -149,10 +181,14 @@ impl CmdRun {
         }
 
         let node = {
-            let global_config = GlobalConfig::from_file(self.global_config)
+            let global_config_path = self
+                .global_config
+                .unwrap_or_else(|| args.home.join("global-config.json"));
+            let global_config = GlobalConfig::from_file(global_config_path)
                 .wrap_err("failed to load global config")?;
 
-            let keys = NodeKeys::from_file(self.keys).wrap_err("failed to load node keys")?;
+            let keys_path = self.keys.unwrap_or_else(|| args.home.join("keys.json"));
+            let keys = NodeKeys::from_file(keys_path).wrap_err("failed to load node keys")?;
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);

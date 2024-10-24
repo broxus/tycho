@@ -21,6 +21,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 clap = { workspace = true }
+dirs = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
