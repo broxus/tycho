@@ -296,8 +296,9 @@ impl CollatorStdImpl {
                         )?;
 
                         collation_data.new_msgs_created += new_messages.len() as u64;
-                        executed_groups_wu_total += new_messages.len() as u64
-                            * self.config.block_work_units_params.execute.serialize;
+                        executed_groups_wu_total += (new_messages.len() as f64
+                            * self.config.block_work_units_params.execute.serialize)
+                            as u64;
 
                         for new_message in new_messages {
                             let MsgInfo::Int(int_msg_info) = new_message.info else {
@@ -511,12 +512,10 @@ impl CollatorStdImpl {
                 / (finalize_block_elapsed.as_micros() as f64
                     / execute_msgs_total_elapsed.as_micros() as f64),
         );
-        metrics::gauge!("tycho_do_collate_gas_to_ns_finalize", &labels)
-            .set(finalize_block_elapsed.as_nanos() as f64 / wu_used_for_finalize as f64);
-        metrics::gauge!("tycho_do_collate_gas_to_ns_execute", &labels).set(
-            execute_msgs_total_elapsed.as_nanos() as f64
-                / collation_data.block_limit.gas_used as f64,
-        );
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
+            .set(finalize_block_elapsed.as_micros() as f64 / wu_used_for_finalize as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels)
+            .set(execute_msgs_total_elapsed.as_micros() as f64 / executed_groups_wu_total as f64);
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
@@ -672,7 +671,8 @@ impl CollatorStdImpl {
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}",
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
+            total_execute_msgs_time_mc={}",
             block_id, block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
@@ -682,7 +682,8 @@ impl CollatorStdImpl {
             collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages,
+            collation_data.total_execute_msgs_time_mc
         );
 
         assert_eq!(

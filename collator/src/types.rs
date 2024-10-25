@@ -108,9 +108,9 @@ pub struct MsgGroupsWUParams {
 impl Default for MsgGroupsWUParams {
     fn default() -> Self {
         Self {
-            const_part: 1000000,
-            read_ext_msgs: 3333,
-            read_int_msgs: 3333,
+            const_part: 6000,  // 6000 mcs
+            read_ext_msgs: 20, // 20 mcs
+            read_int_msgs: 20, // 20 mcs
         }
     }
 }
@@ -118,17 +118,17 @@ impl Default for MsgGroupsWUParams {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
 pub struct ExecuteWUParams {
-    pub prepare: u64,
-    pub execute: u64,
-    pub serialize: u64,
+    pub prepare: f64,
+    pub execute: f64,
+    pub serialize: f64,
 }
 
 impl Default for ExecuteWUParams {
     fn default() -> Self {
         Self {
-            prepare: 5000,
-            execute: 5,
-            serialize: 600,
+            prepare: 200f64,   // 200 mcs
+            execute: 0.000017, // 0.000017 mcs
+            serialize: 3.6,    // 3.6 mcs
         }
     }
 }
@@ -144,9 +144,9 @@ pub struct FinalizeBlockWUParams {
 impl Default for FinalizeBlockWUParams {
     fn default() -> Self {
         Self {
-            build: 2500000,
-            merkle_calc: 2000000,
-            serialize: 5000,
+            build: 15000,       // 15 000 mcs
+            merkle_calc: 12000, // 12 000 mcs
+            serialize: 30,      // 30 mcs
         }
     }
 }

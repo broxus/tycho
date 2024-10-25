@@ -1301,9 +1301,9 @@ impl CollatorStdImpl {
         let force_mc_block_by_uncommitted_chain =
             uncommitted_chain_length >= self.config.max_uncommitted_chain_length;
 
-        // should import anchor after fixed gas used by shard blocks in uncommitted blocks chain
+        // should import anchor after fixed wu used by shard blocks in uncommitted blocks chain
         let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
-        let force_import_anchor_by_used_gas =
+        let force_import_anchor_by_used_wu =
             wu_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
@@ -1316,19 +1316,19 @@ impl CollatorStdImpl {
                 self.config.max_uncommitted_chain_length,
             );
             None
-        } else if no_pending_msgs || force_import_anchor_by_used_gas {
+        } else if no_pending_msgs || force_import_anchor_by_used_wu {
             if no_pending_msgs {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "there are no pending internals or externals, will import next anchor",
                 );
-            } else if force_import_anchor_by_used_gas {
+            } else if force_import_anchor_by_used_wu {
                 tracing::info!(target: tracing_targets::COLLATOR,
-                    "gas used from last anchor {} reached limit {} on length {}, will import next anchor",
+                    "wu used from last anchor {} reached limit {} on length {}, will import next anchor",
                     wu_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
 
-            working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_gas {
+            working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_wu {
                 wu_used_from_last_anchor.saturating_sub(self.config.gas_used_to_import_next_anchor)
             } else {
                 0
@@ -1365,17 +1365,17 @@ impl CollatorStdImpl {
             self.shards_count = 0;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_gas - {}, ",
+                "wu_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_wu - {}, ",
                 no_pending_msgs,
-                force_import_anchor_by_used_gas,
+                force_import_anchor_by_used_wu,
             );
 
-            if next_anchor_has_externals {
+            has_externals = next_anchor_has_externals;
+            if has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",
                 );
             }
-            has_externals |= next_anchor_has_externals;
 
             Some(next_anchor)
         } else {

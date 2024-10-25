@@ -565,7 +565,7 @@ impl MessagesExecutor {
             let executed = executed_msgs_result?;
             ext_msgs_skipped += executed.ext_msgs_skipped;
 
-            let mut current_wu = executed.transactions.len() as u64 * self.execute_params.prepare;
+            let mut current_wu = executed.transactions.len() as f64 * self.execute_params.prepare;
 
             max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
             total_exec_time += executed.exec_time;
@@ -589,7 +589,7 @@ impl MessagesExecutor {
                 self.min_next_lt =
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
-                current_wu += executor_output.gas_used * self.execute_params.execute;
+                current_wu += executor_output.gas_used as f64 * self.execute_params.execute;
 
                 items.push(ExecutedTickItem {
                     in_message: tx.in_message,
@@ -600,7 +600,7 @@ impl MessagesExecutor {
             self.accounts_cache
                 .add_account_stuff(executed.account_state);
 
-            current_max_wu_per_pool = cmp::max(current_max_wu_per_pool, current_wu);
+            current_max_wu_per_pool = cmp::max(current_max_wu_per_pool, current_wu as u64);
             accounts_per_pool += 1;
             if accounts_per_pool == self.rayon_threads {
                 total_exec_wu += current_max_wu_per_pool;
@@ -660,8 +660,8 @@ impl MessagesExecutor {
         let params = self.params.clone();
 
         rayon_run_fifo(move || {
-            let timer = std::time::Instant::now();
             let mut ext_msgs_skipped = 0;
+            let timer = std::time::Instant::now();
 
             let mut transactions = Vec::with_capacity(msgs.len());
             let account_is_empty = account_state.is_empty()?;
