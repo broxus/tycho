@@ -434,14 +434,14 @@ impl ExecutionManager {
                 msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
             );
 
-            self.read_new_messages_total_elapsed += timer.elapsed();
-            self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
-            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
-
             // when we have 2 groups, the second one contains only one message
             // that does not fit first group,
             // so append this one message to first group (merge)
             group_opt = msgs_buffer.message_groups.extract_merged_group();
+
+            self.read_new_messages_total_elapsed += timer.elapsed();
+            self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
+            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
             // actually, we process all message groups with new messages in one step,
             // so we update internals processed_upto each step
@@ -472,7 +472,7 @@ impl ExecutionManager {
         // store actual offset of current interator range
         if collation_data.processed_upto.processed_offset != msgs_buffer.message_groups.offset() {
             collation_data.processed_upto.processed_offset = msgs_buffer.message_groups.offset();
-            tracing::trace!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
+            tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
                 collation_data.processed_upto.processed_offset,
             );
         }
@@ -534,7 +534,7 @@ impl MessagesExecutor {
         let mut ext_msgs_skipped = 0;
 
         let group_horizontal_size = group.len();
-        let group_messages_count = group.messages_count_inner();
+        let group_messages_count = group.calc_messages_count();
         let group_mean_vert_size: usize = group_messages_count
             .checked_div(group_horizontal_size)
             .unwrap_or_default();
@@ -583,14 +583,14 @@ impl MessagesExecutor {
                 self.min_next_lt =
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
-                current_wu = current_wu.saturating_add(self.execute_params.prepare);
-
-                current_wu = current_wu.saturating_add(
-                    executor_output
-                        .gas_used
-                        .saturating_mul(self.execute_params.execute)
-                        .saturating_div(self.execute_params.execute_delimiter),
-                );
+                current_wu = current_wu
+                    .saturating_add(self.execute_params.prepare as u64)
+                    .saturating_add(
+                        executor_output
+                            .gas_used
+                            .saturating_mul(self.execute_params.execute as u64)
+                            .saturating_div(self.execute_params.execute_delimiter as u64),
+                    );
 
                 items.push(ExecutedTickItem {
                     in_message: tx.in_message,
@@ -604,8 +604,11 @@ impl MessagesExecutor {
             wu_items.push(current_wu);
         }
 
-        let subgroups_len =
-            (wu_items.len() as f32 / self.execute_params.subgroup_size as f32).ceil() as u64;
+        let mut subgroups_len = wu_items.len() as u64 / self.execute_params.subgroup_size as u64;
+
+        if (wu_items.len() as u64 % self.execute_params.subgroup_size as u64) > 0 {
+            subgroups_len += 1;
+        }
 
         let total_exec_wu = wu_items
             .into_iter()

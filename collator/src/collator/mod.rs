@@ -219,7 +219,7 @@ pub struct CollatorStdImpl {
     stats: CollatorStats,
     timer: std::time::Instant,
     anchor_timer: std::time::Instant,
-    shards_count: u8,
+    shard_blocks_count_from_last_anchor: u8,
 
     /// Round of a new consensus genesis on recovery
     mempool_start_round: Option<MempoolAnchorId>,
@@ -268,7 +268,7 @@ impl CollatorStdImpl {
             timer: std::time::Instant::now(),
             anchor_timer: std::time::Instant::now(),
             mempool_start_round,
-            shards_count: 0,
+            shard_blocks_count_from_last_anchor: 0,
         };
 
         // create dispatcher for own async tasks queue
@@ -1365,8 +1365,9 @@ impl CollatorStdImpl {
                 metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
                     .record(elapsed_from_prev_anchor);
 
-                metrics::gauge!("tycho_do_collate_shard_blocks_count").set(self.shards_count);
-                self.shards_count = 0;
+                metrics::gauge!("tycho_do_collate_shard_blocks_count_btw_anchors")
+                    .set(self.shard_blocks_count_from_last_anchor);
+                self.shard_blocks_count_from_last_anchor = 0;
 
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "wu_used_from_last_anchor dropped to {}, because no_pending_msgs - {}, force_import_anchor_by_used_wu - {}, ",
@@ -1394,7 +1395,7 @@ impl CollatorStdImpl {
 
             metrics::gauge!("tycho_do_collate_import_next_anchor_count")
                 .set(import_next_anchor_count);
-            self.shards_count = 0;
+            self.shard_blocks_count_from_last_anchor = 0;
 
             last_anchor
         } else {

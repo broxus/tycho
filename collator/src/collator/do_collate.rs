@@ -31,7 +31,7 @@ use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, DisplayBlockIdsIntoIter, DisplayBlockIdsIter,
-    DisplayExternalsProcessedUpto, McData, TopBlockDescription,
+    DisplayExternalsProcessedUpto, ExecuteWUParams, McData, MsgGroupsWUParams, TopBlockDescription,
 };
 
 #[cfg(test)]
@@ -89,7 +89,7 @@ impl CollatorStdImpl {
         let is_masterchain = self.shard_id.is_masterchain();
 
         if !is_masterchain {
-            self.shards_count += 1;
+            self.shard_blocks_count_from_last_anchor += 1;
         }
 
         // prepare block collation data
@@ -254,7 +254,7 @@ impl CollatorStdImpl {
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
         let mut process_txs_total_elapsed = Duration::ZERO;
-        let mut executed_groups_wu_total = 0u64;
+        let mut executed_groups_vm_only = 0u64;
 
         {
             let mut executed_groups_count = 0;
@@ -284,13 +284,11 @@ impl CollatorStdImpl {
                     collation_data.tx_count += group_result.items.len() as u64;
                     collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                     collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
-                    executed_groups_wu_total =
-                        executed_groups_wu_total.saturating_add(group_result.total_exec_wu);
-                    executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-                        group_result.ext_msgs_error_count.saturating_mul(
-                            self.config.block_work_units_params.execute.execute_err,
-                        ),
-                    );
+                    executed_groups_vm_only = executed_groups_vm_only
+                        .saturating_add(group_result.total_exec_wu)
+                        .saturating_add(group_result.ext_msgs_error_count.saturating_mul(
+                            self.config.block_work_units_params.execute.execute_err as u64,
+                        ));
 
                     // Process transactions
                     timer = std::time::Instant::now();
@@ -356,80 +354,6 @@ impl CollatorStdImpl {
             metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
                 .set(executed_groups_count as f64);
         }
-
-        let prepare_groups_wu_total = self
-            .config
-            .block_work_units_params
-            .prepare
-            .const_part
-            .saturating_add(
-                self.config
-                    .block_work_units_params
-                    .prepare
-                    .read_ext_msgs
-                    .saturating_mul(collation_data.read_ext_msgs),
-            )
-            .saturating_add(
-                self.config
-                    .block_work_units_params
-                    .prepare
-                    .read_int_msgs
-                    .saturating_mul(collation_data.read_int_msgs_from_iterator),
-            )
-            .saturating_add(
-                self.config
-                    .block_work_units_params
-                    .prepare
-                    .read_new_msgs
-                    .saturating_mul(collation_data.read_new_msgs_from_iterator),
-            );
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "wu_used_for_prepare_msgs_groups: {}  read_ext_msgs: {}, read_int_msgs: {}, read_new_msgs: {} ",
-            prepare_groups_wu_total,
-            collation_data.read_ext_msgs,
-            collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator,
-        );
-
-        let executeed_groups_vm_only = executed_groups_wu_total;
-        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
-            .set(execute_msgs_total_elapsed.as_micros() as f64 / executeed_groups_vm_only as f64);
-
-        let process_txs_wu = (collation_data.int_enqueue_count)
-            .saturating_mul(
-                self.config
-                    .block_work_units_params
-                    .execute
-                    .serialize_enqueue,
-            )
-            .saturating_add(
-                (collation_data.int_dequeue_count).saturating_mul(
-                    self.config
-                        .block_work_units_params
-                        .execute
-                        .serialize_dequeue,
-                ),
-            )
-            .saturating_add(
-                (collation_data.inserted_new_msgs_to_iterator).saturating_mul(
-                    self.config
-                        .block_work_units_params
-                        .execute
-                        .insert_new_msgs_to_iterator,
-                ),
-            );
-
-        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
-            .set(process_txs_total_elapsed.as_micros() as f64 / process_txs_wu as f64);
-
-        executed_groups_wu_total = executed_groups_wu_total.saturating_add(process_txs_wu);
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "wu_used_for_execute: {}, execute_count_int: {}, execute_count_ext: {}, execute_count_new_int {}, process_txs_wu: {},  executeed_groups_vm_only: {}, collation_data.tx_count: {}",
-            executed_groups_wu_total, collation_data.execute_count_int , collation_data.execute_count_ext, collation_data.execute_count_new_int, process_txs_wu, executeed_groups_vm_only,
-            collation_data.tx_count
-        );
 
         metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
             .record(fill_msgs_total_elapsed);
@@ -547,9 +471,17 @@ impl CollatorStdImpl {
                 }
             });
 
+        let prepare_groups_wu_total = calc_prepare_groups_wu_total(
+            self.config.block_work_units_params.prepare,
+            &collation_data,
+        );
+
+        let process_txs_wu =
+            calc_process_txs_wu(self.config.block_work_units_params.execute, &collation_data);
+        let executed_groups_wu_total = executed_groups_vm_only.saturating_add(process_txs_wu);
+
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
-
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
             let finalize_params = self.config.block_work_units_params.finalize;
@@ -575,6 +507,10 @@ impl CollatorStdImpl {
         let finalize_wu_total = finalized.finalize_wu_total;
 
         metrics::gauge!("tycho_do_collate_wu_to_finalize", &labels).set(finalize_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
+            .set(execute_msgs_total_elapsed.as_micros() as f64 / executed_groups_vm_only as f64);
+        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
+            .set(process_txs_total_elapsed.as_micros() as f64 / process_txs_wu as f64);
         metrics::gauge!("tycho_do_collate_wu_to_execute", &labels)
             .set(executed_groups_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_to_prepare", &labels)
@@ -754,7 +690,9 @@ impl CollatorStdImpl {
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
-            total_execute_msgs_time_mc={}",
+            total_execute_msgs_time_mc={}, \
+            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}
+            ",
             block_id, block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
@@ -765,7 +703,8 @@ impl CollatorStdImpl {
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
             collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages,
-            collation_data.total_execute_msgs_time_mc
+            collation_data.total_execute_msgs_time_mc,
+            prepare_groups_wu_total, executed_groups_wu_total, finalize_wu_total
         );
 
         assert_eq!(
@@ -1795,4 +1734,50 @@ pub fn contains_prefix(shard_id: &ShardIdent, workchain_id: i32, prefix_without_
         return (shard_id.prefix() >> shift) == (prefix_without_tag >> shift);
     }
     false
+}
+
+fn calc_prepare_groups_wu_total(
+    prepare: MsgGroupsWUParams,
+    collation_data: &BlockCollationData,
+) -> u64 {
+    let MsgGroupsWUParams {
+        const_part,
+        read_ext_msgs,
+        read_int_msgs,
+        read_new_msgs,
+    } = prepare;
+
+    (const_part as u64)
+        .saturating_add(
+            collation_data
+                .read_ext_msgs
+                .saturating_mul(read_ext_msgs as u64),
+        )
+        .saturating_add(
+            collation_data
+                .read_int_msgs_from_iterator
+                .saturating_mul(read_int_msgs as u64),
+        )
+        .saturating_add(
+            collation_data
+                .read_new_msgs_from_iterator
+                .saturating_mul(read_new_msgs as u64),
+        )
+}
+
+fn calc_process_txs_wu(execute: ExecuteWUParams, collation_data: &BlockCollationData) -> u64 {
+    let ExecuteWUParams {
+        serialize_enqueue,
+        serialize_dequeue,
+        insert_new_msgs_to_iterator,
+        ..
+    } = execute;
+
+    (collation_data.int_enqueue_count)
+        .saturating_mul(serialize_enqueue as u64)
+        .saturating_add((collation_data.int_dequeue_count).saturating_mul(serialize_dequeue as u64))
+        .saturating_add(
+            (collation_data.inserted_new_msgs_to_iterator)
+                .saturating_mul(insert_new_msgs_to_iterator as u64),
+        )
 }

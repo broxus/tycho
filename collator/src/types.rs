@@ -100,10 +100,10 @@ pub struct BlockWUParams {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
 pub struct MsgGroupsWUParams {
-    pub const_part: u64,
-    pub read_ext_msgs: u64,
-    pub read_int_msgs: u64,
-    pub read_new_msgs: u64,
+    pub const_part: u32,
+    pub read_ext_msgs: u8,
+    pub read_int_msgs: u8,
+    pub read_new_msgs: u8,
 }
 
 impl Default for MsgGroupsWUParams {
@@ -120,14 +120,14 @@ impl Default for MsgGroupsWUParams {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
 pub struct ExecuteWUParams {
-    pub prepare: u64,
-    pub execute: u64,
-    pub execute_err: u64,
-    pub execute_delimiter: u64,
-    pub serialize_enqueue: u64,
-    pub serialize_dequeue: u64,
-    pub insert_new_msgs_to_iterator: u64,
-    pub subgroup_size: u32,
+    pub prepare: u8,
+    pub execute: u8,
+    pub execute_err: u8,
+    pub execute_delimiter: u32,
+    pub serialize_enqueue: u8,
+    pub serialize_dequeue: u8,
+    pub insert_new_msgs_to_iterator: u8,
+    pub subgroup_size: u8,
 }
 
 impl Default for ExecuteWUParams {
@@ -148,22 +148,24 @@ impl Default for ExecuteWUParams {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
 pub struct FinalizeBlockWUParams {
-    pub build_transactions: u64,
-    pub build_in_msg: u64,
-    pub build_out_msg: u64,
-    pub serialize: u64,
-    pub serialize_msg: u64,
-    pub state_update_min: u64,
-    pub state_update_msg: u64,
-    pub serialize_min: u64,
+    pub build_transactions: u8,
+    pub build_accounts: u8,
+    pub build_in_msg: u8,
+    pub build_out_msg: u8,
+    pub serialize: u8,
+    pub serialize_msg: u8,
+    pub state_update_min: u32,
+    pub state_update_msg: u8,
+    pub serialize_min: u32,
 }
 
 impl Default for FinalizeBlockWUParams {
     fn default() -> Self {
         Self {
             build_transactions: 3,   // 3 mcs
-            build_in_msg: 3,         // 3 mcs
-            build_out_msg: 2,        // 2 mcs
+            build_accounts: 1,       // 1 mcs
+            build_in_msg: 1,         // 1 mcs
+            build_out_msg: 1,        // 1 mcs
             serialize: 1,            // 1 mcs
             serialize_msg: 3,        // 3 mcs
             state_update_min: 15000, // 15000 mcs

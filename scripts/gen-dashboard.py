@@ -976,7 +976,7 @@ def block_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_shard_blocks_count",
+            "tycho_do_collate_shard_blocks_count_btw_anchors",
             "Number of Shard Blocks before import next anchor",
         ),        
         create_gauge_panel(
