@@ -676,6 +676,11 @@ impl CollatorStdImpl {
 
         tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "collation timings get next message update_internals_processed_upto={}, iterator_commit={}",
+            exec_manager.update_internals_processed_upto.as_micros(), exec_manager.iterator_commit.as_micros()
+        );
+
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, time_diff={}, \
             collation_time={}, elapsed_from_prev_block={}, overhead={}, \

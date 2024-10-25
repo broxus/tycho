@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use everscale_types::models::*;
@@ -55,6 +55,10 @@ pub(super) struct ExecutionManager {
     read_ext_messages_total_elapsed: Duration,
     /// sum total time of adding messages to groups
     add_to_message_groups_total_elapsed: Duration,
+    ///
+    pub update_internals_processed_upto: Duration,
+    ///
+    pub iterator_commit: Duration,
 }
 
 pub(super) struct MessagesExecutor {
@@ -93,6 +97,8 @@ impl ExecutionManager {
             read_ext_messages_total_elapsed: Duration::ZERO,
             add_to_message_groups_total_elapsed: Duration::ZERO,
             last_read_to_anchor_chain_time: None,
+            update_internals_processed_upto: Duration::ZERO,
+            iterator_commit: Duration::ZERO,
         }
     }
 
@@ -386,12 +392,12 @@ impl ExecutionManager {
         if group_opt.is_none() && self.read_new_messages {
             // when processing new messages we return group immediately when the next message does not fit it
 
+            let mut timer = std::time::Instant::now();
             // first new messages epoch is from existing internals and externals
             // then we read next epoch of new messages only when the previous epoch processed
             mq_iterator_adapter
                 .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
 
-            let timer = std::time::Instant::now();
             let mut add_to_groups_elapsed = Duration::ZERO;
 
             let mut new_internals_read_count = 0;
@@ -435,20 +441,22 @@ impl ExecutionManager {
                 msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
             );
 
+            self.read_new_messages_total_elapsed += timer.elapsed();
+            self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
+            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
+            timer = Instant::now();
+            
             // when we have 2 groups, the second one contains only one message
             // that does not fit first group,
             // so append this one message to first group (merge)
             group_opt = msgs_buffer.message_groups.extract_merged_group();
-
-            self.read_new_messages_total_elapsed += timer.elapsed();
-            self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
-            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
             // actually, we process all message groups with new messages in one step,
             // so we update internals processed_upto each step
             if msgs_buffer.message_groups.is_empty()
                 && msgs_buffer.message_groups.max_message_key() > &QueueKey::MIN
             {
+
                 update_internals_processed_upto(
                     &mut collation_data.processed_upto,
                     self.shard_id,
@@ -460,6 +468,9 @@ impl ExecutionManager {
                     )),
                 );
 
+                self.update_internals_processed_upto += timer.elapsed();
+                timer = Instant::now();
+
                 // commit processed message to iterator
                 mq_iterator_adapter.iterator().commit(vec![(
                     self.shard_id,
@@ -468,6 +479,7 @@ impl ExecutionManager {
 
                 msgs_buffer.message_groups.reset();
             }
+            self.iterator_commit += timer.elapsed();
         }
 
         // store actual offset of current interator range
