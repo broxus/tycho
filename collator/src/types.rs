@@ -103,14 +103,16 @@ pub struct MsgGroupsWUParams {
     pub const_part: u64,
     pub read_ext_msgs: u64,
     pub read_int_msgs: u64,
+    pub read_new_msgs: u64,
 }
 
 impl Default for MsgGroupsWUParams {
     fn default() -> Self {
         Self {
-            const_part: 10000, // 6000 mcs
-            read_ext_msgs: 3,  // 20 mcs
-            read_int_msgs: 3,  // 20 mcs
+            const_part: 10000, // 10000 mcs
+            read_ext_msgs: 3,  // 3 mcs
+            read_int_msgs: 3,  // 3 mcs
+            read_new_msgs: 20, // 20 mcs
         }
     }
 }
@@ -160,7 +162,7 @@ impl Default for FinalizeBlockWUParams {
             state_update_msg: 1, // 1 mcs
             merkle_calc: 10000,  // 10 000 mcs
             serialize: 25,       // 25 mcs
-            serialize_msg: 1,    // 1 mcs
+            serialize_msg: 3,    // 3 mcs
         }
     }
 }

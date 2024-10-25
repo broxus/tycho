@@ -222,19 +222,24 @@ impl CollatorStdImpl {
                 const_part,
                 read_ext_msgs,
                 read_int_msgs,
+                read_new_msgs,
             } = prepare;
 
             let wu_used_for_msgs_groups = const_part
                 .saturating_add(read_ext_msgs.saturating_mul(collation_data.read_ext_msgs))
                 .saturating_add(
                     read_int_msgs.saturating_mul(collation_data.read_int_msgs_from_iterator),
+                )
+                .saturating_add(
+                    read_new_msgs.saturating_mul(collation_data.read_new_msgs_from_iterator),
                 );
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_for_msgs_groups: {}  read_ext_msgs: {}, read_int_msgs: {} ",
+                "wu_used_for_msgs_groups: {}  read_ext_msgs: {}, read_int_msgs: {}, read_new_msgs: {} ",
                 wu_used_for_msgs_groups,
                 collation_data.read_ext_msgs,
                 collation_data.read_int_msgs_from_iterator,
+                collation_data.read_new_msgs_from_iterator,
             );
 
             let FinalizeBlockWUParams {
@@ -250,27 +255,27 @@ impl CollatorStdImpl {
             let accounts_count = processed_accounts.accounts_len as u64;
             let accounts_count_logarithm = (accounts_count as f64).log10();
             let build = build as f64 * accounts_count_logarithm;
-            let build_in_msg = build_in_msg * collation_data.in_msgs.len() as u64;
-            let build_out_msg = build_out_msg * collation_data.out_msgs.len() as u64;
+            let in_msgs_len = collation_data.in_msgs.len() as u64;
+            let build_in_msg = build_in_msg * in_msgs_len;
+            let out_msgs_len = collation_data.out_msgs.len() as u64;
+            let build_out_msg = build_out_msg * out_msgs_len;
             let build = std::cmp::max(build as u64, build_in_msg);
             let build = std::cmp::max(build as u64, build_out_msg);
 
             let merkle_calc = ((merkle_calc as f64 * accounts_count_logarithm) as u64)
-                .saturating_add(state_update_msg.saturating_mul(
-                    collation_data.in_msgs.len() as u64 + collation_data.out_msgs.len() as u64,
-                ));
+                .saturating_add(state_update_msg.saturating_mul(in_msgs_len + out_msgs_len));
 
-            let serialize = serialize.saturating_mul(accounts_count).saturating_add(
-                serialize_msg.saturating_mul(
-                    collation_data.in_msgs.len() as u64 + collation_data.out_msgs.len() as u64,
-                ),
-            );
+            let serialize = serialize
+                .saturating_mul(accounts_count)
+                .saturating_add(serialize_msg.saturating_mul(in_msgs_len + out_msgs_len));
             wu_used_for_finalize = build.saturating_add(merkle_calc).saturating_add(serialize);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_for_finalize: {}  accounts_count: {} ",
+                "wu_used_for_finalize: {}  accounts_count: {}, in_msgs: {}, out_msgs: {} ",
                 wu_used_for_finalize,
                 accounts_count,
+                in_msgs_len,
+                out_msgs_len,
             );
 
             // compute total wu used from last anchor
