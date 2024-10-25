@@ -2,7 +2,9 @@ use std::collections::{btree_map, BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Result};
-use everscale_types::models::{BlockId, BlockIdShort, Lazy, OutMsgDescr, ShardIdent, ValueFlow};
+use everscale_types::models::{
+    BlockId, BlockIdShort, ConsensusInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
+};
 use parking_lot::Mutex;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_block_util::state::ShardStateStuff;
@@ -59,6 +61,26 @@ impl BlocksCache {
         }
 
         Ok(result)
+    }
+
+    pub fn get_consensus_info_for_mc_block(
+        &self,
+        mc_block_key: &BlockCacheKey,
+    ) -> Result<ConsensusInfo> {
+        let consensus_info;
+        {
+            let master_cache = self.masters.lock();
+            let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
+                bail!(
+                    "get_consensus_info_for_mc_block: Master block not found in cache! ({})",
+                    mc_block_key,
+                )
+            };
+
+            consensus_info = mc_block_entry.cached_state()?.state_extra()?.consensus_info;
+        }
+
+        Ok(consensus_info)
     }
 
     pub fn reset_top_shard_blocks_additional_info(&self) -> Result<()> {

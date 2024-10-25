@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
@@ -57,8 +58,8 @@ pub struct CollatorContext {
     pub shard_id: ShardIdent,
     pub prev_blocks_ids: Vec<BlockId>,
     pub mc_data: Arc<McData>,
-    /// Round of a new consensus genesis on recovery
-    pub mempool_start_round: Option<MempoolAnchorId>,
+    /// Mempool config override for a new genesis
+    pub mempool_config_override: Option<MempoolGlobalConfig>,
 }
 
 #[async_trait]
@@ -150,7 +151,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.shard_id,
             cx.prev_blocks_ids,
             cx.mc_data,
-            cx.mempool_start_round,
+            cx.mempool_config_override,
         )
         .await
     }
@@ -216,8 +217,8 @@ pub struct CollatorStdImpl {
     stats: CollatorStats,
     timer: std::time::Instant,
 
-    /// Round of a new consensus genesis on recovery
-    mempool_start_round: Option<MempoolAnchorId>,
+    /// Mempool config override for a new genesis
+    pub mempool_config_override: Option<MempoolGlobalConfig>,
 }
 
 impl CollatorStdImpl {
@@ -232,7 +233,7 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
-        mempool_start_round: Option<MempoolAnchorId>,
+        mempool_config_override: Option<MempoolGlobalConfig>,
     ) -> AsyncQueuedDispatcher<Self> {
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
@@ -261,7 +262,7 @@ impl CollatorStdImpl {
             anchors_cache: Default::default(),
             stats: Default::default(),
             timer: std::time::Instant::now(),
-            mempool_start_round,
+            mempool_config_override,
         };
 
         // create dispatcher for own async tasks queue
@@ -387,16 +388,16 @@ impl CollatorStdImpl {
         prev_chain_time: u64,
         prev_block_id: BlockId,
     ) -> Result<Vec<AnchorInfo>, CollatorError> {
-        let import_init_anchors = match self.mempool_start_round {
-            // TODO: This may not work with shard blocks when we do not specify `from_mc_block_seqno` on recovery
+        let import_init_anchors = match &self.mempool_config_override {
+            // TODO: This may not work with shard blocks when we do not specify `from_mc_block_seqno` on restart from a new genesis
             //      because there may be cases when processed to anchor in shard is before anchor in master
             //      and we may cancel shard collation init incorrectly.
             //      We can produce incorrect shard block and then ignore it.
             //      Or we can try to specify last imported anchor id as a start round.
             //      Currently we do not cancel shard collator init because from block should be correct.
-            Some(mempool_start_round) if mempool_start_round > 0 => {
-                let import_init_anchors = if processed_to_anchor_id <= mempool_start_round {
-                    if processed_to_anchor_id < mempool_start_round
+            Some(mempool_config) if mempool_config.start_round > 0 => {
+                let import_init_anchors = if processed_to_anchor_id <= mempool_config.start_round {
+                    if processed_to_anchor_id < mempool_config.start_round
                         && self.shard_id.is_masterchain()
                     {
                         // if last processed_to anchor is before the start round for master,
@@ -428,7 +429,7 @@ impl CollatorStdImpl {
                         .map_err(|e| CollatorError::Anyhow(e.into()))?
                         .created_by;
                     self.anchors_cache.set_last_imported_anchor_info(
-                        mempool_start_round,
+                        mempool_config.start_round,
                         prev_chain_time,
                         created_by,
                     );
@@ -909,7 +910,7 @@ impl CollatorStdImpl {
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
 
-        // when start in recovery mode then request first next after 0
+        // when restart from a new genesis then request first next after 0
         let prev_id = if matches!(mempool_start_round, Some(round_id) if round_id == id) {
             0
         } else {
@@ -1167,7 +1168,7 @@ impl CollatorStdImpl {
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
-                self.mempool_start_round,
+                self.mempool_config_override.as_ref().map(|c| c.start_round),
             )
             .await;
 
@@ -1320,7 +1321,7 @@ impl CollatorStdImpl {
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
-                self.mempool_start_round,
+                self.mempool_config_override.as_ref().map(|c| c.start_round),
             )
             .await;
 

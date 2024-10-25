@@ -74,6 +74,7 @@ pub(crate) fn build_stub_collation_data(
             version: 50,
             capabilities: supported_capabilities(),
         },
+        None,
     )
     .build(start_lt, DEFAULT_BLOCK_LIMITS)
 }
