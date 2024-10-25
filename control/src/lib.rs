@@ -18,6 +18,3 @@ mod client;
 
 #[cfg(feature = "server")]
 mod server;
-
-// TODO: Change the path to a more general setup.
-pub const DEFAULT_SOCKET_PATH: &str = "/var/venom/data/tycho.sock";

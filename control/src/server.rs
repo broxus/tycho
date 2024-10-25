@@ -1,5 +1,5 @@
 use std::num::NonZeroU64;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use everscale_crypto::ed25519;
@@ -19,17 +19,12 @@ use crate::proto::{self, ArchiveInfo, ControlServer as _};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ControlServerConfig {
-    /// Unix socket path to listen for incoming control connections.
-    ///
-    /// Default: `/var/venom/data/tycho.sock`
-    pub socket_path: PathBuf,
-
     /// Whether to recreate the socket file if it already exists.
     ///
     /// NOTE: If the `socket_path` from multiple instances on the same machine
     /// points to the same file, every instance will just "grab" it to itself.
     ///
-    /// Default: `true`
+    /// Default: `false`
     pub overwrite_socket: bool,
 
     /// Maximum number of parallel connections.
@@ -41,8 +36,7 @@ pub struct ControlServerConfig {
 impl Default for ControlServerConfig {
     fn default() -> Self {
         Self {
-            socket_path: crate::DEFAULT_SOCKET_PATH.into(),
-            overwrite_socket: true,
+            overwrite_socket: false,
             max_connections: 100,
         }
     }
@@ -54,14 +48,14 @@ pub struct ControlEndpoint {
 }
 
 impl ControlEndpoint {
-    pub async fn bind(
+    pub async fn bind<P: AsRef<Path>>(
         config: &ControlServerConfig,
         server: ControlServer,
+        socket_path: P,
     ) -> std::io::Result<Self> {
         use tarpc::tokio_serde::formats::Bincode;
 
-        let socket_path = config.socket_path.clone();
-
+        let socket_path = socket_path.as_ref().to_path_buf();
         if config.overwrite_socket && socket_path.exists() {
             std::fs::remove_file(&socket_path)?;
         }
@@ -86,6 +80,10 @@ impl ControlEndpoint {
             .boxed();
 
         Ok(Self { inner, socket_path })
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
     }
 
     pub async fn serve(mut self) {

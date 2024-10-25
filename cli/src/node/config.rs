@@ -82,7 +82,7 @@ pub struct NodeConfig {
 
     pub rpc: Option<RpcConfig>,
 
-    pub control: Option<ControlServerConfig>,
+    pub control: ControlServerConfig,
 
     pub metrics: Option<MetricsConfig>,
 
@@ -113,7 +113,7 @@ impl Default for NodeConfig {
             mempool: MempoolNodeConfig::default(),
             validator: ValidatorStdImplConfig::default(),
             rpc: Some(RpcConfig::default()),
-            control: None,
+            control: Default::default(),
             metrics: Some(MetricsConfig::default()),
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),

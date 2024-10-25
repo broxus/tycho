@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use crate::util::create_dir_all;
 use crate::BaseArgs;
 
 const TYCHO_SERVICE: &str = "tycho.service";
@@ -50,7 +51,7 @@ pub struct Cmd {
 
 impl Cmd {
     pub fn run(self, args: BaseArgs) -> Result<()> {
-        create_dir(&args.home)?;
+        args.create_home_dir()?;
 
         if self.systemd {
             let Some(user_home) = dirs::home_dir() else {
@@ -58,7 +59,7 @@ impl Cmd {
             };
 
             let systemd_dir = user_home.join(".config/systemd/user");
-            create_dir(&systemd_dir)?;
+            create_dir_all(&systemd_dir)?;
 
             let tycho_service_file = systemd_dir.join(TYCHO_SERVICE);
             if !tycho_service_file.exists() {
@@ -85,9 +86,4 @@ fn default_binary_path() -> &'static Path {
 
         PathBuf::default()
     })
-}
-
-fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    std::fs::create_dir_all(path.as_ref())
-        .with_context(|| format!("failed to create a directory {}", path.as_ref().display()))
 }
