@@ -1,8 +1,10 @@
+use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use everscale_types::models::{BlockId, BlockIdShort};
+use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
-use tycho_core::block_strider::ManualGcTrigger;
+use tycho_util::serde_helpers;
 
 use crate::error::ServerResult;
 
@@ -11,14 +13,17 @@ pub trait ControlServer {
     /// Ping a node. Returns node timestamp in milliseconds.
     async fn ping() -> u64;
 
+    /// Returns a node info.
+    async fn get_node_info() -> NodeInfoResponse;
+
     /// Trigger manual GC for archives.
-    async fn trigger_archives_gc(trigger: ManualGcTrigger);
+    async fn trigger_archives_gc(req: TriggerGcRequest);
 
     /// Trigger manual GC for blocks.
-    async fn trigger_blocks_gc(trigger: ManualGcTrigger);
+    async fn trigger_blocks_gc(req: TriggerGcRequest);
 
     /// Trigger manual GC for states.
-    async fn trigger_states_gc(trigger: ManualGcTrigger);
+    async fn trigger_states_gc(req: TriggerGcRequest);
 
     /// Sets memory profiler state. Returns whether the state was changed.
     async fn set_memory_profiler_enabled(enabled: bool) -> bool;
@@ -46,6 +51,27 @@ pub trait ControlServer {
 
     /// Returns list of all block ids.
     async fn get_block_ids(req: BlockListRequest) -> ServerResult<BlockListResponse>;
+
+    /// Signs an elections payload.
+    async fn sign_elections_payload(
+        req: ElectionsPayloadRequest,
+    ) -> ServerResult<ElectionsPayloadResponse>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfoResponse {
+    // TODO: Somehow expose tycho_network::Address?
+    pub public_addr: String,
+    pub local_addr: SocketAddr,
+    pub adnl_id: HashBytes,
+    pub validator_public_key: Option<HashBytes>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "ty", content = "seqno")]
+pub enum TriggerGcRequest {
+    Exact(u32),
+    Distance(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,4 +124,22 @@ pub struct BlockListRequest {
 pub struct BlockListResponse {
     pub blocks: Vec<BlockId>,
     pub continuation: Option<BlockIdShort>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ElectionsPayloadRequest {
+    pub election_id: u32,
+    pub address: HashBytes,
+    pub max_factor: u32,
+    pub public_key: HashBytes,
+    pub adnl_addr: HashBytes,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ElectionsPayloadResponse {
+    // TODO: Add `serde(with = "base64")`
+    pub data: Vec<u8>,
+    pub public_key: HashBytes,
+    #[serde(with = "serde_helpers::signature")]
+    pub signature: Box<[u8; 64]>,
 }

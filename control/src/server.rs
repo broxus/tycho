@@ -2,14 +2,17 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use everscale_crypto::ed25519;
+use everscale_types::cell::HashBytes;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
 use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
+use tycho_network::Network;
 use tycho_storage::{ArchiveId, Storage};
 
-use crate::error::ServerResult;
+use crate::error::{ServerError, ServerResult};
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
 use crate::proto::{self, ArchiveInfo, ControlServer as _};
 
@@ -28,6 +31,11 @@ pub struct ControlServerConfig {
     ///
     /// Default: `true`
     pub overwrite_socket: bool,
+
+    /// Maximum number of parallel connections.
+    ///
+    /// Default: `100`
+    pub max_connections: usize,
 }
 
 impl Default for ControlServerConfig {
@@ -35,6 +43,7 @@ impl Default for ControlServerConfig {
         Self {
             socket_path: crate::DEFAULT_SOCKET_PATH.into(),
             overwrite_socket: true,
+            max_connections: 100,
         }
     }
 }
@@ -71,8 +80,8 @@ impl ControlEndpoint {
                     futures_util::future::ready(())
                 })
             })
-            // Max 1 channel.
-            .buffer_unordered(1)
+            // Max N channels.
+            .buffer_unordered(config.max_connections)
             .for_each(|_| async {})
             .boxed();
 
@@ -90,60 +99,86 @@ impl Drop for ControlEndpoint {
     }
 }
 
-pub struct ControlServerBuilder<MandatoryFields = (Storage, GcSubscriber)> {
+pub struct ControlServerBuilder<MandatoryFields = (Network, Storage, GcSubscriber)> {
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
+    validator_keypair: Option<Arc<ed25519::KeyPair>>,
 }
 
 impl ControlServerBuilder {
     pub fn build(self) -> ControlServer {
-        let (storage, gc_subscriber) = self.mandatory_fields;
+        let (network, storage, gc_subscriber) = self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
             .unwrap_or_else(|| Arc::new(StubMemoryProfiler));
 
+        let info = proto::NodeInfoResponse {
+            public_addr: network.remote_addr().to_string(),
+            local_addr: network.local_addr(),
+            adnl_id: HashBytes(network.peer_id().to_bytes()),
+            validator_public_key: self
+                .validator_keypair
+                .as_ref()
+                .map(|k| HashBytes(k.public_key.to_bytes())),
+        };
+
         ControlServer {
             inner: Arc::new(Inner {
+                info,
                 gc_subscriber,
                 storage,
                 memory_profiler,
+                validator_keypair: self.validator_keypair,
             }),
         }
     }
 }
 
-impl<T2> ControlServerBuilder<((), T2)> {
-    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(Storage, T2)> {
-        let (_, t2) = self.mandatory_fields;
+impl<T2, T3> ControlServerBuilder<((), T2, T3)> {
+    pub fn with_network(self, network: &Network) -> ControlServerBuilder<(Network, T2, T3)> {
+        let (_, t2, t3) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (storage, t2),
+            mandatory_fields: (network.clone(), t2, t3),
             memory_profiler: self.memory_profiler,
+            validator_keypair: self.validator_keypair,
         }
     }
 }
 
-impl<T1> ControlServerBuilder<(T1, ())> {
+impl<T1, T3> ControlServerBuilder<(T1, (), T3)> {
+    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3)> {
+        let (t1, _, t3) = self.mandatory_fields;
+        ControlServerBuilder {
+            mandatory_fields: (t1, storage, t3),
+            memory_profiler: self.memory_profiler,
+            validator_keypair: self.validator_keypair,
+        }
+    }
+}
+
+impl<T1, T2> ControlServerBuilder<(T1, T2, ())> {
     pub fn with_gc_subscriber(
         self,
         gc_subscriber: GcSubscriber,
-    ) -> ControlServerBuilder<(T1, GcSubscriber)> {
-        let (t1, _) = self.mandatory_fields;
+    ) -> ControlServerBuilder<(T1, T2, GcSubscriber)> {
+        let (t1, t2, _) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, gc_subscriber),
+            mandatory_fields: (t1, t2, gc_subscriber),
             memory_profiler: self.memory_profiler,
+            validator_keypair: self.validator_keypair,
         }
     }
 }
 
 impl<T> ControlServerBuilder<T> {
-    pub fn with_memory_profiler(
-        self,
-        memory_profiler: Arc<dyn MemoryProfiler>,
-    ) -> ControlServerBuilder<T> {
-        ControlServerBuilder {
-            mandatory_fields: self.mandatory_fields,
-            memory_profiler: Some(memory_profiler),
-        }
+    pub fn with_memory_profiler(mut self, memory_profiler: Arc<dyn MemoryProfiler>) -> Self {
+        self.memory_profiler = Some(memory_profiler);
+        self
+    }
+
+    pub fn with_validator_keypair(mut self, keypair: Arc<ed25519::KeyPair>) -> Self {
+        self.validator_keypair = Some(keypair);
+        self
     }
 }
 
@@ -154,10 +189,11 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn builder() -> ControlServerBuilder<((), ())> {
+    pub fn builder() -> ControlServerBuilder<((), (), ())> {
         ControlServerBuilder {
-            mandatory_fields: ((), ()),
+            mandatory_fields: ((), (), ()),
             memory_profiler: None,
+            validator_keypair: None,
         }
     }
 }
@@ -167,16 +203,20 @@ impl proto::ControlServer for ControlServer {
         tycho_util::time::now_millis()
     }
 
-    async fn trigger_archives_gc(self, _: Context, trigger: ManualGcTrigger) {
-        self.inner.gc_subscriber.trigger_archives_gc(trigger);
+    async fn get_node_info(self, _: tarpc::context::Context) -> proto::NodeInfoResponse {
+        self.inner.info.clone()
     }
 
-    async fn trigger_blocks_gc(self, _: Context, trigger: ManualGcTrigger) {
-        self.inner.gc_subscriber.trigger_blocks_gc(trigger);
+    async fn trigger_archives_gc(self, _: Context, req: proto::TriggerGcRequest) {
+        self.inner.gc_subscriber.trigger_archives_gc(req.into());
     }
 
-    async fn trigger_states_gc(self, _: Context, trigger: ManualGcTrigger) {
-        self.inner.gc_subscriber.trigger_states_gc(trigger);
+    async fn trigger_blocks_gc(self, _: Context, req: proto::TriggerGcRequest) {
+        self.inner.gc_subscriber.trigger_blocks_gc(req.into());
+    }
+
+    async fn trigger_states_gc(self, _: Context, req: proto::TriggerGcRequest) {
+        self.inner.gc_subscriber.trigger_states_gc(req.into());
     }
 
     async fn set_memory_profiler_enabled(self, _: Context, enabled: bool) -> bool {
@@ -302,12 +342,71 @@ impl proto::ControlServer for ControlServer {
             continuation,
         })
     }
+
+    async fn sign_elections_payload(
+        self,
+        _: tarpc::context::Context,
+        req: proto::ElectionsPayloadRequest,
+    ) -> ServerResult<proto::ElectionsPayloadResponse> {
+        let Some(keypair) = self.inner.validator_keypair.as_ref() else {
+            return Err(ServerError::new(
+                "control server was created without a keystore",
+            ));
+        };
+
+        if keypair.public_key.as_bytes() != req.public_key.as_array() {
+            return Err(ServerError::new(
+                "no validator key found for the specified public key",
+            ));
+        }
+
+        let data = build_elections_data_to_sign(&req);
+        let signature = keypair.sign_raw(&data);
+
+        Ok(proto::ElectionsPayloadResponse {
+            data,
+            public_key: HashBytes(keypair.public_key.to_bytes()),
+            signature: Box::new(signature),
+        })
+    }
 }
 
 struct Inner {
+    info: proto::NodeInfoResponse,
     gc_subscriber: GcSubscriber,
     storage: Storage,
     memory_profiler: Arc<dyn MemoryProfiler>,
+    validator_keypair: Option<Arc<ed25519::KeyPair>>,
 }
 
 type Context = tarpc::context::Context;
+
+impl From<ManualGcTrigger> for proto::TriggerGcRequest {
+    fn from(value: ManualGcTrigger) -> Self {
+        match value {
+            ManualGcTrigger::Exact(mc_seqno) => Self::Exact(mc_seqno),
+            ManualGcTrigger::Distance(distance) => Self::Distance(distance),
+        }
+    }
+}
+
+impl From<proto::TriggerGcRequest> for ManualGcTrigger {
+    fn from(value: proto::TriggerGcRequest) -> Self {
+        match value {
+            proto::TriggerGcRequest::Exact(mc_seqno) => Self::Exact(mc_seqno),
+            proto::TriggerGcRequest::Distance(distance) => Self::Distance(distance),
+        }
+    }
+}
+
+fn build_elections_data_to_sign(req: &proto::ElectionsPayloadRequest) -> Vec<u8> {
+    const TL_ID: u32 = 0x654C5074;
+
+    let mut data = Vec::with_capacity(4 + 4 + 4 + 32 + 32);
+    data.extend_from_slice(&TL_ID.to_be_bytes());
+    data.extend_from_slice(&req.election_id.to_be_bytes());
+    data.extend_from_slice(&req.max_factor.to_be_bytes());
+    data.extend_from_slice(req.address.as_slice());
+    data.extend_from_slice(req.adnl_addr.as_array());
+    data
+}

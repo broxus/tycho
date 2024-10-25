@@ -7,7 +7,6 @@ use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tycho_core::block_strider::ManualGcTrigger;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 
@@ -33,23 +32,30 @@ impl ControlClient {
         self.inner.ping(current_context()).await.map_err(Into::into)
     }
 
-    pub async fn trigger_archives_gc(&self, trigger: ManualGcTrigger) -> ClientResult<()> {
+    pub async fn get_node_info(&self) -> ClientResult<NodeInfoResponse> {
         self.inner
-            .trigger_archives_gc(current_context(), trigger)
+            .get_node_info(current_context())
             .await
             .map_err(Into::into)
     }
 
-    pub async fn trigger_blocks_gc(&self, trigger: ManualGcTrigger) -> ClientResult<()> {
+    pub async fn trigger_archives_gc(&self, req: TriggerGcRequest) -> ClientResult<()> {
         self.inner
-            .trigger_blocks_gc(current_context(), trigger)
+            .trigger_archives_gc(current_context(), req)
             .await
             .map_err(Into::into)
     }
 
-    pub async fn trigger_states_gc(&self, trigger: ManualGcTrigger) -> ClientResult<()> {
+    pub async fn trigger_blocks_gc(&self, req: TriggerGcRequest) -> ClientResult<()> {
         self.inner
-            .trigger_states_gc(current_context(), trigger)
+            .trigger_blocks_gc(current_context(), req)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn trigger_states_gc(&self, req: TriggerGcRequest) -> ClientResult<()> {
+        self.inner
+            .trigger_states_gc(current_context(), req)
             .await
             .map_err(Into::into)
     }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tl_proto::{TlRead, TlWrite};
-use tycho_util::tl;
+use tycho_util::{serde_helpers, tl};
 
 use crate::types::{Address, PeerId};
 use crate::util::check_peer_signature;
@@ -25,7 +25,7 @@ pub struct PeerInfo {
     /// Unix timestamp up to which the info is valid.
     pub expires_at: u32,
     /// A `ed25519` signature of the info.
-    #[serde(with = "serde_signature")]
+    #[serde(with = "serde_helpers::signature")]
     #[tl(signature, with = "tl::signature_owned")]
     pub signature: Box<[u8; 64]>,
 }
@@ -95,51 +95,6 @@ mod tl_address_list {
         }
 
         Ok(items.into_boxed_slice())
-    }
-}
-
-mod serde_signature {
-    use base64::engine::Engine as _;
-    use base64::prelude::BASE64_STANDARD;
-    use tycho_util::serde_helpers::{BorrowedStr, BytesVisitor};
-
-    use super::*;
-
-    pub fn serialize<S>(data: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        if serializer.is_human_readable() {
-            serializer.serialize_str(&BASE64_STANDARD.encode(data))
-        } else {
-            data.serialize(serializer)
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Box<[u8; 64]>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        if deserializer.is_human_readable() {
-            <BorrowedStr<'_> as Deserialize>::deserialize(deserializer).and_then(
-                |BorrowedStr(s)| {
-                    let mut buffer = [0u8; 66];
-                    match BASE64_STANDARD.decode_slice(s.as_ref(), &mut buffer) {
-                        Ok(64) => {
-                            let [data @ .., _, _] = buffer;
-                            Ok(Box::new(data))
-                        }
-                        _ => Err(Error::custom("Invalid signature")),
-                    }
-                },
-            )
-        } else {
-            deserializer
-                .deserialize_bytes(BytesVisitor::<64>)
-                .map(Box::new)
-        }
     }
 }
 
