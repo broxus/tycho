@@ -301,19 +301,6 @@ impl CollatorStdImpl {
                         )?;
 
                         collation_data.new_msgs_created += new_messages.len() as u64;
-                        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-                            (new_messages.len() as u64)
-                                .saturating_mul(
-                                    self.config.block_work_units_params.execute.serialize,
-                                )
-                                .saturating_div(
-                                    self.config
-                                        .block_work_units_params
-                                        .execute
-                                        .serialize_delimiter,
-                                ),
-                        );
-
                         for new_message in new_messages {
                             let MsgInfo::Int(int_msg_info) = new_message.info else {
                                 continue;
@@ -367,6 +354,20 @@ impl CollatorStdImpl {
             metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
                 .set(executed_groups_count as f64);
         }
+
+        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
+            (collation_data.execute_count_ext + collation_data.execute_count_ext).saturating_mul(
+                self.config
+                    .block_work_units_params
+                    .execute
+                    .serialize_int_ext,
+            ),
+        );
+
+        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
+            (collation_data.execute_count_new_int)
+                .saturating_mul(self.config.block_work_units_params.execute.serialize_new),
+        );
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             "wu_used_for_execute: {}",
@@ -675,11 +676,6 @@ impl CollatorStdImpl {
             .set(diff_time as f64 / 1000.0);
 
         tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "collation timings get next message update_internals_processed_upto={}, iterator_commit={}",
-            exec_manager.update_internals_processed_upto.as_micros(), exec_manager.iterator_commit.as_micros()
-        );
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, time_diff={}, \

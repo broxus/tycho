@@ -112,7 +112,7 @@ impl Default for MsgGroupsWUParams {
             const_part: 10000, // 10000 mcs
             read_ext_msgs: 3,  // 3 mcs
             read_int_msgs: 3,  // 3 mcs
-            read_new_msgs: 20, // 20 mcs
+            read_new_msgs: 75, // 75 mcs
         }
     }
 }
@@ -123,8 +123,8 @@ pub struct ExecuteWUParams {
     pub prepare: u64,
     pub execute: u64,
     pub execute_delimiter: u64,
-    pub serialize: u64,
-    pub serialize_delimiter: u64,
+    pub serialize_int_ext: u64,
+    pub serialize_new: u64,
     pub subgroup_size: u32,
 }
 
@@ -134,8 +134,8 @@ impl Default for ExecuteWUParams {
             prepare: 80,                // 80 mcs
             execute: 17,                // 0.000017 mcs
             execute_delimiter: 1000000, // 1 pcs
-            serialize: 3600,            // 3600 ns
-            serialize_delimiter: 1000,  // 1 ns
+            serialize_int_ext: 7,       // 7 mcs
+            serialize_new: 14,          // 14 mcs
             subgroup_size: 16,
         }
     }
