@@ -441,7 +441,7 @@ impl StarterInner {
 
     async fn download_zerostates(&self) -> Result<(BlockHandle, ShardStateStuff)> {
         let zerostate_id = self.zerostate.as_block_id();
-        tracing::info!(zerostate_id = ?zerostate_id, "download zerostates");
+        tracing::info!(zerostate_id = %zerostate_id, "download zerostates");
 
         let (handle, state) = self
             .download_shard_state(&zerostate_id, &zerostate_id)

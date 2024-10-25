@@ -35,7 +35,7 @@ fn main() -> ExitCode {
     match App::parse().run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("Error: {err}");
+            eprintln!("Error: {err:?}");
             ExitCode::FAILURE
         }
     }

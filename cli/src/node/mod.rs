@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
@@ -40,7 +40,6 @@ use tycho_network::{
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{NodeSyncState, Storage};
-use tycho_util::cli::error::ResultExt;
 use tycho_util::futures::JoinTask;
 
 pub use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -112,7 +111,7 @@ impl Node {
             .with_private_key(keys.secret.0)
             .with_remote_addr(public_addr)
             .build(local_addr, router)
-            .wrap_err("failed to build node network")?;
+            .context("failed to build node network")?;
 
         dht_tasks.spawn(&network);
         overlay_tasks.spawn(&network);
@@ -143,7 +142,7 @@ impl Node {
             .with_rpc_storage(node_config.rpc.is_some())
             .build()
             .await
-            .wrap_err("failed to create storage")?;
+            .context("failed to create storage")?;
         tracing::info!(
             root_dir = %storage.root().path().display(),
             "initialized storage"
@@ -294,7 +293,7 @@ impl Node {
             let endpoint = rpc_state
                 .bind_endpoint()
                 .await
-                .wrap_err("failed to setup RPC server endpoint")?;
+                .context("failed to setup RPC server endpoint")?;
 
             tracing::info!(listen_addr = %config.listen_addr, "RPC server started");
             tokio::task::spawn(async move {
@@ -388,7 +387,7 @@ impl Node {
 
             let endpoint = ControlEndpoint::bind(&self.control_config, server, self.control_socket)
                 .await
-                .wrap_err("failed to setup control server endpoint")?;
+                .context("failed to setup control server endpoint")?;
 
             tracing::info!(socket_path = %endpoint.socket_path().display(), "control server started");
 

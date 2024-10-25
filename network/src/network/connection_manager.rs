@@ -514,7 +514,7 @@ impl ConnectionManager {
             Err(e) => {
                 tracing::debug!(
                     local_id = %self.endpoint.peer_id(),
-                    peer_id = ?res.target_peer_id,
+                    peer_id = %res.target_peer_id,
                     remote_addr = %res.target_address,
                     "connection failed: {e}"
                 );

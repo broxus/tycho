@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tycho_collator::internal_queue::queue::QueueConfig;
 use tycho_collator::types::CollatorConfig;
@@ -19,7 +20,7 @@ use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig}
 use tycho_rpc::RpcConfig;
 use tycho_storage::StorageConfig;
 use tycho_util::cli::config::ThreadPoolConfig;
-use tycho_util::cli::logger::LoggerConfig;
+use tycho_util::cli::logger::{LoggerConfig, LoggerOutput};
 
 #[derive(Debug, Deserialize)]
 pub struct NodeKeys {
@@ -33,6 +34,15 @@ impl NodeKeys {
 
     pub fn as_secret(&self) -> ed25519::SecretKey {
         ed25519::SecretKey::from_bytes(self.secret.0)
+    }
+}
+
+impl rand::distributions::Distribution<NodeKeys> for rand::distributions::Standard {
+    #[inline]
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> NodeKeys {
+        NodeKeys {
+            secret: rand::distributions::Standard.sample(rng),
+        }
     }
 }
 
@@ -132,6 +142,20 @@ impl NodeConfig {
         let data = serde_json::to_string_pretty(self)?;
         std::fs::write(path, data)?;
         Ok(())
+    }
+
+    pub fn with_relative_paths<P: AsRef<Path>>(mut self, base_dir: P) -> Self {
+        let base_dir = base_dir.as_ref();
+
+        self.storage.root_dir = base_dir.join(self.storage.root_dir);
+        self.profiling.profiling_dir = base_dir.join(self.profiling.profiling_dir);
+        for output in &mut self.logger.outputs {
+            if let LoggerOutput::File(output) = output {
+                output.dir = base_dir.join(&output.dir);
+            }
+        }
+
+        self
     }
 }
 
