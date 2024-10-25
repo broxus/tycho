@@ -11,4 +11,6 @@ pub mod test_utils;
 
 pub mod queue_adapter;
 mod tracing_targets;
-pub mod utils;
+mod utils;
+
+pub use self::utils::thread_pool;

@@ -33,6 +33,7 @@ use crate::types::{
 #[cfg(test)]
 #[path = "tests/execution_manager_tests.rs"]
 pub(super) mod tests;
+use crate::utils::thread_pool;
 
 /// Execution manager
 pub(super) struct ExecutionManager {
@@ -635,6 +636,7 @@ impl MessagesExecutor {
 
         rayon_run_fifo(move || {
             let mut ext_msgs_skipped = 0;
+        rayon_run_fifo(thread_pool::get(), move || {
             let timer = std::time::Instant::now();
 
             let mut transactions = Vec::with_capacity(msgs.len());
@@ -675,7 +677,7 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let (account_stuff, executed) = rayon_run_fifo(move || {
+        let (account_stuff, executed) = rayon_run_fifo(thread_pool::get(), move || {
             let executed = execute_ordinary_transaction_impl(
                 &mut account_stuff,
                 in_message,
@@ -706,7 +708,7 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let (account_stuff, executed) = rayon_run_fifo(move || {
+        let (account_stuff, executed) = rayon_run_fifo(thread_pool::get(), move || {
             let executed = execute_ticktock_transaction(
                 &mut account_stuff,
                 tick_tock,

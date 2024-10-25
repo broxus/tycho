@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::metrics::HistogramGuard;
 
 macro_rules! rayon_run_impl {
-    ($func_name:ident, $spawn_method:ident, $prefix:expr) => {
-        pub async fn $func_name<T: 'static + Send>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    ($func_name:ident, $spawn_method:ident, $prefix:expr $(, $thread_pool:ident)?) => {
+        pub async fn $func_name<T: 'static + Send>($($thread_pool: &rayon::ThreadPool,)? f: impl FnOnce() -> T + Send + 'static) -> T {
             static COUNTER: AtomicU32 = AtomicU32::new(0);
 
             let guard = Guard { finished: false };
@@ -12,7 +12,7 @@ macro_rules! rayon_run_impl {
             let (send, recv) = tokio::sync::oneshot::channel();
             let wait_time_histogram = HistogramGuard::begin(concat!($prefix, "_queue_time"));
 
-            rayon::$spawn_method(move || {
+            rayon_run_impl!(@spawn $spawn_method, $($thread_pool,)? || {
                 drop(wait_time_histogram);
 
                 let _task_time = HistogramGuard::begin(concat!($prefix, "_task_time"));
@@ -31,10 +31,17 @@ macro_rules! rayon_run_impl {
             res
         }
     };
+
+    (@spawn $method:ident, $thread_pool:ident, || $($rest:tt)*) => {
+        $thread_pool.$method(move || $($rest)*)
+    };
+    (@spawn $method:ident, || $($rest:tt)*) => {
+        rayon::$method(move || $($rest)*)
+    };
 }
 
 rayon_run_impl!(rayon_run, spawn, "tycho_rayon_lifo");
-rayon_run_impl!(rayon_run_fifo, spawn_fifo, "tycho_rayon_fifo");
+rayon_run_impl!(rayon_run_fifo, spawn_fifo, "tycho_rayon_fifo", thread_pool);
 
 struct Guard {
     finished: bool,
