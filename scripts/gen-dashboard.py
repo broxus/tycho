@@ -960,10 +960,6 @@ def block_metrics() -> RowPanel:
             "Blocks rate",
             labels_selectors=['workchain=~"$workchain"'],
         ),
-        create_gauge_panel(
-            "tycho_do_collate_shard_blocks_count",
-            "Shard Blocks count before import next anchor",
-        ),
         create_counter_panel(
             "tycho_do_collate_blocks_with_limits_reached_count",
             "Number of blocks with limits reached",
@@ -978,6 +974,14 @@ def block_metrics() -> RowPanel:
             "tycho_do_collate_block_seqno",
             "Block seqno",
             labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_shard_blocks_count",
+            "Number of Shard Blocks before import next anchor",
+        ),        
+        create_gauge_panel(
+            "tycho_do_collate_import_next_anchor_count",
+            "Number of imported anchors per tick",
         ),
     ]
     return create_row("collator: Block Metrics", metrics)

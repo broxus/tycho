@@ -1343,6 +1343,7 @@ impl CollatorStdImpl {
             };
 
             let mut last_anchor;
+            let mut import_next_anchor_count = 0;
             loop {
                 let (next_anchor, next_anchor_has_externals) = Self::import_next_anchor(
                     self.shard_id,
@@ -1354,6 +1355,7 @@ impl CollatorStdImpl {
                 .map_err(|e| {
                     anyhow::anyhow!("next_block_info: {}, error: {}", self.next_block_info, e)
                 })?;
+                import_next_anchor_count += 1;
 
                 // time elapsed from prev anchor
                 let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
@@ -1387,6 +1389,10 @@ impl CollatorStdImpl {
                     .wu_used_from_last_anchor
                     .saturating_sub(self.config.gas_used_to_import_next_anchor);
             }
+
+            metrics::gauge!("tycho_do_collate_import_next_anchor_count")
+                .set(import_next_anchor_count);
+            self.shards_count = 0;
 
             last_anchor
         } else {

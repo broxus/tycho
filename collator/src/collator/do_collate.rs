@@ -396,8 +396,8 @@ impl CollatorStdImpl {
         );
 
         let executeed_groups_vm_only = executed_groups_wu_total;
-        metrics::histogram!("tycho_do_collate_execute_txs_to_wu", &labels)
-            .record(process_txs_total_elapsed.as_micros() as f64 / executeed_groups_vm_only as f64);
+        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
+            .set(execute_msgs_total_elapsed.as_micros() as f64 / executeed_groups_vm_only as f64);
 
         let process_txs_wu = (collation_data.int_enqueue_count)
             .saturating_mul(
@@ -413,10 +413,18 @@ impl CollatorStdImpl {
                         .execute
                         .serialize_dequeue,
                 ),
+            )
+            .saturating_add(
+                (collation_data.inserted_new_msgs_to_iterator).saturating_mul(
+                    self.config
+                        .block_work_units_params
+                        .execute
+                        .insert_new_msgs_to_iterator,
+                ),
             );
 
-        metrics::histogram!("tycho_do_collate_process_txs_to_wu", &labels)
-            .record(process_txs_total_elapsed.as_micros() as f64 / process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
+            .set(process_txs_total_elapsed.as_micros() as f64 / process_txs_wu as f64);
 
         executed_groups_wu_total = executed_groups_wu_total.saturating_add(process_txs_wu);
 

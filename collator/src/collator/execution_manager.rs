@@ -562,8 +562,7 @@ impl MessagesExecutor {
             let executed = executed_msgs_result?;
             ext_msgs_skipped += executed.ext_msgs_skipped;
 
-            let mut current_wu =
-                (executed.transactions.len() as u64).saturating_mul(self.execute_params.prepare);
+            let mut current_wu = 0u64;
 
             max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
             total_exec_time += executed.exec_time;
@@ -587,10 +586,14 @@ impl MessagesExecutor {
                 self.min_next_lt =
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
-                current_wu += executor_output
-                    .gas_used
-                    .saturating_mul(self.execute_params.execute)
-                    .saturating_div(self.execute_params.execute_delimiter);
+                current_wu = current_wu.saturating_add(self.execute_params.prepare);
+
+                current_wu = current_wu.saturating_add(
+                    executor_output
+                        .gas_used
+                        .saturating_mul(self.execute_params.execute)
+                        .saturating_div(self.execute_params.execute_delimiter),
+                );
 
                 items.push(ExecutedTickItem {
                     in_message: tx.in_message,

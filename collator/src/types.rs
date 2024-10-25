@@ -126,18 +126,20 @@ pub struct ExecuteWUParams {
     pub execute_delimiter: u64,
     pub serialize_enqueue: u64,
     pub serialize_dequeue: u64,
+    pub insert_new_msgs_to_iterator: u64,
     pub subgroup_size: u32,
 }
 
 impl Default for ExecuteWUParams {
     fn default() -> Self {
         Self {
-            prepare: 114,             // 114 mcs
-            execute: 12,              // 0.0012 mcs
-            execute_err: 6,           // 6 mcs
-            execute_delimiter: 10000, // 0.1 ns
-            serialize_enqueue: 5,     // 5 mcs
-            serialize_dequeue: 6,     // 6 mcs
+            prepare: 114,                   // 114 mcs
+            execute: 25,                    // 0.0025 mcs
+            execute_err: 6,                 // 6 mcs
+            execute_delimiter: 10000,       // 0.1 ns
+            serialize_enqueue: 3,           // 3 mcs
+            serialize_dequeue: 3,           // 3 mcs
+            insert_new_msgs_to_iterator: 3, // 3 mcs
             subgroup_size: 16,
         }
     }
