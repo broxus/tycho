@@ -3,15 +3,13 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracing::Subscriber;
 use tracing_appender::rolling::Rotation;
 use tracing_subscriber::filter::Directive;
 use tracing_subscriber::{fmt, Layer};
-
-use crate::cli::error::ResultExt;
 
 pub struct LoggerTargets {
     directives: Vec<Directive>,
@@ -184,7 +182,7 @@ pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Re
                     .with_default_directive(tracing::Level::INFO.into())
                     .from_env_lossy(),
                 Some(path) => LoggerTargets::load_from(path)
-                    .wrap_err("failed to load logger config")?
+                    .context("failed to load logger config")?
                     .build_subscriber(),
             })
         }

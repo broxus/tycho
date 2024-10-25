@@ -1,13 +1,12 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
-use tycho_util::cli::error::ResultExt;
 use tycho_util::FastHashMap;
 
 use crate::util::{compute_storage_used, print_json};
@@ -81,23 +80,23 @@ fn generate_zerostate(
 
     config
         .prepare_config_params(now)
-        .wrap_err("validator config is invalid")?;
+        .context("validator config is invalid")?;
 
     config
         .add_required_accounts()
-        .wrap_err("failed to add required accounts")?;
+        .context("failed to add required accounts")?;
 
     let state = config
         .build_masterchain_state(now)
-        .wrap_err("failed to build masterchain zerostate")?;
+        .context("failed to build masterchain zerostate")?;
 
-    let boc = CellBuilder::build_from(&state).wrap_err("failed to serialize zerostate")?;
+    let boc = CellBuilder::build_from(&state).context("failed to serialize zerostate")?;
 
     let root_hash = *boc.repr_hash();
     let data = Boc::encode(&boc);
     let file_hash = Boc::file_hash_blake(&data);
 
-    std::fs::write(output_path, data).wrap_err("failed to write masterchain zerostate")?;
+    std::fs::write(output_path, data).context("failed to write masterchain zerostate")?;
 
     let hashes = serde_json::json!({
         "root_hash": root_hash,
@@ -321,7 +320,7 @@ impl ZerostateConfig {
                 state.total_balance = state
                     .total_balance
                     .checked_add(&balance)
-                    .wrap_err("failed ot compute total balance")?;
+                    .context("failed ot compute total balance")?;
 
                 accounts.set(
                     account,

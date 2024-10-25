@@ -58,17 +58,16 @@ impl GcSubscriber {
         let (states_gc_trigger, states_gc_rx) = watch::channel(None::<ManualGcTrigger>);
         let states_gc = tokio::spawn(Self::states_gc(tick_rx, states_gc_rx, storage.clone()));
 
-        let last_know_master_block_seqno = storage.node_state().load_last_mc_block_id();
-        if let Some(last_know_master_block_seqno) = last_know_master_block_seqno {
+        let last_known_mc_block = storage.node_state().load_last_mc_block_id();
+        if let Some(mc_block_id) = last_known_mc_block {
             tracing::info!(
-                ?last_know_master_block_seqno,
+                %mc_block_id,
                 "starting GC subscriber with the last known master block"
             );
-            metrics::gauge!("tycho_core_last_mc_block_seqno")
-                .set(last_know_master_block_seqno.seqno as f64);
+            metrics::gauge!("tycho_core_last_mc_block_seqno").set(mc_block_id.seqno as f64);
             tick_tx.send_replace(Some(Tick {
                 last_key_block_seqno,
-                mc_block_id: last_know_master_block_seqno,
+                mc_block_id,
             }));
         }
 
@@ -139,6 +138,7 @@ impl GcSubscriber {
                 .unwrap_or_default()
         };
 
+        let mut prev_pss_seqno = 0;
         'outer: loop {
             // Wait for a target seqno
             let target_seqno = 'seqno: {
@@ -147,10 +147,13 @@ impl GcSubscriber {
                         let mut new_state_found =
                             pin!(persistent_states.oldest_known_handle_changed());
 
-                        let Some(pss_handle) = persistent_states.load_oldest_known_handle() else {
-                            // Wait for the new state
-                            new_state_found.await;
-                            continue;
+                        let pss_handle = match persistent_states.load_oldest_known_handle() {
+                            Some(handle) if handle.id().seqno > prev_pss_seqno => handle,
+                            _ => {
+                                // Wait for the new state
+                                new_state_found.await;
+                                continue;
+                            }
                         };
 
                         // Wait until it's safe to remove the archives.
@@ -164,7 +167,10 @@ impl GcSubscriber {
 
                 tokio::select! {
                     // Wait until we can remove archives before that state
-                    seqno = wait_for_state_fut => break 'seqno seqno,
+                    seqno = wait_for_state_fut => {
+                        prev_pss_seqno = seqno;
+                        break 'seqno seqno
+                    },
                     // Or handle the manual trigger
                     trigger = manual_rx.changed() => {
                         if trigger.is_err() {

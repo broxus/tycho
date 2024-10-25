@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tycho_core::global_config::GlobalConfig;
-use tycho_util::cli::error::ResultExt;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::{resolve_public_ip, signal};
 
@@ -26,7 +25,6 @@ impl Cmd {
     pub fn run(self, args: BaseArgs) -> Result<()> {
         match self.cmd {
             SubCmd::Run(cmd) => cmd.run(args),
-            SubCmd::InitConfig(cmd) => cmd.run(),
             SubCmd::Control(cmd) => cmd.run(args),
         }
     }
@@ -35,32 +33,8 @@ impl Cmd {
 #[derive(Subcommand)]
 enum SubCmd {
     Run(CmdRun),
-    InitConfig(CmdInitConfig),
     #[clap(flatten)]
     Control(CmdControl),
-}
-
-/// Generate a default node config.
-#[derive(Parser)]
-struct CmdInitConfig {
-    /// path to the output file
-    output: PathBuf,
-
-    /// overwrite the existing config
-    #[clap(short, long)]
-    force: bool,
-}
-
-impl CmdInitConfig {
-    fn run(self) -> Result<()> {
-        if self.output.exists() && !self.force {
-            anyhow::bail!("config file already exists, use --force to overwrite");
-        }
-
-        NodeConfig::default()
-            .save_to_file(self.output)
-            .wrap_err("failed to save node config")
-    }
 }
 
 /// Run a Tycho node.
@@ -104,7 +78,8 @@ struct CmdRun {
 impl CmdRun {
     fn run(self, args: BaseArgs) -> Result<()> {
         let node_config = NodeConfig::from_file(args.node_config_path(self.config.as_ref()))
-            .wrap_err("failed to load node config")?;
+            .context("failed to load node config")?
+            .with_relative_paths(&args.home);
 
         rayon::ThreadPoolBuilder::new()
             .stack_size(8 * 1024 * 1024)
@@ -144,10 +119,10 @@ impl CmdRun {
         let node = {
             let global_config =
                 GlobalConfig::from_file(args.global_config_path(self.global_config.as_ref()))
-                    .wrap_err("failed to load global config")?;
+                    .context("failed to load global config")?;
 
             let keys = NodeKeys::from_file(args.node_keys_path(self.keys.as_ref()))
-                .wrap_err("failed to load node keys")?;
+                .context("failed to load node keys")?;
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
@@ -169,7 +144,7 @@ impl CmdRun {
         let init_block_id = node
             .boot(self.import_zerostate)
             .await
-            .wrap_err("failed to init node")?;
+            .context("failed to init node")?;
 
         tracing::info!(%init_block_id, "node initialized");
 
@@ -206,7 +181,7 @@ fn init_metrics(config: &MetricsConfig) -> Result<()> {
         )?
         .with_http_listener(config.listen_addr)
         .install()
-        .wrap_err("failed to initialize a metrics exporter")?;
+        .context("failed to initialize a metrics exporter")?;
 
     #[cfg(feature = "jemalloc")]
     spawn_allocator_metrics_loop();
