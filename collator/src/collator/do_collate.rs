@@ -465,6 +465,7 @@ impl CollatorStdImpl {
 
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
+            let finalize_block_gas_params = self.config.finalize_block_gas_params;
             move || {
                 Self::finalize_block(
                     collation_data,
@@ -472,6 +473,7 @@ impl CollatorStdImpl {
                     executor,
                     working_state,
                     queue_diff,
+                    finalize_block_gas_params,
                 )
             }
         })

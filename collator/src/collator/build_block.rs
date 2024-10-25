@@ -20,7 +20,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, McData};
+use crate::types::{BlockCandidate, CollationSessionInfo, FinalizeBlockGasParams, McData};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -38,6 +38,7 @@ impl CollatorStdImpl {
         executor: MessagesExecutor,
         working_state: Box<WorkingState>,
         queue_diff: SerializedQueueDiff,
+        finalize_block_gas_params: FinalizeBlockGasParams,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -208,9 +209,29 @@ impl CollatorStdImpl {
             );
 
             // compute total gas used from last anchor
-            let gas_used_from_last_anchor = working_state
+            let mut gas_used_from_last_anchor = working_state
                 .gas_used_from_last_anchor
                 .saturating_add(collation_data.block_limit.gas_used as _);
+
+            // add gas usage for in, out messages building, accounts storing and merkle calculation
+            let FinalizeBlockGasParams {
+                build_account,
+                in_message,
+                out_message,
+                merkle_calc_account,
+            } = finalize_block_gas_params;
+
+            let accounts_count = processed_accounts.shard_accounts.keys().count() as u64;
+            let build = std::cmp::max(
+                std::cmp::max(
+                    build_account * accounts_count,
+                    in_message * in_msgs.keys().count() as u64,
+                ),
+                out_message * out_msgs.keys().count() as u64,
+            );
+            gas_used_from_last_anchor = gas_used_from_last_anchor
+                .saturating_add(build)
+                .saturating_add(merkle_calc_account * accounts_count);
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {

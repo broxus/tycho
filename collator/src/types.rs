@@ -26,6 +26,7 @@ pub struct CollationConfig {
     pub gas_used_to_import_next_anchor: u64,
 
     pub msgs_exec_params: MsgsExecutionParams,
+    pub finalize_block_gas_params: FinalizeBlockGasParams,
 }
 
 impl Default for CollationConfig {
@@ -41,6 +42,7 @@ impl Default for CollationConfig {
             gas_used_to_import_next_anchor: 250_000_000u64,
 
             msgs_exec_params: MsgsExecutionParams::default(),
+            finalize_block_gas_params: FinalizeBlockGasParams::default(),
         }
     }
 }
@@ -83,6 +85,26 @@ impl Default for MsgsExecutionParams {
             buffer_limit: 20000,
             group_limit: 100,
             group_vert_size: 10,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct FinalizeBlockGasParams {
+    pub build_account: u64,
+    pub in_message: u64,
+    pub out_message: u64,
+    pub merkle_calc_account: u64,
+}
+
+impl Default for FinalizeBlockGasParams {
+    fn default() -> Self {
+        Self {
+            build_account: 240000,
+            in_message: 100000,
+            out_message: 100000,
+            merkle_calc_account: 70000,
         }
     }
 }
