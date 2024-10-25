@@ -688,6 +688,11 @@ impl CollatorStdImpl {
 
         let total_elapsed = total_collation_histogram.finish();
 
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_total", &labels).set(
+            total_elapsed.as_micros() as f64
+                / (executed_groups_wu_total + finalize_wu_total + prepare_groups_wu_total) as f64,
+        );
+
         // time elapsed from prev block
         let elapsed_from_prev_block = self.timer.elapsed();
         let collation_mngmnt_overhead = elapsed_from_prev_block - total_elapsed;
