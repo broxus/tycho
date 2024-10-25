@@ -2,10 +2,11 @@ use std::future::Future;
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::Bytes;
+use bytesize::ByteSize;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use scopeguard::ScopeGuard;
@@ -455,8 +456,8 @@ impl BlockchainRpcClient {
         tracing::debug!(
             peer_id = %pending_archive.neighbour.peer_id(),
             archive_id = pending_archive.id,
-            archive_size = pending_archive.size.get(),
-            archuve_chunk_size = pending_archive.chunk_size.get(),
+            archive_size = %ByteSize(pending_archive.size.get()),
+            archuve_chunk_size = %ByteSize(pending_archive.chunk_size.get() as _),
             "found archive",
         );
         Ok(pending_archive)
@@ -470,6 +471,8 @@ impl BlockchainRpcClient {
     where
         W: Write + Send + 'static,
     {
+        use futures_util::FutureExt;
+
         tracing::debug!("started");
         scopeguard::defer! {
             tracing::debug!("finished");
@@ -484,12 +487,22 @@ impl BlockchainRpcClient {
                 let neighbour = archive.neighbour.clone();
                 let overlay_client = self.overlay_client().clone();
 
+                let started_at = Instant::now();
+
                 tracing::debug!(offset, "downloading archive chunk");
                 download_with_retries(
                     Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
                     overlay_client,
                     neighbour,
                 )
+                .map(move |res| {
+                    tracing::info!(
+                        offset,
+                        elapsed = %humantime::format_duration(started_at.elapsed()),
+                        "downloaded archive chunk",
+                    );
+                    res
+                })
             },
             |(output, verifier), chunk| {
                 verifier.write_verify(chunk)?;
