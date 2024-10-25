@@ -101,10 +101,10 @@ pub struct FinalizeBlockGasParams {
 impl Default for FinalizeBlockGasParams {
     fn default() -> Self {
         Self {
-            build_account: 240000,
-            in_message: 100000,
-            out_message: 100000,
-            merkle_calc_account: 70000,
+            build_account: 500,
+            in_message: 170,
+            out_message: 150,
+            merkle_calc_account: 400,
         }
     }
 }

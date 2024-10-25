@@ -221,17 +221,17 @@ impl CollatorStdImpl {
                 merkle_calc_account,
             } = finalize_block_gas_params;
 
-            let accounts_count = processed_accounts.shard_accounts.keys().count() as u64;
+            let accounts_count = processed_accounts.accounts_len as u64;
             let build = std::cmp::max(
                 std::cmp::max(
-                    build_account * accounts_count,
-                    in_message * in_msgs.keys().count() as u64,
+                    build_account.saturating_mul(accounts_count),
+                    in_message.saturating_mul(collation_data.in_msgs.len() as u64),
                 ),
-                out_message * out_msgs.keys().count() as u64,
+                out_message.saturating_mul(collation_data.out_msgs.len() as u64),
             );
             gas_used_from_last_anchor = gas_used_from_last_anchor
                 .saturating_add(build)
-                .saturating_add(merkle_calc_account * accounts_count);
+                .saturating_add(merkle_calc_account.saturating_mul(accounts_count));
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
@@ -700,6 +700,8 @@ impl CollatorStdImpl {
             account_blocks.insert(updated_account.account_addr, account_block);
         }
 
+        let accounts_len = account_blocks.len();
+
         // TODO: Somehow consume accounts inside an iterator
         let account_blocks = RelaxedAugDict::try_from_sorted_iter_any(
             account_blocks
@@ -711,6 +713,7 @@ impl CollatorStdImpl {
             account_blocks: account_blocks.build()?,
             shard_accounts: shard_accounts.build()?,
             new_config_params,
+            accounts_len,
         })
     }
 
@@ -806,6 +809,7 @@ struct ProcessedAccounts {
     account_blocks: AccountBlocks,
     shard_accounts: ShardAccounts,
     new_config_params: Option<BlockchainConfigParams>,
+    accounts_len: usize,
 }
 
 fn create_merkle_update(
