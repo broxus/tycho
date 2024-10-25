@@ -224,6 +224,9 @@ impl CollatorStdImpl {
                 in_message,
                 out_message,
                 merkle_calc_account,
+                serialize_account,
+                serialize_in_message,
+                serialize_out_message,
             } = finalize_block_gas_params;
 
             let accounts_count = processed_accounts.accounts_len as u64;
@@ -238,7 +241,10 @@ impl CollatorStdImpl {
             );
             gas_used_from_last_anchor = gas_used_from_last_anchor
                 .saturating_add(build)
-                .saturating_add(merkle_calc_account.saturating_mul(accounts_count));
+                .saturating_add(merkle_calc_account.saturating_mul(accounts_count))
+                .saturating_add(serialize_account.saturating_mul(accounts_count))
+                .saturating_add(serialize_in_message.saturating_mul(in_msgs_len))
+                .saturating_add(serialize_out_message.saturating_mul(out_msgs_len));
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "gas_used_from_last_anchor with finalize metrics: {:?}  accounts_count: {} in_msgs_len: {} out_msgs_len: {} ",

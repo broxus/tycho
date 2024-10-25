@@ -96,15 +96,21 @@ pub struct FinalizeBlockGasParams {
     pub in_message: u64,
     pub out_message: u64,
     pub merkle_calc_account: u64,
+    pub serialize_account: u64,
+    pub serialize_in_message: u64,
+    pub serialize_out_message: u64,
 }
 
 impl Default for FinalizeBlockGasParams {
     fn default() -> Self {
         Self {
-            build_account: 500,
+            build_account: 750,
             in_message: 170,
             out_message: 150,
-            merkle_calc_account: 400,
+            merkle_calc_account: 700,
+            serialize_account: 75,
+            serialize_in_message: 17,
+            serialize_out_message: 15,
         }
     }
 }
