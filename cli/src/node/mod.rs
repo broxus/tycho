@@ -16,7 +16,7 @@ use tycho_collator::internal_queue::state::persistent_state::PersistentStateImpl
 use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
-use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
+use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
@@ -479,15 +479,6 @@ impl Node {
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
-        // drop uncommitted queue state on recovery reset
-        let mempool_start_round = self
-            .mempool_config_override
-            .as_ref()
-            .map(|conf| conf.start_round);
-        if matches!(mempool_start_round, Some(round_id) if round_id > 0) {
-            message_queue_adapter.clear_session_state()?;
-        }
-
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
                 network: self.dht_client.network().clone(),
@@ -514,7 +505,7 @@ impl Node {
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
-            mempool_start_round,
+            self.mempool_config_override.clone(),
             last_mc_block_seqno,
             #[cfg(test)]
             vec![],

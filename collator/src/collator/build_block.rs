@@ -457,7 +457,7 @@ impl CollatorStdImpl {
         // 1. update config params and detect key block
         let prev_state_extra = prev_state.state_extra()?;
         let prev_config = &prev_state_extra.config;
-        let (config, is_key_block) = if let Some(new_config) = config_params {
+        let (config, mut is_key_block) = if let Some(new_config) = config_params {
             if !new_config.validate_params(true, None)? {
                 bail!(
                     "configuration smart contract {} contains an invalid configuration in its data",
@@ -497,7 +497,19 @@ impl CollatorStdImpl {
 
         // 5. update validator_info and consensus_info
         let mut consensus_info = prev_state_extra.consensus_info;
-        // TODO: update genesis info from the mempool global config
+
+        // update genesis round and time from the mempool global config if present and higher
+        if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
+            if mp_cfg_override.start_round > consensus_info.genesis_round
+                && mp_cfg_override.genesis_time_millis > consensus_info.genesis_millis
+            {
+                consensus_info.genesis_round = mp_cfg_override.start_round;
+                consensus_info.genesis_millis = mp_cfg_override.genesis_time_millis;
+
+                is_key_block = true;
+            }
+        }
+
         let max_consensus_lag = config
             .params
             .get_consensus_config()?

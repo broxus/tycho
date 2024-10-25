@@ -31,7 +31,7 @@ scopeguard = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
-thiserror = { workspace = true}
+thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
@@ -44,6 +44,7 @@ weedb = { workspace = true }
 # local deps
 tycho-block-util = { workspace = true }
 tycho-consensus = { workspace = true }
+tycho-core = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }

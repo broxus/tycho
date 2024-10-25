@@ -14,6 +14,7 @@ use everscale_types::models::{
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
+use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
@@ -205,9 +206,13 @@ pub(super) struct BlockCollationDataBuilder {
     pub created_by: HashBytes,
     pub global_version: GlobalVersion,
     pub top_shard_blocks_ids: Vec<BlockId>,
+
+    /// Mempool config override for a new genesis
+    pub mempool_config_override: Option<MempoolGlobalConfig>,
 }
 
 impl BlockCollationDataBuilder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         block_id_short: BlockIdShort,
         rand_seed: HashBytes,
@@ -216,6 +221,7 @@ impl BlockCollationDataBuilder {
         processed_upto: ProcessedUptoInfoStuff,
         created_by: HashBytes,
         global_version: GlobalVersion,
+        mempool_config_override: Option<MempoolGlobalConfig>,
     ) -> Self {
         let gen_utime = (next_chain_time / 1000) as u32;
         let gen_utime_ms = (next_chain_time % 1000) as u16;
@@ -235,6 +241,7 @@ impl BlockCollationDataBuilder {
             global_version,
             shards: None,
             top_shard_blocks_ids: vec![],
+            mempool_config_override,
         }
     }
     pub fn set_shards(&mut self, shards: FastHashMap<ShardIdent, Box<ShardDescription>>) {
@@ -318,6 +325,7 @@ impl BlockCollationDataBuilder {
             out_msgs: Default::default(),
             mint_msg: None,
             recover_create_msg: None,
+            mempool_config_override: self.mempool_config_override,
             #[cfg(feature = "block-creator-stats")]
             block_create_count: self.block_create_count,
         }
@@ -383,6 +391,9 @@ pub(super) struct BlockCollationData {
     pub created_by: HashBytes,
 
     pub global_version: GlobalVersion,
+
+    /// Mempool config override for a new genesis
+    pub mempool_config_override: Option<MempoolGlobalConfig>,
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
