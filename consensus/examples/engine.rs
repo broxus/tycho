@@ -179,9 +179,10 @@ fn make_network(
                             InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             committed_tx.clone(),
                             &top_known_anchor,
-                            &all_peers,
                             &mempool_config,
                         );
+                        engine.set_start_peers(&all_peers);
+
                         started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(
