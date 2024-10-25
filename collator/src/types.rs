@@ -162,14 +162,14 @@ pub struct FinalizeBlockWUParams {
 impl Default for FinalizeBlockWUParams {
     fn default() -> Self {
         Self {
-            build_transactions: 3,   // 3 mcs
+            build_transactions: 1,   // 1 mcs
             build_accounts: 1,       // 1 mcs
             build_in_msg: 1,         // 1 mcs
             build_out_msg: 1,        // 1 mcs
             serialize: 1,            // 1 mcs
-            serialize_msg: 3,        // 3 mcs
+            serialize_msg: 2,        // 2 mcs
             state_update_min: 15000, // 15000 mcs
-            state_update_msg: 3,     // 3 mcs
+            state_update_msg: 2,     // 2 mcs
             serialize_min: 15000,    // 15000 mcs
         }
     }
