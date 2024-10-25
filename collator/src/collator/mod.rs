@@ -1321,11 +1321,14 @@ impl CollatorStdImpl {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "there are no pending internals or externals, will import next anchor",
                 );
+                working_state.gas_used_from_last_anchor = 0;
             } else if force_import_anchor_by_used_gas {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "gas used from last anchor {} reached limit {} on length {}, will import next anchor",
                     gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
+                working_state.gas_used_from_last_anchor = gas_used_from_last_anchor
+                    .saturating_sub(self.config.gas_used_to_import_next_anchor);
             }
 
             let import_anchor_result = Self::import_next_anchor(
@@ -1354,8 +1357,6 @@ impl CollatorStdImpl {
             self.anchor_timer = std::time::Instant::now();
             metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
                 .record(elapsed_from_prev_anchor);
-
-            working_state.gas_used_from_last_anchor = 0;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "gas_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_gas - {}, ",
