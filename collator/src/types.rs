@@ -108,9 +108,9 @@ pub struct MsgGroupsWUParams {
 impl Default for MsgGroupsWUParams {
     fn default() -> Self {
         Self {
-            const_part: 6000,  // 6000 mcs
-            read_ext_msgs: 20, // 20 mcs
-            read_int_msgs: 20, // 20 mcs
+            const_part: 10000, // 6000 mcs
+            read_ext_msgs: 3,  // 20 mcs
+            read_int_msgs: 3,  // 20 mcs
         }
     }
 }
@@ -118,17 +118,23 @@ impl Default for MsgGroupsWUParams {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
 pub struct ExecuteWUParams {
-    pub prepare: f64,
-    pub execute: f64,
-    pub serialize: f64,
+    pub prepare: u64,
+    pub execute: u64,
+    pub execute_delimiter: u64,
+    pub serialize: u64,
+    pub serialize_delimiter: u64,
+    pub subgroup_size: u32,
 }
 
 impl Default for ExecuteWUParams {
     fn default() -> Self {
         Self {
-            prepare: 200f64,   // 200 mcs
-            execute: 0.000017, // 0.000017 mcs
-            serialize: 3.6,    // 3.6 mcs
+            prepare: 80,               // 80 mcs
+            execute: 17,                // 0.000017 mcs
+            execute_delimiter: 1000000, // 1 pcs
+            serialize: 3600,            // 3600 ns
+            serialize_delimiter: 1000,  // 1 ns
+            subgroup_size: 16,
         }
     }
 }
@@ -137,16 +143,24 @@ impl Default for ExecuteWUParams {
 #[serde(default)]
 pub struct FinalizeBlockWUParams {
     pub build: u64,
+    pub build_in_msg: u64,
+    pub build_out_msg: u64,
     pub merkle_calc: u64,
+    pub state_update_msg: u64,
     pub serialize: u64,
+    pub serialize_msg: u64,
 }
 
 impl Default for FinalizeBlockWUParams {
     fn default() -> Self {
         Self {
-            build: 15000,       // 15 000 mcs
-            merkle_calc: 12000, // 12 000 mcs
-            serialize: 30,      // 30 mcs
+            build: 13000,        // 12 000 mcs
+            build_in_msg: 3,     // 3 mcs
+            build_out_msg: 2,    // 2 mcs
+            state_update_msg: 1, // 1 mcs
+            merkle_calc: 10000,  // 10 000 mcs
+            serialize: 25,       // 25 mcs
+            serialize_msg: 1,    // 1 mcs
         }
     }
 }

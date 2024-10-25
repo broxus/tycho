@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::*;
-use futures_util::stream::FuturesOrdered;
+use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use humantime::format_duration;
 use ton_executor::{
@@ -69,8 +69,7 @@ pub(super) struct MessagesExecutor {
     accounts_cache: AccountsCache,
     /// execute params for work units calculation
     execute_params: ExecuteWUParams,
-    /// rayon threads count
-    rayon_threads: usize,
+    // rayon_threads: usize,
 }
 
 pub(super) enum GetNextMessageGroupMode {
@@ -474,7 +473,7 @@ impl ExecutionManager {
         // store actual offset of current interator range
         if collation_data.processed_upto.processed_offset != msgs_buffer.message_groups.offset() {
             collation_data.processed_upto.processed_offset = msgs_buffer.message_groups.offset();
-            tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
+            tracing::trace!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
                 collation_data.processed_upto.processed_offset,
             );
         }
@@ -492,7 +491,7 @@ impl MessagesExecutor {
         shard_accounts: ShardAccounts,
         execute_params: ExecuteWUParams,
     ) -> Self {
-        let rayon_threads = rayon::current_num_threads();
+        // let rayon_threads = rayon::current_num_threads();
         Self {
             shard_id,
             min_next_lt,
@@ -503,7 +502,7 @@ impl MessagesExecutor {
                 items: Default::default(),
             },
             execute_params,
-            rayon_threads,
+            // rayon_threads,
         }
     }
 
@@ -545,27 +544,26 @@ impl MessagesExecutor {
         let mut group_max_vert_size = 0;
 
         // TODO check externals is not exist accounts needed ?
-        let mut futures = FuturesOrdered::new();
+        let mut futures = FuturesUnordered::new();
         for (account_id, msgs) in group {
             group_max_vert_size = cmp::max(group_max_vert_size, msgs.len());
             let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
-            futures.push_back(self.execute_messages(shard_account_stuff, msgs));
+            futures.push(self.execute_messages(shard_account_stuff, msgs));
         }
 
         let mut items = Vec::with_capacity(group_messages_count);
+        let mut wu_items = Vec::with_capacity(group_messages_count);
         let mut ext_msgs_error_count = 0;
 
         let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
-        let mut total_exec_wu = 0;
-        let mut accounts_per_subgroup = 0;
-        let mut current_max_wu_per_subgroup = 0;
 
         while let Some(executed_msgs_result) = futures.next().await {
             let executed = executed_msgs_result?;
             ext_msgs_skipped += executed.ext_msgs_skipped;
 
-            let mut current_wu = executed.transactions.len() as f64 * self.execute_params.prepare;
+            let mut current_wu =
+                (executed.transactions.len() as u64).saturating_mul(self.execute_params.prepare);
 
             max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
             total_exec_time += executed.exec_time;
@@ -589,7 +587,10 @@ impl MessagesExecutor {
                 self.min_next_lt =
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
-                current_wu += executor_output.gas_used as f64 * self.execute_params.execute;
+                current_wu += executor_output
+                    .gas_used
+                    .saturating_mul(self.execute_params.execute)
+                    .saturating_div(self.execute_params.execute_delimiter);
 
                 items.push(ExecutedTickItem {
                     in_message: tx.in_message,
@@ -600,16 +601,14 @@ impl MessagesExecutor {
             self.accounts_cache
                 .add_account_stuff(executed.account_state);
 
-            current_max_wu_per_subgroup = cmp::max(current_max_wu_per_subgroup, current_wu as u64);
-            accounts_per_subgroup += 1;
-            if accounts_per_subgroup == self.rayon_threads {
-                total_exec_wu += current_max_wu_per_subgroup;
-                current_max_wu_per_subgroup = 0;
-                accounts_per_subgroup = 0;
-            }
+            wu_items.push(current_wu);
         }
 
-        total_exec_wu += current_max_wu_per_subgroup;
+        wu_items.sort_by(|a, b| b.cmp(a));
+
+        let subgroups_len =
+            (wu_items.len() as f32 / self.execute_params.subgroup_size as f32).ceil() as usize;
+        let total_exec_wu = wu_items.into_iter().take(subgroups_len).sum();
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)

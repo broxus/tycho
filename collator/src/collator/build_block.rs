@@ -241,15 +241,31 @@ impl CollatorStdImpl {
                 build,
                 merkle_calc,
                 serialize,
+                build_in_msg,
+                build_out_msg,
+                state_update_msg,
+                serialize_msg,
             } = finalize;
 
             let accounts_count = processed_accounts.accounts_len as u64;
             let accounts_count_logarithm = (accounts_count as f64).log10();
             let build = build as f64 * accounts_count_logarithm;
+            let build_in_msg = build_in_msg * collation_data.in_msgs.len() as u64;
+            let build_out_msg = build_out_msg * collation_data.out_msgs.len() as u64;
+            let build = std::cmp::max(build as u64, build_in_msg);
+            let build = std::cmp::max(build as u64, build_out_msg);
 
-            wu_used_for_finalize = (build as u64)
-                .saturating_add(((merkle_calc as f64) * accounts_count_logarithm) as u64)
-                .saturating_add(serialize.saturating_mul(accounts_count));
+            let merkle_calc = ((merkle_calc as f64 * accounts_count_logarithm) as u64)
+                .saturating_add(state_update_msg.saturating_mul(
+                    collation_data.in_msgs.len() as u64 + collation_data.out_msgs.len() as u64,
+                ));
+
+            let serialize = serialize.saturating_mul(accounts_count).saturating_add(
+                serialize_msg.saturating_mul(
+                    collation_data.in_msgs.len() as u64 + collation_data.out_msgs.len() as u64,
+                ),
+            );
+            wu_used_for_finalize = build.saturating_add(merkle_calc).saturating_add(serialize);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "wu_used_for_finalize: {}  accounts_count: {} ",

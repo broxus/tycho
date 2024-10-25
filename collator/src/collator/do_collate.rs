@@ -298,9 +298,16 @@ impl CollatorStdImpl {
 
                         collation_data.new_msgs_created += new_messages.len() as u64;
                         executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-                            (new_messages.len() as f64
-                                * self.config.block_work_units_params.execute.serialize)
-                                as u64,
+                            (new_messages.len() as u64)
+                                .saturating_mul(
+                                    self.config.block_work_units_params.execute.serialize,
+                                )
+                                .saturating_div(
+                                    self.config
+                                        .block_work_units_params
+                                        .execute
+                                        .serialize_delimiter,
+                                ),
                         );
 
                         for new_message in new_messages {

@@ -1365,7 +1365,8 @@ impl CollatorStdImpl {
             self.shards_count = 0;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_wu - {}, ",
+                "wu_used_from_last_anchor dropped to {}, because no_pending_msgs - {}, force_import_anchor_by_used_wu - {}, ",
+                working_state.wu_used_from_last_anchor,
                 no_pending_msgs,
                 force_import_anchor_by_used_wu,
             );

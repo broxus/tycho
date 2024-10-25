@@ -1014,7 +1014,7 @@ impl MessageGroups {
             self.offset += 1;
         }
         if let Some(first_group) = first_group_opt.as_ref() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
+            tracing::trace!(target: tracing_targets::COLLATOR,
                 "extracted first message group from message_groups buffer: offset={}, buffer int={}, ext={}, group {}",
                 self.offset(), self.int_messages_count(), self.ext_messages_count(),
                 DisplayMessageGroup(first_group),
