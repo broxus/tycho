@@ -245,9 +245,10 @@ impl Mempool {
             input_buffer,
             committed_tx,
             anchor_consumer.top_known_anchor(),
-            &self.bootstrap_peers,
             &self.config_builder.build()?,
         );
+
+        engine.set_start_peers(&self.bootstrap_peers);
 
         tracing::info!("mempool engine initialized");
 

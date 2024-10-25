@@ -1,7 +1,8 @@
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
-use tokio::task::AbortHandle;
-use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesReadGuard};
+use tycho_network::{PeerId, PrivateOverlay};
+use tycho_util::futures::JoinTask;
+use tycho_util::FastHashSet;
 
 use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::stateful::PeerScheduleStateful;
@@ -15,7 +16,7 @@ pub struct PeerScheduleLocked {
     /// source of updates, remapped and filtered locally
     pub(super) overlay: PrivateOverlay,
     /// update task
-    pub(super) abort_resolve_peers: Option<AbortHandle>,
+    pub(super) abort_resolve_peers: Option<JoinTask<()>>,
     // Connection to self is always "Added"
     // Updates are Resolved or Removed, sent single time
     // Must be kept under Mutex to provide consistent updates on retrieved data
@@ -48,27 +49,48 @@ impl PeerScheduleLocked {
         is_applied
     }
 
-    pub(super) fn update_resolve(
-        &mut self,
-        parent: &PeerSchedule,
-        to_remove: &[PeerId],
-        to_add: &[PeerId],
-    ) -> PrivateOverlayEntriesReadGuard<'_> {
-        let entries = {
+    pub(super) fn forget_previous(&mut self, parent: PeerSchedule) {
+        let to_forget = self.data.forget_previous();
+        self.abort_resolve_peers = None;
+        let resolved_waiters = {
             let mut entries = self.overlay.write_entries();
-            for peer_id in to_remove {
-                entries.remove(peer_id);
+            for peer_id in to_forget {
+                entries.remove(&peer_id);
             }
-            for peer_id in to_add {
-                entries.insert(peer_id);
-            }
-            entries.downgrade()
+            PeerSchedule::resolved_waiters(&self.local_id, &entries.downgrade())
         };
-        let resolved_waiters = PeerSchedule::resolved_waiters(&self.local_id, &entries);
-        if let Some(handle) = &self.abort_resolve_peers {
-            handle.abort();
-        }
         self.abort_resolve_peers = parent.clone().new_resolve_task(resolved_waiters);
-        entries
+    }
+
+    pub(super) fn set_next_set(&mut self, parent: PeerSchedule, validator_set: &[PeerId]) {
+        self.abort_resolve_peers = None;
+
+        let resolved_waiters = {
+            let mut write_entries = self.overlay.write_entries();
+
+            for peer_id in validator_set {
+                write_entries.insert(peer_id);
+            }
+
+            let all_resolved = write_entries
+                .iter()
+                .filter(|a| a.resolver_handle.is_resolved() && a.peer_id != self.local_id)
+                .map(|a| a.peer_id)
+                .collect::<FastHashSet<_>>();
+
+            let to_forget = self
+                .data
+                .set_next_validator_set(validator_set, all_resolved);
+
+            for peer_id in to_forget {
+                write_entries.remove(&peer_id);
+            }
+
+            let read_entries = write_entries.downgrade();
+
+            PeerSchedule::resolved_waiters(&self.local_id, &read_entries)
+        };
+
+        self.abort_resolve_peers = parent.new_resolve_task(resolved_waiters);
     }
 }

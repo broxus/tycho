@@ -10,12 +10,11 @@ use parking_lot::lock_api::{RwLockReadGuard, RwLockWriteGuard};
 use parking_lot::{RawRwLock, RwLock};
 use rand::thread_rng;
 use tokio::sync::broadcast;
-use tokio::task::AbortHandle;
 use tycho_network::{
     KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard,
 };
-use tycho_util::FastHashSet;
+use tycho_util::futures::JoinTask;
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::Genesis;
@@ -47,9 +46,8 @@ impl PeerSchedule {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
         }));
-
-        this.set_next_peers(&[Genesis::id().author], false);
-        this.set_next_start(Genesis::round());
+        // validator set is not defined for genesis
+        this.set_next_subset(&[], Genesis::round(), &[Genesis::id().author]);
         this.apply_scheduled(Genesis::round());
 
         this
@@ -63,37 +61,34 @@ impl PeerSchedule {
         self.0.locked.write()
     }
 
-    pub fn set_next_peers(&self, peers: &[PeerId], update_overlay: bool) {
+    pub fn set_next_set(&self, validator_set: &[PeerId]) {
         let mut locked = self.write();
-        let all_resolved = {
-            let local_id = locked.local_id;
-            let entries = if update_overlay {
-                let to_remove = self.atomic().next_to_remove(peers);
-                locked.update_resolve(self, &to_remove, peers)
-            } else {
-                locked.overlay.read_entries()
-            };
-            entries
-                .iter()
-                .filter(|a| a.resolver_handle.is_resolved() && a.peer_id != local_id)
-                .map(|a| a.peer_id)
-                .collect::<FastHashSet<_>>()
-        };
-
-        locked.data.set_next_peers(peers, all_resolved);
-        // atomic part is updated under lock too
-        self.update_atomic(|stateless| stateless.set_next_peers(peers));
+        locked.set_next_set(self.clone(), validator_set);
     }
 
     // `false` if next round is outdated
-    pub fn set_next_start(&self, next_round: Round) -> bool {
+    pub fn set_next_subset(
+        &self,
+        validator_set: &[PeerId],
+        next_round: Round,
+        working_subset: &[PeerId],
+    ) -> bool {
         if next_round <= self.atomic().cur_epoch_start {
             return false; // ignore outdated
         }
         let mut locked = self.write();
+
+        locked.set_next_set(self.clone(), validator_set);
+
+        locked.data.set_next_subset(working_subset);
         locked.data.next_epoch_start = Some(next_round);
+
         // atomic part is updated under lock too
-        self.update_atomic(|stateless| stateless.next_epoch_start = Some(next_round));
+        self.update_atomic(|stateless| {
+            stateless.set_next_peers(working_subset);
+            stateless.next_epoch_start = Some(next_round);
+        });
+
         true
     }
 
@@ -108,9 +103,11 @@ impl PeerSchedule {
             self.atomic(),
             locked.data,
         );
-        let to_forget = locked.data.forget_previous();
+
+        // rotate only after previous data is cleaned
+        locked.forget_previous(self.clone());
         locked.data.rotate();
-        locked.update_resolve(self, &to_forget, &[]);
+
         // atomic part is updated under lock too
         self.update_atomic(|stateless| {
             stateless.forget_previous();
@@ -129,8 +126,8 @@ impl PeerSchedule {
     #[allow(dead_code)] // TODO use on change of validator set
     pub fn forget_previous(&self) {
         let mut locked = self.write();
-        let to_forget = locked.data.forget_previous();
-        locked.update_resolve(self, &to_forget, &[]);
+
+        locked.forget_previous(self.clone());
         // atomic part is updated under lock too
         self.update_atomic(|stateless| stateless.forget_previous());
     }
@@ -155,16 +152,16 @@ impl PeerSchedule {
         tracing::info!("starting peer schedule updates");
         let (local_id, mut rx) = {
             let mut guard = self.write();
+
+            guard.abort_resolve_peers = None;
             let local_id = guard.local_id;
             let (rx, resolved_waiters) = {
                 let entries = guard.overlay.read_entries();
                 let rx = entries.subscribe();
                 (rx, Self::resolved_waiters(&local_id, &entries))
             };
-            if let Some(handle) = &guard.abort_resolve_peers {
-                handle.abort();
-            }
             guard.abort_resolve_peers = self.clone().new_resolve_task(resolved_waiters);
+
             (local_id, rx)
         };
 
@@ -174,14 +171,11 @@ impl PeerSchedule {
                     let mut guard = self.write();
                     let restart = guard.set_state(&peer, PeerState::Unknown);
                     if restart {
+                        guard.abort_resolve_peers = None;
                         let resolved_waiters = {
                             let entries = guard.overlay.read_entries();
                             Self::resolved_waiters(&local_id, &entries)
                         };
-                        // with fewer peers to await, because you cannot find and remove one task
-                        if let Some(handle) = &guard.abort_resolve_peers {
-                            handle.abort();
-                        }
                         guard.abort_resolve_peers = self.clone().new_resolve_task(resolved_waiters);
                     }
                     drop(guard);
@@ -236,19 +230,19 @@ impl PeerSchedule {
         mut resolved_waiters: FuturesUnordered<
             impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
         >,
-    ) -> Option<AbortHandle> {
+    ) -> Option<JoinTask<()>> {
         tracing::info!("restart resolve task");
         if resolved_waiters.is_empty() {
             None
         } else {
-            let join = tokio::spawn(async move {
+            let join_task = JoinTask::new(async move {
                 while let Some(known_peer_handle) = resolved_waiters.next().await {
                     _ = self
                         .write()
                         .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
                 }
             });
-            Some(join.abort_handle())
+            Some(join_task)
         }
     }
 }
