@@ -20,7 +20,10 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, FinalizeBlockGasParams, McData};
+use crate::types::{
+    BlockCandidate, BlockWUParams, CollationSessionInfo, FinalizeBlockWUParams, McData,
+    MsgGroupsWUParams,
+};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -29,7 +32,7 @@ pub struct FinalizedBlock {
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
-    pub gas_used_for_finalize: u64,
+    pub wu_used_for_finalize: u64,
 }
 
 impl CollatorStdImpl {
@@ -39,7 +42,8 @@ impl CollatorStdImpl {
         executor: MessagesExecutor,
         working_state: Box<WorkingState>,
         queue_diff: SerializedQueueDiff,
-        finalize_block_gas_params: FinalizeBlockGasParams,
+        block_work_units_params: BlockWUParams,
+        executed_groups_wu_total: u64,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -203,48 +207,64 @@ impl CollatorStdImpl {
         let build_state_update_elapsed;
         let new_state_root;
         let total_validator_fees;
-        let gas_used_for_finalize;
+        let wu_used_for_finalize;
         let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
             );
 
+            let BlockWUParams {
+                prepare, finalize, ..
+            } = block_work_units_params;
+
+            let MsgGroupsWUParams {
+                const_part,
+                read_ext_msgs,
+                read_int_msgs,
+            } = prepare;
+
+            let wu_used_for_msgs_groups = const_part
+                .saturating_add(read_ext_msgs * collation_data.read_ext_msgs)
+                .saturating_add(read_int_msgs * collation_data.read_int_msgs_from_iterator);
+
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_for_execute: {}",
-                collation_data.block_limit.gas_used,
+                "wu_used_for_msgs_groups: {}  read_ext_msgs: {}, read_int_msgs: {} ",
+                wu_used_for_msgs_groups,
+                collation_data.read_ext_msgs,
+                collation_data.read_int_msgs_from_iterator,
             );
 
-            // add gas usage for in, out messages building, accounts storing and merkle calculation
-            let FinalizeBlockGasParams {
-                build_account,
-                merkle_calc_account,
-                serialize_account,
-            } = finalize_block_gas_params;
+            let FinalizeBlockWUParams {
+                build,
+                merkle_calc,
+                serialize,
+            } = finalize;
 
             let accounts_count = processed_accounts.accounts_len as u64;
-            let accounts_count_log = (accounts_count as f64).log10();
-            let build = build_account as f64 * accounts_count_log;
+            let accounts_count_logarithm = (accounts_count as f64).log10();
+            let build = build as f64 * accounts_count_logarithm;
 
-            gas_used_for_finalize = (build as u64)
-                .saturating_add(((merkle_calc_account as f64) * accounts_count_log) as u64)
-                .saturating_add(serialize_account.saturating_mul(accounts_count));
+            wu_used_for_finalize = (build as u64)
+                .saturating_add(((merkle_calc as f64) * accounts_count_logarithm) as u64)
+                .saturating_add(serialize.saturating_mul(accounts_count));
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_for_finalize: {}  accounts_count: {} ",
-                gas_used_for_finalize,
+                "wu_used_for_finalize: {}  accounts_count: {} ",
+                wu_used_for_finalize,
                 accounts_count,
             );
 
-            // compute total gas used from last anchor
-            let gas_used_from_last_anchor = working_state
-                .gas_used_from_last_anchor
-                .saturating_add(collation_data.block_limit.gas_used as _)
-                .saturating_add(gas_used_for_finalize);
+            // compute total wu used from last anchor
+            let wu_used_from_last_anchor = working_state
+                .wu_used_from_last_anchor
+                .saturating_add(wu_used_for_msgs_groups)
+                .saturating_add(executed_groups_wu_total)
+                .saturating_add(wu_used_for_finalize);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_from_last_anchor: {:?}",
-                gas_used_from_last_anchor
+                "wu_used_from_last_anchor: {:?}",
+                wu_used_from_last_anchor
             );
 
             // build new state
@@ -260,7 +280,7 @@ impl CollatorStdImpl {
                 processed_upto: Lazy::new(&collation_data.processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
-                overload_history: gas_used_from_last_anchor,
+                overload_history: wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: prev_shard_data.total_validator_fees().clone(),
@@ -474,7 +494,7 @@ impl CollatorStdImpl {
             mc_data,
             new_state_root,
             new_observable_state,
-            gas_used_for_finalize,
+            wu_used_for_finalize,
         })
     }
 

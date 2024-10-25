@@ -179,6 +179,7 @@ impl CollatorStdImpl {
                 ..ExecuteParams::default()
             }),
             prev_shard_data.observable_accounts().clone(),
+            self.config.block_work_units_params.execute,
         );
 
         // create exec_manager
@@ -252,6 +253,7 @@ impl CollatorStdImpl {
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
         let mut process_txs_total_elapsed = Duration::ZERO;
+        let mut executed_groups_wu_total = 0;
 
         {
             let mut executed_groups_count = 0;
@@ -281,11 +283,7 @@ impl CollatorStdImpl {
                     collation_data.tx_count += group_result.items.len() as u64;
                     collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                     collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
-                    let gas_used_for_execute: u64 = group_result
-                        .items
-                        .iter()
-                        .map(|i| i.executor_output.gas_used)
-                        .sum();
+                    executed_groups_wu_total += group_result.total_exec_wu;
 
                     // Process transactions
                     timer = std::time::Instant::now();
@@ -298,6 +296,8 @@ impl CollatorStdImpl {
                         )?;
 
                         collation_data.new_msgs_created += new_messages.len() as u64;
+                        executed_groups_wu_total += new_messages.len() as u64
+                            * self.config.block_work_units_params.execute.serialize;
 
                         for new_message in new_messages {
                             let MsgInfo::Int(int_msg_info) = new_message.info else {
@@ -352,6 +352,11 @@ impl CollatorStdImpl {
             metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
                 .set(executed_groups_count as f64);
         }
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "wu_used_for_execute: {}",
+            executed_groups_wu_total,
+        );
 
         metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
             .record(fill_msgs_total_elapsed);
@@ -474,7 +479,7 @@ impl CollatorStdImpl {
 
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
-            let finalize_block_gas_params = self.config.finalize_block_gas_params;
+            let finalize_block_gas_params = self.config.block_work_units_params;
             move || {
                 Self::finalize_block(
                     collation_data,
@@ -483,6 +488,7 @@ impl CollatorStdImpl {
                     working_state,
                     queue_diff,
                     finalize_block_gas_params,
+                    executed_groups_wu_total,
                 )
             }
         })
@@ -492,21 +498,21 @@ impl CollatorStdImpl {
 
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
-        let gas_used_fo_finalize = finalized.gas_used_for_finalize;
+        let wu_used_for_finalize = finalized.wu_used_for_finalize;
 
-        metrics::gauge!("tycho_do_collate_gas_to_finalize", &labels)
-            .set(gas_used_fo_finalize as f64);
-        metrics::gauge!("tycho_do_collate_gas_to_execute", &labels)
-            .set(collation_data.block_limit.gas_used as f64);
-        metrics::gauge!("tycho_do_collate_gas_to_execute_and_finalize", &labels)
-            .set(collation_data.block_limit.gas_used as f64 + gas_used_fo_finalize as f64);
-        metrics::gauge!("tycho_do_collate_gas_to_time_proportion", &labels).set(
-            (gas_used_fo_finalize as f64 / collation_data.block_limit.gas_used as f64)
+        metrics::gauge!("tycho_do_collate_wu_to_finalize", &labels)
+            .set(wu_used_for_finalize as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_execute", &labels)
+            .set(executed_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_execute_and_finalize", &labels)
+            .set(executed_groups_wu_total as f64 + wu_used_for_finalize as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_time_proportion", &labels).set(
+            (wu_used_for_finalize as f64 / executed_groups_wu_total as f64)
                 / (finalize_block_elapsed.as_micros() as f64
                     / execute_msgs_total_elapsed.as_micros() as f64),
         );
         metrics::gauge!("tycho_do_collate_gas_to_ns_finalize", &labels)
-            .set(finalize_block_elapsed.as_nanos() as f64 / gas_used_fo_finalize as f64);
+            .set(finalize_block_elapsed.as_nanos() as f64 / wu_used_for_finalize as f64);
         metrics::gauge!("tycho_do_collate_gas_to_ns_execute", &labels).set(
             execute_msgs_total_elapsed.as_nanos() as f64
                 / collation_data.block_limit.gas_used as f64,

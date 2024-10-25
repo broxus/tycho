@@ -736,7 +736,7 @@ impl CollatorStdImpl {
             Ok(Box::new(WorkingState {
                 next_block_id_short,
                 mc_data,
-                gas_used_from_last_anchor: prev_shard_data.gas_used_from_last_anchor(),
+                wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
@@ -823,7 +823,7 @@ impl CollatorStdImpl {
         Ok(Box::new(WorkingState {
             next_block_id_short,
             mc_data,
-            gas_used_from_last_anchor: prev_shard_data.gas_used_from_last_anchor(),
+            wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
             has_unprocessed_messages: None,
@@ -1196,7 +1196,7 @@ impl CollatorStdImpl {
             metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
                 .record(elapsed_from_prev_anchor);
 
-            working_state.gas_used_from_last_anchor = 0;
+            working_state.wu_used_from_last_anchor = 0;
 
             if has_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
@@ -1302,9 +1302,9 @@ impl CollatorStdImpl {
             uncommitted_chain_length >= self.config.max_uncommitted_chain_length;
 
         // should import anchor after fixed gas used by shard blocks in uncommitted blocks chain
-        let gas_used_from_last_anchor = working_state.gas_used_from_last_anchor;
+        let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
         let force_import_anchor_by_used_gas =
-            gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
+            wu_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
         let no_pending_msgs = !has_uprocessed_messages && !has_externals;
@@ -1324,12 +1324,12 @@ impl CollatorStdImpl {
             } else if force_import_anchor_by_used_gas {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "gas used from last anchor {} reached limit {} on length {}, will import next anchor",
-                    gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
+                    wu_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
 
-            working_state.gas_used_from_last_anchor = if force_import_anchor_by_used_gas {
-                gas_used_from_last_anchor.saturating_sub(self.config.gas_used_to_import_next_anchor)
+            working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_gas {
+                wu_used_from_last_anchor.saturating_sub(self.config.gas_used_to_import_next_anchor)
             } else {
                 0
             };
@@ -1365,7 +1365,7 @@ impl CollatorStdImpl {
             self.shards_count = 0;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_gas - {}, ",
+                "wu_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_gas - {}, ",
                 no_pending_msgs,
                 force_import_anchor_by_used_gas,
             );

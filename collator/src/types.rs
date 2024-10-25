@@ -26,7 +26,7 @@ pub struct CollationConfig {
     pub gas_used_to_import_next_anchor: u64,
 
     pub msgs_exec_params: MsgsExecutionParams,
-    pub finalize_block_gas_params: FinalizeBlockGasParams,
+    pub block_work_units_params: BlockWUParams,
 }
 
 impl Default for CollationConfig {
@@ -42,7 +42,7 @@ impl Default for CollationConfig {
             gas_used_to_import_next_anchor: 250_000_000u64,
 
             msgs_exec_params: MsgsExecutionParams::default(),
-            finalize_block_gas_params: FinalizeBlockGasParams::default(),
+            block_work_units_params: BlockWUParams::default(),
         }
     }
 }
@@ -89,20 +89,64 @@ impl Default for MsgsExecutionParams {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
 #[serde(default)]
-pub struct FinalizeBlockGasParams {
-    pub build_account: u64,
-    pub merkle_calc_account: u64,
-    pub serialize_account: u64,
+pub struct BlockWUParams {
+    pub prepare: MsgGroupsWUParams,
+    pub execute: ExecuteWUParams,
+    pub finalize: FinalizeBlockWUParams,
 }
 
-impl Default for FinalizeBlockGasParams {
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct MsgGroupsWUParams {
+    pub const_part: u64,
+    pub read_ext_msgs: u64,
+    pub read_int_msgs: u64,
+}
+
+impl Default for MsgGroupsWUParams {
     fn default() -> Self {
         Self {
-            build_account: 2500000,
-            merkle_calc_account: 2000000,
-            serialize_account: 5000,
+            const_part: 1000000,
+            read_ext_msgs: 3333,
+            read_int_msgs: 3333,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct ExecuteWUParams {
+    pub prepare: u64,
+    pub execute: u64,
+    pub serialize: u64,
+}
+
+impl Default for ExecuteWUParams {
+    fn default() -> Self {
+        Self {
+            prepare: 5000,
+            execute: 5,
+            serialize: 600,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct FinalizeBlockWUParams {
+    pub build: u64,
+    pub merkle_calc: u64,
+    pub serialize: u64,
+}
+
+impl Default for FinalizeBlockWUParams {
+    fn default() -> Self {
+        Self {
+            build: 2500000,
+            merkle_calc: 2000000,
+            serialize: 5000,
         }
     }
 }

@@ -27,13 +27,13 @@ use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
-    DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
+    DisplayExternalsProcessedUpto, ExecuteWUParams, InternalsProcessedUptoStuff,
+    ProcessedUptoInfoStuff,
 };
 
 #[cfg(test)]
 #[path = "tests/execution_manager_tests.rs"]
 pub(super) mod tests;
-use crate::utils::thread_pool;
 
 /// Execution manager
 pub(super) struct ExecutionManager {
@@ -67,6 +67,10 @@ pub(super) struct MessagesExecutor {
     params: Arc<ExecuteParams>,
     /// shard accounts
     accounts_cache: AccountsCache,
+    /// execute params for work units calculation
+    execute_params: ExecuteWUParams,
+    /// rayon threads count
+    rayon_threads: usize,
 }
 
 pub(super) enum GetNextMessageGroupMode {
@@ -486,7 +490,9 @@ impl MessagesExecutor {
         config: Arc<PreloadedBlockchainConfig>,
         params: Arc<ExecuteParams>,
         shard_accounts: ShardAccounts,
+        execute_params: ExecuteWUParams,
     ) -> Self {
+        let rayon_threads = rayon::current_num_threads();
         Self {
             shard_id,
             min_next_lt,
@@ -496,6 +502,8 @@ impl MessagesExecutor {
                 shard_accounts,
                 items: Default::default(),
             },
+            execute_params,
+            rayon_threads,
         }
     }
 
@@ -549,10 +557,15 @@ impl MessagesExecutor {
 
         let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
+        let mut total_exec_wu = 0;
+        let mut accounts_per_pool = 0;
+        let mut current_max_wu_per_pool = 0;
 
         while let Some(executed_msgs_result) = futures.next().await {
             let executed = executed_msgs_result?;
             ext_msgs_skipped += executed.ext_msgs_skipped;
+
+            let mut current_wu = executed.transactions.len() as u64 * self.execute_params.prepare;
 
             max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
             total_exec_time += executed.exec_time;
@@ -576,6 +589,8 @@ impl MessagesExecutor {
                 self.min_next_lt =
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
+                current_wu += executor_output.gas_used * self.execute_params.execute;
+
                 items.push(ExecutedTickItem {
                     in_message: tx.in_message,
                     executor_output,
@@ -584,6 +599,14 @@ impl MessagesExecutor {
 
             self.accounts_cache
                 .add_account_stuff(executed.account_state);
+
+            current_max_wu_per_pool = cmp::max(current_max_wu_per_pool, current_wu);
+            accounts_per_pool += 1;
+            if accounts_per_pool == self.rayon_threads {
+                total_exec_wu += current_max_wu_per_pool;
+                current_max_wu_per_pool = 0;
+                accounts_per_pool = 0;
+            }
         }
 
         let mean_account_msgs_exec_time = total_exec_time
@@ -595,6 +618,7 @@ impl MessagesExecutor {
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
             max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
+            total_exec_wu,
             "execute_group",
         );
 
@@ -621,6 +645,7 @@ impl MessagesExecutor {
             items,
             ext_msgs_error_count,
             ext_msgs_skipped,
+            total_exec_wu,
         })
     }
 
@@ -635,9 +660,8 @@ impl MessagesExecutor {
         let params = self.params.clone();
 
         rayon_run_fifo(move || {
-            let mut ext_msgs_skipped = 0;
-        rayon_run_fifo(thread_pool::get(), move || {
             let timer = std::time::Instant::now();
+            let mut ext_msgs_skipped = 0;
 
             let mut transactions = Vec::with_capacity(msgs.len());
             let account_is_empty = account_state.is_empty()?;
@@ -787,6 +811,7 @@ pub struct ExecutedGroup {
     pub items: Vec<ExecutedTickItem>,
     pub ext_msgs_error_count: u64,
     pub ext_msgs_skipped: u64,
+    pub total_exec_wu: u64,
 }
 
 pub struct ExecutedTickItem {
