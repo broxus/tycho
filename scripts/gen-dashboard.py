@@ -1157,13 +1157,8 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_time_proportion",
-            "Wu to time proportion",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_to_finalize",
-            "Wu spent on finalize",
+            "tycho_do_collate_wu_to_prepare",
+            "Wu spent on prepare",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
@@ -1172,8 +1167,13 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_finalize",
-            "Wu price in microseconds on finalize",
+            "tycho_do_collate_wu_to_finalize",
+            "Wu spent on finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_prepare",
+            "Wu price in microseconds on prepare",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
@@ -1182,8 +1182,13 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_execute_and_finalize",
-            "Wu spent on execute and finalize",
+            "tycho_do_collate_wu_to_mcs_finalize",
+            "Wu price in microseconds on finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_all",
+            "Wu spent on prepare, execute and finalize",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(

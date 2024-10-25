@@ -109,9 +109,9 @@ pub struct MsgGroupsWUParams {
 impl Default for MsgGroupsWUParams {
     fn default() -> Self {
         Self {
-            const_part: 10000, // 10000 mcs
-            read_ext_msgs: 3,  // 3 mcs
-            read_int_msgs: 3,  // 3 mcs
+            const_part: 5000,  // 50000 mcs
+            read_ext_msgs: 4,  // 4 mcs
+            read_int_msgs: 6,  // 6 mcs
             read_new_msgs: 75, // 75 mcs
         }
     }
@@ -131,7 +131,7 @@ pub struct ExecuteWUParams {
 impl Default for ExecuteWUParams {
     fn default() -> Self {
         Self {
-            prepare: 80,                // 80 mcs
+            prepare: 70,                // 70 mcs
             execute: 17,                // 0.000017 mcs
             execute_delimiter: 1000000, // 1 pcs
             serialize_int_ext: 7,       // 7 mcs
@@ -156,12 +156,12 @@ pub struct FinalizeBlockWUParams {
 impl Default for FinalizeBlockWUParams {
     fn default() -> Self {
         Self {
-            build: 13000,        // 12 000 mcs
+            build: 13000,        // 13 000 mcs
             build_in_msg: 3,     // 3 mcs
             build_out_msg: 2,    // 2 mcs
             state_update_msg: 1, // 1 mcs
             merkle_calc: 10000,  // 10 000 mcs
-            serialize: 25,       // 25 mcs
+            serialize: 20,       // 20 mcs
             serialize_msg: 3,    // 3 mcs
         }
     }

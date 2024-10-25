@@ -20,10 +20,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{
-    BlockCandidate, BlockWUParams, CollationSessionInfo, FinalizeBlockWUParams, McData,
-    MsgGroupsWUParams,
-};
+use crate::types::{BlockCandidate, CollationSessionInfo, FinalizeBlockWUParams, McData};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -32,17 +29,19 @@ pub struct FinalizedBlock {
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
-    pub wu_used_for_finalize: u64,
+    pub finalize_wu_total: u64,
 }
 
 impl CollatorStdImpl {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn finalize_block(
         mut collation_data: Box<BlockCollationData>,
         collation_session: Arc<CollationSessionInfo>,
         executor: MessagesExecutor,
         working_state: Box<WorkingState>,
         queue_diff: SerializedQueueDiff,
-        block_work_units_params: BlockWUParams,
+        finalize_params: FinalizeBlockWUParams,
+        prepare_groups_wu_total: u64,
         executed_groups_wu_total: u64,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
@@ -207,39 +206,11 @@ impl CollatorStdImpl {
         let build_state_update_elapsed;
         let new_state_root;
         let total_validator_fees;
-        let wu_used_for_finalize;
+        let finalize_wu_total;
         let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
-            );
-
-            let BlockWUParams {
-                prepare, finalize, ..
-            } = block_work_units_params;
-
-            let MsgGroupsWUParams {
-                const_part,
-                read_ext_msgs,
-                read_int_msgs,
-                read_new_msgs,
-            } = prepare;
-
-            let wu_used_for_msgs_groups = const_part
-                .saturating_add(read_ext_msgs.saturating_mul(collation_data.read_ext_msgs))
-                .saturating_add(
-                    read_int_msgs.saturating_mul(collation_data.read_int_msgs_from_iterator),
-                )
-                .saturating_add(
-                    read_new_msgs.saturating_mul(collation_data.read_new_msgs_from_iterator),
-                );
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_for_msgs_groups: {}  read_ext_msgs: {}, read_int_msgs: {}, read_new_msgs: {} ",
-                wu_used_for_msgs_groups,
-                collation_data.read_ext_msgs,
-                collation_data.read_int_msgs_from_iterator,
-                collation_data.read_new_msgs_from_iterator,
             );
 
             let FinalizeBlockWUParams {
@@ -250,7 +221,7 @@ impl CollatorStdImpl {
                 build_out_msg,
                 state_update_msg,
                 serialize_msg,
-            } = finalize;
+            } = finalize_params;
 
             let accounts_count = processed_accounts.accounts_len as u64;
             let accounts_count_logarithm = (accounts_count as f64).log10();
@@ -268,11 +239,11 @@ impl CollatorStdImpl {
             let serialize = serialize
                 .saturating_mul(accounts_count)
                 .saturating_add(serialize_msg.saturating_mul(in_msgs_len + out_msgs_len));
-            wu_used_for_finalize = build.saturating_add(merkle_calc).saturating_add(serialize);
+            finalize_wu_total = build.saturating_add(merkle_calc).saturating_add(serialize);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_for_finalize: {}  accounts_count: {}, in_msgs: {}, out_msgs: {} ",
-                wu_used_for_finalize,
+                "finalize_wu_total: {}  accounts_count: {}, in_msgs: {}, out_msgs: {} ",
+                finalize_wu_total,
                 accounts_count,
                 in_msgs_len,
                 out_msgs_len,
@@ -281,9 +252,9 @@ impl CollatorStdImpl {
             // compute total wu used from last anchor
             let wu_used_from_last_anchor = working_state
                 .wu_used_from_last_anchor
-                .saturating_add(wu_used_for_msgs_groups)
+                .saturating_add(prepare_groups_wu_total)
                 .saturating_add(executed_groups_wu_total)
-                .saturating_add(wu_used_for_finalize);
+                .saturating_add(finalize_wu_total);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "wu_used_from_last_anchor: {:?}",
@@ -517,7 +488,7 @@ impl CollatorStdImpl {
             mc_data,
             new_state_root,
             new_observable_state,
-            wu_used_for_finalize,
+            finalize_wu_total,
         })
     }
 
