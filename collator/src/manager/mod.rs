@@ -15,6 +15,7 @@ use tracing::Instrument;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
@@ -109,9 +110,10 @@ where
     /// Cache for validator sets from config
     validator_set_cache: ValidatorSetCache,
 
-    /// Round of a new consensus genesis
-    mempool_start_round: Option<u32>,
-    /// Last know applied master block seqno to recover from
+    /// Mempool config override for a new genesis
+    mempool_config_override: Option<MempoolGlobalConfig>,
+    /// Last know applied master block seqno
+    /// to restart from a new genesis
     from_mc_block_seqno: Option<u32>,
 
     #[cfg(any(test, feature = "test"))]
@@ -183,6 +185,7 @@ fn metrics_report_last_applied_block_and_anchor(
     let block_id = state.block_id();
     let labels = [("workchain", block_id.shard.workchain().to_string())];
 
+    let block_ct = state.get_gen_chain_time();
     let processed_to_anchor_id = processed_upto
         .externals
         .as_ref()
@@ -194,6 +197,7 @@ fn metrics_report_last_applied_block_and_anchor(
 
     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
         block_id = %DisplayAsShortId(block_id),
+        block_ct,
         processed_to_anchor_id = processed_to_anchor_id,
         "last applied block",
     );
@@ -265,7 +269,7 @@ where
         mpool_adapter_factory: MPF,
         validator: V,
         collator_factory: CF,
-        mempool_start_round: Option<u32>,
+        mempool_config_override: Option<MempoolGlobalConfig>,
         from_mc_block_seqno: Option<u32>,
         #[cfg(any(test, feature = "test"))] test_validators_keypairs: Vec<Arc<KeyPair>>,
     ) -> RunningCollationManager<CF, V>
@@ -317,7 +321,7 @@ where
 
             validator_set_cache: Default::default(),
 
-            mempool_start_round,
+            mempool_config_override,
             from_mc_block_seqno,
 
             #[cfg(any(test, feature = "test"))]
@@ -860,7 +864,7 @@ where
             if let Some(from_mc_block_seqno) = self.from_mc_block_seqno {
                 if block_id.seqno < from_mc_block_seqno {
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        "recovery restart: skip block, should wait for specified last applied with seqno {}",
+                        "restart with a new genesis: skip block, should wait for specified last applied with seqno {}",
                         from_mc_block_seqno,
                     );
                     return Ok(());
@@ -1000,6 +1004,26 @@ where
             shard: ShardIdent::MASTERCHAIN,
             seqno: applied_range.1,
         };
+
+        // we need to drop uncommitted internal messages from the queue
+        // when mempool config override has genesis higher then in the last consensus info
+        if let Some(mp_cfg_override) = &self.mempool_config_override {
+            let last_consesus_info = self
+                .blocks_cache
+                .get_consensus_info_for_mc_block(&last_applied_mc_block_key)?;
+            if mp_cfg_override.start_round > last_consesus_info.genesis_round
+                && mp_cfg_override.genesis_time_millis > last_consesus_info.genesis_millis
+            {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    prev_genesis_start_round = last_consesus_info.genesis_round,
+                    prev_genesis_time_millis = last_consesus_info.genesis_millis,
+                    new_genesis_start_round = mp_cfg_override.start_round,
+                    new_genesis_time_millis = mp_cfg_override.genesis_time_millis,
+                    "Will drop uncommitted internal messages from queue on new genesis",
+                );
+                self.mq_adapter.clear_session_state()?;
+            }
+        }
 
         // get min internals processed upto
         let min_processed_to_by_shards = self
@@ -1361,8 +1385,16 @@ where
             .validator_set_cache
             .get_next_validator_set(&mc_data.config)?;
 
+        let mc_processed_to_anchor_id = mc_data
+            .processed_upto
+            .externals
+            .as_ref()
+            .map_or(0, |upto| upto.processed_to.0);
+
         let cx = StateUpdateContext {
             mc_block_id: mc_data.block_id,
+            mc_block_chain_time: mc_data.gen_chain_time,
+            mc_processed_to_anchor_id,
             consensus_info: mc_data.consensus_info,
             shuffle_validators: mc_data.config.get_catchain_config()?.shuffle_mc_validators,
             consensus_config: mc_data.config.get_consensus_config()?,
@@ -1615,7 +1647,7 @@ where
                             shard_id,
                             prev_blocks_ids,
                             mc_data: mc_data.clone(),
-                            mempool_start_round: self.mempool_start_round,
+                            mempool_config_override: self.mempool_config_override.clone(),
                         })
                         .await;
 

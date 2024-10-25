@@ -110,6 +110,7 @@ impl CollatorStdImpl {
                 version: self.config.supported_block_version,
                 capabilities: self.config.supported_capabilities,
             },
+            self.mempool_config_override.clone(),
         );
 
         // init ShardHashes descriptions for master
@@ -217,7 +218,7 @@ impl CollatorStdImpl {
                     )
                     .await?;
                 if msg_group.is_none() {
-                    // on recovery we will be unable to refill buffer with externals
+                    // on restart from a new genesis we will not be able to refill buffer with externals
                     // so we stop refilling when there is no more groups in buffer
                     break;
                 }
