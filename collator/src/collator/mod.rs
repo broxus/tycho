@@ -1312,7 +1312,7 @@ impl CollatorStdImpl {
         // should import anchor after fixed wu used by shard blocks in uncommitted blocks chain
         let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
         let force_import_anchor_by_used_wu =
-            wu_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
+            wu_used_from_last_anchor > self.config.wu_used_to_import_next_anchor;
 
         // check if has pending internals or externals
         let no_pending_msgs = !has_uprocessed_messages && !has_externals;
@@ -1332,12 +1332,12 @@ impl CollatorStdImpl {
             } else if force_import_anchor_by_used_wu {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "wu used from last anchor {} reached limit {} on length {}, will import next anchor",
-                    wu_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
+                    wu_used_from_last_anchor, self.config.wu_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
 
             working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_wu {
-                wu_used_from_last_anchor.saturating_sub(self.config.gas_used_to_import_next_anchor)
+                wu_used_from_last_anchor.saturating_sub(self.config.wu_used_to_import_next_anchor)
             } else {
                 0
             };
@@ -1381,13 +1381,13 @@ impl CollatorStdImpl {
                 }
                 last_anchor = Some(next_anchor);
                 if working_state.wu_used_from_last_anchor
-                    < self.config.gas_used_to_import_next_anchor
+                    < self.config.wu_used_to_import_next_anchor
                 {
                     break;
                 }
                 working_state.wu_used_from_last_anchor = working_state
                     .wu_used_from_last_anchor
-                    .saturating_sub(self.config.gas_used_to_import_next_anchor);
+                    .saturating_sub(self.config.wu_used_to_import_next_anchor);
             }
 
             metrics::gauge!("tycho_do_collate_import_next_anchor_count")

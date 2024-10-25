@@ -23,7 +23,7 @@ pub struct CollationConfig {
     pub mc_block_min_interval: Duration,
     pub min_mc_block_delta_from_bc_to_sync: u32,
     pub max_uncommitted_chain_length: u32,
-    pub gas_used_to_import_next_anchor: u64,
+    pub wu_used_to_import_next_anchor: u64,
 
     pub msgs_exec_params: MsgsExecutionParams,
     pub block_work_units_params: BlockWUParams,
@@ -39,7 +39,7 @@ impl Default for CollationConfig {
             min_mc_block_delta_from_bc_to_sync: 3,
 
             max_uncommitted_chain_length: 31,
-            gas_used_to_import_next_anchor: 250_000_000u64,
+            wu_used_to_import_next_anchor: 1_200_000u64,
 
             msgs_exec_params: MsgsExecutionParams::default(),
             block_work_units_params: BlockWUParams::default(),
