@@ -1912,7 +1912,7 @@ where
         )?;
 
         mc_collator
-            .enqueue_do_collate(top_shard_blocks_info)
+            .enqueue_do_collate(top_shard_blocks_info, next_mc_block_chain_time)
             .await?;
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,

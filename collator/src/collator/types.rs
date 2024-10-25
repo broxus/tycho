@@ -1203,10 +1203,10 @@ impl AnchorsCache {
         self.last_imported_anchor.as_ref().map(|anchor| anchor.ct)
     }
 
-    pub fn get_last_imported_anchor_ct_and_author(&self) -> Option<(u64, HashBytes)> {
+    pub fn get_last_imported_anchor_author(&self) -> Option<HashBytes> {
         self.last_imported_anchor
             .as_ref()
-            .map(|anchor| (anchor.ct, anchor.author.0.into()))
+            .map(|anchor| anchor.author.0.into())
     }
 
     pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {

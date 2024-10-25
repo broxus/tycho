@@ -51,6 +51,7 @@ impl CollatorStdImpl {
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
+        next_chain_time: Option<u64>,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
@@ -74,10 +75,13 @@ impl CollatorStdImpl {
             )),
         );
 
-        let (next_chain_time, created_by) = self
+        let created_by = self
             .anchors_cache
-            .get_last_imported_anchor_ct_and_author()
+            .get_last_imported_anchor_author()
             .unwrap();
+
+        let next_chain_time =
+            next_chain_time.unwrap_or(self.anchors_cache.get_last_imported_anchor_ct().unwrap());
 
         // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor

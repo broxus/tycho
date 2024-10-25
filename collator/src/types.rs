@@ -129,7 +129,7 @@ pub struct ExecuteWUParams {
 impl Default for ExecuteWUParams {
     fn default() -> Self {
         Self {
-            prepare: 80,               // 80 mcs
+            prepare: 80,                // 80 mcs
             execute: 17,                // 0.000017 mcs
             execute_delimiter: 1000000, // 1 pcs
             serialize: 3600,            // 3600 ns
