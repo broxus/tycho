@@ -962,7 +962,7 @@ def block_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_shard_blocks_count",
-            "Shard Blocks count between master blocks",
+            "Shard Blocks count before import next anchor",
         ),
         create_counter_panel(
             "tycho_do_collate_blocks_with_limits_reached_count",

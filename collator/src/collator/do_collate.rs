@@ -87,11 +87,7 @@ impl CollatorStdImpl {
 
         let is_masterchain = self.shard_id.is_masterchain();
 
-        if is_masterchain {
-            metrics::gauge!("tycho_do_collate_shard_blocks_count").set(self.shards_count);
-            self.shards_count = 0;
-        } else {
-            metrics::gauge!("tycho_do_collate_shard_blocks_count").set(self.shards_count);
+        if !is_masterchain {
             self.shards_count += 1;
         }
 
@@ -506,12 +502,15 @@ impl CollatorStdImpl {
             .set(collation_data.block_limit.gas_used as f64 + gas_used_fo_finalize as f64);
         metrics::gauge!("tycho_do_collate_gas_to_time_proportion", &labels).set(
             (gas_used_fo_finalize as f64 / collation_data.block_limit.gas_used as f64)
-                / (finalize_block_elapsed.as_micros() as f64 / execute_elapsed.as_micros() as f64),
+                / (finalize_block_elapsed.as_micros() as f64
+                    / execute_msgs_total_elapsed.as_micros() as f64),
         );
         metrics::gauge!("tycho_do_collate_gas_to_ns_finalize", &labels)
             .set(finalize_block_elapsed.as_nanos() as f64 / gas_used_fo_finalize as f64);
-        metrics::gauge!("tycho_do_collate_gas_to_ns_execute", &labels)
-            .set(execute_elapsed.as_nanos() as f64 / collation_data.block_limit.gas_used as f64);
+        metrics::gauge!("tycho_do_collate_gas_to_ns_execute", &labels).set(
+            execute_msgs_total_elapsed.as_nanos() as f64
+                / collation_data.block_limit.gas_used as f64,
+        );
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)

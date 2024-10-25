@@ -1361,6 +1361,9 @@ impl CollatorStdImpl {
             metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
                 .record(elapsed_from_prev_anchor);
 
+            metrics::gauge!("tycho_do_collate_shard_blocks_count").set(self.shards_count);
+            self.shards_count = 0;
+
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "gas_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_gas - {}, ",
                 no_pending_msgs,
