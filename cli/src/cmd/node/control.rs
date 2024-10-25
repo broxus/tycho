@@ -1,9 +1,9 @@
 use std::future::Future;
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use everscale_types::models::BlockId;
 use serde::Serialize;
 use tycho_control::ControlClient;
@@ -11,6 +11,7 @@ use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
 use crate::util::print_json;
+use crate::BaseArgs;
 
 #[derive(Subcommand)]
 pub enum CmdControl {
@@ -31,21 +32,21 @@ pub enum CmdControl {
 }
 
 impl CmdControl {
-    pub fn run(self) -> Result<()> {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
         match self {
-            Self::Ping(cmd) => cmd.run(),
-            Self::GetInfo(cmd) => cmd.run(),
-            Self::FindArchive(cmd) => cmd.run(),
-            Self::ListArchives(cmd) => cmd.run(),
-            Self::DumpArchive(cmd) => cmd.run(),
-            Self::ListBlocks(cmd) => cmd.run(),
-            Self::DumpBlock(cmd) => cmd.run(),
-            Self::DumpProof(cmd) => cmd.run(),
-            Self::DumpQueueDiff(cmd) => cmd.run(),
-            Self::GcArchives(cmd) => cmd.run(),
-            Self::GcBlocks(cmd) => cmd.run(),
-            Self::GcStates(cmd) => cmd.run(),
-            Self::MemProfiler(cmd) => cmd.run(),
+            Self::Ping(cmd) => cmd.run(args),
+            Self::GetInfo(cmd) => cmd.run(args),
+            Self::FindArchive(cmd) => cmd.run(args),
+            Self::ListArchives(cmd) => cmd.run(args),
+            Self::DumpArchive(cmd) => cmd.run(args),
+            Self::ListBlocks(cmd) => cmd.run(args),
+            Self::DumpBlock(cmd) => cmd.run(args),
+            Self::DumpProof(cmd) => cmd.run(args),
+            Self::DumpQueueDiff(cmd) => cmd.run(args),
+            Self::GcArchives(cmd) => cmd.run(args),
+            Self::GcBlocks(cmd) => cmd.run(args),
+            Self::GcStates(cmd) => cmd.run(args),
+            Self::MemProfiler(cmd) => cmd.run(args),
         }
     }
 }
@@ -53,14 +54,13 @@ impl CmdControl {
 /// Ping the control server.
 #[derive(Parser)]
 pub struct CmdPing {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 }
 
 impl CmdPing {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
             let timestamp = client.ping().await?;
             print_json(serde_json::json!({
                 "timestamp": timestamp,
@@ -72,14 +72,13 @@ impl CmdPing {
 /// Get a brief node info.
 #[derive(Parser)]
 pub struct CmdGetInfo {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 }
 
 impl CmdGetInfo {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
             let info = client.get_node_info().await?;
             print_json(serde_json::json!({
                 "public_addr": info.public_addr,
@@ -94,17 +93,16 @@ impl CmdGetInfo {
 /// Trigger a garbage collection of archives.
 #[derive(Parser)]
 pub struct CmdGcArchives {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     #[clap(flatten)]
     by: TriggerBy,
 }
 
 impl CmdGcArchives {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
             client.trigger_archives_gc(self.by.into()).await?;
             print_json(Empty {})
         })
@@ -114,17 +112,16 @@ impl CmdGcArchives {
 /// Trigger a garbage collection of blocks.
 #[derive(Parser)]
 pub struct CmdGcBlocks {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     #[clap(flatten)]
     by: TriggerBy,
 }
 
 impl CmdGcBlocks {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
             client.trigger_blocks_gc(self.by.into()).await?;
             print_json(Empty {})
         })
@@ -134,17 +131,16 @@ impl CmdGcBlocks {
 /// Trigger a garbage collection of states.
 #[derive(Parser)]
 pub struct CmdGcStates {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     #[clap(flatten)]
     by: TriggerBy,
 }
 
 impl CmdGcStates {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
             client.trigger_states_gc(self.by.into()).await?;
             print_json(Empty {})
         })
@@ -160,11 +156,11 @@ pub enum CmdMemProfiler {
 }
 
 impl CmdMemProfiler {
-    pub fn run(self) -> Result<()> {
-        let sock = match &self {
-            Self::Start(cmd) => &cmd.sock,
-            Self::Stop(cmd) => &cmd.sock,
-            Self::Dump(cmd) => &cmd.sock,
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        let control = match &self {
+            Self::Start(cmd) => &cmd.args,
+            Self::Stop(cmd) => &cmd.args,
+            Self::Dump(cmd) => &cmd.args,
         }
         .clone();
 
@@ -174,7 +170,7 @@ impl CmdMemProfiler {
             active: bool,
         }
 
-        control_rt(sock, |client| async move {
+        control.rt(args, |client| async move {
             match self {
                 Self::Start(_) => {
                     let updated = client.set_memory_profiler_enabled(true).await?;
@@ -205,25 +201,22 @@ impl CmdMemProfiler {
 /// Start the memory profiler.
 #[derive(Parser)]
 pub struct CmdProfilerStart {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 }
 
 /// Stop the memory profiler.
 #[derive(Parser)]
 pub struct CmdProfilerStop {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 }
 
 /// Dump the memory profiler data.
 #[derive(Parser)]
 pub struct CmdProfilerDump {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     /// path to the output file
     #[clap()]
@@ -233,9 +226,8 @@ pub struct CmdProfilerDump {
 /// Get archive info from the node.
 #[derive(Parser)]
 pub struct CmdFindArchive {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     /// masterchain block seqno.
     #[clap(long)]
@@ -243,8 +235,8 @@ pub struct CmdFindArchive {
 }
 
 impl CmdFindArchive {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, move |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
             let Some(info) = client.find_archive(self.seqno).await? else {
                 anyhow::bail!("archive not found");
             };
@@ -260,15 +252,15 @@ impl CmdFindArchive {
 /// Fetch the list of all stored archive ids.
 #[derive(Parser)]
 pub struct CmdListArchives {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
+
     #[clap(long)]
     human_readable: bool,
 }
 
 impl CmdListArchives {
-    pub fn run(self) -> Result<()> {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
         fn print_human_readable(archives: &[tycho_control::proto::ArchiveInfo]) {
             use bytesize::ByteSize;
 
@@ -309,7 +301,7 @@ impl CmdListArchives {
             }
         }
 
-        control_rt(self.sock, move |client| async move {
+        self.args.rt(args, move |client| async move {
             let archives = client.list_archives().await?;
             if self.human_readable {
                 print_human_readable(&archives);
@@ -325,9 +317,8 @@ impl CmdListArchives {
 /// Dump the archive from the node.
 #[derive(Parser)]
 pub struct CmdDumpArchive {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     /// masterchain block seqno.
     #[clap(long)]
@@ -343,8 +334,8 @@ pub struct CmdDumpArchive {
 }
 
 impl CmdDumpArchive {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, move |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
             let Some(info) = client.find_archive(self.seqno).await? else {
                 anyhow::bail!("archive not found");
             };
@@ -373,16 +364,16 @@ impl CmdDumpArchive {
 /// Fetch the list of all stored block ids.
 #[derive(Parser)]
 pub struct CmdListBlocks {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
+
     #[clap(long)]
     human_readable: bool,
 }
 
 impl CmdListBlocks {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, move |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
             let (json_start, json_pfx, json_end) = if std::io::stdin().is_terminal() {
                 ("{\n  \"blocks\": [", "\n    ", "\n  ]\n}")
             } else {
@@ -436,9 +427,8 @@ impl CmdListBlocks {
 /// Download a block from the node.
 #[derive(Parser)]
 pub struct CmdDumpBlock {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     /// full block ID.
     #[clap(short, long, allow_hyphen_values(true))]
@@ -450,8 +440,8 @@ pub struct CmdDumpBlock {
 }
 
 impl CmdDumpBlock {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, move |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
             let Some(data) = client.get_block(&self.block_id).await? else {
                 anyhow::bail!("block not found");
             };
@@ -471,9 +461,8 @@ impl CmdDumpBlock {
 /// Dump a block proof from the node.
 #[derive(Parser)]
 pub struct CmdDumpProof {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     /// full block ID.
     #[clap(short, long, allow_hyphen_values(true))]
@@ -485,8 +474,8 @@ pub struct CmdDumpProof {
 }
 
 impl CmdDumpProof {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, move |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
             let Some(data) = client.get_block_proof(&self.block_id).await? else {
                 anyhow::bail!("block proof not found");
             };
@@ -507,9 +496,8 @@ impl CmdDumpProof {
 /// Dump a queue diff from the node.
 #[derive(Parser)]
 pub struct CmdDumpQueueDiff {
-    /// Unix socket path to connect to.
-    #[clap(short, long)]
-    sock: Option<PathBuf>,
+    #[clap(flatten)]
+    args: ControlArgs,
 
     /// full block ID.
     #[clap(short, long, allow_hyphen_values(true))]
@@ -521,8 +509,8 @@ pub struct CmdDumpQueueDiff {
 }
 
 impl CmdDumpQueueDiff {
-    pub fn run(self) -> Result<()> {
-        control_rt(self.sock, move |client| async move {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
             let Some(data) = client.get_queue_diff(&self.block_id).await? else {
                 anyhow::bail!("queue diff not found");
             };
@@ -563,42 +551,44 @@ impl From<TriggerBy> for tycho_control::proto::TriggerGcRequest {
 #[derive(Serialize)]
 struct Empty {}
 
-fn control_rt<P, F, FT>(sock: Option<P>, f: F) -> Result<()>
-where
-    P: AsRef<Path>,
-    F: FnOnce(ControlClient) -> FT + Send + 'static,
-    FT: Future<Output = Result<()>> + Send,
-{
-    tracing_subscriber::fmt::init();
+#[derive(Clone, Args)]
+struct ControlArgs {
+    /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+    #[clap(long)]
+    control_socket: Option<PathBuf>,
+}
 
-    let sock = match sock {
-        Some(sock) => sock.as_ref().to_owned(),
-        None => match std::env::var("TYCHO_CONTROL_SOCK") {
-            Ok(sock) => PathBuf::from(sock),
-            Err(_) => PathBuf::from(tycho_control::DEFAULT_SOCKET_PATH),
-        },
-    };
+impl ControlArgs {
+    fn rt<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
+    where
+        F: FnOnce(ControlClient) -> FT + Send + 'static,
+        FT: Future<Output = Result<()>> + Send,
+    {
+        tracing_subscriber::fmt::init();
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async move {
-            let run_fut = JoinTask::new(async move {
-                let client = ControlClient::connect(sock)
-                    .await
-                    .context("failed to connect to control server")?;
-                f(client).await
-            });
-            let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-            tokio::select! {
-                res = run_fut => res,
-                signal = stop_fut => match signal {
-                    Ok(signal) => {
-                        tracing::info!(?signal, "received termination signal");
-                        Ok(())
+        let sock = args.control_socket_path(self.control_socket.as_ref());
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let run_fut = JoinTask::new(async move {
+                    let client = ControlClient::connect(sock)
+                        .await
+                        .context("failed to connect to control server")?;
+                    f(client).await
+                });
+                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+                tokio::select! {
+                    res = run_fut => res,
+                    signal = stop_fut => match signal {
+                        Ok(signal) => {
+                            tracing::info!(?signal, "received termination signal");
+                            Ok(())
+                        }
+                        Err(e) => Err(e.into()),
                     }
-                    Err(e) => Err(e.into()),
                 }
-            }
-        })
+            })
+    }
 }

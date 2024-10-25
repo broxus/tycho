@@ -746,7 +746,7 @@ fn build_config_account(
     address: &HashBytes,
     balance: Tokens,
 ) -> Result<Account> {
-    const CONFIG_CODE: &[u8] = include_bytes!("../../res/config_code.boc");
+    const CONFIG_CODE: &[u8] = include_bytes!("../../../res/config_code.boc");
 
     let code = Boc::decode(CONFIG_CODE)?;
 
@@ -781,7 +781,7 @@ fn build_config_account(
 }
 
 fn build_elector_code(address: &HashBytes, balance: Tokens) -> Result<Account> {
-    const ELECTOR_CODE: &[u8] = include_bytes!("../../res/elector_code.boc");
+    const ELECTOR_CODE: &[u8] = include_bytes!("../../../res/elector_code.boc");
 
     let code = Boc::decode(ELECTOR_CODE)?;
 
@@ -816,7 +816,7 @@ fn build_elector_code(address: &HashBytes, balance: Tokens) -> Result<Account> {
 }
 
 fn build_minter_account(pubkey: &ed25519::PublicKey, address: &HashBytes) -> Result<Account> {
-    const MINTER_STATE: &[u8] = include_bytes!("../../res/minter_state.boc");
+    const MINTER_STATE: &[u8] = include_bytes!("../../../res/minter_state.boc");
 
     let mut account = BocRepr::decode::<OptionalAccount, _>(MINTER_STATE)?
         .0

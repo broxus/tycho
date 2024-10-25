@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
-use clap::{Parser, Subcommand};
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
@@ -42,207 +41,15 @@ use tycho_network::{
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{NodeSyncState, Storage};
 use tycho_util::cli::error::ResultExt;
-use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
-use tycho_util::cli::{resolve_public_ip, signal};
 use tycho_util::futures::JoinTask;
 
-use self::config::{NodeConfig, NodeKeys};
-pub use self::control::CmdControl;
-use crate::node::config::MetricsConfig;
-use crate::util::alloc::spawn_allocator_metrics_loop;
+pub use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
-use crate::BaseArgs;
 
-pub mod config;
-mod control;
+mod config;
 
 const SERVICE_NAME: &str = "tycho-node";
-
-/// Manage node.
-#[derive(Parser)]
-pub struct Cmd {
-    #[clap(subcommand)]
-    cmd: SubCmd,
-}
-
-impl Cmd {
-    pub fn run(self, args: BaseArgs) -> Result<()> {
-        match self.cmd {
-            SubCmd::Run(cmd) => cmd.run(args),
-            SubCmd::InitConfig(cmd) => cmd.run(),
-            SubCmd::Control(cmd) => cmd.run(),
-        }
-    }
-}
-
-#[derive(Subcommand)]
-enum SubCmd {
-    Run(CmdRun),
-    InitConfig(CmdInitConfig),
-    #[clap(flatten)]
-    Control(CmdControl),
-}
-
-/// Generate a default node config.
-#[derive(Parser)]
-struct CmdInitConfig {
-    /// path to the output file
-    output: PathBuf,
-
-    /// overwrite the existing config
-    #[clap(short, long)]
-    force: bool,
-}
-
-impl CmdInitConfig {
-    fn run(self) -> Result<()> {
-        if self.output.exists() && !self.force {
-            anyhow::bail!("config file already exists, use --force to overwrite");
-        }
-
-        NodeConfig::default()
-            .save_to_file(self.output)
-            .wrap_err("failed to save node config")
-    }
-}
-
-/// Run a Tycho node.
-#[derive(Parser)]
-struct CmdRun {
-    /// Path to the node config. Default: `$TYCHO_HOME/config.json`
-    #[clap(long)]
-    config: Option<PathBuf>,
-
-    /// Path to the global config. Default: `$TYCHO_HOME/global-config.json`
-    #[clap(long)]
-    global_config: Option<PathBuf>,
-
-    /// Path to the node keys. Default: `$TYCHO_HOME/keys.json`
-    #[clap(long)]
-    keys: Option<PathBuf>,
-
-    /// Path to the logger config.
-    #[clap(long)]
-    logger_config: Option<PathBuf>,
-
-    /// List of zerostate files to import.
-    #[clap(long)]
-    import_zerostate: Option<Vec<PathBuf>>,
-
-    /// Last know applied master block seqno to recover from
-    #[allow(clippy::option_option)]
-    #[clap(long)]
-    pub from_mc_block_seqno: Option<Option<u32>>,
-}
-
-impl CmdRun {
-    fn run(self, args: BaseArgs) -> Result<()> {
-        let config_path = self
-            .config
-            .clone()
-            .unwrap_or_else(|| args.home.join("config.json"));
-        let node_config =
-            NodeConfig::from_file(config_path).wrap_err("failed to load node config")?;
-
-        rayon::ThreadPoolBuilder::new()
-            .stack_size(8 * 1024 * 1024)
-            .thread_name(|_| "rayon_worker".to_string())
-            .num_threads(node_config.threads.rayon_threads)
-            .build_global()
-            .unwrap();
-
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(node_config.threads.tokio_workers)
-            .build()?
-            .block_on(async move {
-                let run_fut = tokio::spawn(self.run_impl(args, node_config));
-                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-                tokio::select! {
-                    res = run_fut => res.unwrap(),
-                    signal = stop_fut => match signal {
-                        Ok(signal) => {
-                            tracing::info!(?signal, "received termination signal");
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                }
-            })
-    }
-
-    async fn run_impl(self, args: BaseArgs, node_config: NodeConfig) -> Result<()> {
-        init_logger(&node_config.logger, self.logger_config)?;
-        set_abort_with_tracing();
-
-        if let Some(metrics_config) = &node_config.metrics {
-            init_metrics(metrics_config)?;
-        }
-
-        let node = {
-            let global_config_path = self
-                .global_config
-                .unwrap_or_else(|| args.home.join("global-config.json"));
-            let global_config = GlobalConfig::from_file(global_config_path)
-                .wrap_err("failed to load global config")?;
-
-            let keys_path = self.keys.unwrap_or_else(|| args.home.join("keys.json"));
-            let keys = NodeKeys::from_file(keys_path).wrap_err("failed to load node keys")?;
-
-            let public_ip = resolve_public_ip(node_config.public_ip).await?;
-            let socket_addr = SocketAddr::new(public_ip, node_config.port);
-
-            Node::new(socket_addr, keys, node_config, global_config).await?
-        };
-
-        node.wait_for_neighbours().await;
-
-        let init_block_id = node
-            .boot(self.import_zerostate)
-            .await
-            .wrap_err("failed to init node")?;
-
-        tracing::info!(%init_block_id, "node initialized");
-
-        let from_mc_block_seqno = self.from_mc_block_seqno.unwrap_or_default();
-
-        node.run(&init_block_id, from_mc_block_seqno).await?;
-
-        Ok(())
-    }
-}
-
-fn init_metrics(config: &MetricsConfig) -> Result<()> {
-    use metrics_exporter_prometheus::Matcher;
-    const EXPONENTIAL_SECONDS: &[f64] = &[
-        0.000001, 0.00001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.75, 1.0, 2.5, 5.0,
-        7.5, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0,
-    ];
-
-    const EXPONENTIAL_LONG_SECONDS: &[f64] = &[
-        0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0,
-        14400.0, 28800.0, 43200.0, 86400.0,
-    ];
-
-    const EXPONENTIAL_THREADS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
-
-    metrics_exporter_prometheus::PrometheusBuilder::new()
-        .set_buckets_for_metric(Matcher::Suffix("_time".to_string()), EXPONENTIAL_SECONDS)?
-        .set_buckets_for_metric(Matcher::Suffix("_threads".to_string()), EXPONENTIAL_THREADS)?
-        .set_buckets_for_metric(
-            Matcher::Suffix("_time_long".to_string()),
-            EXPONENTIAL_LONG_SECONDS,
-        )?
-        .with_http_listener(config.listen_addr)
-        .install()
-        .wrap_err("failed to initialize a metrics exporter")?;
-
-    #[cfg(feature = "jemalloc")]
-    spawn_allocator_metrics_loop();
-
-    Ok(())
-}
 
 pub struct Node {
     keypair: Arc<ed25519::KeyPair>,
@@ -261,7 +68,8 @@ pub struct Node {
 
     starter_config: StarterConfig,
     rpc_config: Option<RpcConfig>,
-    control_config: Option<ControlServerConfig>,
+    control_config: ControlServerConfig,
+    control_socket: PathBuf,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
     archive_block_provider_config: ArchiveBlockProviderConfig,
 
@@ -277,6 +85,7 @@ impl Node {
         keys: NodeKeys,
         node_config: NodeConfig,
         global_config: GlobalConfig,
+        control_socket: PathBuf,
     ) -> Result<Self> {
         // Setup network
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
@@ -397,6 +206,7 @@ impl Node {
             starter_config: node_config.starter,
             rpc_config: node_config.rpc,
             control_config: node_config.control,
+            control_socket,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             archive_block_provider_config: node_config.archive_block_provider,
             collator_config: node_config.collator,
@@ -406,7 +216,7 @@ impl Node {
         })
     }
 
-    async fn wait_for_neighbours(&self) {
+    pub async fn wait_for_neighbours(&self) {
         // Ensure that there are some neighbours
         tracing::info!("waiting for initial neighbours");
         self.blockchain_rpc_client
@@ -418,7 +228,7 @@ impl Node {
     }
 
     /// Initialize the node and return the init block id.
-    async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
+    pub async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
@@ -560,7 +370,7 @@ impl Node {
 
         // Create RPC
         // NOTE: This variable is used as a guard to abort the server future on drop.
-        let _control_state = if let Some(config) = &self.control_config {
+        let _control_state = {
             let server = {
                 let mut builder = ControlServer::builder()
                     .with_network(&self.network)
@@ -576,20 +386,19 @@ impl Node {
                 builder.build()
             };
 
-            let endpoint = ControlEndpoint::bind(config, server)
+            let endpoint = ControlEndpoint::bind(&self.control_config, server, self.control_socket)
                 .await
                 .wrap_err("failed to setup control server endpoint")?;
 
-            tracing::info!(socket_path = %config.socket_path.display(), "control server started");
-            Some(JoinTask::new(async move {
+            tracing::info!(socket_path = %endpoint.socket_path().display(), "control server started");
+
+            JoinTask::new(async move {
                 scopeguard::defer! {
                     tracing::info!("control server stopped");
                 }
 
                 endpoint.serve().await;
-            }))
-        } else {
-            None
+            })
         };
 
         // Create block strider

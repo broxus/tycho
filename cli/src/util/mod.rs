@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
@@ -10,6 +11,11 @@ use serde::Serialize;
 
 #[cfg(feature = "jemalloc")]
 pub mod alloc;
+
+pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
+    std::fs::create_dir_all(path.as_ref())
+        .with_context(|| format!("failed to create a directory {}", path.as_ref().display()))
+}
 
 pub fn print_json<T: Serialize>(output: T) -> Result<()> {
     let output = if std::io::stdin().is_terminal() {

@@ -7,11 +7,15 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-#[cfg(feature = "debug")]
-mod debug;
-mod init;
+mod cmd {
+    #[cfg(feature = "debug")]
+    pub mod debug;
+    pub mod init;
+    pub mod node;
+    pub mod tools;
+}
+
 mod node;
-mod tools;
 mod util;
 
 #[cfg(feature = "jemalloc")]
@@ -58,11 +62,11 @@ impl App {
 
 #[derive(Subcommand)]
 enum Cmd {
-    Init(init::Cmd),
-    Node(node::Cmd),
-    Tool(tools::Cmd),
+    Init(cmd::init::Cmd),
+    Node(cmd::node::Cmd),
+    Tool(cmd::tools::Cmd),
     #[cfg(feature = "debug")]
-    Debug(debug::Cmd),
+    Debug(cmd::debug::Cmd),
 }
 
 impl Cmd {
@@ -82,6 +86,41 @@ pub struct BaseArgs {
     /// Directory for config and keys.
     #[clap(long, value_parser, default_value_os = default_home_dir().as_os_str())]
     home: PathBuf,
+}
+
+impl BaseArgs {
+    pub fn create_home_dir(&self) -> Result<&Self> {
+        crate::util::create_dir_all(&self.home)?;
+        Ok(self)
+    }
+
+    pub fn node_config_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+        overwrite
+            .cloned()
+            .unwrap_or_else(|| self.home.join("config.json"))
+    }
+
+    pub fn node_keys_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+        overwrite
+            .cloned()
+            .unwrap_or_else(|| self.home.join("keys.json"))
+    }
+
+    pub fn global_config_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+        overwrite
+            .cloned()
+            .unwrap_or_else(|| self.home.join("global-config.json"))
+    }
+
+    pub fn control_socket_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+        match overwrite {
+            Some(path) => path.clone(),
+            None => match std::env::var("TYCHO_CONTROL_SOCK") {
+                Ok(sock) => PathBuf::from(sock),
+                Err(_) => self.home.join("control.sock"),
+            },
+        }
+    }
 }
 
 fn version_string() -> &'static str {

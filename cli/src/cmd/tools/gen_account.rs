@@ -159,7 +159,7 @@ struct WalletBuilder {
 
 impl WalletBuilder {
     fn build(self) -> Result<(HashBytes, Account)> {
-        const EVER_WALLET_CODE: &[u8] = include_bytes!("../../res/ever_wallet_code.boc");
+        const EVER_WALLET_CODE: &[u8] = include_bytes!("../../../res/ever_wallet_code.boc");
 
         let data = CellBuilder::build_from((HashBytes::wrap(self.pubkey.as_bytes()), 0u64))?;
         let code = Boc::decode(EVER_WALLET_CODE)?;
@@ -203,9 +203,10 @@ impl MultisigBuilder {
         const MIN_LIFETIME: u32 = 600;
 
         // Multisig2
-        const SAFE_MULTISIG_CODE: &[u8] = include_bytes!("../../res/safe_multisig_code.boc");
+        const SAFE_MULTISIG_CODE: &[u8] = include_bytes!("../../../res/safe_multisig_code.boc");
         // SetcodeMultisig (old)
-        const SETCODE_MULTISIG_CODE: &[u8] = include_bytes!("../../res/setcode_multisig_code.boc");
+        const SETCODE_MULTISIG_CODE: &[u8] =
+            include_bytes!("../../../res/setcode_multisig_code.boc");
 
         if let Some(lifetime) = self.lifetime {
             anyhow::ensure!(
@@ -347,7 +348,7 @@ struct GiverBuilder {
 
 impl GiverBuilder {
     fn build(self) -> Result<(HashBytes, Account)> {
-        const GIVER_STATE: &[u8] = include_bytes!("../../res/giver_state.boc");
+        const GIVER_STATE: &[u8] = include_bytes!("../../../res/giver_state.boc");
 
         let mut account = BocRepr::decode::<OptionalAccount, _>(GIVER_STATE)?
             .0
