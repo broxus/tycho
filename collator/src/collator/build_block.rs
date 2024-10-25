@@ -218,37 +218,22 @@ impl CollatorStdImpl {
             // add gas usage for in, out messages building, accounts storing and merkle calculation
             let FinalizeBlockGasParams {
                 build_account,
-                in_message,
-                out_message,
                 merkle_calc_account,
                 serialize_account,
-                serialize_in_message,
-                serialize_out_message,
             } = finalize_block_gas_params;
 
             let accounts_count = processed_accounts.accounts_len as u64;
-            let in_msgs_len = collation_data.in_msgs.len() as u64;
-            let out_msgs_len = collation_data.out_msgs.len() as u64;
-            let build = std::cmp::max(
-                std::cmp::max(
-                    build_account.saturating_mul(accounts_count),
-                    in_message.saturating_mul(in_msgs_len),
-                ),
-                out_message.saturating_mul(out_msgs_len),
-            );
+            let accounts_count_log = (accounts_count as f64).log10();
+            let build = build_account as f64 * accounts_count_log;
 
-            gas_used_for_finalize = build
-                .saturating_add(merkle_calc_account.saturating_mul(accounts_count))
-                .saturating_add(serialize_account.saturating_mul(accounts_count))
-                .saturating_add(serialize_in_message.saturating_mul(in_msgs_len))
-                .saturating_add(serialize_out_message.saturating_mul(out_msgs_len));
+            gas_used_for_finalize = (build as u64)
+                .saturating_add(((merkle_calc_account as f64) * accounts_count_log) as u64)
+                .saturating_add(serialize_account.saturating_mul(accounts_count));
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_for_finalize: {}  accounts_count: {} in_msgs_len: {} out_msgs_len: {} ",
+                "gas_used_for_finalize: {}  accounts_count: {} ",
                 gas_used_for_finalize,
                 accounts_count,
-                in_msgs_len,
-                out_msgs_len,
             );
 
             // compute total gas used from last anchor

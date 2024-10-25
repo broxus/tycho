@@ -93,24 +93,16 @@ impl Default for MsgsExecutionParams {
 #[serde(default)]
 pub struct FinalizeBlockGasParams {
     pub build_account: u64,
-    pub in_message: u64,
-    pub out_message: u64,
     pub merkle_calc_account: u64,
     pub serialize_account: u64,
-    pub serialize_in_message: u64,
-    pub serialize_out_message: u64,
 }
 
 impl Default for FinalizeBlockGasParams {
     fn default() -> Self {
         Self {
-            build_account: 5000,
-            in_message: 1000,
-            out_message: 900,
-            merkle_calc_account: 4600,
-            serialize_account: 500,
-            serialize_in_message: 100,
-            serialize_out_message: 90,
+            build_account: 3000000,
+            merkle_calc_account: 2500000,
+            serialize_account: 5000,
         }
     }
 }
