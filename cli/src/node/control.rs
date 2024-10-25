@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use everscale_types::models::BlockId;
 use serde::Serialize;
 use tycho_control::ControlClient;
-use tycho_core::block_strider::ManualGcTrigger;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
@@ -16,6 +15,7 @@ use crate::util::print_json;
 #[derive(Subcommand)]
 pub enum CmdControl {
     Ping(CmdPing),
+    GetInfo(CmdGetInfo),
     FindArchive(CmdFindArchive),
     ListArchives(CmdListArchives),
     DumpArchive(CmdDumpArchive),
@@ -34,6 +34,7 @@ impl CmdControl {
     pub fn run(self) -> Result<()> {
         match self {
             Self::Ping(cmd) => cmd.run(),
+            Self::GetInfo(cmd) => cmd.run(),
             Self::FindArchive(cmd) => cmd.run(),
             Self::ListArchives(cmd) => cmd.run(),
             Self::DumpArchive(cmd) => cmd.run(),
@@ -63,6 +64,28 @@ impl CmdPing {
             let timestamp = client.ping().await?;
             print_json(serde_json::json!({
                 "timestamp": timestamp,
+            }))
+        })
+    }
+}
+
+/// Get a brief node info.
+#[derive(Parser)]
+pub struct CmdGetInfo {
+    /// Unix socket path to connect to.
+    #[clap(short, long)]
+    sock: Option<PathBuf>,
+}
+
+impl CmdGetInfo {
+    pub fn run(self) -> Result<()> {
+        control_rt(self.sock, |client| async move {
+            let info = client.get_node_info().await?;
+            print_json(serde_json::json!({
+                "public_addr": info.public_addr,
+                "local_addr": info.local_addr.to_string(),
+                "adnl_id": info.adnl_id,
+                "validator_public_key": info.public_addr,
             }))
         })
     }
@@ -527,11 +550,11 @@ struct TriggerBy {
     pub distance: Option<u32>,
 }
 
-impl From<TriggerBy> for ManualGcTrigger {
+impl From<TriggerBy> for tycho_control::proto::TriggerGcRequest {
     fn from(value: TriggerBy) -> Self {
         match (value.seqno, value.distance) {
-            (Some(seqno), None) => ManualGcTrigger::Exact(seqno),
-            (None, Some(distance)) => ManualGcTrigger::Distance(distance),
+            (Some(seqno), None) => tycho_control::proto::TriggerGcRequest::Exact(seqno),
+            (None, Some(distance)) => tycho_control::proto::TriggerGcRequest::Distance(distance),
             _ => unreachable!(),
         }
     }

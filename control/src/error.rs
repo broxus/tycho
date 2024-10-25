@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "client")]
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("client failed: {0}")]
@@ -10,6 +11,7 @@ pub enum ClientError {
     Internal(#[from] ServerError),
 }
 
+#[cfg(feature = "client")]
 pub type ClientResult<T, E = ClientError> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error, Serialize, Deserialize)]

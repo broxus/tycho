@@ -249,6 +249,7 @@ pub struct Node {
 
     zerostate: ZerostateId,
 
+    network: Network,
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
@@ -367,7 +368,7 @@ impl Node {
 
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_public_overlay_client(PublicOverlayClient::new(
-                network,
+                network.clone(),
                 public_overlay,
                 node_config.public_overlay_client,
             ))
@@ -384,6 +385,7 @@ impl Node {
 
         Ok(Self {
             keypair,
+            network,
             zerostate,
             dht_client,
             peer_resolver,
@@ -561,8 +563,10 @@ impl Node {
         let _control_state = if let Some(config) = &self.control_config {
             let server = {
                 let mut builder = ControlServer::builder()
+                    .with_network(&self.network)
                     .with_gc_subscriber(gc_subscriber.clone())
-                    .with_storage(self.storage.clone());
+                    .with_storage(self.storage.clone())
+                    .with_validator_keypair(self.keypair.clone());
 
                 #[cfg(feature = "jemalloc")]
                 if let Some(profiler) = JemallocMemoryProfiler::connect() {

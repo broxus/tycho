@@ -3417,6 +3417,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "everscale-crypto",
  "everscale-types",
  "futures-util",
  "serde",
@@ -3425,6 +3426,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tycho-core",
+ "tycho-network",
  "tycho-storage",
  "tycho-util",
 ]
@@ -3599,6 +3601,7 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "anyhow",
+ "base64",
  "bytes",
  "castaway",
  "dashmap",

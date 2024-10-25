@@ -8,19 +8,28 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+# TODO: Make all dependencies optional to allow using just a plain proto
+
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 
 # local deps
-tycho-core = { workspace = true }
-tycho-storage = { workspace = true }
+tycho-core = { workspace = true, optional = true }
+tycho-network = { workspace = true, optional = true }
+tycho-storage = { workspace = true, optional = true }
 tycho-util = { workspace = true }
+
+[features]
+full = ["client", "server"]
+client = []
+server = ["dep:tycho-core", "dep:tycho-network", "dep:tycho-storage"]
