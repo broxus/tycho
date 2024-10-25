@@ -214,30 +214,36 @@ impl CollatorStdImpl {
             );
 
             let FinalizeBlockWUParams {
-                build,
-                merkle_calc,
-                serialize,
+                build_transactions,
                 build_in_msg,
                 build_out_msg,
-                state_update_msg,
                 serialize_msg,
+                state_update_min,
+                serialize_min,
+                serialize,
+                state_update_msg,
             } = finalize_params;
 
             let accounts_count = processed_accounts.accounts_len as u64;
-            let accounts_count_logarithm = (accounts_count as f64).log10();
-            let build = build as f64 * accounts_count_logarithm;
+            let accounts_count_logarithm = (accounts_count as f64).log2();
+            let build = accounts_count as f64 * accounts_count_logarithm;
             let in_msgs_len = collation_data.in_msgs.len() as u64;
-            let build_in_msg = build_in_msg * in_msgs_len;
+            let build_in_msg = build_in_msg.saturating_mul(in_msgs_len);
             let out_msgs_len = collation_data.out_msgs.len() as u64;
-            let build_out_msg = build_out_msg * out_msgs_len;
-            let build = std::cmp::max(build as u64, build_in_msg);
-            let build = std::cmp::max(build as u64, build_out_msg);
+            let build_out_msg = build_out_msg.saturating_mul(out_msgs_len);
+            let build = (build as u64).saturating_add(
+                build_transactions.saturating_mul(std::cmp::max(out_msgs_len, in_msgs_len)),
+            );
+            let build = std::cmp::max(build, build_in_msg);
+            let build = std::cmp::max(build, build_out_msg);
 
-            let merkle_calc = ((merkle_calc as f64 * accounts_count_logarithm) as u64)
-                .saturating_add(state_update_msg.saturating_mul(in_msgs_len + out_msgs_len));
+            let merkle_calc = std::cmp::max(
+                state_update_min,
+                (((accounts_count as f64 * accounts_count_logarithm) as u64).saturating_div(2))
+                    .saturating_add(state_update_msg.saturating_mul(out_msgs_len)),
+            );
 
-            let serialize = serialize
-                .saturating_mul(accounts_count)
+            let serialize = std::cmp::max(serialize_min, serialize.saturating_mul(accounts_count))
                 .saturating_add(serialize_msg.saturating_mul(in_msgs_len + out_msgs_len));
             finalize_wu_total = build.saturating_add(merkle_calc).saturating_add(serialize);
 

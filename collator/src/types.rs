@@ -146,25 +146,27 @@ impl Default for ExecuteWUParams {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
 pub struct FinalizeBlockWUParams {
-    pub build: u64,
+    pub build_transactions: u64,
     pub build_in_msg: u64,
     pub build_out_msg: u64,
-    pub merkle_calc: u64,
-    pub state_update_msg: u64,
     pub serialize: u64,
     pub serialize_msg: u64,
+    pub state_update_min: u64,
+    pub state_update_msg: u64,
+    pub serialize_min: u64,
 }
 
 impl Default for FinalizeBlockWUParams {
     fn default() -> Self {
         Self {
-            build: 13000,        // 13 000 mcs
-            build_in_msg: 3,     // 3 mcs
-            build_out_msg: 2,    // 2 mcs
-            state_update_msg: 1, // 1 mcs
-            merkle_calc: 10000,  // 10 000 mcs
-            serialize: 20,       // 20 mcs
-            serialize_msg: 3,    // 3 mcs
+            build_transactions: 3,   // 3 mcs
+            build_in_msg: 3,         // 3 mcs
+            build_out_msg: 2,        // 2 mcs
+            serialize: 1,            // 1 mcs
+            serialize_msg: 3,        // 3 mcs
+            state_update_min: 15000, // 15000 mcs
+            state_update_msg: 3,     // 3 mcs
+            serialize_min: 15000,    // 15000 mcs
         }
     }
 }
