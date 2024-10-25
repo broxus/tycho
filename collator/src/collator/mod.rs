@@ -1291,8 +1291,8 @@ impl CollatorStdImpl {
 
         // should import anchor after fixed gas used by shard blocks in uncommitted blocks chain
         let gas_used_from_last_anchor = working_state.gas_used_from_last_anchor;
-        let force_import_anchor_by_used_gas = uncommitted_chain_length > 0
-            && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
+        let force_import_anchor_by_used_gas =
+            gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
         let no_pending_msgs = !has_uprocessed_messages && !has_externals;
@@ -1339,14 +1339,20 @@ impl CollatorStdImpl {
 
             working_state.gas_used_from_last_anchor = 0;
 
-            has_externals = next_anchor_has_externals;
-            if has_externals {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "gas_used_from_last_anchor dropped to 0, because no_pending_msgs - {}, force_import_anchor_by_used_gas - {}, ",
+                no_pending_msgs,
+                force_import_anchor_by_used_gas,
+            );
+
+            if next_anchor_has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",
                 );
             }
+            has_externals |= next_anchor_has_externals;
 
-            Some((next_anchor, next_anchor_has_externals))
+            Some(next_anchor)
         } else {
             None
         };
@@ -1358,7 +1364,7 @@ impl CollatorStdImpl {
         } else {
             // here just imported anchor has no externals
             // or we reached max uncommitted chain length
-            let anchor_chain_time = if let Some((next_anchor, _)) = next_anchor_info_opt {
+            let anchor_chain_time = if let Some(next_anchor) = next_anchor_info_opt {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "just imported anchor has no externals for current shard, will notify collation manager",
                 );

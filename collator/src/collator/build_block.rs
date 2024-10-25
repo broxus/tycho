@@ -213,6 +213,11 @@ impl CollatorStdImpl {
                 .gas_used_from_last_anchor
                 .saturating_add(collation_data.block_limit.gas_used as _);
 
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "gas_used_from_last_anchor: {:?}",
+                gas_used_from_last_anchor
+            );
+
             // add gas usage for in, out messages building, accounts storing and merkle calculation
             let FinalizeBlockGasParams {
                 build_account,
@@ -222,16 +227,26 @@ impl CollatorStdImpl {
             } = finalize_block_gas_params;
 
             let accounts_count = processed_accounts.accounts_len as u64;
+            let in_msgs_len = collation_data.in_msgs.len() as u64;
+            let out_msgs_len = collation_data.out_msgs.len() as u64;
             let build = std::cmp::max(
                 std::cmp::max(
                     build_account.saturating_mul(accounts_count),
-                    in_message.saturating_mul(collation_data.in_msgs.len() as u64),
+                    in_message.saturating_mul(in_msgs_len),
                 ),
-                out_message.saturating_mul(collation_data.out_msgs.len() as u64),
+                out_message.saturating_mul(out_msgs_len),
             );
             gas_used_from_last_anchor = gas_used_from_last_anchor
                 .saturating_add(build)
                 .saturating_add(merkle_calc_account.saturating_mul(accounts_count));
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "gas_used_from_last_anchor with finalize metrics: {:?}  accounts_count: {} in_msgs_len: {} out_msgs_len: {} ",
+                gas_used_from_last_anchor,
+                accounts_count,
+                in_msgs_len,
+                out_msgs_len,
+            );
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
