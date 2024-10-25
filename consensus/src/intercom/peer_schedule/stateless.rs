@@ -104,19 +104,6 @@ impl PeerScheduleStateless {
         result
     }
 
-    /// to keep already active resolve handles
-    pub(super) fn next_to_remove(&self, new_next_peers: &[PeerId]) -> Vec<PeerId> {
-        let to_be = new_next_peers.iter().collect::<FastHashSet<_>>();
-        self.peer_sets[2]
-            // filter out those in current set;
-            // no need to visit peer_sets[0] - they will be removed
-            .difference(&self.peer_sets[1])
-            // keep those new already matching
-            .filter(|old| !to_be.contains(old))
-            .copied()
-            .collect()
-    }
-
     pub(super) fn set_next_peers(&mut self, peers: &[PeerId]) {
         self.peer_sets[2] = Arc::new(peers.iter().copied().collect());
         self.peer_vecs[2] = Arc::new(peers.to_vec());

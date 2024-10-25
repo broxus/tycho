@@ -32,6 +32,77 @@ struct UnappliedConfig {
     engine_handle: Option<EngineHandle>,
 }
 
+impl UnappliedConfig {
+    fn apply_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
+        let round = new_cx.consensus_info.config_update_round;
+        let whole_set = (new_cx.current_validator_set.1.list.iter())
+            .map(|descr| PeerId(descr.public_key.0))
+            .collect::<Vec<_>>();
+        let subset = Self::compute_peers_subset(
+            &new_cx.current_validator_set.1,
+            &new_cx.mc_block_id,
+            round,
+            true, // new_cx.shuffle_validators, TODO same for prev
+        )?;
+        engine.set_next_peers(&whole_set, Some((round, &subset)));
+
+        if let Some((_, next)) = &new_cx.next_validator_set {
+            // NOTE: do not try to calculate subset from next set
+            //  because it is impossible without known future session_update_round
+            let whole_set = (next.list.iter())
+                .map(|descr| PeerId(descr.public_key.0))
+                .collect::<Vec<_>>();
+            engine.set_next_peers(&whole_set, None);
+        }
+
+        Ok(())
+    }
+
+    fn apply_prev_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
+        if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
+            let round = new_cx.consensus_info.prev_config_round;
+            let whole_set = prev_set
+                .list
+                .iter()
+                .map(|descr| PeerId(descr.public_key.0))
+                .collect::<Vec<_>>();
+            let subset = Self::compute_peers_subset(
+                prev_set,
+                &new_cx.mc_block_id,
+                round,
+                // TODO new field in consensus_info for prev subset flag
+                //  or toggling `shuffle_validators` will require new genesis
+                true, // new_cx.consensus_info.prev_shuffle_validators,
+            )?;
+            engine.set_next_peers(&whole_set, Some((round, &subset)));
+        }
+
+        Ok(())
+    }
+
+    fn compute_peers_subset(
+        validator_set: &ValidatorSet,
+        mc_block_id: &BlockId,
+        session_update_round: u32,
+        shuffle_validators: bool,
+    ) -> Result<Vec<PeerId>> {
+        let Some((list, _)) =
+            validator_set.compute_mc_subset(session_update_round, shuffle_validators)
+        else {
+            bail!(
+                "Mempool peer set is empty after shuffle, mc_block_id: {}",
+                mc_block_id,
+            )
+        };
+        let result = list
+            .into_iter()
+            .map(|x| PeerId(x.public_key.0))
+            .collect::<Vec<_>>();
+        tracing::info!("New mempool validator subset len {}", result.len());
+        Ok(result)
+    }
+}
+
 pub struct MempoolAdapterStdImpl {
     unapplied_config: Mutex<UnappliedConfig>,
 
@@ -106,26 +177,6 @@ impl MempoolAdapterStdImpl {
         let consensus_config = (config_guard.builder.get_consensus_config().cloned())
             .ok_or(anyhow!("consensus config is not set"))?;
 
-        let prev_peers = last_state_update
-            .prev_validator_set
-            .as_ref()
-            .map(|(_, prev_set)| {
-                compute_peers_subset(
-                    prev_set,
-                    &last_state_update.mc_block_id,
-                    last_state_update.consensus_info.prev_config_round,
-                    last_state_update.shuffle_validators,
-                )
-            })
-            .transpose()?;
-
-        let current_peers = compute_peers_subset(
-            &last_state_update.current_validator_set.1,
-            &last_state_update.mc_block_id,
-            last_state_update.consensus_info.config_update_round,
-            last_state_update.shuffle_validators,
-        )?;
-
         let engine = Engine::new(
             self.key_pair.clone(),
             &self.network,
@@ -136,21 +187,13 @@ impl MempoolAdapterStdImpl {
             anchor_tx,
             &self.top_known_anchor,
             // This will be used as next set after genesis, skipping some existed set
-            prev_peers.as_ref().unwrap_or(&current_peers),
             &mempool_config,
         );
 
         let handle = engine.get_handle();
 
-        if prev_peers.is_some() {
-            handle.set_next_peers(
-                &current_peers,
-                Some(last_state_update.consensus_info.config_update_round),
-            );
-        }
-
-        // NOTE: do not try to calculate subset from next set
-        //      because it is impossible without known future session_update_round
+        UnappliedConfig::apply_prev_vset(&handle, last_state_update)?;
+        UnappliedConfig::apply_vset(&handle, last_state_update)?;
 
         tokio::spawn(async move {
             engine.run().await;
@@ -242,27 +285,6 @@ impl MempoolAdapterStdImpl {
     }
 }
 
-fn compute_peers_subset(
-    validator_set: &ValidatorSet,
-    mc_block_id: &BlockId,
-    session_update_round: u32,
-    shuffle_validators: bool,
-) -> Result<Vec<PeerId>> {
-    let Some((list, _)) = validator_set.compute_mc_subset(session_update_round, shuffle_validators)
-    else {
-        bail!(
-            "Mempool peer set is empty after shuffle, mc_block_id: {}",
-            mc_block_id,
-        )
-    };
-    let result = list
-        .into_iter()
-        .map(|x| PeerId(x.public_key.0))
-        .collect::<Vec<_>>();
-    tracing::info!("New mempool validator subset len {}", result.len());
-    Ok(result)
-}
-
 impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
     type Adapter = MempoolAdapterStdImpl;
 
@@ -314,7 +336,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     "Using genesis override: round {round} time {time}"
                 );
             } else {
-                (config_guard.builder).set_genesis(
+                config_guard.builder.set_genesis(
                     new_cx.consensus_info.genesis_round,
                     new_cx.consensus_info.genesis_millis,
                 );
@@ -326,14 +348,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        if config_guard
-            .state_update_ctx
-            .as_ref()
-            .map_or(false, |old_cx| {
-                old_cx.consensus_info.config_update_round
-                    >= new_cx.consensus_info.config_update_round
-            })
-        {
+        if (config_guard.state_update_ctx.as_ref()).map_or(false, |old_cx| {
+            old_cx.consensus_info.config_update_round >= new_cx.consensus_info.config_update_round
+        }) {
             tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 "Skipped old state update from mc block {}: {:?}",
@@ -343,17 +360,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        let subset = compute_peers_subset(
-            &new_cx.current_validator_set.1,
-            &new_cx.mc_block_id,
-            new_cx.consensus_info.config_update_round,
-            new_cx.shuffle_validators,
-        )?;
-        engine.set_next_peers(&subset, Some(new_cx.consensus_info.config_update_round));
-
-        // NOTE: do not try to calculate subset from next set
-        //      because it is impossible without known future session_update_round
-
+        UnappliedConfig::apply_vset(engine, &new_cx)?;
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
     }

@@ -36,14 +36,21 @@ pub struct EngineHandle {
     peer_schedule: PeerSchedule,
 }
 impl EngineHandle {
-    pub fn set_next_peers(&self, next_peers: &[PeerId], next_round: Option<u32>) {
-        if let Some(next) = next_round {
-            if !self.peer_schedule.set_next_start(Round(next)) {
-                tracing::trace!("cannot schedule outdated round {next} and set");
+    pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
+        if let Some((switch_round, subset)) = subset {
+            let round = if switch_round == Round::BOTTOM.0 {
+                // special zerostate case, genesis is unaligned
+                // TODO align genesis ins mc state or require it aligned
+                Genesis::round().next()
+            } else {
+                Round(switch_round)
+            };
+            if !(self.peer_schedule).set_next_subset(set, round, subset) {
+                tracing::trace!("cannot schedule outdated round {switch_round} and set");
                 return;
             }
         }
-        self.peer_schedule.set_next_peers(next_peers, true);
+        self.peer_schedule.set_next_set(set);
     }
 }
 
@@ -58,7 +65,6 @@ impl Engine {
         input_buffer: InputBuffer,
         committed_info_tx: mpsc::UnboundedSender<CommitResult>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        bootstrap_peers: &[PeerId],
         config: &MempoolConfig,
     ) -> Self {
         // mostly everything depends on genesis - must init at the first line
@@ -79,9 +85,6 @@ impl Engine {
 
         let dispatcher = Dispatcher::new(network, &private_overlay);
         let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
-        peer_schedule.set_next_peers(bootstrap_peers, true);
-        peer_schedule.set_next_start(Genesis::round().next());
-        peer_schedule.apply_scheduled(Genesis::round().next());
 
         genesis.verify_hash().expect("Failed to verify genesis");
         Verifier::verify(&genesis).expect("genesis failed to verify");
@@ -153,8 +156,16 @@ impl Engine {
         }
     }
 
+    #[cfg(any(test, feature = "test"))]
+    pub fn set_start_peers(&self, peers: &[PeerId]) {
+        let first = Genesis::round().next();
+        (self.round_task.state.peer_schedule).set_next_subset(peers, first, peers);
+    }
+
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
     async fn pre_run(&mut self) -> Option<(Point, InclusionState)> {
+        (self.round_task.state.peer_schedule).apply_scheduled(Genesis::round().next());
+
         let genesis_incl_state = self.init_task.take().expect("init task must be set").await;
         let broadcast_points = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
