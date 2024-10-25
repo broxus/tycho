@@ -604,11 +604,13 @@ impl MessagesExecutor {
             wu_items.push(current_wu);
         }
 
-        wu_items.sort_by(|a, b| b.cmp(a));
-
         let subgroups_len =
-            (wu_items.len() as f32 / self.execute_params.subgroup_size as f32).ceil() as usize;
-        let total_exec_wu = wu_items.into_iter().take(subgroups_len).sum();
+            (wu_items.len() as f32 / self.execute_params.subgroup_size as f32).ceil() as u64;
+
+        let total_exec_wu = wu_items
+            .into_iter()
+            .sum::<u64>()
+            .saturating_div(subgroups_len);
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)

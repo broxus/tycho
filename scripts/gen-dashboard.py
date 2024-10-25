@@ -1231,6 +1231,16 @@ def collator_wu_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
+            "tycho_do_collate_execute_txs_to_wu",
+            "Wu price in microseconds on vm execute",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_process_txs_to_wu",
+            "Wu price in microseconds on process executed txs",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_finalize",
             "Wu price in microseconds on finalize",
             labels=['workchain=~"$workchain"'],

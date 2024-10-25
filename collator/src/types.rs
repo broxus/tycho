@@ -109,9 +109,9 @@ pub struct MsgGroupsWUParams {
 impl Default for MsgGroupsWUParams {
     fn default() -> Self {
         Self {
-            const_part: 5000,  // 50000 mcs
+            const_part: 5000,  // 5000 mcs
             read_ext_msgs: 4,  // 4 mcs
-            read_int_msgs: 6,  // 6 mcs
+            read_int_msgs: 5,  // 5 mcs
             read_new_msgs: 75, // 75 mcs
         }
     }
@@ -122,22 +122,22 @@ impl Default for MsgGroupsWUParams {
 pub struct ExecuteWUParams {
     pub prepare: u64,
     pub execute: u64,
+    pub execute_err: u64,
     pub execute_delimiter: u64,
-    pub serialize_int: u64,
-    pub serialize_ext: u64,
-    pub serialize_new: u64,
+    pub serialize_enqueue: u64,
+    pub serialize_dequeue: u64,
     pub subgroup_size: u32,
 }
 
 impl Default for ExecuteWUParams {
     fn default() -> Self {
         Self {
-            prepare: 70,                // 70 mcs
-            execute: 17,                // 0.000017 mcs
-            execute_delimiter: 1000000, // 1 pcs
-            serialize_ext: 6,           // 6 mcs
-            serialize_new: 14,          // 14 mcs
-            serialize_int: 21,          // 21 mcs
+            prepare: 114,             // 114 mcs
+            execute: 12,              // 0.0012 mcs
+            execute_err: 6,           // 6 mcs
+            execute_delimiter: 10000, // 0.1 ns
+            serialize_enqueue: 5,     // 5 mcs
+            serialize_dequeue: 6,     // 6 mcs
             subgroup_size: 16,
         }
     }

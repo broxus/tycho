@@ -289,6 +289,11 @@ impl CollatorStdImpl {
                     collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
                     executed_groups_wu_total =
                         executed_groups_wu_total.saturating_add(group_result.total_exec_wu);
+                    executed_groups_wu_total = executed_groups_wu_total.saturating_add(
+                        group_result.ext_msgs_error_count.saturating_mul(
+                            self.config.block_work_units_params.execute.execute_err,
+                        ),
+                    );
 
                     // Process transactions
                     timer = std::time::Instant::now();
@@ -390,22 +395,35 @@ impl CollatorStdImpl {
             collation_data.read_new_msgs_from_iterator,
         );
 
-        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-            (collation_data.execute_count_int)
-                .saturating_mul(self.config.block_work_units_params.execute.serialize_int),
-        );
-        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-            (collation_data.execute_count_ext)
-                .saturating_mul(self.config.block_work_units_params.execute.serialize_ext),
-        );
-        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-            (collation_data.execute_count_new_int)
-                .saturating_mul(self.config.block_work_units_params.execute.serialize_new),
-        );
+        let executeed_groups_vm_only = executed_groups_wu_total;
+        metrics::histogram!("tycho_do_collate_execute_txs_to_wu", &labels)
+            .record(process_txs_total_elapsed.as_micros() as f64 / executeed_groups_vm_only as f64);
+
+        let process_txs_wu = (collation_data.int_enqueue_count)
+            .saturating_mul(
+                self.config
+                    .block_work_units_params
+                    .execute
+                    .serialize_enqueue,
+            )
+            .saturating_add(
+                (collation_data.int_dequeue_count).saturating_mul(
+                    self.config
+                        .block_work_units_params
+                        .execute
+                        .serialize_dequeue,
+                ),
+            );
+
+        metrics::histogram!("tycho_do_collate_process_txs_to_wu", &labels)
+            .record(process_txs_total_elapsed.as_micros() as f64 / process_txs_wu as f64);
+
+        executed_groups_wu_total = executed_groups_wu_total.saturating_add(process_txs_wu);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "wu_used_for_execute: {}, execute_count_int: {}, execute_count_ext: {}, execute_count_new_int {}",
-            executed_groups_wu_total, collation_data.execute_count_int , collation_data.execute_count_ext, collation_data.execute_count_new_int
+            "wu_used_for_execute: {}, execute_count_int: {}, execute_count_ext: {}, execute_count_new_int {}, process_txs_wu: {},  executeed_groups_vm_only: {}, collation_data.tx_count: {}",
+            executed_groups_wu_total, collation_data.execute_count_int , collation_data.execute_count_ext, collation_data.execute_count_new_int, process_txs_wu, executeed_groups_vm_only,
+            collation_data.tx_count
         );
 
         metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
@@ -563,8 +581,11 @@ impl CollatorStdImpl {
         );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
             .set(finalize_block_elapsed.as_micros() as f64 / finalize_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels)
-            .set(execute_msgs_total_elapsed.as_micros() as f64 / executed_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
+            (execute_msgs_total_elapsed.as_micros() as f64
+                + process_txs_total_elapsed.as_micros() as f64)
+                / executed_groups_wu_total as f64,
+        );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
             .set(fill_msgs_total_elapsed.as_micros() as f64 / prepare_groups_wu_total as f64);
 
