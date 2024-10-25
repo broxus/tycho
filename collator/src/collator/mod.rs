@@ -215,6 +215,7 @@ pub struct CollatorStdImpl {
     anchors_cache: AnchorsCache,
     stats: CollatorStats,
     timer: std::time::Instant,
+    anchor_timer: std::time::Instant,
 
     /// Round of a new consensus genesis on recovery
     mempool_start_round: Option<MempoolAnchorId>,
@@ -261,6 +262,7 @@ impl CollatorStdImpl {
             anchors_cache: Default::default(),
             stats: Default::default(),
             timer: std::time::Instant::now(),
+            anchor_timer: std::time::Instant::now(),
             mempool_start_round,
         };
 
@@ -368,6 +370,8 @@ impl CollatorStdImpl {
         working_state_tx.send(Ok(working_state)).ok();
 
         self.timer = std::time::Instant::now();
+
+        self.anchor_timer = std::time::Instant::now();
 
         tracing::info!(target: tracing_targets::COLLATOR, "init finished");
 
@@ -1184,6 +1188,12 @@ impl CollatorStdImpl {
                 None => return Ok(()),
             };
 
+            // time elapsed from prev anchor
+            let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
+            self.anchor_timer = std::time::Instant::now();
+            metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
+                .record(elapsed_from_prev_anchor);
+
             working_state.gas_used_from_last_anchor = 0;
 
             if has_externals {
@@ -1336,6 +1346,12 @@ impl CollatorStdImpl {
                 Some(result) => result,
                 None => return Ok(()),
             };
+
+            // time elapsed from prev anchor
+            let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
+            self.anchor_timer = std::time::Instant::now();
+            metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
+                .record(elapsed_from_prev_anchor);
 
             working_state.gas_used_from_last_anchor = 0;
 

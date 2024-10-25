@@ -1146,6 +1146,11 @@ def collator_time_metrics() -> RowPanel:
             "tycho_do_collate_from_prev_block_time",
             "Time elapsed from prev block",
             labels=['workchain=~"$workchain"'],
+        ),        
+        create_heatmap_panel(
+            "tycho_do_collate_from_prev_anchor_time",
+            "Time elapsed from prev anchor",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_overhead_time",
