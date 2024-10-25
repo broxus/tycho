@@ -7,6 +7,7 @@ use everscale_types::models::ShardIdent;
 pub enum SplitMergeAction {
     Add(ShardIdent),
     Split(ShardIdent),
+    Merge(ShardIdent, ShardIdent),
 }
 
 enum CalcSplitMergeStep<'a> {
@@ -97,6 +98,9 @@ pub fn calc_split_merge_actions(
                         None,
                         Some(action),
                     ));
+                }
+                SplitMergeAction::Merge(_from_shard_id_1, _from_shard_id_2) => {
+                    // do nothing
                 }
                 SplitMergeAction::Add(_) => {}
             },

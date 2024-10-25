@@ -677,7 +677,7 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let (account_stuff, executed) = rayon_run_fifo(thread_pool::get(), move || {
+        let (account_stuff, executed) = rayon_run_fifo(move || {
             let executed = execute_ordinary_transaction_impl(
                 &mut account_stuff,
                 in_message,
@@ -708,7 +708,7 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let (account_stuff, executed) = rayon_run_fifo(thread_pool::get(), move || {
+        let (account_stuff, executed) = rayon_run_fifo(move || {
             let executed = execute_ticktock_transaction(
                 &mut account_stuff,
                 tick_tock,
