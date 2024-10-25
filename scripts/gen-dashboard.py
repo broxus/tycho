@@ -1161,6 +1161,21 @@ def collator_time_metrics() -> RowPanel:
             "Gas to time proportion",
             labels=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_do_collate_gas_to_finalize",
+            "Gas spent on finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_gas_to_execute",
+            "Gas spent on execute",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_gas_to_execute_and_finalize",
+            "Gas spent on execute and finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_heatmap_panel(
             "tycho_do_collate_overhead_time",
             "Collation flow overhead",

@@ -493,6 +493,12 @@ impl CollatorStdImpl {
 
         let gas_used_fo_finalize = finalized.gas_used_for_finalize;
 
+        metrics::gauge!("tycho_do_collate_gas_to_finalize", &labels)
+            .set(gas_used_fo_finalize as f64);
+        metrics::gauge!("tycho_do_collate_gas_to_execute", &labels)
+            .set(collation_data.block_limit.gas_used as f64);
+        metrics::gauge!("tycho_do_collate_gas_to_execute_and_finalize", &labels)
+            .set(collation_data.block_limit.gas_used as f64 + gas_used_fo_finalize as f64);
         metrics::gauge!("tycho_do_collate_gas_to_time_proportion", &labels).set(
             (gas_used_fo_finalize as f64 / collation_data.block_limit.gas_used as f64)
                 / (finalize_block_elapsed.as_micros() as f64 / execute_elapsed.as_micros() as f64),
