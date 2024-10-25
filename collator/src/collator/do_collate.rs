@@ -254,7 +254,7 @@ impl CollatorStdImpl {
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
         let mut process_txs_total_elapsed = Duration::ZERO;
-        let mut executed_groups_vm_only = 0u64;
+        let mut execute_groups_wu_vm_only = 0u64;
 
         {
             let mut executed_groups_count = 0;
@@ -284,7 +284,7 @@ impl CollatorStdImpl {
                     collation_data.tx_count += group_result.items.len() as u64;
                     collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                     collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
-                    executed_groups_vm_only = executed_groups_vm_only
+                    execute_groups_wu_vm_only = execute_groups_wu_vm_only
                         .saturating_add(group_result.total_exec_wu)
                         .saturating_add(group_result.ext_msgs_error_count.saturating_mul(
                             self.config.block_work_units_params.execute.execute_err as u64,
@@ -478,7 +478,7 @@ impl CollatorStdImpl {
 
         let process_txs_wu =
             calc_process_txs_wu(self.config.block_work_units_params.execute, &collation_data);
-        let executed_groups_wu_total = executed_groups_vm_only.saturating_add(process_txs_wu);
+        let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
@@ -494,45 +494,13 @@ impl CollatorStdImpl {
                     queue_diff,
                     finalize_params,
                     prepare_groups_wu_total,
-                    executed_groups_wu_total,
+                    execute_groups_wu_total,
                 )
             }
         })
         .await?;
         collation_data = finalized.collation_data;
         working_state = finalized.working_state;
-
-        let finalize_block_elapsed = finalize_block_timer.elapsed();
-
-        let finalize_wu_total = finalized.finalize_wu_total;
-
-        metrics::gauge!("tycho_do_collate_wu_to_finalize", &labels).set(finalize_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
-            .set(execute_msgs_total_elapsed.as_nanos() as f64 / executed_groups_vm_only as f64);
-        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
-            .set(process_txs_total_elapsed.as_nanos() as f64 / process_txs_wu as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_execute", &labels)
-            .set(executed_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_prepare", &labels)
-            .set(prepare_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_all", &labels).set(
-            executed_groups_wu_total as f64
-                + finalize_wu_total as f64
-                + prepare_groups_wu_total as f64,
-        );
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
-            .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
-            (execute_msgs_total_elapsed.as_nanos() as f64
-                + process_txs_total_elapsed.as_nanos() as f64)
-                / executed_groups_wu_total as f64,
-        );
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
-            .set(fill_msgs_total_elapsed.as_nanos() as f64 / prepare_groups_wu_total as f64);
-
-        metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
-        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
-            .set(collation_data.block_id_short.seqno);
 
         let block_id = *finalized.block_candidate.block.id();
         let is_key_block = finalized.block_candidate.is_key_block;
@@ -604,6 +572,10 @@ impl CollatorStdImpl {
 
         // metrics
         metrics::counter!("tycho_do_collate_tx_total", &labels).increment(collation_data.tx_count);
+        metrics::gauge!("tycho_do_collate_tx_per_block", &labels)
+            .set(collation_data.tx_count as f64);
+        metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
+            .set(collation_data.accounts_count as f64);
 
         metrics::counter!("tycho_do_collate_int_enqueue_count")
             .increment(collation_data.int_enqueue_count);
@@ -617,6 +589,7 @@ impl CollatorStdImpl {
         metrics::counter!("tycho_do_collate_msgs_exec_count_all", &labels)
             .increment(collation_data.execute_count_all);
 
+        // external messages
         metrics::counter!("tycho_do_collate_msgs_read_count_ext", &labels)
             .increment(collation_data.read_ext_msgs);
         metrics::counter!("tycho_do_collate_msgs_exec_count_ext", &labels)
@@ -626,6 +599,7 @@ impl CollatorStdImpl {
         metrics::counter!("tycho_do_collate_msgs_skipped_count_ext", &labels)
             .increment(collation_data.ext_msgs_skipped);
 
+        // existing internals messages
         metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
             .increment(collation_data.read_int_msgs_from_iterator);
         metrics::counter!("tycho_do_collate_msgs_exec_count_int", &labels)
@@ -644,14 +618,45 @@ impl CollatorStdImpl {
         metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
             .increment(collation_data.execute_count_new_int);
 
-        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
-        self.update_stats(&collation_data);
+        // blocks
+        metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
+        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
+            .set(collation_data.block_id_short.seqno);
+
+        // work units
+        let finalize_block_elapsed = finalize_block_timer.elapsed();
+        let finalize_wu_total = finalized.finalize_wu_total;
+
+        metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
+            .set(prepare_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
+            .set(execute_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
+            execute_groups_wu_total as f64
+                + finalize_wu_total as f64
+                + prepare_groups_wu_total as f64,
+        );
+
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
+            .set(fill_msgs_total_elapsed.as_nanos() as f64 / prepare_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
+            (execute_msgs_total_elapsed.as_nanos() as f64
+                + process_txs_total_elapsed.as_nanos() as f64)
+                / execute_groups_wu_total as f64,
+        );
+        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
+            .set(execute_msgs_total_elapsed.as_nanos() as f64 / execute_groups_wu_vm_only as f64);
+        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
+            .set(process_txs_total_elapsed.as_nanos() as f64 / process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
+            .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
 
         let total_elapsed = total_collation_histogram.finish();
 
         metrics::gauge!("tycho_do_collate_wu_to_mcs_total", &labels).set(
-            total_elapsed.as_micros() as f64
-                / (executed_groups_wu_total + finalize_wu_total + prepare_groups_wu_total) as f64,
+            total_elapsed.as_nanos() as f64
+                / (execute_groups_wu_total + finalize_wu_total + prepare_groups_wu_total) as f64,
         );
 
         // time elapsed from prev block
@@ -678,6 +683,8 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 
+        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
+        self.update_stats(&collation_data);
         tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -691,8 +698,7 @@ impl CollatorStdImpl {
             read_ext_msgs={}, read_int_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
             total_execute_msgs_time_mc={}, \
-            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}
-            ",
+            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}",
             block_id, block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
@@ -704,7 +710,7 @@ impl CollatorStdImpl {
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
             collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
-            prepare_groups_wu_total, executed_groups_wu_total, finalize_wu_total
+            prepare_groups_wu_total, execute_groups_wu_total, finalize_wu_total
         );
 
         assert_eq!(

@@ -976,6 +976,16 @@ def block_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
+            "tycho_do_collate_tx_per_block",
+            "Number of transactions per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_accounts_per_block",
+            "Number of accounts per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
             "tycho_do_collate_shard_blocks_count_btw_anchors",
             "Number of Shard Blocks before import next anchor",
         ),        
@@ -1205,53 +1215,53 @@ def collator_time_metrics() -> RowPanel:
 def collator_wu_metrics() -> RowPanel:
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_wu_to_prepare",
+            "tycho_do_collate_wu_on_prepare",
             "Wu spent on prepare",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_execute",
+            "tycho_do_collate_wu_on_execute",
             "Wu spent on execute",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_finalize",
+            "tycho_do_collate_wu_on_finalize",
             "Wu spent on finalize",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_all",
+            "tycho_do_collate_wu_on_all",
             "Wu spent on prepare, execute and finalize",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_prepare",
-            "Wu price in microseconds on prepare",
+            "Wu price in nanoseconds on prepare",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_execute",
-            "Wu price in microseconds on execute",
+            "Wu price in nanoseconds on execute",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_execute_txs_to_wu",
-            "Wu price in microseconds on vm execute",
+            "Wu price in nanoseconds on vm execute",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_process_txs_to_wu",
-            "Wu price in microseconds on process executed txs",
+            "Wu price in nanoseconds on process executed txs",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_finalize",
-            "Wu price in microseconds on finalize",
+            "Wu price in nanoseconds on finalize",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_total",
-            "Wu price in microseconds total",
+            "Wu price in nanoseconds total",
             labels=['workchain=~"$workchain"'],
         ),
     ]

@@ -39,7 +39,7 @@ impl Default for CollationConfig {
             min_mc_block_delta_from_bc_to_sync: 3,
 
             max_uncommitted_chain_length: 31,
-            wu_used_to_import_next_anchor: 1_200_000u64,
+            wu_used_to_import_next_anchor: 1_200_000_000u64,
 
             msgs_exec_params: MsgsExecutionParams::default(),
             block_work_units_params: BlockWUParams::default(),
@@ -135,8 +135,8 @@ impl Default for ExecuteWUParams {
         Self {
             prepare: 114_000,                   // 114 mcs
             execute_err: 6_000,                 // 6 mcs
-            execute: 25,                        // 2.5 ns
-            execute_delimiter: 10,              // 0.1 ns
+            execute: 25_000,                    // 25 mcs
+            execute_delimiter: 10_000,          //
             serialize_enqueue: 3_000,           // 3 mcs
             serialize_dequeue: 3_000,           // 3 mcs
             insert_new_msgs_to_iterator: 3_000, // 3 mcs
@@ -152,12 +152,12 @@ pub struct FinalizeBlockWUParams {
     pub build_accounts: u16,
     pub build_in_msg: u16,
     pub build_out_msg: u16,
-    pub serialize: u16,
+    pub serialize_accounts: u16,
+    pub serialize_min: u32,
     pub serialize_msg: u16,
     pub state_update_accounts: u32,
     pub state_update_min: u32,
     pub state_update_msg: u16,
-    pub serialize_min: u32,
 }
 
 impl Default for FinalizeBlockWUParams {
@@ -167,12 +167,12 @@ impl Default for FinalizeBlockWUParams {
             build_accounts: 500,          // 0.5 mcs
             build_in_msg: 500,            // 0.5 mcs
             build_out_msg: 500,           // 0.5 mcs
-            serialize: 1_000,             // 1 mcs
+            serialize_accounts: 1_000,    // 1 mcs
+            serialize_min: 15_000_000,    // 15 ms
             serialize_msg: 2_000,         // 2 mcs
             state_update_accounts: 500,   // 0.5 mcs
             state_update_min: 15_000_000, // 15 ms
             state_update_msg: 2_000,      // 2 mcs
-            serialize_min: 15_000_000,    // 15 ms
         }
     }
 }

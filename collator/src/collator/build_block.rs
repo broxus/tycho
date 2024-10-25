@@ -42,7 +42,7 @@ impl CollatorStdImpl {
         queue_diff: SerializedQueueDiff,
         finalize_params: FinalizeBlockWUParams,
         prepare_groups_wu_total: u64,
-        executed_groups_wu_total: u64,
+        execute_groups_wu_total: u64,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -117,6 +117,7 @@ impl CollatorStdImpl {
             histogram_build_account_blocks_and_messages.finish();
 
         let processed_accounts = processed_accounts_res?;
+        collation_data.accounts_count = processed_accounts.accounts_len as u64;
         let in_msgs = in_msgs_res?;
         let out_msgs = out_msgs_res?;
 
@@ -213,7 +214,7 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let accounts_count = processed_accounts.accounts_len as u64;
+            let accounts_count = collation_data.accounts_count;
             let in_msgs_len = collation_data.in_msgs.len() as u64;
             let out_msgs_len = collation_data.out_msgs.len() as u64;
 
@@ -236,7 +237,7 @@ impl CollatorStdImpl {
             let wu_used_from_last_anchor = working_state
                 .wu_used_from_last_anchor
                 .saturating_add(prepare_groups_wu_total)
-                .saturating_add(executed_groups_wu_total)
+                .saturating_add(execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -486,12 +487,12 @@ impl CollatorStdImpl {
             build_in_msg,
             build_accounts,
             build_out_msg,
-            serialize,
+            serialize_accounts,
+            serialize_min,
             serialize_msg,
             state_update_accounts,
             state_update_min,
             state_update_msg,
-            serialize_min,
         } = finalize_params;
 
         let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;
@@ -520,7 +521,7 @@ impl CollatorStdImpl {
 
         let serialize = std::cmp::max(
             serialize_min as u64,
-            accounts_count.saturating_mul(serialize as u64),
+            accounts_count.saturating_mul(serialize_accounts as u64),
         )
         .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
 
