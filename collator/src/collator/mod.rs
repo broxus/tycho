@@ -216,6 +216,7 @@ pub struct CollatorStdImpl {
     stats: CollatorStats,
     timer: std::time::Instant,
     anchor_timer: std::time::Instant,
+    shards_count: u8,
 
     /// Round of a new consensus genesis on recovery
     mempool_start_round: Option<MempoolAnchorId>,
@@ -264,6 +265,7 @@ impl CollatorStdImpl {
             timer: std::time::Instant::now(),
             anchor_timer: std::time::Instant::now(),
             mempool_start_round,
+            shards_count: 0,
         };
 
         // create dispatcher for own async tasks queue

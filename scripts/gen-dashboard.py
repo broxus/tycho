@@ -961,6 +961,10 @@ def block_metrics() -> RowPanel:
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
+            "tycho_do_collate_shard_blocks_count",
+            "Shard Blocks count between master blocks",
+        ),
+        create_counter_panel(
             "tycho_do_collate_blocks_with_limits_reached_count",
             "Number of blocks with limits reached",
             labels_selectors=['workchain=~"$workchain"'],
@@ -1150,6 +1154,11 @@ def collator_time_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_do_collate_from_prev_anchor_time",
             "Time elapsed from prev anchor",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_gas_to_time_proportion",
+            "Gas to time proportion",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(

@@ -87,6 +87,14 @@ impl CollatorStdImpl {
 
         let is_masterchain = self.shard_id.is_masterchain();
 
+        if is_masterchain {
+            metrics::counter!("tycho_do_collate_shard_blocks_count")
+                .absolute(self.shards_count as _);
+            self.shards_count = 0;
+        } else {
+            self.shards_count += 1;
+        }
+
         // prepare block collation data
         let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -482,6 +490,13 @@ impl CollatorStdImpl {
         working_state = finalized.working_state;
 
         let finalize_block_elapsed = finalize_block_timer.elapsed();
+
+        let gas_used_fo_finalize = finalized.gas_used_for_finalize;
+
+        metrics::gauge!("tycho_do_collate_gas_to_time_proportion", &labels).set(
+            (gas_used_fo_finalize as f64 / collation_data.block_limit.gas_used as f64)
+                / (finalize_block_elapsed.as_micros() as f64 / execute_elapsed.as_micros() as f64),
+        );
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)

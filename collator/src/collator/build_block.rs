@@ -29,6 +29,7 @@ pub struct FinalizedBlock {
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
+    pub gas_used_for_finalize: u64,
 }
 
 impl CollatorStdImpl {
@@ -202,20 +203,16 @@ impl CollatorStdImpl {
         let build_state_update_elapsed;
         let new_state_root;
         let total_validator_fees;
+        let gas_used_for_finalize;
         let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
             );
 
-            // compute total gas used from last anchor
-            let mut gas_used_from_last_anchor = working_state
-                .gas_used_from_last_anchor
-                .saturating_add(collation_data.block_limit.gas_used as _);
-
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_from_last_anchor: {:?}",
-                gas_used_from_last_anchor
+                "gas_used_for_execute: {}",
+                collation_data.block_limit.gas_used,
             );
 
             // add gas usage for in, out messages building, accounts storing and merkle calculation
@@ -239,19 +236,30 @@ impl CollatorStdImpl {
                 ),
                 out_message.saturating_mul(out_msgs_len),
             );
-            gas_used_from_last_anchor = gas_used_from_last_anchor
-                .saturating_add(build)
+
+            gas_used_for_finalize = build
                 .saturating_add(merkle_calc_account.saturating_mul(accounts_count))
                 .saturating_add(serialize_account.saturating_mul(accounts_count))
                 .saturating_add(serialize_in_message.saturating_mul(in_msgs_len))
                 .saturating_add(serialize_out_message.saturating_mul(out_msgs_len));
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "gas_used_from_last_anchor with finalize metrics: {:?}  accounts_count: {} in_msgs_len: {} out_msgs_len: {} ",
-                gas_used_from_last_anchor,
+                "gas_used_for_finalize: {}  accounts_count: {} in_msgs_len: {} out_msgs_len: {} ",
+                gas_used_for_finalize,
                 accounts_count,
                 in_msgs_len,
                 out_msgs_len,
+            );
+
+            // compute total gas used from last anchor
+            let gas_used_from_last_anchor = working_state
+                .gas_used_from_last_anchor
+                .saturating_add(collation_data.block_limit.gas_used as _)
+                .saturating_add(gas_used_for_finalize);
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "gas_used_from_last_anchor: {:?}",
+                gas_used_from_last_anchor
             );
 
             // build new state
@@ -481,6 +489,7 @@ impl CollatorStdImpl {
             mc_data,
             new_state_root,
             new_observable_state,
+            gas_used_for_finalize,
         })
     }
 
