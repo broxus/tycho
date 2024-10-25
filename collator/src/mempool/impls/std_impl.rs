@@ -274,7 +274,7 @@ impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "Processing state update from mc block {}: {:?}",
             new_cx.mc_block_id.as_short_id(), DebugStateUpdateContext(&new_cx),
@@ -298,6 +298,17 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             {
                 // Note: assume that global config is applied to mempool adapter
                 //   before collator is run in synchronous code, so this method is called later
+
+                anyhow::ensure!(
+                    round >= new_cx.mc_processed_to_anchor_id && time >= new_cx.mc_block_chain_time,
+                    "new genesis round {} and time {} should be >= \
+                    master block processed_to_anchor_id {} and gen chain_time {}",
+                    round,
+                    time,
+                    new_cx.mc_processed_to_anchor_id,
+                    new_cx.mc_block_chain_time,
+                );
+
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
                     "Using genesis override: round {round} time {time}"
@@ -323,7 +334,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     >= new_cx.consensus_info.config_update_round
             })
         {
-            tracing::info!(
+            tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 "Skipped old state update from mc block {}: {:?}",
                 new_cx.mc_block_id.as_short_id(),
