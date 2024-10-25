@@ -123,7 +123,8 @@ pub struct ExecuteWUParams {
     pub prepare: u64,
     pub execute: u64,
     pub execute_delimiter: u64,
-    pub serialize_int_ext: u64,
+    pub serialize_int: u64,
+    pub serialize_ext: u64,
     pub serialize_new: u64,
     pub subgroup_size: u32,
 }
@@ -134,8 +135,9 @@ impl Default for ExecuteWUParams {
             prepare: 70,                // 70 mcs
             execute: 17,                // 0.000017 mcs
             execute_delimiter: 1000000, // 1 pcs
-            serialize_int_ext: 7,       // 7 mcs
+            serialize_ext: 6,           // 6 mcs
             serialize_new: 14,          // 14 mcs
+            serialize_int: 21,          // 21 mcs
             subgroup_size: 16,
         }
     }

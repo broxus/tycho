@@ -391,14 +391,13 @@ impl CollatorStdImpl {
         );
 
         executed_groups_wu_total = executed_groups_wu_total.saturating_add(
-            (collation_data.execute_count_int + collation_data.execute_count_ext).saturating_mul(
-                self.config
-                    .block_work_units_params
-                    .execute
-                    .serialize_int_ext,
-            ),
+            (collation_data.execute_count_int)
+                .saturating_mul(self.config.block_work_units_params.execute.serialize_int),
         );
-
+        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
+            (collation_data.execute_count_ext)
+                .saturating_mul(self.config.block_work_units_params.execute.serialize_ext),
+        );
         executed_groups_wu_total = executed_groups_wu_total.saturating_add(
             (collation_data.execute_count_new_int)
                 .saturating_mul(self.config.block_work_units_params.execute.serialize_new),
