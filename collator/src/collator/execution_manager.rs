@@ -69,7 +69,6 @@ pub(super) struct MessagesExecutor {
     accounts_cache: AccountsCache,
     /// execute params for work units calculation
     execute_params: ExecuteWUParams,
-    // rayon_threads: usize,
 }
 
 pub(super) enum GetNextMessageGroupMode {
@@ -491,7 +490,6 @@ impl MessagesExecutor {
         shard_accounts: ShardAccounts,
         execute_params: ExecuteWUParams,
     ) -> Self {
-        // let rayon_threads = rayon::current_num_threads();
         Self {
             shard_id,
             min_next_lt,
@@ -502,7 +500,6 @@ impl MessagesExecutor {
                 items: Default::default(),
             },
             execute_params,
-            // rayon_threads,
         }
     }
 

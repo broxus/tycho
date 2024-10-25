@@ -1131,12 +1131,8 @@ impl CollatorStdImpl {
         next_chain_time: u64,
     ) -> Result<()> {
         let working_state = self.delayed_working_state.wait().await?;
-        self.do_collate(
-            working_state,
-            Some(top_shard_blocks_info),
-            Some(next_chain_time),
-        )
-        .await
+        self.do_collate(working_state, Some(top_shard_blocks_info), next_chain_time)
+            .await
     }
 
     /// Run collation if there are internals,
@@ -1170,7 +1166,13 @@ impl CollatorStdImpl {
                 "there are unprocessed messages from previous block, will collate next block",
             );
             drop(histogram);
-            self.do_collate(working_state, None, None).await?;
+
+            self.do_collate(
+                working_state,
+                None,
+                self.anchors_cache.get_last_imported_anchor_ct().unwrap(),
+            )
+            .await?;
         } else {
             // otherwise import next anchor and return it notify to manager
             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -1402,7 +1404,12 @@ impl CollatorStdImpl {
         // collate block if has internals or externals
         if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
             drop(histogram);
-            self.do_collate(working_state, None, None).await?;
+            self.do_collate(
+                working_state,
+                None,
+                self.anchors_cache.get_last_imported_anchor_ct().unwrap(),
+            )
+            .await?;
         } else {
             // here just imported anchor has no externals
             // or we reached max uncommitted chain length

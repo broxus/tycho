@@ -51,7 +51,7 @@ impl CollatorStdImpl {
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
-        next_chain_time: Option<u64>,
+        next_chain_time: u64,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
@@ -79,9 +79,6 @@ impl CollatorStdImpl {
             .anchors_cache
             .get_last_imported_anchor_author()
             .unwrap();
-
-        let next_chain_time =
-            next_chain_time.unwrap_or(self.anchors_cache.get_last_imported_anchor_ct().unwrap());
 
         // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor
@@ -555,7 +552,7 @@ impl CollatorStdImpl {
 
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
-            let finalize_block_gas_params = self.config.block_work_units_params.finalize;
+            let finalize_params = self.config.block_work_units_params.finalize;
             move || {
                 Self::finalize_block(
                     collation_data,
@@ -563,7 +560,7 @@ impl CollatorStdImpl {
                     executor,
                     working_state,
                     queue_diff,
-                    finalize_block_gas_params,
+                    finalize_params,
                     prepare_groups_wu_total,
                     executed_groups_wu_total,
                 )
