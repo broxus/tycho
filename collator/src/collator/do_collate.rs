@@ -253,7 +253,7 @@ impl CollatorStdImpl {
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
         let mut process_txs_total_elapsed = Duration::ZERO;
-        let mut executed_groups_wu_total = 0;
+        let mut executed_groups_wu_total = 0u64;
 
         {
             let mut executed_groups_count = 0;
@@ -283,7 +283,8 @@ impl CollatorStdImpl {
                     collation_data.tx_count += group_result.items.len() as u64;
                     collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                     collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
-                    executed_groups_wu_total += group_result.total_exec_wu;
+                    executed_groups_wu_total =
+                        executed_groups_wu_total.saturating_add(group_result.total_exec_wu);
 
                     // Process transactions
                     timer = std::time::Instant::now();
@@ -296,9 +297,11 @@ impl CollatorStdImpl {
                         )?;
 
                         collation_data.new_msgs_created += new_messages.len() as u64;
-                        executed_groups_wu_total += (new_messages.len() as f64
-                            * self.config.block_work_units_params.execute.serialize)
-                            as u64;
+                        executed_groups_wu_total = executed_groups_wu_total.saturating_add(
+                            (new_messages.len() as f64
+                                * self.config.block_work_units_params.execute.serialize)
+                                as u64,
+                        );
 
                         for new_message in new_messages {
                             let MsgInfo::Int(int_msg_info) = new_message.info else {

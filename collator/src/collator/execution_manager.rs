@@ -543,71 +543,50 @@ impl MessagesExecutor {
             .checked_div(group_horizontal_size)
             .unwrap_or_default();
         let mut group_max_vert_size = 0;
-
-        // TODO check externals is not exist accounts needed ?
-        let mut futures = FuturesUnordered::new();
-        for (account_id, msgs) in group {
-            group_max_vert_size = cmp::max(group_max_vert_size, msgs.len());
-            let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
-            futures.push(self.execute_messages(shard_account_stuff, msgs));
-        }
-
         let mut items = Vec::with_capacity(group_messages_count);
         let mut ext_msgs_error_count = 0;
 
         let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
-        let mut total_exec_wu = 0;
-        let mut accounts_per_pool = 0;
-        let mut current_max_wu_per_pool = 0;
+        let mut total_exec_wu = 0u64;
+        let mut subgroup_len = 0;
 
-        while let Some(executed_msgs_result) = futures.next().await {
-            let executed = executed_msgs_result?;
-            ext_msgs_skipped += executed.ext_msgs_skipped;
-
-            let mut current_wu = executed.transactions.len() as f64 * self.execute_params.prepare;
-
-            max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
-            total_exec_time += executed.exec_time;
-
-            for tx in executed.transactions {
-                if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
-                    if let Err(e) = &tx.result {
-                        tracing::warn!(
-                            target: tracing_targets::EXEC_MANAGER,
-                            account_addr = %executed.account_state.account_addr,
-                            message_hash = %tx.in_message.cell.repr_hash(),
-                            "failed to execute external message: {e:?}",
-                        );
-                        ext_msgs_error_count += 1;
-                        continue;
-                    }
-                }
-
-                let executor_output = tx.result?;
-
-                self.min_next_lt =
-                    cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
-
-                current_wu += executor_output.gas_used as f64 * self.execute_params.execute;
-
-                items.push(ExecutedTickItem {
-                    in_message: tx.in_message,
-                    executor_output,
-                });
-            }
-
-            self.accounts_cache
-                .add_account_stuff(executed.account_state);
-
-            current_max_wu_per_pool = cmp::max(current_max_wu_per_pool, current_wu as u64);
-            accounts_per_pool += 1;
-            if accounts_per_pool == self.rayon_threads {
-                total_exec_wu += current_max_wu_per_pool;
-                current_max_wu_per_pool = 0;
-                accounts_per_pool = 0;
+        let mut futures = FuturesUnordered::new();
+        for (account_id, msgs) in group {
+            // TODO check externals is not exist accounts needed ?
+            group_max_vert_size = cmp::max(group_max_vert_size, msgs.len());
+            let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
+            futures.push(self.execute_messages(shard_account_stuff, msgs));
+            subgroup_len += 1;
+            // self.rayon_threads
+            if subgroup_len == 12 {
+                let current_max_wu_per_subgroup = self
+                    .execute_subgroup(
+                        futures,
+                        &mut ext_msgs_skipped,
+                        &mut max_account_msgs_exec_time,
+                        &mut total_exec_time,
+                        &mut ext_msgs_error_count,
+                        &mut items,
+                    )
+                    .await?;
+                total_exec_wu = total_exec_wu.saturating_add(current_max_wu_per_subgroup);
+                subgroup_len = 0;
+                futures = FuturesUnordered::new();
             }
         }
+
+        let current_max_wu_per_subgroup = self
+            .execute_subgroup(
+                futures,
+                &mut ext_msgs_skipped,
+                &mut max_account_msgs_exec_time,
+                &mut total_exec_time,
+                &mut ext_msgs_error_count,
+                &mut items,
+            )
+            .await?;
+        total_exec_wu = total_exec_wu.saturating_add(current_max_wu_per_subgroup);
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)
@@ -647,6 +626,60 @@ impl MessagesExecutor {
             ext_msgs_skipped,
             total_exec_wu,
         })
+    }
+
+    async fn execute_subgroup(
+        &mut self,
+        mut futures: FuturesUnordered<impl Future<Output = Result<ExecutedTransactions>> + Send>,
+        ext_msgs_skipped: &mut u64,
+        max_account_msgs_exec_time: &mut Duration,
+        total_exec_time: &mut Duration,
+        ext_msgs_error_count: &mut u64,
+        items: &mut Vec<ExecutedTickItem>,
+    ) -> Result<u64> {
+        let mut current_max_wu_per_subgroup = 0u64;
+        while let Some(executed_msgs_result) = futures.next().await {
+            let executed = executed_msgs_result?;
+            *ext_msgs_skipped += executed.ext_msgs_skipped;
+
+            let mut current_wu = executed.transactions.len() as f64 * self.execute_params.prepare;
+
+            *max_account_msgs_exec_time = (*max_account_msgs_exec_time).max(executed.exec_time);
+            *total_exec_time += executed.exec_time;
+
+            for tx in executed.transactions {
+                if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
+                    if let Err(e) = &tx.result {
+                        tracing::warn!(
+                            target: tracing_targets::EXEC_MANAGER,
+                            account_addr = %executed.account_state.account_addr,
+                            message_hash = %tx.in_message.cell.repr_hash(),
+                            "failed to execute external message: {e:?}",
+                        );
+                        *ext_msgs_error_count += 1;
+                        continue;
+                    }
+                }
+
+                let executor_output = tx.result?;
+
+                self.min_next_lt =
+                    cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
+
+                current_wu += executor_output.gas_used as f64 * self.execute_params.execute;
+
+                items.push(ExecutedTickItem {
+                    in_message: tx.in_message,
+                    executor_output,
+                });
+            }
+
+            self.accounts_cache
+                .add_account_stuff(executed.account_state);
+
+            current_max_wu_per_subgroup = cmp::max(current_max_wu_per_subgroup, current_wu as u64);
+        }
+        Ok(current_max_wu_per_subgroup)
     }
 
     #[allow(clippy::vec_box)]

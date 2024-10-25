@@ -225,8 +225,10 @@ impl CollatorStdImpl {
             } = prepare;
 
             let wu_used_for_msgs_groups = const_part
-                .saturating_add(read_ext_msgs * collation_data.read_ext_msgs)
-                .saturating_add(read_int_msgs * collation_data.read_int_msgs_from_iterator);
+                .saturating_add(read_ext_msgs.saturating_mul(collation_data.read_ext_msgs))
+                .saturating_add(
+                    read_int_msgs.saturating_mul(collation_data.read_int_msgs_from_iterator),
+                );
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "wu_used_for_msgs_groups: {}  read_ext_msgs: {}, read_int_msgs: {} ",
