@@ -488,6 +488,7 @@ impl CollatorStdImpl {
             build_out_msg,
             serialize,
             serialize_msg,
+            state_update_accounts,
             state_update_min,
             state_update_msg,
             serialize_min,
@@ -496,16 +497,13 @@ impl CollatorStdImpl {
         let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;
         let build = accounts_count
             .saturating_mul(accounts_count_logarithm)
-            .saturating_mul(build_accounts as u64)
-            .saturating_div(2);
+            .saturating_mul(build_accounts as u64);
         let build_in_msg = in_msgs_len
             .saturating_mul(in_msgs_len.checked_ilog2().unwrap_or_default() as u64)
-            .saturating_mul(build_in_msg as u64)
-            .saturating_div(2);
+            .saturating_mul(build_in_msg as u64);
         let build_out_msg = out_msgs_len
             .saturating_mul(out_msgs_len.checked_ilog2().unwrap_or_default() as u64)
-            .saturating_mul(build_out_msg as u64)
-            .saturating_div(2);
+            .saturating_mul(build_out_msg as u64);
         let build = build.saturating_add(
             std::cmp::max(out_msgs_len, in_msgs_len).saturating_mul(build_transactions as u64),
         );
@@ -516,7 +514,7 @@ impl CollatorStdImpl {
             state_update_min as u64,
             accounts_count
                 .saturating_mul(accounts_count_logarithm)
-                .saturating_div(2)
+                .saturating_mul(state_update_accounts as u64)
                 .saturating_add(out_msgs_len.saturating_mul(state_update_msg as u64)),
         );
 

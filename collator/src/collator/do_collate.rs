@@ -508,9 +508,9 @@ impl CollatorStdImpl {
 
         metrics::gauge!("tycho_do_collate_wu_to_finalize", &labels).set(finalize_wu_total as f64);
         metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
-            .set(execute_msgs_total_elapsed.as_micros() as f64 / executed_groups_vm_only as f64);
+            .set(execute_msgs_total_elapsed.as_nanos() as f64 / executed_groups_vm_only as f64);
         metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
-            .set(process_txs_total_elapsed.as_micros() as f64 / process_txs_wu as f64);
+            .set(process_txs_total_elapsed.as_nanos() as f64 / process_txs_wu as f64);
         metrics::gauge!("tycho_do_collate_wu_to_execute", &labels)
             .set(executed_groups_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_to_prepare", &labels)
@@ -521,14 +521,14 @@ impl CollatorStdImpl {
                 + prepare_groups_wu_total as f64,
         );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
-            .set(finalize_block_elapsed.as_micros() as f64 / finalize_wu_total as f64);
+            .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
-            (execute_msgs_total_elapsed.as_micros() as f64
-                + process_txs_total_elapsed.as_micros() as f64)
+            (execute_msgs_total_elapsed.as_nanos() as f64
+                + process_txs_total_elapsed.as_nanos() as f64)
                 / executed_groups_wu_total as f64,
         );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
-            .set(fill_msgs_total_elapsed.as_micros() as f64 / prepare_groups_wu_total as f64);
+            .set(fill_msgs_total_elapsed.as_nanos() as f64 / prepare_groups_wu_total as f64);
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
