@@ -1321,17 +1321,20 @@ impl CollatorStdImpl {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "there are no pending internals or externals, will import next anchor",
                 );
-                working_state.gas_used_from_last_anchor = 0;
             } else if force_import_anchor_by_used_gas {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "gas used from last anchor {} reached limit {} on length {}, will import next anchor",
                     gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
-                working_state.gas_used_from_last_anchor = gas_used_from_last_anchor
-                    .saturating_sub(self.config.gas_used_to_import_next_anchor);
             }
 
-            let import_anchor_result = Self::import_next_anchor(
+            working_state.gas_used_from_last_anchor = if force_import_anchor_by_used_gas {
+                gas_used_from_last_anchor.saturating_sub(self.config.gas_used_to_import_next_anchor)
+            } else {
+                0
+            };
+
+            let (next_anchor, next_anchor_has_externals) = Self::import_next_anchor(
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),

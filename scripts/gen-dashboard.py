@@ -960,7 +960,7 @@ def block_metrics() -> RowPanel:
             "Blocks rate",
             labels_selectors=['workchain=~"$workchain"'],
         ),
-        create_counter_panel(
+        create_gauge_panel(
             "tycho_do_collate_shard_blocks_count",
             "Shard Blocks count between master blocks",
         ),
@@ -1169,6 +1169,16 @@ def collator_time_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_gas_to_execute",
             "Gas spent on execute",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_gas_to_ns_finalize",
+            "Gas price in nanoseconds on finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_gas_to_ns_execute",
+            "Gas price in nanoseconds on execute",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
