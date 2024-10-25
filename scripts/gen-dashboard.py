@@ -1236,33 +1236,39 @@ def collator_wu_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_prepare",
-            "Wu price in nanoseconds on prepare",
+            "Wu price on prepare",
             labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_execute",
-            "Wu price in nanoseconds on execute",
-            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_execute_txs_to_wu",
-            "Wu price in nanoseconds on vm execute",
+            "Wu price on execute in vm",
             labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_process_txs_to_wu",
-            "Wu price in nanoseconds on process executed txs",
+            "Wu price on process executed txs",
             labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_execute",
+            "Wu price on execute total",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_finalize",
-            "Wu price in nanoseconds on finalize",
+            "Wu price on finalize",
             labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_total",
-            "Wu price in nanoseconds total",
+            "Wu price total",
             labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
         ),
     ]
     return create_row("collator: Work units calculation", metrics)
