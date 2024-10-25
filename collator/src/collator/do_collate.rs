@@ -280,8 +280,7 @@ impl CollatorStdImpl {
                     // Execute messages group
                     timer = std::time::Instant::now();
                     let group_result = executor.execute_group(msgs_group).await?;
-                    let executed_group_elapsed = timer.elapsed();
-                    execute_msgs_total_elapsed += executed_group_elapsed;
+                    execute_msgs_total_elapsed += timer.elapsed();
                     executed_groups_count += 1;
                     collation_data.tx_count += group_result.items.len() as u64;
                     collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
@@ -335,10 +334,6 @@ impl CollatorStdImpl {
                         collation_data.block_limit.lt_current = collation_data.next_lt;
                     }
                     process_txs_total_elapsed += timer.elapsed();
-
-                    metrics::gauge!("tycho_do_collate_gas_to_ns_execute", &labels).set(
-                        executed_group_elapsed.as_nanos() as f64 / gas_used_for_execute as f64,
-                    );
 
                     if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
                         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -515,6 +510,8 @@ impl CollatorStdImpl {
         );
         metrics::gauge!("tycho_do_collate_gas_to_ns_finalize", &labels)
             .set(finalize_block_elapsed.as_nanos() as f64 / gas_used_fo_finalize as f64);
+        metrics::gauge!("tycho_do_collate_gas_to_ns_execute", &labels)
+            .set(execute_elapsed.as_nanos() as f64 / collation_data.block_limit.gas_used as f64);
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
