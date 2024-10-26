@@ -91,6 +91,6 @@ function ensure_exists() {
 ensure_exists "states.tar.zst"
 ensure_exists "zerostate.boc"
 
-ensure_exists "archive.bin"
-ensure_exists "next_archive.bin"
-ensure_exists "last_archive.bin"
+ensure_exists "archive_1.bin"
+ensure_exists "archive_2.bin"
+ensure_exists "archive_3.bin"

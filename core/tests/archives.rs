@@ -182,7 +182,7 @@ async fn archives() -> Result<()> {
     let state_applier = ShardStateApplier::new(state_tracker, storage.clone(), state_subscriber);
 
     // Archive provider
-    let archive_data = utils::read_file("archive.bin")?;
+    let archive_data = utils::read_file("archive_1.bin")?;
     let archive = utils::parse_archive(&archive_data)?;
 
     let archive_provider = ArchiveProvider {
@@ -191,7 +191,7 @@ async fn archives() -> Result<()> {
     };
 
     // Next archive provider
-    let next_archive_data = utils::read_file("next_archive.bin")?;
+    let next_archive_data = utils::read_file("archive_2.bin")?;
     let next_archive = utils::parse_archive(&next_archive_data)?;
 
     let next_archive_provider = ArchiveProvider {
@@ -200,7 +200,7 @@ async fn archives() -> Result<()> {
     };
 
     // Last archive provider
-    let last_archive_data = utils::read_file("last_archive.bin")?;
+    let last_archive_data = utils::read_file("archive_3.bin")?;
     let last_archive = utils::parse_archive(&last_archive_data)?;
 
     let last_archive_provider = ArchiveProvider {
@@ -290,7 +290,7 @@ async fn heavy_archives() -> Result<()> {
     let state_applier = ShardStateApplier::new(state_tracker, storage.clone(), state_subscriber);
 
     // Archive provider
-    let archive_path = integration_test_path.join("archive.bin");
+    let archive_path = integration_test_path.join("archive_1.bin");
     let archive_data = std::fs::read(archive_path)?;
     let archive = utils::parse_archive(&archive_data)?;
 
@@ -300,7 +300,7 @@ async fn heavy_archives() -> Result<()> {
     };
 
     // Next archive provider
-    let next_archive_path = integration_test_path.join("next_archive.bin");
+    let next_archive_path = integration_test_path.join("archive_2.bin");
     let next_archive_data = std::fs::read(next_archive_path)?;
     let next_archive = utils::parse_archive(&next_archive_data)?;
 
@@ -310,7 +310,7 @@ async fn heavy_archives() -> Result<()> {
     };
 
     // Last archive provider
-    let last_archive_path = integration_test_path.join("last_archive.bin");
+    let last_archive_path = integration_test_path.join("archive_3.bin");
     let last_archive_data = std::fs::read(last_archive_path)?;
     let last_archive = utils::parse_archive(&last_archive_data)?;
 
@@ -366,7 +366,7 @@ async fn heavy_archives() -> Result<()> {
         .build();
 
     // Get archive
-    let archive_path = integration_test_path.join("archive.bin");
+    let archive_path = integration_test_path.join("archive_1.bin");
     let archive_data = std::fs::read(archive_path)?;
     let archive = utils::parse_archive(&archive_data)?;
 
