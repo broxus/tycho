@@ -188,7 +188,11 @@ where
 
             // Check if the diff is sequential
             if block_id_short.seqno != last_applied_seqno + 1 {
-                bail!("Diff seqno is not sequential");
+                bail!(
+                    "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
+                    block_id_short.seqno,
+                    last_applied_seqno
+                );
             }
         }
 
@@ -265,6 +269,7 @@ where
     }
 
     fn clear_session_state(&self) -> Result<()> {
+        self.diffs.clear();
         self.session_state.truncate()
     }
 }
