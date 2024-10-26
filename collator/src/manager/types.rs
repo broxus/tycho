@@ -20,6 +20,7 @@ pub(super) enum CollatorState {
     Active,
     Waiting,
     Cancelled,
+    CancelPending,
 }
 
 pub(super) struct ActiveCollator<C> {
@@ -36,6 +37,7 @@ pub(super) struct ChainTimesSyncState {
 
 pub(super) struct BlockCacheStoreResult {
     pub received_and_collated: bool,
+    pub blocks_mismatch_with_present: bool,
     pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
 }
