@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use everscale_types::models::{BlockId, BlockIdShort};
+use everscale_types::models::{BlockId, BlockIdShort, StdAddr};
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
@@ -30,6 +30,9 @@ pub trait ControlServer {
 
     /// Returns memory profiler dump.
     async fn dump_memory_profiler() -> ServerResult<Vec<u8>>;
+
+    /// Get account state.
+    async fn get_account_state(req: AccountStateRequest) -> ServerResult<AccountStateResponse>;
 
     /// Get block bytes
     async fn get_block(req: BlockRequest) -> ServerResult<BlockResponse>;
@@ -72,6 +75,26 @@ pub struct NodeInfoResponse {
 pub enum TriggerGcRequest {
     Exact(u32),
     Distance(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountStateRequest {
+    pub address: StdAddr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountStateResponse {
+    pub mc_seqno: u32,
+    pub gen_utime: u32,
+
+    /// A BOC with a [`ShardAccount`].
+    ///
+    /// NOTE: [`BocRepr`] cannot be safely used here because
+    /// we must hold a state tracker handle to delay the GC,
+    /// and it is very inconvenient to pass it around here.
+    ///
+    /// [`ShardAccount`]: everscale_types::models::ShardAccount
+    pub state: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

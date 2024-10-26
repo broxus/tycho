@@ -1,16 +1,27 @@
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use anyhow::Result;
 use everscale_crypto::ed25519;
-use everscale_types::cell::HashBytes;
+use everscale_types::boc::BocRepr;
+use everscale_types::cell::{Cell, HashBytes, WeakCell};
+use everscale_types::dict::Dict;
+use everscale_types::models::{
+    Account, DepthBalanceInfo, Lazy, OptionalAccount, ShardAccount, ShardIdent,
+};
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
-use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
+use tycho_block_util::state::RefMcStateHandle;
+use tycho_core::block_strider::{
+    GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
+};
 use tycho_network::Network;
-use tycho_storage::{ArchiveId, Storage};
+use tycho_storage::{ArchiveId, BlockHandle, Storage};
+use tycho_util::FastHashMap;
 
 use crate::error::{ServerError, ServerResult};
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
@@ -127,6 +138,8 @@ impl ControlServerBuilder {
                 storage,
                 memory_profiler,
                 validator_keypair: self.validator_keypair,
+                mc_accounts: Default::default(),
+                sc_accounts: Default::default(),
             }),
         }
     }
@@ -223,6 +236,63 @@ impl proto::ControlServer for ControlServer {
 
     async fn dump_memory_profiler(self, _: Context) -> ServerResult<Vec<u8>> {
         self.inner.memory_profiler.dump().await.map_err(Into::into)
+    }
+
+    async fn get_account_state(
+        self,
+        _: Context,
+        req: proto::AccountStateRequest,
+    ) -> ServerResult<proto::AccountStateResponse> {
+        let (block_handle, account) = 'state: {
+            let (block_handle, tracker_handle) = 'fast_path: {
+                if req.address.is_masterchain() {
+                    let Some(cached) = &*self.inner.mc_accounts.read() else {
+                        return Err(ServerError::new("no masterchain state"));
+                    };
+
+                    let block_handle = cached.block_handle.clone();
+                    match cached.try_get(&req.address.address)? {
+                        CacheItem::Unavailable => {
+                            break 'fast_path (block_handle, cached.tracker_handle.clone())
+                        }
+                        CacheItem::NotFound => break 'state (block_handle, None),
+                        CacheItem::Loaded(account) => break 'state (block_handle, Some(account)),
+                    }
+                } else {
+                    todo!()
+                }
+            };
+
+            let state = self
+                .inner
+                .storage
+                .shard_state_storage()
+                .load_state(block_handle.id())
+                .await?;
+
+            match state.as_ref().load_accounts()?.get(&req.address.address)? {
+                None => (block_handle, None),
+                Some((_, account)) => (
+                    block_handle,
+                    Some(LoadedAccount {
+                        account,
+                        tracker_handle,
+                    }),
+                ),
+            }
+        };
+
+        // TODO: Store serialized instead?
+        let state = BocRepr::encode_rayon(match &account {
+            None => empty_shard_account(),
+            Some(account) => &account.account,
+        })?;
+
+        Ok(proto::AccountStateResponse {
+            mc_seqno: block_handle.mc_ref_seqno(),
+            gen_utime: block_handle.gen_utime(),
+            state,
+        })
     }
 
     async fn get_block(
@@ -369,12 +439,22 @@ impl proto::ControlServer for ControlServer {
     }
 }
 
+impl StateSubscriber for ControlServer {
+    type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        todo!()
+    }
+}
+
 struct Inner {
     info: proto::NodeInfoResponse,
     gc_subscriber: GcSubscriber,
     storage: Storage,
     memory_profiler: Arc<dyn MemoryProfiler>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
+    mc_accounts: RwLock<Option<CachedAccounts>>,
+    sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
 }
 
 type Context = tarpc::context::Context;
@@ -407,4 +487,56 @@ fn build_elections_data_to_sign(req: &proto::ElectionsPayloadRequest) -> Vec<u8>
     data.extend_from_slice(req.address.as_slice());
     data.extend_from_slice(req.adnl_addr.as_array());
     data
+}
+
+/// A bit more weak version of `CachedAccounts` from the `tycho-rpc`.
+struct CachedAccounts {
+    block_handle: BlockHandle,
+    accounts_dict_root: Option<WeakCell>,
+    tracker_handle: RefMcStateHandle,
+}
+
+impl CachedAccounts {
+    fn try_get(&self, addr: &HashBytes) -> Result<CacheItem> {
+        let Some(dict_root) = &self.accounts_dict_root else {
+            return Ok(CacheItem::NotFound);
+        };
+
+        let Some(dict_root) = dict_root.upgrade() else {
+            return Ok(CacheItem::Unavailable);
+        };
+
+        match ShardAccountsDict::from_raw(Some(dict_root)).get(addr)? {
+            Some((_, account)) => Ok(CacheItem::Loaded(LoadedAccount {
+                account,
+                tracker_handle: self.tracker_handle.clone(),
+            })),
+            None => Ok(CacheItem::NotFound),
+        }
+    }
+}
+
+enum CacheItem {
+    Unavailable,
+    NotFound,
+    Loaded(LoadedAccount),
+}
+
+struct LoadedAccount {
+    account: ShardAccount,
+
+    // NOTE: Stored to delay the GC.
+    #[allow(unused)]
+    tracker_handle: RefMcStateHandle,
+}
+
+type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
+
+fn empty_shard_account() -> &'static ShardAccount {
+    static EMPTY: OnceLock<ShardAccount> = OnceLock::new();
+    EMPTY.get_or_init(|| ShardAccount {
+        account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
+        last_trans_hash: HashBytes::ZERO,
+        last_trans_lt: 0,
+    })
 }

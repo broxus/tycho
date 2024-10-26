@@ -30,4 +30,10 @@ impl From<anyhow::Error> for ServerError {
     }
 }
 
+impl From<everscale_types::error::Error> for ServerError {
+    fn from(value: everscale_types::error::Error) -> Self {
+        Self(value.to_string())
+    }
+}
+
 pub type ServerResult<T, E = ServerError> = std::result::Result<T, E>;

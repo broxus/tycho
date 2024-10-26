@@ -20,7 +20,7 @@ impl MinRefMcStateTracker {
         self.inner.counters.read().min_seqno
     }
 
-    pub(crate) fn insert(&self, mc_seqno: u32) -> RefMcStateHandle {
+    pub fn insert(&self, mc_seqno: u32) -> RefMcStateHandle {
         self.inner.insert(mc_seqno)
     }
 

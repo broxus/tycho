@@ -23,12 +23,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory={work_dir}
-ExecStart={tycho_bin} node run \
-    --mempool-start-round 0 \
-    --keys keys.json \
-    --config config.json \
-    --global-config global-config.json \
-    --logger-config logger.json
+ExecStart={tycho_bin} node run --mempool-start-round 0
 Environment=RUST_BACKTRACE=1,RUST_LIB_BACKTRACE=0
 
 [Install]
