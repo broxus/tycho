@@ -21,7 +21,7 @@ async fn storage_block_strider() -> anyhow::Result<()> {
 
     let storage_provider = StorageBlockProvider::new(storage);
 
-    let archive_data = utils::read_file("archive.bin")?;
+    let archive_data = utils::read_file("archive_1.bin")?;
     let archive = utils::parse_archive(&archive_data)?;
     for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
@@ -127,7 +127,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         .build();
     let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
 
-    let archive_data = utils::read_file("archive.bin")?;
+    let archive_data = utils::read_file("archive_1.bin")?;
     let archive = utils::parse_archive(&archive_data)?;
     for block_id in archive.mc_block_ids.values() {
         let block = provider.get_block(&block_id.relative_to_self()).await;

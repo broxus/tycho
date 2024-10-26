@@ -124,3 +124,19 @@ node *flags:
 # to define new mempool genesis at non-default round
 mempool *flags:
     ./scripts/run-mempool.sh --dir {{local_network_dir}} {{flags}}
+
+# Dumps necessary part 01 of test data from the local running network:
+# zerostate, initial state of shard 0:80,
+# first empty master block and it's queue diff
+dump_test_data_01:
+    ./scripts/dump-test-data-01.sh
+
+# Dumps necessary part 02 of test data from the local running network under load:
+# not empty block from shard 0:80
+dump_test_data_02:
+    ./scripts/dump-test-data-02.sh
+
+# Dumps necessary part 03 of test data from the local running network under load:
+# first 3 archives
+dump_test_data_03:
+    ./scripts/dump-test-data-03.sh
