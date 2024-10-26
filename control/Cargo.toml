@@ -17,6 +17,7 @@ async-trait = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
+parking_lot = { workspace = true, optional = true }
 serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
@@ -24,6 +25,7 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 
 # local deps
+tycho-block-util = { workspace = true, optional = true }
 tycho-core = { workspace = true, optional = true }
 tycho-network = { workspace = true, optional = true }
 tycho-storage = { workspace = true, optional = true }
@@ -32,4 +34,10 @@ tycho-util = { workspace = true }
 [features]
 full = ["client", "server"]
 client = []
-server = ["dep:tycho-core", "dep:tycho-network", "dep:tycho-storage"]
+server = [
+    "dep:tycho-block-util",
+    "dep:tycho-core",
+    "dep:tycho-network",
+    "dep:tycho-storage",
+    "dep:parking_lot",
+]

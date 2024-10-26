@@ -805,7 +805,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.8"
-source = "git+https://www.github.com/broxus/everscale-types.git?rev=7ca5c3e895d3d6dced61e4bd299ba92fa723a38a#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
+source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
 dependencies = [
  "ahash",
  "base64",
@@ -828,7 +828,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://www.github.com/broxus/everscale-types.git?rev=7ca5c3e895d3d6dced61e4bd299ba92fa723a38a#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
+source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3420,11 +3420,13 @@ dependencies = [
  "everscale-crypto",
  "everscale-types",
  "futures-util",
+ "parking_lot",
  "serde",
  "tarpc",
  "thiserror",
  "tokio",
  "tracing",
+ "tycho-block-util",
  "tycho-core",
  "tycho-network",
  "tycho-storage",
