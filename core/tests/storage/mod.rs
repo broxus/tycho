@@ -28,7 +28,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
         .await?;
 
     // Init blocks
-    let archive_data = utils::read_file("archive.bin")?;
+    let archive_data = utils::read_file("archive_1.bin")?;
     let block_provider = utils::parse_archive(&archive_data)?;
 
     for block_id in block_provider.mc_block_ids.values() {
