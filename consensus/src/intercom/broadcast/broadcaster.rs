@@ -237,7 +237,7 @@ impl Broadcaster {
         match result {
             Err(error) => {
                 self.sig_peers.insert(*peer_id); // lighter weight retry loop
-                tracing::error!(
+                tracing::warn!(
                     parent: self.effects.span(),
                     peer = display(peer_id.alt()),
                     error = display(error),
@@ -260,7 +260,7 @@ impl Broadcaster {
         match result {
             Err(error) => {
                 self.sig_peers.insert(*peer_id); // let it retry
-                tracing::error!(
+                tracing::warn!(
                     parent: self.effects.span(),
                     peer = display(peer_id.alt()),
                     error = display(error),
