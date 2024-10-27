@@ -2,14 +2,10 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use everscale_crypto::ed25519;
-use everscale_types::boc::BocRepr;
-use everscale_types::cell::{Cell, HashBytes, WeakCell};
-use everscale_types::dict::Dict;
-use everscale_types::models::{
-    Account, DepthBalanceInfo, Lazy, OptionalAccount, ShardAccount, ShardIdent,
-};
+use everscale_types::models::{DepthBalanceInfo, Lazy, OptionalAccount, ShardAccount, ShardIdent};
+use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
 use parking_lot::RwLock;
@@ -244,25 +240,39 @@ impl proto::ControlServer for ControlServer {
         req: proto::AccountStateRequest,
     ) -> ServerResult<proto::AccountStateResponse> {
         let (block_handle, account) = 'state: {
-            let (block_handle, tracker_handle) = 'fast_path: {
-                if req.address.is_masterchain() {
-                    let Some(cached) = &*self.inner.mc_accounts.read() else {
-                        return Err(ServerError::new("no masterchain state"));
-                    };
-
-                    let block_handle = cached.block_handle.clone();
-                    match cached.try_get(&req.address.address)? {
-                        CacheItem::Unavailable => {
-                            break 'fast_path (block_handle, cached.tracker_handle.clone())
-                        }
-                        CacheItem::NotFound => break 'state (block_handle, None),
-                        CacheItem::Loaded(account) => break 'state (block_handle, Some(account)),
-                    }
+            // Try fast path first.
+            let (block_handle, tracker_handle) = {
+                // NOTE: Extending lifetimes of guards here.
+                let mc_guard;
+                let sc_guard;
+                let cached = if req.address.is_masterchain() {
+                    mc_guard = self.inner.mc_accounts.read();
+                    mc_guard.as_ref()
                 } else {
-                    todo!()
+                    sc_guard = self.inner.sc_accounts.read();
+                    sc_guard.iter().find_map(|(s, cached)| {
+                        s.contains_account(&req.address.address).then_some(cached)
+                    })
+                };
+
+                let Some(cached) = cached else {
+                    return Err(ServerError::new("shard state not found"));
+                };
+
+                let block_handle = cached.block_handle.clone();
+                match cached.try_get(&req.address.address)? {
+                    // No cached accounts map, so we need to load the state (go to slow path)
+                    CacheItem::Unavailable => (block_handle, cached.tracker_handle.clone()),
+                    // No account state by the latest known block (fast path done)
+                    CacheItem::NotFound => break 'state (block_handle, None),
+                    // Found an account state (fast path done)
+                    CacheItem::Loaded(account) => break 'state (block_handle, Some(account)),
                 }
             };
 
+            // Fallback to slow path
+
+            // Load the state
             let state = self
                 .inner
                 .storage
@@ -270,6 +280,7 @@ impl proto::ControlServer for ControlServer {
                 .load_state(block_handle.id())
                 .await?;
 
+            // Find the account state in it
             match state.as_ref().load_accounts()?.get(&req.address.address)? {
                 None => (block_handle, None),
                 Some((_, account)) => (
@@ -443,7 +454,8 @@ impl StateSubscriber for ControlServer {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        todo!()
+        let res = self.inner.handle_state_impl(cx);
+        futures_util::future::ready(res)
     }
 }
 
@@ -455,6 +467,43 @@ struct Inner {
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
+}
+
+impl Inner {
+    fn handle_state_impl(&self, cx: &StateSubscriberContext) -> Result<()> {
+        let block_id = cx.block.id();
+        let block_handle = self
+            .storage
+            .block_handle_storage()
+            .load_handle(block_id)
+            .context("block handle not found")?;
+
+        // Get a weak reference to the accounts dictionary root.
+        let accounts_dict_root = {
+            let accounts = cx.state.as_ref().load_accounts()?;
+            let (dict_root, _) = accounts.into_parts();
+            dict_root.into_root().as_ref().map(Cell::downgrade)
+        };
+
+        // Store a tracker handle to delay the GC.
+        let tracker_handle = cx.state.ref_mc_state_handle().clone();
+
+        let cached = CachedAccounts {
+            block_handle,
+            accounts_dict_root,
+            tracker_handle,
+        };
+
+        // Update the cache.
+        if block_id.is_masterchain() {
+            *self.mc_accounts.write() = Some(cached);
+        } else {
+            // TODO: Handle split/merge like in `tycho-rpc`.
+            self.sc_accounts.write().insert(block_id.shard, cached);
+        }
+
+        Ok(())
+    }
 }
 
 type Context = tarpc::context::Context;
