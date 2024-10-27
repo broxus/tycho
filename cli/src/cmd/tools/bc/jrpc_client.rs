@@ -31,7 +31,8 @@ impl JrpcClient {
     pub async fn send_message(&self, message: &DynCell) -> Result<()> {
         #[derive(Serialize)]
         struct Params<'a> {
-            #[serde(with = "Boc")]
+            // TODO: Revert this line once the fix is merged:
+            // #[serde(with = "Boc")]
             message: &'a DynCell,
         }
 

@@ -367,27 +367,32 @@ impl Node {
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
         let ps_subscriber = PsSubscriber::new(self.storage.clone());
 
-        // Create RPC
+        // Create control server
+        let control_server = {
+            let mut builder = ControlServer::builder()
+                .with_network(&self.network)
+                .with_gc_subscriber(gc_subscriber.clone())
+                .with_storage(self.storage.clone())
+                .with_validator_keypair(self.keypair.clone());
+
+            #[cfg(feature = "jemalloc")]
+            if let Some(profiler) = JemallocMemoryProfiler::connect() {
+                builder = builder.with_memory_profiler(Arc::new(profiler));
+            }
+
+            builder.build()
+        };
+
+        // Spawn control server endpoint
         // NOTE: This variable is used as a guard to abort the server future on drop.
-        let _control_state = {
-            let server = {
-                let mut builder = ControlServer::builder()
-                    .with_network(&self.network)
-                    .with_gc_subscriber(gc_subscriber.clone())
-                    .with_storage(self.storage.clone())
-                    .with_validator_keypair(self.keypair.clone());
-
-                #[cfg(feature = "jemalloc")]
-                if let Some(profiler) = JemallocMemoryProfiler::connect() {
-                    builder = builder.with_memory_profiler(Arc::new(profiler));
-                }
-
-                builder.build()
-            };
-
-            let endpoint = ControlEndpoint::bind(&self.control_config, server, self.control_socket)
-                .await
-                .context("failed to setup control server endpoint")?;
+        let _control_endpoint = {
+            let endpoint = ControlEndpoint::bind(
+                &self.control_config,
+                control_server.clone(),
+                self.control_socket,
+            )
+            .await
+            .context("failed to setup control server endpoint")?;
 
             tracing::info!(socket_path = %endpoint.socket_path().display(), "control server started");
 
@@ -440,7 +445,12 @@ impl Node {
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
-                        (collator, rpc_state_subscriber, ps_subscriber),
+                        (
+                            collator,
+                            rpc_state_subscriber,
+                            ps_subscriber,
+                            control_server,
+                        ),
                     ),
                     rpc_block_subscriber,
                     validator_subscriber,

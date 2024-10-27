@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use everscale_types::models::{BlockId, BlockIdShort};
+use everscale_types::models::{BlockId, BlockIdShort, StdAddr};
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
@@ -36,6 +36,15 @@ impl ControlClient {
         self.inner
             .get_node_info(current_context())
             .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_account_state(&self, addr: &StdAddr) -> ClientResult<AccountStateResponse> {
+        self.inner
+            .get_account_state(current_context(), AccountStateRequest {
+                address: addr.clone(),
+            })
+            .await?
             .map_err(Into::into)
     }
 

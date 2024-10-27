@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use everscale_types::models::{BlockId, BlockIdShort, StdAddr};
+use everscale_types::models::{BlockId, BlockIdShort, ShardAccount, StdAddr};
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
@@ -95,6 +95,23 @@ pub struct AccountStateResponse {
     ///
     /// [`ShardAccount`]: everscale_types::models::ShardAccount
     pub state: Vec<u8>,
+}
+
+impl AccountStateResponse {
+    pub fn parse(&self) -> Result<ParsedAccountState, everscale_types::boc::BocReprError> {
+        Ok(ParsedAccountState {
+            mc_seqno: self.mc_seqno,
+            gen_utime: self.gen_utime,
+            state: BocRepr::decode(&self.state)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedAccountState {
+    pub mc_seqno: u32,
+    pub gen_utime: u32,
+    pub state: ShardAccount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

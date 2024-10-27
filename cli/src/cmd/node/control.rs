@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, StdAddr};
 use serde::Serialize;
 use tycho_control::ControlClient;
 use tycho_util::cli::signal;
@@ -17,6 +17,7 @@ use crate::BaseArgs;
 pub enum CmdControl {
     Ping(CmdPing),
     GetInfo(CmdGetInfo),
+    GetAccount(CmdGetAccount),
     FindArchive(CmdFindArchive),
     ListArchives(CmdListArchives),
     DumpArchive(CmdDumpArchive),
@@ -36,6 +37,7 @@ impl CmdControl {
         match self {
             Self::Ping(cmd) => cmd.run(args),
             Self::GetInfo(cmd) => cmd.run(args),
+            Self::GetAccount(cmd) => cmd.run(args),
             Self::FindArchive(cmd) => cmd.run(args),
             Self::ListArchives(cmd) => cmd.run(args),
             Self::DumpArchive(cmd) => cmd.run(args),
@@ -86,6 +88,34 @@ impl CmdGetInfo {
                 "adnl_id": info.adnl_id,
                 "validator_public_key": info.public_addr,
             }))
+        })
+    }
+}
+
+/// Get account state from the node.
+#[derive(Parser)]
+pub struct CmdGetAccount {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// Account address.
+    #[clap(long, short)]
+    addr: StdAddr,
+
+    /// Parse the account state.
+    #[clap(short, long)]
+    parse: bool,
+}
+
+impl CmdGetAccount {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let state = client.get_account_state(&self.addr).await?;
+            if self.parse {
+                print_json(state.parse()?)
+            } else {
+                print_json(state)
+            }
         })
     }
 }
