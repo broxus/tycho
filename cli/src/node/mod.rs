@@ -373,6 +373,7 @@ impl Node {
                 .with_network(&self.network)
                 .with_gc_subscriber(gc_subscriber.clone())
                 .with_storage(self.storage.clone())
+                .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                 .with_validator_keypair(self.keypair.clone());
 
             #[cfg(feature = "jemalloc")]
