@@ -137,7 +137,7 @@ impl CollatorStdImpl {
             .balance
             .clone();
 
-        if let Err(e) = Self::check_value_flow(
+        Self::check_value_flow(
             &value_flow,
             is_masterchain,
             &collation_data,
@@ -146,11 +146,7 @@ impl CollatorStdImpl {
             &in_msgs,
             &out_msgs,
             &processed_accounts,
-        ) {
-            tracing::error!(target: tracing_targets::COLLATOR, "check_value_flow failed: {:?}", e);
-        } else {
-            tracing::debug!(target: tracing_targets::COLLATOR, "check_value_flow successful");
-        }
+        )?;
 
         // build master state extra or get a ref to last applied master block
         // TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
