@@ -609,6 +609,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
+ "digest",
  "fiat-crypto",
  "rustc_version",
  "subtle",
@@ -723,6 +724,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519-dalek"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "serde",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "educe"
 version = "0.4.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -808,13 +823,18 @@ version = "0.1.0-rc.8"
 source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
 dependencies = [
  "ahash",
+ "anyhow",
  "base64",
  "bitflags",
  "blake3",
+ "bytes",
  "crc32c",
+ "ed25519-dalek",
  "everscale-crypto",
  "everscale-types-proc",
  "hex",
+ "num-bigint",
+ "num-traits",
  "rand",
  "rayon",
  "scc",

@@ -23,7 +23,7 @@ bytesize = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 everscale-crypto = { workspace = true }
-everscale-types = { workspace = true }
+everscale-types = { workspace = true, features = ["abi"] }
 futures-util = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }

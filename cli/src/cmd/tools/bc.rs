@@ -15,11 +15,8 @@ use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 
-use self::jrpc_client::{AccountStateResponse, JrpcClient};
+use crate::util::jrpc_client::{AccountStateResponse, JrpcClient};
 use crate::util::{parse_public_key, parse_secret_key, print_json};
-
-// TODO: Move into a standalone crate
-mod jrpc_client;
 
 /// Generate an account state
 #[derive(clap::Parser)]

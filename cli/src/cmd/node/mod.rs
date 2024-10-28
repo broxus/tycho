@@ -14,7 +14,7 @@ use crate::BaseArgs;
 
 mod control;
 
-/// Manage node.
+/// Manage the node.
 #[derive(Parser)]
 pub struct Cmd {
     #[clap(subcommand)]
@@ -48,7 +48,7 @@ struct CmdRun {
     #[clap(long)]
     global_config: Option<PathBuf>,
 
-    /// Path to the node keys. Default: `$TYCHO_HOME/keys.json`
+    /// Path to the node keys. Default: `$TYCHO_HOME/node_keys.json`
     #[clap(long)]
     keys: Option<PathBuf>,
 

@@ -11,6 +11,9 @@ use serde::Serialize;
 
 #[cfg(feature = "jemalloc")]
 pub mod alloc;
+pub mod elector;
+pub mod jrpc_client;
+pub mod wallet;
 
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
     std::fs::create_dir_all(path.as_ref())

@@ -7,7 +7,7 @@ mod gen_dht;
 mod gen_key;
 mod gen_zerostate;
 
-/// A collection of tools
+/// Work with blockchain stuff.
 #[derive(Parser)]
 pub struct Cmd {
     #[clap(subcommand)]
