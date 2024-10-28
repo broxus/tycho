@@ -1,7 +1,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use everscale_types::models::{BlockId, BlockIdShort, StdAddr};
+use everscale_types::boc::BocRepr;
+use everscale_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
@@ -39,15 +40,6 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
-    pub async fn get_account_state(&self, addr: &StdAddr) -> ClientResult<AccountStateResponse> {
-        self.inner
-            .get_account_state(current_context(), AccountStateRequest {
-                address: addr.clone(),
-            })
-            .await?
-            .map_err(Into::into)
-    }
-
     pub async fn trigger_archives_gc(&self, req: TriggerGcRequest) -> ClientResult<()> {
         self.inner
             .trigger_archives_gc(current_context(), req)
@@ -79,6 +71,31 @@ impl ControlClient {
     pub async fn dump_memory_profiler(&self) -> ClientResult<Vec<u8>> {
         self.inner
             .dump_memory_profiler(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn broadcast_external_message(&self, message: OwnedMessage) -> ClientResult<()> {
+        if !message.info.is_external_in() {
+            return Err(ClientError::ClientFailed(anyhow::anyhow!(
+                "expected an ExtIn message"
+            )));
+        }
+
+        let message =
+            BocRepr::encode_rayon(message).map_err(|e| ClientError::ClientFailed(e.into()))?;
+
+        self.inner
+            .broadcast_external_message(current_context(), BroadcastExtMsgRequest { message })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn get_account_state(&self, addr: &StdAddr) -> ClientResult<AccountStateResponse> {
+        self.inner
+            .get_account_state(current_context(), AccountStateRequest {
+                address: addr.clone(),
+            })
             .await?
             .map_err(Into::into)
     }

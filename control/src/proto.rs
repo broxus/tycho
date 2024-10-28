@@ -31,6 +31,9 @@ pub trait ControlServer {
     /// Returns memory profiler dump.
     async fn dump_memory_profiler() -> ServerResult<Vec<u8>>;
 
+    /// Broadcast a message to validators.
+    async fn broadcast_external_message(req: BroadcastExtMsgRequest) -> ServerResult<()>;
+
     /// Get account state.
     async fn get_account_state(req: AccountStateRequest) -> ServerResult<AccountStateResponse>;
 
@@ -75,6 +78,14 @@ pub struct NodeInfoResponse {
 pub enum TriggerGcRequest {
     Exact(u32),
     Distance(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastExtMsgRequest {
+    /// A BOC with a [`Message`].
+    ///
+    /// [`Message`]: everscale_types::models::Message
+    pub message: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

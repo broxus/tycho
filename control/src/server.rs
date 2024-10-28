@@ -4,7 +4,9 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
 use everscale_crypto::ed25519;
-use everscale_types::models::{DepthBalanceInfo, Lazy, OptionalAccount, ShardAccount, ShardIdent};
+use everscale_types::models::{
+    DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
+};
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
@@ -15,6 +17,7 @@ use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::block_strider::{
     GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
 };
+use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_network::Network;
 use tycho_storage::{ArchiveId, BlockHandle, Storage};
 use tycho_util::FastHashMap;
@@ -104,7 +107,9 @@ impl Drop for ControlEndpoint {
     }
 }
 
-pub struct ControlServerBuilder<MandatoryFields = (Network, Storage, GcSubscriber)> {
+pub struct ControlServerBuilder<
+    MandatoryFields = (Network, Storage, GcSubscriber, BlockchainRpcClient),
+> {
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
@@ -112,7 +117,7 @@ pub struct ControlServerBuilder<MandatoryFields = (Network, Storage, GcSubscribe
 
 impl ControlServerBuilder {
     pub fn build(self) -> ControlServer {
-        let (network, storage, gc_subscriber) = self.mandatory_fields;
+        let (network, storage, gc_subscriber, blockchain_rpc_client) = self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
             .unwrap_or_else(|| Arc::new(StubMemoryProfiler));
@@ -132,6 +137,7 @@ impl ControlServerBuilder {
                 info,
                 gc_subscriber,
                 storage,
+                blockchain_rpc_client,
                 memory_profiler,
                 validator_keypair: self.validator_keypair,
                 mc_accounts: Default::default(),
@@ -141,36 +147,50 @@ impl ControlServerBuilder {
     }
 }
 
-impl<T2, T3> ControlServerBuilder<((), T2, T3)> {
-    pub fn with_network(self, network: &Network) -> ControlServerBuilder<(Network, T2, T3)> {
-        let (_, t2, t3) = self.mandatory_fields;
+impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
+    pub fn with_network(self, network: &Network) -> ControlServerBuilder<(Network, T2, T3, T4)> {
+        let (_, t2, t3, t4) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (network.clone(), t2, t3),
+            mandatory_fields: (network.clone(), t2, t3, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
         }
     }
 }
 
-impl<T1, T3> ControlServerBuilder<(T1, (), T3)> {
-    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3)> {
-        let (t1, _, t3) = self.mandatory_fields;
+impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
+    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3, T4)> {
+        let (t1, _, t3, t4) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, storage, t3),
+            mandatory_fields: (t1, storage, t3, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
         }
     }
 }
 
-impl<T1, T2> ControlServerBuilder<(T1, T2, ())> {
+impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
     pub fn with_gc_subscriber(
         self,
         gc_subscriber: GcSubscriber,
-    ) -> ControlServerBuilder<(T1, T2, GcSubscriber)> {
-        let (t1, t2, _) = self.mandatory_fields;
+    ) -> ControlServerBuilder<(T1, T2, GcSubscriber, T4)> {
+        let (t1, t2, _, t4) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, t2, gc_subscriber),
+            mandatory_fields: (t1, t2, gc_subscriber, t4),
+            memory_profiler: self.memory_profiler,
+            validator_keypair: self.validator_keypair,
+        }
+    }
+}
+
+impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
+    pub fn with_blockchain_rpc_client(
+        self,
+        client: BlockchainRpcClient,
+    ) -> ControlServerBuilder<(T1, T2, T3, BlockchainRpcClient)> {
+        let (t1, t2, t3, _) = self.mandatory_fields;
+        ControlServerBuilder {
+            mandatory_fields: (t1, t2, t3, client),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
         }
@@ -196,9 +216,9 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn builder() -> ControlServerBuilder<((), (), ())> {
+    pub fn builder() -> ControlServerBuilder<((), (), (), ())> {
         ControlServerBuilder {
-            mandatory_fields: ((), (), ()),
+            mandatory_fields: ((), (), (), ()),
             memory_profiler: None,
             validator_keypair: None,
         }
@@ -232,6 +252,26 @@ impl proto::ControlServer for ControlServer {
 
     async fn dump_memory_profiler(self, _: Context) -> ServerResult<Vec<u8>> {
         self.inner.memory_profiler.dump().await.map_err(Into::into)
+    }
+
+    async fn broadcast_external_message(
+        self,
+        _: Context,
+        req: proto::BroadcastExtMsgRequest,
+    ) -> ServerResult<()> {
+        Boc::decode(&req.message)
+            .ok()
+            .and_then(|msg| {
+                let msg = msg.parse::<Message<'_>>().ok()?;
+                msg.info.is_external_in().then_some(())
+            })
+            .ok_or_else(|| ServerError::new("invalid external message"))?;
+
+        self.inner
+            .blockchain_rpc_client
+            .broadcast_external_message(&req.message)
+            .await;
+        Ok(())
     }
 
     async fn get_account_state(
@@ -281,7 +321,7 @@ impl proto::ControlServer for ControlServer {
                 .await?;
 
             // Find the account state in it
-            match state.as_ref().load_accounts()?.get(&req.address.address)? {
+            match state.as_ref().load_accounts()?.get(req.address.address)? {
                 None => (block_handle, None),
                 Some((_, account)) => (
                     block_handle,
@@ -463,6 +503,7 @@ struct Inner {
     info: proto::NodeInfoResponse,
     gc_subscriber: GcSubscriber,
     storage: Storage,
+    blockchain_rpc_client: BlockchainRpcClient,
     memory_profiler: Arc<dyn MemoryProfiler>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
