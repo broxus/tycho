@@ -534,7 +534,7 @@ impl MessagesExecutor {
         let mut ext_msgs_skipped = 0;
 
         let group_horizontal_size = group.len();
-        let group_messages_count = group.calc_messages_count();
+        let group_messages_count = group.messages_count();
         let group_mean_vert_size: usize = group_messages_count
             .checked_div(group_horizontal_size)
             .unwrap_or_default();

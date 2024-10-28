@@ -1081,8 +1081,8 @@ impl MessageGroup {
         self.inner.len()
     }
 
-    pub fn calc_messages_count(&self) -> usize {
-        self.inner.values().map(|v| v.len()).sum::<usize>()
+    pub fn messages_count(&self) -> usize {
+        self.int_messages_count + self.ext_messages_count
     }
 
     fn incriment_counters(&mut self, is_int: bool) {
