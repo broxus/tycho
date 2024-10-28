@@ -1,15 +1,11 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)] // it's a CLI tool
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use tycho_control::ControlClient;
-use tycho_util::cli::signal;
-use tycho_util::futures::JoinTask;
 
 mod cmd {
     #[cfg(feature = "debug")]
@@ -133,48 +129,6 @@ impl BaseArgs {
                 Err(_) => self.home.join("control.sock"),
             },
         }
-    }
-}
-
-#[derive(Clone, Args)]
-struct ControlArgs {
-    /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
-    #[clap(long)]
-    control_socket: Option<PathBuf>,
-}
-
-impl ControlArgs {
-    fn rt<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
-    where
-        F: FnOnce(ControlClient) -> FT + Send + 'static,
-        FT: Future<Output = Result<()>> + Send,
-    {
-        tracing_subscriber::fmt::init();
-
-        let sock = args.control_socket_path(self.control_socket.as_ref());
-
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async move {
-                let run_fut = JoinTask::new(async move {
-                    let client = ControlClient::connect(sock)
-                        .await
-                        .context("failed to connect to control server")?;
-                    f(client).await
-                });
-                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-                tokio::select! {
-                    res = run_fut => res,
-                    signal = stop_fut => match signal {
-                        Ok(signal) => {
-                            tracing::info!(?signal, "received termination signal");
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                }
-            })
     }
 }
 
