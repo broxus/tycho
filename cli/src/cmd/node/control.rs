@@ -3,6 +3,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use base64::prelude::{Engine as _, BASE64_STANDARD};
 use clap::{Args, Parser, Subcommand};
 use everscale_types::models::{BlockId, StdAddr};
 use serde::Serialize;
@@ -99,7 +100,7 @@ pub struct CmdGetAccount {
     args: ControlArgs,
 
     /// Account address.
-    #[clap(long, short)]
+    #[clap(long, short, allow_hyphen_values(true))]
     addr: StdAddr,
 
     /// Parse the account state.
@@ -114,7 +115,11 @@ impl CmdGetAccount {
             if self.parse {
                 print_json(state.parse()?)
             } else {
-                print_json(state)
+                print_json(serde_json::json!({
+                    "mc_seqno": state.mc_seqno,
+                    "gen_utime": state.gen_utime,
+                    "state": BASE64_STANDARD.encode(state.state),
+                }))
             }
         })
     }

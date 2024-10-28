@@ -111,6 +111,7 @@ impl AccountStateResponse {
 pub struct ParsedAccountState {
     pub mc_seqno: u32,
     pub gen_utime: u32,
+    #[serde(flatten)]
     pub state: ShardAccount,
 }
 
