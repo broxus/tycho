@@ -5,6 +5,8 @@ use everscale_types::abi::{AbiType, AbiValue, Function, IntoAbi, WithAbiType};
 use everscale_types::models::{StateInit, StdAddr};
 use everscale_types::prelude::*;
 
+pub const MSG_FLAGS: u8 = 3;
+
 pub fn compute_address(workchain: i8, public_key: &ed25519::PublicKey) -> StdAddr {
     let address = *CellBuilder::build_from(make_state_init(public_key))
         .unwrap()
