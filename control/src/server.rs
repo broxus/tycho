@@ -13,6 +13,7 @@ use futures_util::{FutureExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
+use tycho_block_util::config::build_elections_data_to_sign;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::block_strider::{
     GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
@@ -479,7 +480,12 @@ impl proto::ControlServer for ControlServer {
             ));
         }
 
-        let data = build_elections_data_to_sign(&req);
+        let data = build_elections_data_to_sign(
+            req.election_id,
+            req.max_factor,
+            &req.address,
+            &req.adnl_addr,
+        );
         let signature = keypair.sign_raw(&data);
 
         Ok(proto::ElectionsPayloadResponse {
@@ -565,18 +571,6 @@ impl From<proto::TriggerGcRequest> for ManualGcTrigger {
             proto::TriggerGcRequest::Distance(distance) => Self::Distance(distance),
         }
     }
-}
-
-fn build_elections_data_to_sign(req: &proto::ElectionsPayloadRequest) -> Vec<u8> {
-    const TL_ID: u32 = 0x654C5074;
-
-    let mut data = Vec::with_capacity(4 + 4 + 4 + 32 + 32);
-    data.extend_from_slice(&TL_ID.to_be_bytes());
-    data.extend_from_slice(&req.election_id.to_be_bytes());
-    data.extend_from_slice(&req.max_factor.to_be_bytes());
-    data.extend_from_slice(req.address.as_slice());
-    data.extend_from_slice(req.adnl_addr.as_array());
-    data
 }
 
 /// A bit more weak version of `CachedAccounts` from the `tycho-rpc`.
