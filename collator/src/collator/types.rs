@@ -1038,6 +1038,8 @@ impl MessageGroups {
         let mut merged_group_opt: Option<MessageGroup> = None;
         while let Some(next_group) = self.extract_first_group_inner() {
             if let Some(merged_group) = merged_group_opt.as_mut() {
+                merged_group.int_messages_count += next_group.int_messages_count;
+                merged_group.ext_messages_count += next_group.ext_messages_count;
                 for (account_id, mut account_msgs) in next_group.inner {
                     if let Some(existing_account_msgs) = merged_group.inner.get_mut(&account_id) {
                         existing_account_msgs.append(&mut account_msgs);
