@@ -1,15 +1,20 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)] // it's a CLI tool
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use tycho_control::ControlClient;
+use tycho_util::cli::signal;
+use tycho_util::futures::JoinTask;
 
 mod cmd {
     #[cfg(feature = "debug")]
     pub mod debug;
+    pub mod elect;
     pub mod init;
     pub mod node;
     pub mod tools;
@@ -65,6 +70,7 @@ enum Cmd {
     Init(cmd::init::Cmd),
     Node(cmd::node::Cmd),
     Tool(cmd::tools::Cmd),
+    Elect(cmd::elect::Cmd),
     #[cfg(feature = "debug")]
     Debug(cmd::debug::Cmd),
 }
@@ -75,6 +81,7 @@ impl Cmd {
             Cmd::Init(cmd) => cmd.run(args),
             Cmd::Node(cmd) => cmd.run(args),
             Cmd::Tool(cmd) => cmd.run(),
+            Cmd::Elect(cmd) => cmd.run(args),
             #[cfg(feature = "debug")]
             Cmd::Debug(cmd) => cmd.run(),
         }
@@ -103,7 +110,13 @@ impl BaseArgs {
     pub fn node_keys_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
         overwrite
             .cloned()
-            .unwrap_or_else(|| self.home.join("keys.json"))
+            .unwrap_or_else(|| self.home.join("node_keys.json"))
+    }
+
+    pub fn validator_keys_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+        overwrite
+            .cloned()
+            .unwrap_or_else(|| self.home.join("validator_keys.json"))
     }
 
     pub fn global_config_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
@@ -120,6 +133,48 @@ impl BaseArgs {
                 Err(_) => self.home.join("control.sock"),
             },
         }
+    }
+}
+
+#[derive(Clone, Args)]
+struct ControlArgs {
+    /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+    #[clap(long)]
+    control_socket: Option<PathBuf>,
+}
+
+impl ControlArgs {
+    fn rt<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
+    where
+        F: FnOnce(ControlClient) -> FT + Send + 'static,
+        FT: Future<Output = Result<()>> + Send,
+    {
+        tracing_subscriber::fmt::init();
+
+        let sock = args.control_socket_path(self.control_socket.as_ref());
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let run_fut = JoinTask::new(async move {
+                    let client = ControlClient::connect(sock)
+                        .await
+                        .context("failed to connect to control server")?;
+                    f(client).await
+                });
+                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+                tokio::select! {
+                    res = run_fut => res,
+                    signal = stop_fut => match signal {
+                        Ok(signal) => {
+                            tracing::info!(?signal, "received termination signal");
+                            Ok(())
+                        }
+                        Err(e) => Err(e.into()),
+                    }
+                }
+            })
     }
 }
 
