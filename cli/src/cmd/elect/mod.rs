@@ -11,12 +11,18 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::*;
 use reqwest::Url;
+use serde::Serialize;
+use tycho_block_util::config::build_elections_data_to_sign;
 use tycho_control::ControlClient;
+use tycho_network::PeerId;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
+use tycho_util::serde_helpers;
 use tycho_util::time::now_millis;
 
 use crate::node::NodeKeys;
+use crate::util::elector::data::Ref;
+use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
 use crate::util::{elector, print_json, wallet};
 use crate::BaseArgs;
@@ -31,6 +37,7 @@ pub struct Cmd {
 impl Cmd {
     pub fn run(self, args: BaseArgs) -> Result<()> {
         match self.cmd {
+            SubCmd::Once(cmd) => cmd.run(args),
             SubCmd::Recover(cmd) => cmd.run(args),
             SubCmd::GetState(cmd) => cmd.run(args),
         }
@@ -39,8 +46,163 @@ impl Cmd {
 
 #[derive(Subcommand)]
 enum SubCmd {
+    Once(CmdOnce),
     Recover(CmdRecover),
     GetState(CmdGetState),
+}
+
+/// Participate in validator elections.
+#[derive(Parser)]
+struct CmdOnce {
+    #[clap(flatten)]
+    control: ControlArgs,
+
+    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
+    #[clap(long)]
+    keys: Option<PathBuf>,
+
+    /// Path to node keys. Default: `$TYCHO_HOME/node_keys.json`
+    node_keys: Option<PathBuf>,
+
+    #[clap(long)]
+    stake: u128,
+
+    #[clap(long, value_parser, default_value_t = MAX_FACTOR)]
+    max_factor: u32,
+}
+
+impl CmdOnce {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        // Prepare keys
+        let keys = NodeKeys::from_file(args.validator_keys_path(self.keys.as_ref()))?;
+        let node_keys = {
+            let path = args.node_keys_path(self.node_keys.as_ref());
+            let secret = NodeKeys::from_file(path)?.as_secret();
+            Arc::new(ed25519::KeyPair::from(&secret))
+        };
+        let adnl_addr = PeerId::from(node_keys.public_key);
+
+        // Use client
+        self.control.rt(args, move |client| async move {
+            let wallet = Wallet::new(client.clone(), &keys.as_secret());
+
+            // Get current elections
+            let elector_data = client.get_elector_data().await?;
+            let Some(Ref(elections)) = elector_data.current_election else {
+                return print_json(ParticipateStatus::NoElections);
+            };
+
+            // Check stake
+            if self.stake < elections.min_stake.into_inner() {
+                anyhow::bail!("stake is too small (min {})", elections.min_stake);
+            }
+
+            // Build payload signature
+            let adnl_addr = HashBytes(adnl_addr.to_bytes());
+            let validator_key = adnl_addr;
+            let signature = node_keys
+                .sign_raw(&build_elections_data_to_sign(
+                    elections.elect_at,
+                    self.max_factor,
+                    &wallet.address.address,
+                    &adnl_addr,
+                ))
+                .to_vec();
+
+            // Build elections payload
+            let payload = elector::methods::participate_in_elections()
+                .encode_internal_input(&[ParticiateInElectionsInput {
+                    query_id: now_millis(),
+                    validator_key,
+                    stake_at: elections.elect_at,
+                    max_factor: self.max_factor,
+                    adnl_addr,
+                    signature,
+                }
+                .into_abi()
+                .named("input")])?
+                .build()?;
+
+            // Send stake
+            wallet
+                .transfer(&ELECTOR_ADDR, self.stake + ONE_CC, true, payload)
+                .await?;
+
+            // Done
+            print_json(ParticipateStatus::Participating {
+                elections_id: elections.elect_at,
+                elections_end: elections.elect_close,
+                stake: self.stake,
+            })
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status")]
+enum ParticipateStatus {
+    NoElections,
+    Participating {
+        elections_id: u32,
+        elections_end: u32,
+        #[serde(with = "serde_helpers::string")]
+        stake: u128,
+    },
+}
+
+/// Recover stake.
+#[derive(Parser)]
+struct CmdRecover {
+    #[clap(flatten)]
+    control: ControlArgs,
+
+    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
+    #[clap(long)]
+    keys: Option<PathBuf>,
+}
+
+impl CmdRecover {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        // Prepare keys
+        let keys_path = args.validator_keys_path(self.keys.as_ref());
+        let keys = NodeKeys::from_file(&keys_path)?;
+
+        // Use client
+        self.control.rt(args, move |client| async move {
+            let wallet = Wallet::new(client.clone(), &keys.as_secret());
+
+            // Find reward
+            let elector_data = client.get_elector_data().await?;
+            let Some(to_recover) = elector_data.credits.get(&wallet.address.address) else {
+                return print_json(RecoverStatus::NoReward);
+            };
+
+            // Build payload
+            let payload = elector::methods::recover_stake()
+                .encode_internal_input(&[now_millis().into_abi().named("query_id")])?
+                .build()?;
+
+            // Send recover message
+            wallet
+                .transfer(&ELECTOR_ADDR, ONE_CC, true, payload)
+                .await?;
+
+            // Done
+            print_json(RecoverStatus::Recovered {
+                amount: to_recover.into_inner(),
+            })
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status")]
+enum RecoverStatus {
+    NoReward,
+    Recovered {
+        #[serde(with = "serde_helpers::string")]
+        amount: u128,
+    },
 }
 
 /// Get elector contract state.
@@ -59,48 +221,9 @@ impl CmdGetState {
     }
 }
 
-/// Recover stake.
-#[derive(Parser)]
-struct CmdRecover {
-    #[clap(flatten)]
-    control: ControlArgs,
-
-    /// Path to the validator keys. Default: `$TYCHO_HOME/validator_keys.json`
-    #[clap(long)]
-    keys: Option<PathBuf>,
-}
-
-impl CmdRecover {
-    fn run(self, args: BaseArgs) -> Result<()> {
-        let keys_path = args.validator_keys_path(self.keys.as_ref());
-        let keys = NodeKeys::from_file(&keys_path)?;
-
-        self.control.rt(args, move |client| async move {
-            let elector_data = client.get_elector_data().await?;
-            let wallet = Wallet::new(client, &keys.as_secret());
-
-            let Some(to_recover) = elector_data.credits.get(&wallet.address.address) else {
-                return print_json(serde_json::json!({
-                    "status": "NoReward",
-                }));
-            };
-
-            let payload = elector::methods::recover_stake()
-                .encode_internal_input(&[now_millis().into_abi().named("query_id")])?
-                .build()?;
-            wallet
-                .transfer(&ELECTOR_ADDR, 1_000_000_000, true, payload)
-                .await?;
-
-            print_json(serde_json::json!({
-                "status": "Recovered",
-                "amount": to_recover.into_inner().to_string(),
-            }))
-        })
-    }
-}
-
 const ELECTOR_ADDR: StdAddr = StdAddr::new(-1, HashBytes([0x33; 32]));
+const ONE_CC: u128 = 1_000_000_000;
+const MAX_FACTOR: u32 = 3 << 16;
 
 #[derive(Clone, Args)]
 struct ControlArgs {
