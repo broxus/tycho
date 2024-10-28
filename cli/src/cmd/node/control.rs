@@ -1,14 +1,18 @@
+use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use everscale_types::models::{BlockId, StdAddr};
 use serde::Serialize;
+use tycho_control::ControlClient;
+use tycho_util::cli::signal;
+use tycho_util::futures::JoinTask;
 
 use crate::util::print_json;
-use crate::{BaseArgs, ControlArgs};
+use crate::BaseArgs;
 
 #[derive(Subcommand)]
 pub enum CmdControl {
@@ -581,3 +585,45 @@ impl From<TriggerBy> for tycho_control::proto::TriggerGcRequest {
 
 #[derive(Serialize)]
 struct Empty {}
+
+#[derive(Clone, Args)]
+struct ControlArgs {
+    /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+    #[clap(long)]
+    control_socket: Option<PathBuf>,
+}
+
+impl ControlArgs {
+    fn rt<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
+    where
+        F: FnOnce(ControlClient) -> FT + Send + 'static,
+        FT: Future<Output = Result<()>> + Send,
+    {
+        tracing_subscriber::fmt::init();
+
+        let sock = args.control_socket_path(self.control_socket.as_ref());
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let run_fut = JoinTask::new(async move {
+                    let client = ControlClient::connect(sock)
+                        .await
+                        .context("failed to connect to control server")?;
+                    f(client).await
+                });
+                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+                tokio::select! {
+                    res = run_fut => res,
+                    signal = stop_fut => match signal {
+                        Ok(signal) => {
+                            tracing::info!(?signal, "received termination signal");
+                            Ok(())
+                        }
+                        Err(e) => Err(e.into()),
+                    }
+                }
+            })
+    }
+}
