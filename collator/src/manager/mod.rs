@@ -1598,6 +1598,11 @@ where
                 Some(self.keypair.clone()),
             ));
 
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "new_session_info.validators: {:?}",
+                new_session_info.collators(),
+            );
+
             let next_block_id_short = calc_next_block_id_short(&prev_blocks_ids);
 
             match self.active_collators.entry(shard_id) {
