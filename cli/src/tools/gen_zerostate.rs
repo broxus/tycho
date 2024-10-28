@@ -207,10 +207,16 @@ impl ZerostateConfig {
 
             anyhow::ensure!(!self.validators.is_empty(), "validator set is empty");
 
+            let max_main_validators = self
+                .params
+                .get_validator_count_params()?
+                .max_main_validators;
             let mut validator_set = ValidatorSet {
                 utime_since: now,
                 utime_until: now,
-                main: (self.validators.len() as u16).try_into().unwrap(),
+                main: std::cmp::min(self.validators.len() as u16, max_main_validators)
+                    .try_into()
+                    .unwrap(),
                 total_weight: 0,
                 list: Vec::with_capacity(self.validators.len()),
             };
