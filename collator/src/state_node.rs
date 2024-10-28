@@ -561,8 +561,12 @@ fn prepare_block_proof(
 
     if let Some(custom) = block.load_extra()?.load_custom()? {
         if let Some(config) = &custom.config {
-            config.get_current_validator_set()?;
             config.get::<ConfigParam28>()?;
+            for param_id in 32..=38 {
+                if let Some(mut vset) = config.get_raw(param_id)? {
+                    ValidatorSet::load_from(&mut vset)?;
+                }
+            }
         }
     }
 
