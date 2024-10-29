@@ -6,8 +6,8 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
-    BlockId, BlockIdShort, ExternalsProcessedUpto, ProcessedUptoInfo, ShardHashes, ShardIdent,
-    ValidatorDescription,
+    BlockId, BlockIdShort, CollationConfig, ExternalsProcessedUpto, ProcessedUptoInfo, ShardHashes,
+    ShardIdent, ValidatorDescription,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
@@ -37,7 +37,7 @@ use crate::mempool::{
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
-    BlockCollationResult, BlockIdExt, CollationConfig, CollationSessionId, CollationSessionInfo,
+    BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
     ShardDescriptionExt,
 };
@@ -85,7 +85,7 @@ where
     CF: CollatorFactory,
 {
     keypair: Arc<KeyPair>,
-    config: Arc<CollationConfig>,
+    config: Arc<CollatorConfig>,
 
     dispatcher: Arc<AsyncDispatcher<Self>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
@@ -215,13 +215,15 @@ where
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
         force_mc_block: bool,
+        collation_config: Arc<CollationConfig>,
     ) -> Result<()> {
         self.spawn_task(method_to_async_closure!(
             handle_skipped_anchor,
             prev_mc_block_id,
             next_block_id_short,
             anchor_chain_time,
-            force_mc_block
+            force_mc_block,
+            collation_config
         ))
         .await
     }
@@ -263,7 +265,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn start<STF, MPF>(
         keypair: Arc<KeyPair>,
-        config: CollationConfig,
+        config: CollatorConfig,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         state_node_adapter_factory: STF,
         mpool_adapter_factory: MPF,
@@ -559,6 +561,7 @@ where
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
         force_mc_block: bool,
+        collation_config: Arc<CollationConfig>,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Will check if should collate next master block",
@@ -569,6 +572,7 @@ where
             anchor_chain_time,
             force_mc_block,
             None,
+            collation_config.mc_block_min_interval_ms as _,
         )
         .await
     }
@@ -583,6 +587,7 @@ where
         chain_time: u64,
         force_mc_block: bool,
         trigger_shard_block_id_opt: Option<BlockId>,
+        mc_block_min_interval_ms: u64,
     ) -> Result<()> {
         // if should collate master block due to current shard chain time
         // then stop current shard collation
@@ -591,6 +596,7 @@ where
                 shard_id,
                 chain_time,
                 force_mc_block,
+                mc_block_min_interval_ms,
             );
         if should_collate_mc_block {
             // and if chain time elapsed master block interval in every shard
@@ -837,6 +843,7 @@ where
                     candidate_chain_time,
                     false,
                     Some(block_id),
+                    collation_result.collation_config.mc_block_min_interval_ms as _,
                 )
                 .await?;
             }
@@ -1396,7 +1403,7 @@ where
             mc_block_chain_time: mc_data.gen_chain_time,
             mc_processed_to_anchor_id,
             consensus_info: mc_data.consensus_info,
-            shuffle_validators: mc_data.config.get_catchain_config()?.shuffle_mc_validators,
+            shuffle_validators: mc_data.config.get_collation_config()?.shuffle_mc_validators,
             consensus_config: mc_data.config.get_consensus_config()?,
             prev_validator_set,
             current_validator_set,
@@ -1477,7 +1484,7 @@ where
             full_validators_set.main, full_validators_set.total_weight,
             DebugIter(full_validators_set.list.iter().map(|i| i.public_key)),
         );
-        let collation_config = mc_data.config.get_catchain_config()?;
+        let collation_config = mc_data.config.get_collation_config()?;
         let mut subset_cache = FastHashMap::new();
         let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
             hash_map::Entry::Occupied(entry) => {
@@ -1809,6 +1816,7 @@ where
         shard_id: ShardIdent,
         chain_time: u64,
         force_mc_block: bool,
+        mc_block_min_interval_ms: u64,
     ) -> (bool, Option<u64>) {
         // Idea is to store collated chain times and "force" flags for each shard.
         // Then we can collate master block if interval elapsed or have "force" flag in every shards.
@@ -1824,8 +1832,6 @@ where
             .entry(shard_id)
             .or_default();
         last_collated_chain_times.push((chain_time, force_mc_block));
-
-        let mc_block_min_interval_ms = self.config.mc_block_min_interval.as_millis() as u64;
 
         // check if should collate master in current shard
         let should_collate_mc_block = if force_mc_block {

@@ -24,7 +24,7 @@ use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
-    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
+    BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DisplayBlockIdsIntoIter, McData, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
@@ -52,7 +52,7 @@ pub struct CollatorContext {
     pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     pub mpool_adapter: Arc<dyn MempoolAdapter>,
     pub state_node_adapter: Arc<dyn StateNodeAdapter>,
-    pub config: Arc<CollationConfig>,
+    pub config: Arc<CollatorConfig>,
     pub collation_session: Arc<CollationSessionInfo>,
     pub listener: Arc<dyn CollatorEventListener>,
     pub shard_id: ShardIdent,
@@ -95,6 +95,7 @@ pub trait CollatorEventListener: Send + Sync {
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
         force_mc_block: bool,
+        collation_config: Arc<CollationConfig>,
     ) -> Result<()>;
     /// Handle when collator action was cancelled
     async fn on_cancelled(
@@ -206,7 +207,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
 pub struct CollatorStdImpl {
     next_block_info: BlockIdShort,
 
-    config: Arc<CollationConfig>,
+    config: Arc<CollatorConfig>,
     collation_session: Arc<CollationSessionInfo>,
 
     listener: Arc<dyn CollatorEventListener>,
@@ -232,7 +233,7 @@ impl CollatorStdImpl {
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         mpool_adapter: Arc<dyn MempoolAdapter>,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
-        config: Arc<CollationConfig>,
+        config: Arc<CollatorConfig>,
         collation_session: Arc<CollationSessionInfo>,
         listener: Arc<dyn CollatorEventListener>,
         shard_id: ShardIdent,
@@ -322,7 +323,6 @@ impl CollatorStdImpl {
         // init working state
         let working_state = Self::init_working_state(
             &self.next_block_info,
-            &self.config,
             self.state_node_adapter.clone(),
             mc_data,
             prev_blocks_ids,
@@ -542,7 +542,6 @@ impl CollatorStdImpl {
             );
             let working_state = Self::init_working_state(
                 &self.next_block_info,
-                &self.config,
                 self.state_node_adapter.clone(),
                 mc_data,
                 new_prev_blocks_ids,
@@ -608,7 +607,6 @@ impl CollatorStdImpl {
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
     async fn init_working_state(
         next_block_id_short: &BlockIdShort,
-        config: &CollationConfig,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mc_data: Arc<McData>,
         prev_blocks_ids: Vec<BlockId>,
@@ -624,12 +622,7 @@ impl CollatorStdImpl {
         // build and validate working state
         tracing::debug!(target: tracing_targets::COLLATOR, "building working state...");
 
-        Self::build_and_validate_init_working_state(
-            config,
-            mc_data,
-            prev_states,
-            prev_queue_diff_hashes,
-        )
+        Self::build_and_validate_init_working_state(mc_data, prev_states, prev_queue_diff_hashes)
     }
 
     async fn reload_prev_data(
@@ -676,6 +669,7 @@ impl CollatorStdImpl {
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
         mc_data: Option<Arc<McData>>,
+        collation_config: Arc<CollationConfig>,
         has_unprocessed_messages: bool,
         prev_working_state: Box<WorkingState>,
         msgs_buffer: MessagesBuffer,
@@ -740,6 +734,7 @@ impl CollatorStdImpl {
             Ok(Box::new(WorkingState {
                 next_block_id_short,
                 mc_data,
+                collation_config,
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
@@ -813,7 +808,6 @@ impl CollatorStdImpl {
     ///
     /// Perform some validations on state
     fn build_and_validate_init_working_state(
-        config: &CollationConfig,
         mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
@@ -824,6 +818,8 @@ impl CollatorStdImpl {
 
         let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
 
+        let collation_config = Arc::new(mc_data.config.get_collation_config()?);
+
         Ok(Box::new(WorkingState {
             next_block_id_short,
             mc_data,
@@ -833,9 +829,10 @@ impl CollatorStdImpl {
             has_unprocessed_messages: None,
             msgs_buffer: Some(MessagesBuffer::new(
                 next_block_id_short.shard,
-                config.msgs_exec_params.group_limit as _,
-                config.msgs_exec_params.group_vert_size as _,
+                collation_config.msgs_exec_params.group_limit as _,
+                collation_config.msgs_exec_params.group_vert_size as _,
             )),
+            collation_config,
         }))
     }
 
@@ -1221,6 +1218,7 @@ impl CollatorStdImpl {
                     working_state.next_block_id_short,
                     next_anchor.chain_time,
                     false,
+                    working_state.collation_config.clone(),
                 )
                 .await?;
 
@@ -1308,14 +1306,19 @@ impl CollatorStdImpl {
         let uncommitted_chain_length =
             working_state.next_block_id_short.seqno - 1 - last_committed_seqno;
 
+        let max_uncommitted_chain_length =
+            working_state.collation_config.max_uncommitted_chain_length as u32;
+        let wu_used_to_import_next_anchor =
+            working_state.collation_config.wu_used_to_import_next_anchor;
+
         // check if should force master block collation
         let force_mc_block_by_uncommitted_chain =
-            uncommitted_chain_length >= self.config.max_uncommitted_chain_length;
+            uncommitted_chain_length >= max_uncommitted_chain_length;
 
         // should import anchor after fixed wu used by shard blocks in uncommitted blocks chain
         let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
         let force_import_anchor_by_used_wu =
-            wu_used_from_last_anchor > self.config.wu_used_to_import_next_anchor;
+            wu_used_from_last_anchor > wu_used_to_import_next_anchor;
 
         // check if has pending internals or externals
         let no_pending_msgs = !has_uprocessed_messages && !has_externals;
@@ -1324,7 +1327,7 @@ impl CollatorStdImpl {
         let next_anchor_info_opt = if force_mc_block_by_uncommitted_chain {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "max_uncommitted_chain_length {} reached",
-                self.config.max_uncommitted_chain_length,
+                max_uncommitted_chain_length,
             );
             None
         } else if no_pending_msgs || force_import_anchor_by_used_wu {
@@ -1335,12 +1338,12 @@ impl CollatorStdImpl {
             } else if force_import_anchor_by_used_wu {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "wu used from last anchor {} reached limit {} on length {}, will import next anchor",
-                    wu_used_from_last_anchor, self.config.wu_used_to_import_next_anchor,  uncommitted_chain_length,
+                    wu_used_from_last_anchor, wu_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
 
             working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_wu {
-                wu_used_from_last_anchor.saturating_sub(self.config.wu_used_to_import_next_anchor)
+                wu_used_from_last_anchor.saturating_sub(wu_used_to_import_next_anchor)
             } else {
                 0
             };
@@ -1395,14 +1398,12 @@ impl CollatorStdImpl {
                     );
                 }
                 last_anchor = Some(next_anchor);
-                if working_state.wu_used_from_last_anchor
-                    < self.config.wu_used_to_import_next_anchor
-                {
+                if working_state.wu_used_from_last_anchor < wu_used_to_import_next_anchor {
                     break;
                 }
                 working_state.wu_used_from_last_anchor = working_state
                     .wu_used_from_last_anchor
-                    .saturating_sub(self.config.wu_used_to_import_next_anchor);
+                    .saturating_sub(wu_used_to_import_next_anchor);
             }
 
             metrics::gauge!("tycho_do_collate_import_next_anchor_count")
@@ -1445,6 +1446,7 @@ impl CollatorStdImpl {
                     working_state.next_block_id_short,
                     anchor_chain_time,
                     force_mc_block_by_uncommitted_chain,
+                    working_state.collation_config.clone(),
                 )
                 .await?;
 

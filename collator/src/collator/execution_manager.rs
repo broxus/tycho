@@ -27,8 +27,7 @@ use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
-    DisplayExternalsProcessedUpto, ExecuteWUParams, InternalsProcessedUptoStuff,
-    ProcessedUptoInfoStuff,
+    DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
 };
 
 #[cfg(test)]
@@ -67,8 +66,8 @@ pub(super) struct MessagesExecutor {
     params: Arc<ExecuteParams>,
     /// shard accounts
     accounts_cache: AccountsCache,
-    /// execute params for work units calculation
-    execute_params: ExecuteWUParams,
+    /// Params to calculate messages execution work in work units
+    wu_params_execute: WorkUnitsParamsExecute,
 }
 
 pub(super) enum GetNextMessageGroupMode {
@@ -488,7 +487,7 @@ impl MessagesExecutor {
         config: Arc<PreloadedBlockchainConfig>,
         params: Arc<ExecuteParams>,
         shard_accounts: ShardAccounts,
-        execute_params: ExecuteWUParams,
+        wu_params_execute: WorkUnitsParamsExecute,
     ) -> Self {
         Self {
             shard_id,
@@ -499,7 +498,7 @@ impl MessagesExecutor {
                 shard_accounts,
                 items: Default::default(),
             },
-            execute_params,
+            wu_params_execute,
         }
     }
 
@@ -584,12 +583,12 @@ impl MessagesExecutor {
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
                 current_wu = current_wu
-                    .saturating_add(self.execute_params.prepare as u64)
+                    .saturating_add(self.wu_params_execute.prepare as u64)
                     .saturating_add(
                         executor_output
                             .gas_used
-                            .saturating_mul(self.execute_params.execute as u64)
-                            .saturating_div(self.execute_params.execute_delimiter as u64),
+                            .saturating_mul(self.wu_params_execute.execute as u64)
+                            .saturating_div(self.wu_params_execute.execute_delimiter as u64),
                     );
 
                 items.push(ExecutedTickItem {
@@ -605,7 +604,7 @@ impl MessagesExecutor {
         }
 
         let subgroup_count = {
-            let subgroup_size = self.execute_params.subgroup_size.max(1) as usize;
+            let subgroup_size = self.wu_params_execute.subgroup_size.max(1) as usize;
             (group_horizontal_size + subgroup_size - 1) / subgroup_size
         };
         let total_exec_wu = (total_exec_wu / subgroup_count as u128) as u64;

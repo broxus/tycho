@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
@@ -16,7 +15,7 @@ use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{supported_capabilities, CollationConfig, MsgsExecutionParams};
+use tycho_collator::types::{supported_capabilities, CollatorConfig};
 use tycho_collator::validator::ValidatorStdImpl;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
@@ -84,18 +83,10 @@ async fn test_collation_process_on_stubs() {
 
     let validator_network = common::make_validator_network(&node_1_secret, &zerostate_id);
 
-    let config = CollationConfig {
+    let config = CollatorConfig {
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
-        mc_block_min_interval: Duration::from_secs(1),
         min_mc_block_delta_from_bc_to_sync: 3,
-        max_uncommitted_chain_length: 31,
-        msgs_exec_params: MsgsExecutionParams {
-            buffer_limit: 9,
-            group_limit: 4,
-            group_vert_size: 2,
-        },
-        ..Default::default()
     };
 
     tracing::info!("Trying to start CollationManager");

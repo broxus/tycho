@@ -18,7 +18,7 @@ use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
-use tycho_collator::types::CollationConfig;
+use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
@@ -230,7 +230,7 @@ pub struct Node {
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
     archive_block_provider_config: ArchiveBlockProviderConfig,
 
-    collation_config: CollationConfig,
+    collator_config: CollatorConfig,
     validator_config: ValidatorStdImplConfig,
     internal_queue_config: QueueConfig,
     mempool_config_override: Option<MempoolGlobalConfig>,
@@ -364,7 +364,7 @@ impl Node {
             control_config: node_config.control,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             archive_block_provider_config: node_config.archive_block_provider,
-            collation_config: node_config.collator,
+            collator_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
             mempool_config_override: global_config.mempool_override,
@@ -499,7 +499,7 @@ impl Node {
 
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
-            self.collation_config.clone(),
+            self.collator_config.clone(),
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone(), sync_context),
             mempool_adapter,

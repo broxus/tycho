@@ -20,7 +20,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, FinalizeBlockWUParams, McData};
+use crate::types::{BlockCandidate, CollationSessionInfo, McData};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -40,7 +40,7 @@ impl CollatorStdImpl {
         executor: MessagesExecutor,
         working_state: Box<WorkingState>,
         queue_diff: SerializedQueueDiff,
-        finalize_params: FinalizeBlockWUParams,
+        wu_params_finalize: WorkUnitsParamsFinalize,
         prepare_groups_wu_total: u64,
         execute_groups_wu_total: u64,
     ) -> Result<FinalizedBlock> {
@@ -222,7 +222,7 @@ impl CollatorStdImpl {
                 accounts_count,
                 in_msgs_len,
                 out_msgs_len,
-                finalize_params,
+                wu_params_finalize,
             );
 
             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -484,20 +484,20 @@ impl CollatorStdImpl {
         accounts_count: u64,
         in_msgs_len: u64,
         out_msgs_len: u64,
-        finalize_params: FinalizeBlockWUParams,
+        wu_params_finalize: WorkUnitsParamsFinalize,
     ) -> u64 {
-        let FinalizeBlockWUParams {
+        let WorkUnitsParamsFinalize {
             build_transactions,
             build_in_msg,
             build_accounts,
             build_out_msg,
-            serialize_accounts,
             serialize_min,
+            serialize_accounts,
             serialize_msg,
-            state_update_accounts,
             state_update_min,
+            state_update_accounts,
             state_update_msg,
-        } = finalize_params;
+        } = wu_params_finalize;
 
         let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;
         let build = accounts_count
@@ -556,18 +556,36 @@ impl CollatorStdImpl {
             (prev_config.clone(), false)
         };
 
-        let current_gen_utime = collation_data.gen_utime;
-        let prev_gen_utime = prev_state.state().gen_utime;
+        // 1.10. update genesis round and time from the mempool global config if present and higher
+        let mut consensus_info = prev_state_extra.consensus_info;
+
+        if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
+            if mp_cfg_override.start_round > consensus_info.genesis_round
+                && mp_cfg_override.genesis_time_millis > consensus_info.genesis_millis
+            {
+                consensus_info.genesis_round = mp_cfg_override.start_round;
+                consensus_info.genesis_millis = mp_cfg_override.genesis_time_millis;
+
+                is_key_block = true;
+            }
+        }
 
         // 2. update shard_hashes and shard_fees
-        let cc_config = config.get_catchain_config()?;
+        let collation_config = config.get_collation_config()?;
         let workchains = config.get_workchains()?;
         // check if need to start new collation session for shards
-        let update_shard_cc = {
-            let lifetimes = current_gen_utime / cc_config.shard_catchain_lifetime;
-            let prev_lifetimes = prev_gen_utime / cc_config.shard_catchain_lifetime;
-            is_key_block || (lifetimes > prev_lifetimes)
-        };
+
+        // NOTE: currently we do not implement the logic of node rotation inside one set,
+        //      so we will not use session liftime and will check only for a key block
+        // let current_gen_utime = collation_data.gen_utime;
+        // let prev_gen_utime = prev_state.state().gen_utime;
+        // let update_shard_cc = {
+        //     let lifetimes = current_gen_utime / collation_config.shard_catchain_lifetime;
+        //     let prev_lifetimes = prev_gen_utime / collation_config.shard_catchain_lifetime;
+        //     is_key_block || (lifetimes > prev_lifetimes)
+        // };
+        let update_shard_cc = is_key_block;
+
         let min_ref_mc_seqno =
             Self::update_shard_config(collation_data, &workchains, update_shard_cc)?;
 
@@ -640,7 +658,7 @@ impl CollatorStdImpl {
                 let current_vset = current_vset.parse::<ValidatorSet>()?;
                 let (_, validator_list_hash_short) = current_vset.compute_mc_subset(
                     session_update_round,
-                    cc_config.shuffle_mc_validators,
+                    collation_config.shuffle_mc_validators,
                 ).ok_or_else(|| anyhow!(
                     "Error calculating subset of validators for next session (shard_id = {}, session_seqno = {})",
                     ShardIdent::MASTERCHAIN,

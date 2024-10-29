@@ -345,16 +345,16 @@ impl BlockProofStuff {
             master_state.block_id(),
         );
 
-        let (validator_set, catchain_config) = {
+        let (validator_set, shuffle_validators) = {
             let Some(custom) = master_state.state().load_custom()? else {
                 anyhow::bail!("no additional masterchain data found in the master state");
             };
             let validator_set = custom.config.get_current_validator_set()?;
-            let catchain_config = custom.config.get_catchain_config()?;
-            (validator_set, catchain_config)
+            let shuffle_validators = custom.config.get_collation_config()?.shuffle_mc_validators;
+            (validator_set, shuffle_validators)
         };
 
-        self.calc_validators_subset_standard(&validator_set, catchain_config.shuffle_mc_validators)
+        self.calc_validators_subset_standard(&validator_set, shuffle_validators)
     }
 
     fn process_prev_key_block_proof(
@@ -372,7 +372,7 @@ impl BlockProofStuff {
             clippy::disallowed_methods,
             reason = "We are working with a virtual block here, so `load_extra` and other methods are necessary"
         )]
-        let (validator_set, catchain_config) = {
+        let (validator_set, shuffle_validators) = {
             let extra = virt_key_block.load_extra()?;
             let Some(custom) = extra.load_custom()? else {
                 anyhow::bail!("no additional masterchain data found in the key block");
@@ -382,11 +382,11 @@ impl BlockProofStuff {
             };
 
             let validator_set = config.get_current_validator_set()?;
-            let catchain_config = config.get_catchain_config()?;
-            (validator_set, catchain_config)
+            let shuffle_validators = config.get_collation_config()?.shuffle_mc_validators;
+            (validator_set, shuffle_validators)
         };
 
-        self.calc_validators_subset_standard(&validator_set, catchain_config.shuffle_mc_validators)
+        self.calc_validators_subset_standard(&validator_set, shuffle_validators)
     }
 
     fn calc_validators_subset_standard(
