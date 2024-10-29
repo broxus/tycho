@@ -102,6 +102,13 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
+    pub async fn get_blockchain_config(&self) -> ClientResult<BlockchainConfigResponse> {
+        self.inner
+            .get_blockchain_config(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn get_block(&self, block_id: &BlockId) -> ClientResult<Option<Bytes>> {
         let req = BlockRequest {
             block_id: *block_id,

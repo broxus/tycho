@@ -5,9 +5,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use everscale_crypto::ed25519;
-use everscale_types::abi::{AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType};
+use everscale_types::abi::{
+    extend_signature_with_id, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType,
+};
 use everscale_types::models::{
-    Account, AccountState, ExtInMsgInfo, MsgInfo, OwnedMessage, StdAddr,
+    Account, AccountState, BlockchainConfig, ElectionTimings, ExtInMsgInfo, GlobalCapability,
+    MsgInfo, OwnedMessage, StdAddr, ValidatorStakeParams,
 };
 use everscale_types::prelude::*;
 use reqwest::Url;
@@ -67,8 +70,8 @@ struct CmdOnce {
     #[clap(long)]
     stake: u128,
 
-    #[clap(long, value_parser, default_value_t = MAX_FACTOR)]
-    max_factor: u32,
+    #[clap(long)]
+    max_factor: Option<u32>,
 }
 
 impl CmdOnce {
@@ -86,28 +89,35 @@ impl CmdOnce {
         self.control.rt(args, move |client| async move {
             let wallet = Wallet::new(client.clone(), &keys.as_secret());
 
+            let config = client.get_blockchain_config().await?;
+            config.check_stake(self.stake)?;
+            let max_factor = match self.max_factor {
+                None => config.stake_params.max_stake_factor,
+                Some(factor) => {
+                    config.check_max_factor(factor)?;
+                    factor
+                }
+            };
+
             // Get current elections
             let elector_data = client.get_elector_data().await?;
             let Some(Ref(elections)) = elector_data.current_election else {
                 return print_json(ParticipateStatus::NoElections);
             };
 
-            // Check stake
-            if self.stake < elections.min_stake.into_inner() {
-                anyhow::bail!("stake is too small (min {})", elections.min_stake);
-            }
-
             // Build payload signature
             let adnl_addr = HashBytes(adnl_addr.to_bytes());
             let validator_key = adnl_addr;
-            let signature = node_keys
-                .sign_raw(&build_elections_data_to_sign(
+            let signature = {
+                let data_to_sign = build_elections_data_to_sign(
                     elections.elect_at,
-                    self.max_factor,
+                    max_factor,
                     &wallet.address.address,
                     &adnl_addr,
-                ))
-                .to_vec();
+                );
+                let data_to_sign = extend_signature_with_id(&data_to_sign, config.signature_id);
+                node_keys.sign_raw(&data_to_sign).to_vec()
+            };
 
             // Build elections payload
             let payload = elector::methods::participate_in_elections()
@@ -115,7 +125,7 @@ impl CmdOnce {
                     query_id: now_millis(),
                     validator_key,
                     stake_at: elections.elect_at,
-                    max_factor: self.max_factor,
+                    max_factor,
                     adnl_addr,
                     signature,
                 }
@@ -125,7 +135,13 @@ impl CmdOnce {
 
             // Send stake
             wallet
-                .transfer(&ELECTOR_ADDR, self.stake + ONE_CC, true, payload)
+                .transfer(
+                    &ELECTOR_ADDR,
+                    self.stake + ONE_CC,
+                    true,
+                    payload,
+                    config.signature_id,
+                )
                 .await?;
 
             // Done
@@ -171,6 +187,8 @@ impl CmdRecover {
         self.control.rt(args, move |client| async move {
             let wallet = Wallet::new(client.clone(), &keys.as_secret());
 
+            let config = client.get_blockchain_config().await?;
+
             // Find reward
             let elector_data = client.get_elector_data().await?;
             let Some(to_recover) = elector_data.credits.get(&wallet.address.address) else {
@@ -184,7 +202,7 @@ impl CmdRecover {
 
             // Send recover message
             wallet
-                .transfer(&ELECTOR_ADDR, ONE_CC, true, payload)
+                .transfer(&ELECTOR_ADDR, ONE_CC, true, payload, config.signature_id)
                 .await?;
 
             // Done
@@ -223,7 +241,6 @@ impl CmdGetState {
 
 const ELECTOR_ADDR: StdAddr = StdAddr::new(-1, HashBytes([0x33; 32]));
 const ONE_CC: u128 = 1_000_000_000;
-const MAX_FACTOR: u32 = 3 << 16;
 
 #[derive(Clone, Args)]
 struct ControlArgs {
@@ -319,6 +336,7 @@ impl Wallet {
         amount: u128,
         bounce: bool,
         payload: Cell,
+        signature_id: Option<i32>,
     ) -> Result<()> {
         let account_state = self
             .client
@@ -352,10 +370,6 @@ impl Wallet {
 
         let now_ms = now_millis();
         let expire_at = (now_ms / 1000) as u32 + 40;
-
-        // TODO: Add support for signature id
-        let signature_id = None;
-
         let body = wallet::methods::send_transaction()
             .encode_external(&inputs)
             .with_address(&self.address)
@@ -408,6 +422,19 @@ impl Client {
         .and_then(elector::data::PartialElectorData::from_abi)
     }
 
+    async fn get_blockchain_config(&self) -> Result<ParsedBlockchainConfig> {
+        match self.inner.as_ref() {
+            ClientImpl::Jrpc(rpc) => {
+                let res = rpc.get_config().await?;
+                ParsedBlockchainConfig::new(res.global_id, res.seqno, res.config)
+            }
+            ClientImpl::Control(control) => {
+                let res = control.get_blockchain_config().await?.parse()?;
+                ParsedBlockchainConfig::new(res.global_id, res.mc_seqno, res.config)
+            }
+        }
+    }
+
     async fn get_account_state(&self, addr: &StdAddr) -> Result<Option<Account>> {
         match self.inner.as_ref() {
             ClientImpl::Jrpc(rpc) => match rpc.get_account(addr).await? {
@@ -441,4 +468,51 @@ impl Client {
 enum ClientImpl {
     Control(ControlClient),
     Jrpc(JrpcClient),
+}
+
+struct ParsedBlockchainConfig {
+    signature_id: Option<i32>,
+    #[allow(unused)]
+    election_timings: ElectionTimings,
+    stake_params: ValidatorStakeParams,
+}
+
+impl ParsedBlockchainConfig {
+    fn new(global_id: i32, _mc_seqno: u32, config: BlockchainConfig) -> Result<Self> {
+        let version = config.get_global_version()?;
+        let signature_id = version
+            .capabilities
+            .contains(GlobalCapability::CapSignatureWithId)
+            .then_some(global_id);
+
+        let election_timings = config.get_election_timings()?;
+        let stake_params = config.get_validator_stake_params()?;
+
+        Ok(Self {
+            signature_id,
+            election_timings,
+            stake_params,
+        })
+    }
+
+    fn check_stake(&self, stake: u128) -> Result<()> {
+        anyhow::ensure!(
+            stake >= self.stake_params.min_stake.into_inner(),
+            "stake is too small"
+        );
+        anyhow::ensure!(
+            stake <= self.stake_params.max_stake.into_inner(),
+            "stake is too big"
+        );
+        Ok(())
+    }
+
+    fn check_max_factor(&self, max_factor: u32) -> Result<()> {
+        anyhow::ensure!(max_factor <= (1 << 16), "max factor is too small");
+        anyhow::ensure!(
+            max_factor >= self.stake_params.max_stake_factor,
+            "max factor is too big"
+        );
+        Ok(())
+    }
 }
