@@ -2,7 +2,8 @@ use std::io::Write;
 use std::path::Path;
 
 use bytes::Bytes;
-use everscale_types::boc::BocRepr;
+use everscale_types::boc::{Boc, BocRepr};
+use everscale_types::cell::DynCell;
 use everscale_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
@@ -87,6 +88,14 @@ impl ControlClient {
             .map_err(|e| ClientError::ClientFailed(e.into()))?
             .into();
 
+        self.inner
+            .broadcast_external_message(current_context(), BroadcastExtMsgRequest { message })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn broadcast_external_message_raw(&self, message: &DynCell) -> ClientResult<()> {
+        let message = Boc::encode_rayon(message).into();
         self.inner
             .broadcast_external_message(current_context(), BroadcastExtMsgRequest { message })
             .await?

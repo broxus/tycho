@@ -159,7 +159,7 @@ pub mod data {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ElectionMember {
-        pub msg_value: u64,
+        pub msg_value: Tokens,
         pub created_at: u32,
         pub max_factor: u32,
         pub src_addr: HashBytes,
@@ -170,7 +170,7 @@ pub mod data {
     impl WithAbiType for ElectionMember {
         fn abi_type() -> AbiType {
             AbiType::tuple([
-                u64::abi_type().named("msg_value"),
+                Tokens::abi_type().named("msg_value"),
                 u32::abi_type().named("created_at"),
                 u32::abi_type().named("max_factor"),
                 HashBytes::abi_type().named("src_addr"),
