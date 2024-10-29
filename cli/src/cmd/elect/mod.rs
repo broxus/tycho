@@ -1,12 +1,12 @@
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use everscale_crypto::ed25519;
 use everscale_types::abi::{
-    extend_signature_with_id, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType,
+    extend_signature_with_id, AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType,
 };
 use everscale_types::models::{
     Account, AccountState, BlockchainConfig, ElectionTimings, ExtInMsgInfo, GlobalCapability,
@@ -42,6 +42,7 @@ impl Cmd {
         match self.cmd {
             SubCmd::Once(cmd) => cmd.run(args),
             SubCmd::Recover(cmd) => cmd.run(args),
+            SubCmd::Withdraw(cmd) => cmd.run(args),
             SubCmd::GetState(cmd) => cmd.run(args),
         }
     }
@@ -51,6 +52,7 @@ impl Cmd {
 enum SubCmd {
     Once(CmdOnce),
     Recover(CmdRecover),
+    Withdraw(CmdWithdraw),
     GetState(CmdGetState),
 }
 
@@ -62,14 +64,16 @@ struct CmdOnce {
 
     /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
     #[clap(long)]
-    keys: Option<PathBuf>,
+    sign: Option<PathBuf>,
 
     /// Path to node keys. Default: `$TYCHO_HOME/node_keys.json`
     node_keys: Option<PathBuf>,
 
+    /// Stake size in nano tokens.
     #[clap(long)]
     stake: u128,
 
+    /// Max stake factor. Uses config by default.
     #[clap(long)]
     max_factor: Option<u32>,
 }
@@ -77,7 +81,7 @@ struct CmdOnce {
 impl CmdOnce {
     fn run(self, args: BaseArgs) -> Result<()> {
         // Prepare keys
-        let keys = NodeKeys::from_file(args.validator_keys_path(self.keys.as_ref()))?;
+        let wallet_keys = NodeKeys::from_file(args.validator_keys_path(self.sign.as_ref()))?;
         let node_keys = {
             let path = args.node_keys_path(self.node_keys.as_ref());
             let secret = NodeKeys::from_file(path)?.as_secret();
@@ -87,7 +91,7 @@ impl CmdOnce {
 
         // Use client
         self.control.rt(args, move |client| async move {
-            let wallet = Wallet::new(client.clone(), &keys.as_secret());
+            let wallet = Wallet::new(client.clone(), &wallet_keys.as_secret());
 
             let config = client.get_blockchain_config().await?;
             config.check_stake(self.stake)?;
@@ -134,10 +138,10 @@ impl CmdOnce {
                 .build()?;
 
             // Send stake
-            wallet
+            let sent = wallet
                 .transfer(
                     &ELECTOR_ADDR,
-                    self.stake + ONE_CC,
+                    Amount::Exact(self.stake + ONE_CC),
                     true,
                     payload,
                     config.signature_id,
@@ -146,6 +150,8 @@ impl CmdOnce {
 
             // Done
             print_json(ParticipateStatus::Participating {
+                message_hash: sent.hash,
+                message_expire_at: sent.expire_at,
                 elections_id: elections.elect_at,
                 elections_end: elections.elect_close,
                 stake: self.stake,
@@ -159,6 +165,8 @@ impl CmdOnce {
 enum ParticipateStatus {
     NoElections,
     Participating {
+        message_hash: HashBytes,
+        message_expire_at: u32,
         elections_id: u32,
         elections_end: u32,
         #[serde(with = "serde_helpers::string")]
@@ -174,18 +182,17 @@ struct CmdRecover {
 
     /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
     #[clap(long)]
-    keys: Option<PathBuf>,
+    sign: Option<PathBuf>,
 }
 
 impl CmdRecover {
     fn run(self, args: BaseArgs) -> Result<()> {
         // Prepare keys
-        let keys_path = args.validator_keys_path(self.keys.as_ref());
-        let keys = NodeKeys::from_file(&keys_path)?;
+        let wallet_keys = NodeKeys::from_file(&args.validator_keys_path(self.sign.as_ref()))?;
 
         // Use client
         self.control.rt(args, move |client| async move {
-            let wallet = Wallet::new(client.clone(), &keys.as_secret());
+            let wallet = Wallet::new(client.clone(), &wallet_keys.as_secret());
 
             let config = client.get_blockchain_config().await?;
 
@@ -201,12 +208,20 @@ impl CmdRecover {
                 .build()?;
 
             // Send recover message
-            wallet
-                .transfer(&ELECTOR_ADDR, ONE_CC, true, payload, config.signature_id)
+            let sent = wallet
+                .transfer(
+                    &ELECTOR_ADDR,
+                    Amount::Exact(ONE_CC),
+                    true,
+                    payload,
+                    config.signature_id,
+                )
                 .await?;
 
             // Done
             print_json(RecoverStatus::Recovered {
+                message_hash: sent.hash,
+                message_expire_at: sent.expire_at,
                 amount: to_recover.into_inner(),
             })
         })
@@ -218,9 +233,81 @@ impl CmdRecover {
 enum RecoverStatus {
     NoReward,
     Recovered {
+        message_hash: HashBytes,
+        message_expire_at: u32,
         #[serde(with = "serde_helpers::string")]
         amount: u128,
     },
+}
+
+/// Withdraw funds from the validator wallet.
+#[derive(Parser)]
+struct CmdWithdraw {
+    #[clap(flatten)]
+    control: ControlArgs,
+
+    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
+    #[clap(long)]
+    sign: Option<PathBuf>,
+
+    /// Destination address.
+    #[clap(short, long, allow_hyphen_values(true))]
+    dest: StdAddr,
+
+    /// Amount in nano tokens.
+    #[clap(short, long, required_unless_present = "all")]
+    amount: Option<u128>,
+
+    /// Withdraw everything from the wallet.
+    #[clap(long)]
+    all: bool,
+
+    /// Sets `bounce` message flag.
+    #[clap(short, long)]
+    bounce: bool,
+
+    /// Withdrawal message payload as a base64-encoded BOC.
+    #[clap(short, long)]
+    payload: Option<String>,
+}
+
+impl CmdWithdraw {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        // Prepare keys
+        let wallet_keys = NodeKeys::from_file(&args.validator_keys_path(self.sign.as_ref()))?;
+
+        // Parse paylout
+        let payload = match self.payload {
+            None => Cell::default(),
+            Some(payload) => Boc::decode_base64(payload).context("invalid payload")?,
+        };
+
+        // Use client
+        self.control.rt(args, move |client| async move {
+            let wallet = Wallet::new(client.clone(), &wallet_keys.as_secret());
+
+            let config = client.get_blockchain_config().await?;
+
+            let amount = match self.amount {
+                None => Amount::All,
+                Some(amount) => Amount::Exact(amount),
+            };
+            let sent = wallet
+                .transfer(
+                    &self.dest,
+                    amount,
+                    self.bounce,
+                    payload,
+                    config.signature_id,
+                )
+                .await?;
+
+            print_json(serde_json::json!({
+                "message_hash": sent.hash,
+                "message_expire_at": sent.expire_at,
+            }))
+        })
+    }
 }
 
 /// Get elector contract state.
@@ -242,71 +329,7 @@ impl CmdGetState {
 const ELECTOR_ADDR: StdAddr = StdAddr::new(-1, HashBytes([0x33; 32]));
 const ONE_CC: u128 = 1_000_000_000;
 
-#[derive(Clone, Args)]
-struct ControlArgs {
-    /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
-    #[clap(long)]
-    control_socket: Option<PathBuf>,
-
-    /// RPC url
-    #[clap(long)]
-    rpc: Option<Url>,
-
-    #[clap(long, requires = "rpc")]
-    force_rpc: bool,
-}
-
-impl ControlArgs {
-    fn rt<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
-    where
-        F: FnOnce(Client) -> FT + Send + 'static,
-        FT: Future<Output = Result<()>> + Send,
-    {
-        tracing_subscriber::fmt::init();
-
-        let sock = args.control_socket_path(self.control_socket.as_ref());
-
-        let rpc = self.rpc.clone();
-        let force_rpc = self.force_rpc;
-
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async move {
-                let run_fut = JoinTask::new(async move {
-                    let inner = 'client: {
-                        if let Some(rpc) = rpc {
-                            if force_rpc || !sock.exists() {
-                                let rpc = JrpcClient::new(rpc)?;
-                                break 'client ClientImpl::Jrpc(rpc);
-                            }
-                        }
-
-                        let control = ControlClient::connect(sock)
-                            .await
-                            .context("failed to connect to control server")?;
-                        ClientImpl::Control(control)
-                    };
-
-                    f(Client {
-                        inner: Arc::new(inner),
-                    })
-                    .await
-                });
-                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-                tokio::select! {
-                    res = run_fut => res,
-                    signal = stop_fut => match signal {
-                        Ok(signal) => {
-                            tracing::info!(?signal, "received termination signal");
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                }
-            })
-    }
-}
+// === Wallet Stuff ===
 
 struct Wallet {
     client: Client,
@@ -333,21 +356,16 @@ impl Wallet {
     async fn transfer(
         &self,
         to: &StdAddr,
-        amount: u128,
+        amount: Amount,
         bounce: bool,
         payload: Cell,
         signature_id: Option<i32>,
-    ) -> Result<()> {
+    ) -> Result<SentMessage> {
         let account_state = self
             .client
             .get_account_state(&self.address)
             .await?
             .context("wallet account does not exist")?;
-
-        anyhow::ensure!(
-            account_state.balance.tokens.into_inner() >= amount,
-            "insufficient balance"
-        );
 
         let init = match account_state.state {
             AccountState::Active(_) => None,
@@ -357,11 +375,20 @@ impl Wallet {
             AccountState::Frozen(_) => anyhow::bail!("wallet account is frozen"),
         };
 
+        let (value, flags) = match amount {
+            Amount::Exact(value) => (value, wallet::MSG_FLAGS_SIMPLE_SEND),
+            Amount::All => (0, wallet::MSG_FLAGS_SEND_ALL),
+        };
+        anyhow::ensure!(
+            account_state.balance.tokens.into_inner() >= value,
+            "insufficient balance"
+        );
+
         let AbiValue::Tuple(inputs) = wallet::methods::SendTransactionInputs {
             dest: to.clone(),
-            value: amount,
+            value,
             bounce,
-            flags: wallet::MSG_FLAGS,
+            flags,
             payload,
         }
         .into_abi() else {
@@ -390,10 +417,118 @@ impl Wallet {
             body: (body, body_range),
             layout: None,
         };
+        let message_cell = CellBuilder::build_from(message)?;
 
-        self.client.broadcast_message(message).await?;
+        self.client.broadcast_message(message_cell.as_ref()).await?;
 
-        Ok(())
+        Ok(SentMessage {
+            hash: *message_cell.repr_hash(),
+            expire_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Amount {
+    Exact(u128),
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct SentMessage {
+    hash: HashBytes,
+    expire_at: u32,
+}
+
+// === Control RT ===
+
+#[derive(Clone, Args)]
+struct ControlArgs {
+    /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+    #[clap(long)]
+    control_socket: Option<PathBuf>,
+
+    /// RPC url
+    #[clap(long)]
+    rpc: Option<Url>,
+
+    #[clap(long, requires = "rpc")]
+    force_rpc: bool,
+}
+
+impl ControlArgs {
+    fn rt<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
+    where
+        F: FnOnce(Client) -> FT + Send + 'static,
+        FT: Future<Output = Result<()>> + Send,
+    {
+        self.rt_ext(args, move |factory| async move {
+            let client = factory.create().await?;
+            f(client).await
+        })
+    }
+
+    fn rt_ext<F, FT>(&self, args: BaseArgs, f: F) -> Result<()>
+    where
+        F: FnOnce(ClientFactory) -> FT + Send + 'static,
+        FT: Future<Output = Result<()>> + Send + 'static,
+    {
+        tracing_subscriber::fmt::init();
+
+        let factory = ClientFactory {
+            sock: args.control_socket_path(self.control_socket.as_ref()),
+            rpc: self.rpc.clone(),
+            force_rpc: self.force_rpc,
+        };
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let run_fut = JoinTask::new(f(factory));
+                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+                tokio::select! {
+                    res = run_fut => res,
+                    signal = stop_fut => match signal {
+                        Ok(signal) => {
+                            tracing::info!(?signal, "received termination signal");
+                            Ok(())
+                        }
+                        Err(e) => Err(e.into()),
+                    }
+                }
+            })
+    }
+}
+
+// === Control/RPC client ===
+
+struct ClientFactory {
+    sock: PathBuf,
+    rpc: Option<Url>,
+    force_rpc: bool,
+}
+
+impl ClientFactory {
+    async fn create(&self) -> Result<Client> {
+        let inner = 'client: {
+            if let Some(rpc) = &self.rpc {
+                if self.force_rpc || !self.sock.exists() {
+                    let rpc =
+                        JrpcClient::new(rpc.clone()).context("failed to create JRPC client")?;
+                    break 'client ClientImpl::Jrpc(rpc);
+                }
+            }
+
+            let control = ControlClient::connect(&self.sock)
+                .await
+                .context("failed to connect to control server")?;
+            ClientImpl::Control(control)
+        };
+
+        Ok(Client {
+            inner: Arc::new(inner),
+        })
     }
 }
 
@@ -404,6 +539,8 @@ struct Client {
 
 impl Client {
     async fn get_elector_data(&self) -> Result<elector::data::PartialElectorData> {
+        static ELECTOR_ABI: OnceLock<AbiType> = OnceLock::new();
+
         let account_state = self
             .get_account_state(&ELECTOR_ADDR)
             .await?
@@ -414,12 +551,9 @@ impl Client {
             _ => anyhow::bail!("invalid elector state"),
         };
 
-        AbiValue::load_partial(
-            &elector::data::PartialElectorData::abi_type(),
-            AbiVersion::V2_1,
-            &mut elector_data.as_slice()?,
-        )
-        .and_then(elector::data::PartialElectorData::from_abi)
+        let abi_type = ELECTOR_ABI.get_or_init(elector::data::PartialElectorData::abi_type);
+        AbiValue::load_partial(&abi_type, AbiVersion::V2_1, &mut elector_data.as_slice()?)
+            .and_then(elector::data::PartialElectorData::from_abi)
     }
 
     async fn get_blockchain_config(&self) -> Result<ParsedBlockchainConfig> {
@@ -451,14 +585,11 @@ impl Client {
         }
     }
 
-    async fn broadcast_message(&self, message: OwnedMessage) -> Result<()> {
+    async fn broadcast_message(&self, message: &DynCell) -> Result<()> {
         match self.inner.as_ref() {
-            ClientImpl::Jrpc(rpc) => {
-                let cell = CellBuilder::build_from(&message)?;
-                rpc.send_message(cell.as_ref()).await
-            }
+            ClientImpl::Jrpc(rpc) => rpc.send_message(message).await,
             ClientImpl::Control(control) => control
-                .broadcast_external_message(message)
+                .broadcast_external_message_raw(message)
                 .await
                 .map_err(Into::into),
         }

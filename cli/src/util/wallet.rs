@@ -1,11 +1,14 @@
 use std::sync::OnceLock;
 
 use everscale_crypto::ed25519;
-use everscale_types::abi::{AbiType, AbiValue, Function, IntoAbi, WithAbiType};
+use everscale_types::abi::{
+    AbiHeaderType, AbiType, AbiValue, AbiVersion, Function, IntoAbi, WithAbiType,
+};
 use everscale_types::models::{StateInit, StdAddr};
 use everscale_types::prelude::*;
 
-pub const MSG_FLAGS: u8 = 3;
+pub const MSG_FLAGS_SIMPLE_SEND: u8 = 3;
+pub const MSG_FLAGS_SEND_ALL: u8 = 3 + 128;
 
 pub fn compute_address(workchain: i8, public_key: &ed25519::PublicKey) -> StdAddr {
     let address = *CellBuilder::build_from(make_state_init(public_key))
@@ -35,7 +38,16 @@ pub mod methods {
 
     pub fn send_transaction() -> &'static Function {
         static FUNCTION: OnceLock<Function> = OnceLock::new();
-        FUNCTION.get_or_init(move || todo!())
+        FUNCTION.get_or_init(move || {
+            Function::builder(AbiVersion::V2_3, "sendTransaction")
+                .with_headers([
+                    AbiHeaderType::PublicKey,
+                    AbiHeaderType::Time,
+                    AbiHeaderType::Expire,
+                ])
+                .with_inputs(SendTransactionInputs::abi_type().named("").flatten())
+                .build()
+        })
     }
 
     #[derive(Debug, Clone)]
