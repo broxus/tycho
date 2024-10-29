@@ -20,7 +20,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
 };
-use crate::models::{Link, Point, Round};
+use crate::models::{Link, Point, PointInfo, Round};
 
 pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
@@ -358,9 +358,11 @@ impl RoundTaskReady {
                 panic!("Failed to verify own point: {err:?} {:?}", point)
             }
             let (_, do_not_certify_tx) = oneshot::channel();
-            let validate_effects = Effects::<ValidateContext>::new(&effects, &point);
+            let info = PointInfo::from(&point);
+            let validate_effects = Effects::<ValidateContext>::new(&effects, &info);
             let dag_point = Verifier::validate(
-                point.clone(),
+                info,
+                point.prev_proof(),
                 point_round,
                 downloader,
                 store,

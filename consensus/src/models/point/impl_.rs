@@ -152,8 +152,8 @@ impl Point {
         })
     }
 
-    pub fn prev_proof(&self) -> Option<PrevPoint> {
-        Some(PrevPoint {
+    pub fn prev_proof(&self) -> Option<PrevPointProof> {
+        Some(PrevPointProof {
             digest: *self.0.body.data.prev_digest()?,
             evidence: self.0.body.evidence.clone(),
         })
@@ -219,12 +219,12 @@ impl Point {
 }
 
 #[derive(Debug)]
-pub struct PrevPoint {
+pub struct PrevPointProof {
     pub digest: Digest,
     pub evidence: BTreeMap<PeerId, Signature>,
 }
 
-impl PrevPoint {
+impl PrevPointProof {
     pub fn signatures_match(&self) -> bool {
         // according to the rule of thumb to yield every 0.01-0.1 ms,
         // and that each signature check takes near 0.03 ms,
