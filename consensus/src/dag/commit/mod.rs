@@ -119,10 +119,14 @@ impl Committer {
         // if chain is broken - take the prefix until first gap
 
         for trigger in triggers {
-            let Some(chain_part) = self
-                .dag
-                .anchor_chain(self.anchor_chain.top_proof_round(), &trigger)
+            // update for each trigger
+            let Some(last_proof_round) = (self.anchor_chain.top_proof_round())
+                // init chain after each gap
+                .or_else(|| self.dag.last_unusable_proof_round(&trigger))
             else {
+                return; // cannot init
+            };
+            let Some(chain_part) = self.dag.anchor_chain(last_proof_round, &trigger) else {
                 break; // some dag point future is not yet resolved
             };
             for next in chain_part {
