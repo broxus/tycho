@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use everscale_types::models::{BlockId, StdAddr};
 use serde::Serialize;
 use tycho_control::ControlClient;
+use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
@@ -599,7 +600,7 @@ impl ControlArgs {
         F: FnOnce(ControlClient) -> FT + Send + 'static,
         FT: Future<Output = Result<()>> + Send,
     {
-        tracing_subscriber::fmt::init();
+        init_logger_simple("info");
 
         let sock = args.control_socket_path(self.control_socket.as_ref());
 

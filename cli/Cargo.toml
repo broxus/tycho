@@ -27,6 +27,7 @@ everscale-crypto = { workspace = true }
 everscale-types = { workspace = true, features = ["abi"] }
 futures-util = { workspace = true }
 hex = { workspace = true }
+humantime = { workspace = true }
 libc = { workspace = true }
 metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true }
