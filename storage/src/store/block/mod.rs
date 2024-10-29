@@ -595,7 +595,7 @@ impl BlockStorage {
     }
 
     pub async fn load_queue_diff(&self, handle: &BlockHandle) -> Result<QueueDiffStuff> {
-        let raw_diff = self.load_queue_raw_ref(handle).await?;
+        let raw_diff = self.load_queue_diff_raw_ref(handle).await?;
         QueueDiffStuff::deserialize(handle.id(), raw_diff.as_ref())
     }
 
@@ -608,7 +608,7 @@ impl BlockStorage {
             .await
     }
 
-    pub async fn load_queue_raw_ref<'a>(
+    pub async fn load_queue_diff_raw_ref<'a>(
         &'a self,
         handle: &'a BlockHandle,
     ) -> Result<impl AsRef<[u8]> + 'a> {

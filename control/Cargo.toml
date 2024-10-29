@@ -13,7 +13,9 @@ license.workspace = true
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
+arc-swap = { workspace = true, optional = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
@@ -39,5 +41,6 @@ server = [
     "dep:tycho-core",
     "dep:tycho-network",
     "dep:tycho-storage",
+    "dep:arc-swap",
     "dep:parking_lot",
 ]

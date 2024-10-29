@@ -51,7 +51,7 @@ enum SubCmd {
     GetState(CmdGetState),
 }
 
-/// Participate in validator elections.
+/// Participate in validator elections (once).
 #[derive(Parser)]
 struct CmdOnce {
     #[clap(flatten)]

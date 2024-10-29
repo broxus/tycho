@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use bytes::Bytes;
 use everscale_types::boc::BocRepr;
 use everscale_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use futures_util::StreamExt;
@@ -82,8 +83,9 @@ impl ControlClient {
             )));
         }
 
-        let message =
-            BocRepr::encode_rayon(message).map_err(|e| ClientError::ClientFailed(e.into()))?;
+        let message = BocRepr::encode_rayon(message)
+            .map_err(|e| ClientError::ClientFailed(e.into()))?
+            .into();
 
         self.inner
             .broadcast_external_message(current_context(), BroadcastExtMsgRequest { message })
@@ -100,7 +102,7 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
-    pub async fn get_block(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
+    pub async fn get_block(&self, block_id: &BlockId) -> ClientResult<Option<Bytes>> {
         let req = BlockRequest {
             block_id: *block_id,
         };
@@ -110,7 +112,7 @@ impl ControlClient {
         }
     }
 
-    pub async fn get_block_proof(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
+    pub async fn get_block_proof(&self, block_id: &BlockId) -> ClientResult<Option<Bytes>> {
         let req = BlockRequest {
             block_id: *block_id,
         };
@@ -121,7 +123,7 @@ impl ControlClient {
         }
     }
 
-    pub async fn get_queue_diff(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
+    pub async fn get_queue_diff(&self, block_id: &BlockId) -> ClientResult<Option<Bytes>> {
         let req = BlockRequest {
             block_id: *block_id,
         };
