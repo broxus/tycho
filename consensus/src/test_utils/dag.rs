@@ -17,8 +17,8 @@ use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature, Through,
-    UnixTime,
+    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
+    Signature, Through, UnixTime,
 };
 
 pub fn make_dag_parts<const PEER_COUNT: usize>(
@@ -130,10 +130,12 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         };
 
         Verifier::verify(point).expect("well-formed point");
+        let info = PointInfo::from(point);
         let (_, certified_tx) = oneshot::channel();
-        let effects = Effects::<ValidateContext>::new(effects, point);
+        let effects = Effects::<ValidateContext>::new(effects, &info);
         Verifier::validate(
-            point.clone(),
+            info,
+            point.prev_proof(),
             dag_round.downgrade(),
             downloader.clone(),
             store.clone(),
@@ -172,13 +174,13 @@ fn point<const PEER_COUNT: usize>(
     let peer_count = PeerCount::try_from(PEER_COUNT).expect("enough peers in non-genesis round");
 
     let evidence = match includes.get(&peers[idx].0) {
-        Some(prev_point) => {
+        Some(prev_digest) => {
             let mut evidence = BTreeMap::default();
             for i in &rand_arr::<PEER_COUNT>()[..(peer_count.majority_of_others() + 1)] {
                 if *i == idx {
                     continue;
                 }
-                evidence.insert(peers[*i].0, Signature::new(&peers[*i].1, prev_point));
+                evidence.insert(peers[*i].0, Signature::new(&peers[*i].1, prev_digest));
             }
             evidence
         }

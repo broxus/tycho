@@ -16,7 +16,7 @@ use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::Genesis;
 use crate::intercom::{DownloadResult, Downloader};
-use crate::models::{DagPoint, Digest, Point, PointId, ValidPoint};
+use crate::models::{DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -112,11 +112,12 @@ impl DagPointFuture {
         effects: &Effects<EngineContext>,
     ) -> Self {
         let point_dag_round = point_dag_round.downgrade();
+        let info = PointInfo::from(point);
         let point = point.clone();
         let state = state.clone();
         let downloader = downloader.clone();
         let store = store.clone();
-        let validate_effects = Effects::<ValidateContext>::new(effects, &point);
+        let validate_effects = Effects::<ValidateContext>::new(effects, &info);
 
         let (certified_tx, certified_rx) = oneshot::channel();
         let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
@@ -124,13 +125,14 @@ impl DagPointFuture {
 
         let task = async move {
             let point_id = point.id();
+            let prev_proof = point.prev_proof();
             let stored_fut = tokio::task::spawn_blocking({
-                let point = point.clone();
                 let store = store.clone();
                 move || store.insert_point(&point, &PointStatus::default())
             });
             let validated_fut = Verifier::validate(
-                point,
+                info,
+                prev_proof,
                 point_dag_round,
                 downloader,
                 store.clone(),
@@ -190,34 +192,51 @@ impl DagPointFuture {
         let once_certified_tx_clone = once_certified_tx.clone();
 
         let task = async move {
-            let stored_valid = tokio::task::spawn_blocking({
+            let stored = tokio::task::spawn_blocking({
                 let store = store.clone();
                 move || match store.get_status(point_id.round, &point_id.digest) {
-                    Some(status) if status.is_valid || status.is_certified => {
-                        store.get_info(point_id.round, point_id.digest)
+                    Some(status) if status.is_trusted || status.is_certified => {
+                        // should be often on reboot
+                        let info = store
+                            .get_info(point_id.round, point_id.digest)
+                            .expect("info by status must exist in DB");
+                        // Note: no need to check point's evidence one more time
+                        Some(Ok((info, None, status)))
                     }
-                    _ => None,
+                    Some(status) if status.is_validated && !status.is_valid => {
+                        let info = store
+                            .get_info(point_id.round, point_id.digest)
+                            .expect("info by status must exist in DB");
+                        Some(Err(DagPoint::Invalid(info)))
+                    }
+                    Some(status) if status.is_ill_formed => {
+                        Some(Err(DagPoint::IllFormed(Arc::new(point_id))))
+                    }
+                    Some(status) => {
+                        // have to load and drop the full point only because of evidence;
+                        // should be the rarest case, when shutdown interrupted point validation
+                        let point = store
+                            .get_point(point_id.round, &point_id.digest)
+                            .expect("point by status must exist in DB");
+                        Some(Ok((PointInfo::from(&point), point.prev_proof(), status)))
+                    }
+                    _ => None, // normal
                 }
             })
             .await
             .expect("db get point info status");
 
-            let stored_verified = match stored_valid {
-                Some(info) => {
-                    let dag_point = DagPoint::Trusted(ValidPoint::new(info));
+            let (verified, prev_proof, stored_status, storage_fut) = match stored {
+                Some(Ok((info, prev_proof, status))) => (
+                    info,
+                    prev_proof,
+                    Some(status),
+                    future::Either::Left(future::ready(Ok(()))),
+                ),
+                Some(Err(dag_point)) => {
                     state.init(&dag_point);
                     return dag_point;
                 }
-                None => tokio::task::spawn_blocking({
-                    let store = store.clone();
-                    move || store.get_point(point_id.round, &point_id.digest)
-                })
-                .await
-                .expect("db get point"),
-            };
-
-            let (verified, storage_fut) = match stored_verified {
-                Some(point) => (point, future::Either::Left(future::ready(Ok(())))),
                 None => {
                     let downloaded = downloader
                         .run(
@@ -255,7 +274,12 @@ impl DagPointFuture {
                         let store = store.clone();
                         move || store.insert_point(&verified, &PointStatus::default())
                     }));
-                    (verified, stored_fut)
+                    (
+                        PointInfo::from(&verified),
+                        verified.prev_proof(),
+                        None,
+                        stored_fut,
+                    )
                 }
             };
 
@@ -265,8 +289,17 @@ impl DagPointFuture {
                 "downloaded, start validating",
             );
 
+            if stored_status.map_or(false, |status| status.is_certified) {
+                // note if the point contains valid evidence for a vertex,
+                //  the vertex and its dependencies are marked certified, but not the point itself,
+                //  so `Trusted` stored status does not trigger certification mark
+                if let Some(certified) = once_certified_tx_clone.take() {
+                    _ = certified.send(());
+                }
+            }
             let validated_fut = Verifier::validate(
                 verified,
+                prev_proof,
                 point_dag_round,
                 downloader,
                 store.clone(),
@@ -281,7 +314,7 @@ impl DagPointFuture {
             };
             let status = PointStatus {
                 is_validated: true,
-                is_certified: !once_certified_tx_clone.has_value(),
+                is_certified: !once_certified_tx_clone.has_value(), // it may come from next point
                 ..dag_point.basic_status()
             };
             tokio::task::spawn_blocking(move || {

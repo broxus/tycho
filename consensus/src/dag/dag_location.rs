@@ -87,6 +87,13 @@ impl InclusionState {
         _ = self.0.get_or_init(|| {
             let signed = OnceLock::new();
             if first_completed.trusted().is_none() {
+                tracing::warn!(
+                    result = display(first_completed.alt()),
+                    author = display(first_completed.author().alt()),
+                    round = first_completed.round().0,
+                    digest = display(first_completed.digest().alt()),
+                    "resolved dag point",
+                );
                 _ = signed.set(Err(()));
             }
             Signable {
