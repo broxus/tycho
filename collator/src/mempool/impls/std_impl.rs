@@ -229,12 +229,14 @@ impl MempoolAdapterStdImpl {
                     cache.reset();
                     parser = Parser::new(config.deduplicate_rounds);
                     store.report_new_start(anchors_full_bottom);
-                    first_after_gap = Some(
-                        (anchors_full_bottom.0).saturating_add(config.deduplicate_rounds as u32),
-                    );
+                    let first_to_execute =
+                        (anchors_full_bottom.0).saturating_add(config.deduplicate_rounds as u32);
+                    first_after_gap = Some(first_to_execute);
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
-                        "externals cache dropped"
+                        new_bottom = anchors_full_bottom.0,
+                        first_after_gap = first_to_execute,
+                        "externals cache dropped",
                     );
                     continue;
                 }

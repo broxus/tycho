@@ -57,7 +57,7 @@ impl Deduplicator {
                 } // else - nothing to update
 
                 // in case an outdated value was stored - act as if it was already removed;
-                old_round < anchor_round.saturating_sub(self.round_threshold)
+                old_round < anchor_round.saturating_sub(self.round_threshold) + 1
             } else {
                 // branch: not cached, i.e. first insert since threshold passed
                 true
@@ -69,8 +69,8 @@ impl Deduplicator {
     }
 
     pub fn clean(&mut self, anchor_round: MempoolAnchorId) {
-        // bottom round is the least kept in map
-        let bottom_round = anchor_round.saturating_sub(self.round_threshold);
+        // bottom round is the least kept in map; cache exactly `round_threshold` rounds
+        let bottom_round = anchor_round.saturating_sub(self.round_threshold) + 1;
         let bottom_index = self
             .round_to_hashes
             .binary_search_keys(&bottom_round)
@@ -110,7 +110,9 @@ mod tests {
 
     #[test]
     pub fn dedup_externals_test() {
-        const START_ROUND: u32 = 0;
+        // round number is expected cache length after each insert, until threshold reached;
+        // also mempool genesis starts with at least 1, can never be 0
+        const START_ROUND: u32 = 1;
         let threshold: u32 = 100;
         let mut round_id = START_ROUND;
         let first = [u8::MIN; 32];
@@ -133,55 +135,60 @@ mod tests {
             if round_id < 150 {
                 assert!(
                     !cache.check_unique(round_id, &first),
-                    "duplicate insert must not be unique"
+                    "duplicate insert must not be unique @ {i}"
                 );
             }
 
             assert!(
                 !cache.check_unique(round_id, &second),
-                "duplicate insert must not be unique"
+                "duplicate insert must not be unique @ {i}"
             );
 
             assert!(
                 !cache.check_unique(round_id, &first),
-                "duplicate insert must not be unique"
+                "duplicate insert must not be unique @ {i}"
             );
 
-            assert_eq!(cache.hash_max_round.len(), 2);
-            assert_eq!(cache.hash_max_round.get(&first), Some(&round_id));
-            assert_eq!(cache.hash_max_round.get(&second), Some(&round_id));
+            assert_eq!(cache.hash_max_round.len(), 2, "@ {i}");
+            assert_eq!(cache.hash_max_round.get(&first), Some(&round_id), "@ {i}");
+            assert_eq!(cache.hash_max_round.get(&second), Some(&round_id), "@ {i}");
 
-            assert_eq!(cache.round_to_hashes.last(), Some((&round_id, &vals)));
+            assert_eq!(
+                cache.round_to_hashes.last(),
+                Some((&round_id, &vals)),
+                "@ {i}"
+            );
 
-            assert!(cache
-                .round_to_hashes
-                .iter()
-                .all(|(r, h)| *r == round_id || h.is_empty()));
+            assert!(
+                (cache.round_to_hashes.iter()).all(|(r, h)| *r == round_id || h.is_empty()),
+                "cache must remove hashes for outdated rounds, leaving sets empty is ok @ {i}"
+            );
 
             cache.clean(round_id);
 
             assert_eq!(
                 cache.round_to_hashes.len(),
-                round_id.min(threshold) as usize + 1
+                round_id.min(threshold) as usize,
+                "must cache every inserted round and keep exactly {threshold} thereafter @ {i}"
             );
         }
 
-        round_id += threshold;
+        round_id += threshold - 1;
         assert!(
             !cache.check_unique(round_id, &first),
-            "must be a duplicate insert within threshold"
+            "must be a duplicate insert within threshold @ {round_id}"
         );
         cache.clean(round_id);
-        assert_eq!(cache.hash_max_round.len(), 2);
-        assert_eq!(cache.round_to_hashes.len(), 2);
+        assert_eq!(cache.hash_max_round.len(), 2, "@ {round_id}");
+        assert_eq!(cache.round_to_hashes.len(), 2, "@ {round_id}");
 
-        round_id += threshold + 1;
+        round_id += threshold;
         assert!(
             cache.check_unique(round_id, &first),
-            "must be a unique insert after threshold"
+            "must be a unique insert after threshold {round_id}"
         );
         cache.clean(round_id);
-        assert_eq!(cache.hash_max_round.len(), 1);
-        assert_eq!(cache.round_to_hashes.len(), 1);
+        assert_eq!(cache.hash_max_round.len(), 1, "@ {round_id}");
+        assert_eq!(cache.round_to_hashes.len(), 1, "@ {round_id}");
     }
 }
