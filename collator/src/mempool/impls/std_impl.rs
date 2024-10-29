@@ -251,17 +251,14 @@ impl MempoolAdapterStdImpl {
                     let anchor_id: MempoolAnchorId = anchor.round().0;
                     metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
-                    // may skip expand part, but never skip set committed part;
-                    let points = store.expand_anchor_history(&history);
-                    // set committed only after point data is read or skipped
-                    store.set_committed(&anchor, &history);
+                    let payloads = store.expand_anchor_history(&anchor, &history);
 
                     let is_executable = first_after_gap
                         .as_ref()
                         .map_or(true, |first_id| anchor_id >= *first_id);
 
                     let unique_messages =
-                        parser.parse_unique(anchor_id, chain_time, is_executable, points);
+                        parser.parse_unique(anchor_id, chain_time, is_executable, payloads);
 
                     if is_executable {
                         anchors.push(Arc::new(MempoolAnchor {
