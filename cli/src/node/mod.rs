@@ -381,7 +381,7 @@ impl Node {
                 builder = builder.with_memory_profiler(Arc::new(profiler));
             }
 
-            builder.build()
+            builder.build().await?
         };
 
         // Spawn control server endpoint
