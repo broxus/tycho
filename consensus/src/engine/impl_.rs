@@ -234,7 +234,8 @@ impl Engine {
 
     pub async fn run(mut self) {
         let mut start_point_with_state = self.pre_run().await;
-        let mut full_history_bottom = None;
+        // Boxed for just not to move a Copy to other thread by mistake
+        let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
@@ -261,7 +262,7 @@ impl Engine {
                     self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
                     let round_effects =
                         Effects::<EngineContext>::new(&self.effects, consensus_round);
-                    full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+                    *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
                         consensus_round,
                         ready_committer.as_mut(),
                         &self.round_task.state.peer_schedule,
@@ -271,7 +272,7 @@ impl Engine {
             };
             metrics::gauge!("tycho_mempool_engine_current_round").set(current_dag_round.round().0);
 
-            full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+            *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
                 current_dag_round.round().next(),
                 ready_committer.as_mut(),
                 &self.round_task.state.peer_schedule,
@@ -307,11 +308,12 @@ impl Engine {
             if let Some(mut committer) = ready_committer {
                 let committed_info_tx = self.committed_info_tx.clone();
                 let round_effects = round_effects.clone();
+                let full_history_bottom = full_history_bottom.take();
 
                 self.committer_run = tokio::task::spawn_blocking(move || {
                     let _guard = round_effects.span().enter();
 
-                    if let Some(full_history_bottom) = mem::take(&mut full_history_bottom) {
+                    if let Some(full_history_bottom) = full_history_bottom {
                         committed_info_tx
                             .send(CommitResult::NewStartAfterGap(full_history_bottom)) // not recoverable
                             .expect("Failed to send anchor history info to mpsc channel");
