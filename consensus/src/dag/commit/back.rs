@@ -130,7 +130,7 @@ impl DagBack {
         let rev_iter = self
             .rounds
             .range((
-                Bound::Excluded(last_proof_round_or_bottom.next()),
+                Bound::Included(last_proof_round_or_bottom),
                 Bound::Included(up_to),
             ))
             .rev();
@@ -155,10 +155,98 @@ impl DagBack {
         triggers
     }
 
+    pub fn last_unusable_proof_round(&self, trigger: &PointInfo) -> Option<Round> {
+        // anchor chain is not init yet, and exactly anchor trigger or proof is at the bottom -
+        // dag cannot contain corresponding anchor candidate
+
+        let bottom_round = self.bottom_round();
+        let mut last_proof = trigger.anchor_id(AnchorStageRole::Proof);
+
+        if last_proof.round <= bottom_round {
+            return Some(last_proof.round);
+        };
+
+        // iter for proof->candidate->proof chain
+        let mut rev_iter = self
+            .rounds
+            .range((Bound::Unbounded, Bound::Included(last_proof.round)))
+            .rev()
+            .peekable();
+
+        while rev_iter.peek().is_some() {
+            let (_, proof_dag_round) = rev_iter.next().expect("peek in line above");
+            if proof_dag_round.round() > last_proof.round {
+                continue;
+            }
+            assert_eq!(
+                proof_dag_round.round(),
+                last_proof.round,
+                "{} is not contiguous: iter skipped proof round",
+                self.alt(),
+            );
+
+            match proof_dag_round.anchor_stage() {
+                Some(stage) if stage.role == AnchorStageRole::Proof => {
+                    assert_eq!(
+                        last_proof.author,
+                        stage.leader,
+                        "validate() is broken: anchor proof author is not leader {:?}",
+                        last_proof.alt()
+                    );
+                }
+                _ => panic!(
+                    "validate() is broken: anchor stage is not for anchor proof {:?}",
+                    last_proof.alt()
+                ),
+            }
+
+            let proof = Self::ready_valid_point(
+                proof_dag_round,
+                &last_proof.author,
+                &last_proof.digest,
+                "anchor proof",
+            )?
+            .info;
+
+            let Some(anchor_id) = proof.prev_id() else {
+                panic!(
+                    "verify() is broken: anchor proof without prev id; proof id {:?}",
+                    proof.id()
+                )
+            };
+
+            let Some((_, anchor_dag_round)) = rev_iter.next() else {
+                return Some(proof.round());
+            };
+
+            assert_eq!(
+                anchor_dag_round.round(),
+                anchor_id.round,
+                "{} is not contiguous: iter skipped anchor round",
+                self.alt(),
+            );
+
+            let anchor = Self::ready_valid_point(
+                anchor_dag_round,
+                &anchor_id.author,
+                &anchor_id.digest,
+                "anchor candidate",
+            )?
+            .info;
+
+            last_proof = anchor.anchor_id(AnchorStageRole::Proof);
+
+            if last_proof.round <= bottom_round {
+                return Some(last_proof.round);
+            };
+        }
+        unreachable!("iter exhausted, last unusable proof not found")
+    }
+
     // Some contiguous part of anchor chain in historical order; None in case of a gap
     pub fn anchor_chain(
         &self,
-        last_proof_round: Option<Round>,
+        last_proof_round: Round,
         trigger: &PointInfo,
     ) -> Option<VecDeque<EnqueuedAnchor>> {
         assert_eq!(
@@ -168,26 +256,21 @@ impl DagBack {
             trigger.id().alt()
         );
 
-        if match last_proof_round {
-            // anchor chain is not init yet, and exactly anchor trigger or proof is at the bottom -
-            // dag cannot contain corresponding anchor candidate
-            None => self.bottom_round() >= trigger.round().prev(),
+        if last_proof_round >= trigger.round().prev() {
             // some trigger (point future) from a later round resolved earlier than current one,
             // so this proof is already in chain with `direct_trigger: None`
             // this proof can even be the last element in chain, as those next trigger and proof
             // still wait for corresponding anchor point future to resolve
-            Some(last_proof_round) => last_proof_round == trigger.round().prev(),
-        } {
             return Some(VecDeque::new());
         }
-
-        let last_proof_or_bottom_round = last_proof_round.unwrap_or_else(|| self.bottom_round());
 
         let mut rev_iter = self
             .rounds
             .range((
-                Bound::Excluded(last_proof_or_bottom_round), // exclude used proof
-                Bound::Excluded(trigger.round()),            // include topmost proof only
+                // exclude used or unusable proof (it may be out of range)
+                Bound::Excluded(last_proof_round),
+                // include topmost proof only
+                Bound::Excluded(trigger.round()),
             ))
             .rev()
             .peekable();
@@ -197,7 +280,7 @@ impl DagBack {
             .expect("validation broken: anchor trigger without prev point");
 
         let mut result = VecDeque::new();
-        while rev_iter.peek().is_some() && lookup_proof_id.round > last_proof_or_bottom_round {
+        while rev_iter.peek().is_some() {
             let (_, proof_dag_round) = rev_iter.next().expect("peek in line above");
             if proof_dag_round.round() > lookup_proof_id.round {
                 continue;
@@ -212,15 +295,17 @@ impl DagBack {
             match proof_dag_round.anchor_stage() {
                 Some(stage) if stage.role == AnchorStageRole::Proof => {
                     assert_eq!(
-                        lookup_proof_id.author, stage.leader,
-                        "validate() is broken: anchor proof author is not leader"
+                        lookup_proof_id.author,
+                        stage.leader,
+                        "validate() is broken: anchor proof author is not leader {:?}",
+                        lookup_proof_id.alt()
                     );
                     if stage.is_used.load(atomic::Ordering::Relaxed) {
                         // this branch must be visited only with engine round change
                         // (new call to commit), when `anchor_chain` is emptied;
                         // during the same commit call, expect `anchor_chain` to serve its purpose
                         assert!(
-                            last_proof_round.is_none(),
+                            last_proof_round <= self.bottom_round(),
                             "limit by round range is broken: visiting already committed proof {:?}",
                             lookup_proof_id.alt()
                         );
@@ -273,7 +358,9 @@ impl DagBack {
             .info;
 
             let mut direct_trigger = None;
-            if proof.round() == trigger.round().prev() {
+            if proof.round() == trigger.round().prev()
+                && proof.id() == trigger.anchor_id(AnchorStageRole::Proof)
+            {
                 direct_trigger = Some(trigger.clone());
             }
             lookup_proof_id = anchor.anchor_id(AnchorStageRole::Proof);
@@ -287,7 +374,7 @@ impl DagBack {
         }
 
         let linked_to_proof_round = result.front()?.anchor.anchor_round(AnchorStageRole::Proof);
-        if linked_to_proof_round <= last_proof_or_bottom_round {
+        if linked_to_proof_round <= last_proof_round {
             Some(result)
         } else {
             None
@@ -312,12 +399,10 @@ impl DagBack {
                 }
             }
         }
-        let history_limit = Round(
-            (anchor.round().0)
-                .saturating_sub(CachedConfig::commit_history_rounds())
-                // do not commit genesis - we may place some arbitrary payload in it
-                .max(Genesis::round().next().0),
-        );
+        // do not commit genesis - we may place some arbitrary payload in it
+        let history_limit = Genesis::round().next().max(Round(
+            (anchor.round().0).saturating_sub(CachedConfig::commit_history_rounds()),
+        ));
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], &anchor.data().includes); // points @ r+0
