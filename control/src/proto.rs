@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use everscale_types::models::{BlockId, BlockIdShort, ShardAccount, StdAddr};
+use bytes::Bytes;
+use everscale_types::models::{BlockId, BlockIdShort, BlockchainConfig, ShardAccount, StdAddr};
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
@@ -36,6 +37,9 @@ pub trait ControlServer {
 
     /// Get account state.
     async fn get_account_state(req: AccountStateRequest) -> ServerResult<AccountStateResponse>;
+
+    /// Get blockchain config.
+    async fn get_blockchain_config() -> ServerResult<BlockchainConfigResponse>;
 
     /// Get block bytes
     async fn get_block(req: BlockRequest) -> ServerResult<BlockResponse>;
@@ -85,7 +89,7 @@ pub struct BroadcastExtMsgRequest {
     /// A BOC with a [`Message`].
     ///
     /// [`Message`]: everscale_types::models::Message
-    pub message: Vec<u8>,
+    pub message: Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,9 +107,7 @@ pub struct AccountStateResponse {
     /// NOTE: [`BocRepr`] cannot be safely used here because
     /// we must hold a state tracker handle to delay the GC,
     /// and it is very inconvenient to pass it around here.
-    ///
-    /// [`ShardAccount`]: everscale_types::models::ShardAccount
-    pub state: Vec<u8>,
+    pub state: Bytes,
 }
 
 impl AccountStateResponse {
@@ -127,13 +129,45 @@ pub struct ParsedAccountState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockchainConfigResponse {
+    pub global_id: i32,
+    pub mc_seqno: u32,
+    pub gen_utime: u32,
+
+    /// A BOC with a [`BlockchainConfig`].
+    pub config: Bytes,
+}
+
+impl BlockchainConfigResponse {
+    pub fn parse(
+        &self,
+    ) -> Result<ParsedBlockchainConfigResponse, everscale_types::boc::BocReprError> {
+        Ok(ParsedBlockchainConfigResponse {
+            global_id: self.global_id,
+            mc_seqno: self.mc_seqno,
+            gen_utime: self.gen_utime,
+            config: BocRepr::decode(&self.config)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedBlockchainConfigResponse {
+    pub global_id: i32,
+    pub mc_seqno: u32,
+    pub gen_utime: u32,
+    #[serde(flatten)]
+    pub config: BlockchainConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockRequest {
     pub block_id: BlockId,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BlockResponse {
-    Found { data: Vec<u8> },
+    Found { data: Bytes },
     NotFound,
 }
 
@@ -164,7 +198,7 @@ pub struct ArchiveSliceRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveSliceResponse {
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -190,7 +224,7 @@ pub struct ElectionsPayloadRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ElectionsPayloadResponse {
     // TODO: Add `serde(with = "base64")`
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub public_key: HashBytes,
     #[serde(with = "serde_helpers::signature")]
     pub signature: Box<[u8; 64]>,

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
+use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use everscale_crypto::ed25519;
 use everscale_types::models::{
     DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
@@ -117,11 +119,31 @@ pub struct ControlServerBuilder<
 }
 
 impl ControlServerBuilder {
-    pub fn build(self) -> ControlServer {
+    pub async fn build(self) -> Result<ControlServer> {
         let (network, storage, gc_subscriber, blockchain_rpc_client) = self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
             .unwrap_or_else(|| Arc::new(StubMemoryProfiler));
+
+        let config_response = 'config: {
+            let Some(mc_block_id) = storage.node_state().load_last_mc_block_id() else {
+                break 'config None;
+            };
+
+            let mc_state = storage
+                .shard_state_storage()
+                .load_state(&mc_block_id)
+                .await?;
+
+            let config = mc_state.config_params()?;
+
+            Some(Arc::new(proto::BlockchainConfigResponse {
+                global_id: mc_state.as_ref().global_id,
+                mc_seqno: mc_state.block_id().seqno,
+                gen_utime: mc_state.as_ref().gen_utime,
+                config: BocRepr::encode_rayon(config)?.into(),
+            }))
+        };
 
         let info = proto::NodeInfoResponse {
             public_addr: network.remote_addr().to_string(),
@@ -133,9 +155,10 @@ impl ControlServerBuilder {
                 .map(|k| HashBytes(k.public_key.to_bytes())),
         };
 
-        ControlServer {
+        Ok(ControlServer {
             inner: Arc::new(Inner {
-                info,
+                info_response: info,
+                config_response: ArcSwapOption::new(config_response),
                 gc_subscriber,
                 storage,
                 blockchain_rpc_client,
@@ -144,7 +167,7 @@ impl ControlServerBuilder {
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
             }),
-        }
+        })
     }
 }
 
@@ -232,7 +255,7 @@ impl proto::ControlServer for ControlServer {
     }
 
     async fn get_node_info(self, _: tarpc::context::Context) -> proto::NodeInfoResponse {
-        self.inner.info.clone()
+        self.inner.info_response.clone()
     }
 
     async fn trigger_archives_gc(self, _: Context, req: proto::TriggerGcRequest) {
@@ -338,13 +361,24 @@ impl proto::ControlServer for ControlServer {
         let state = BocRepr::encode_rayon(match &account {
             None => empty_shard_account(),
             Some(account) => &account.account,
-        })?;
+        })?
+        .into();
 
         Ok(proto::AccountStateResponse {
             mc_seqno: block_handle.mc_ref_seqno(),
             gen_utime: block_handle.gen_utime(),
             state,
         })
+    }
+
+    async fn get_blockchain_config(
+        self,
+        _: Context,
+    ) -> ServerResult<proto::BlockchainConfigResponse> {
+        match self.inner.config_response.load().as_deref().cloned() {
+            Some(response) => Ok(response),
+            None => Err(ServerError::new("not ready")),
+        }
     }
 
     async fn get_block(
@@ -359,7 +393,10 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = blocks.load_block_data_raw(&handle).await?.to_vec();
+        let data = {
+            let data = blocks.load_block_data_raw_ref(&handle).await?;
+            Bytes::copy_from_slice(data.as_ref())
+        };
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -375,7 +412,10 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = blocks.load_block_proof_raw(&handle).await?.to_vec();
+        let data = {
+            let data = blocks.load_block_proof_raw_ref(&handle).await?;
+            Bytes::copy_from_slice(data.as_ref())
+        };
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -391,7 +431,10 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = blocks.load_queue_diff_raw(&handle).await?.to_vec();
+        let data = {
+            let data = blocks.load_queue_diff_raw_ref(&handle).await?;
+            Bytes::copy_from_slice(data.as_ref())
+        };
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -426,10 +469,10 @@ impl proto::ControlServer for ControlServer {
     ) -> ServerResult<proto::ArchiveSliceResponse> {
         let blocks = self.inner.storage.block_storage();
 
-        let data = blocks
-            .get_archive_chunk(req.archive_id, req.offset)
-            .await?
-            .to_vec();
+        let data = {
+            let data = blocks.get_archive_chunk(req.archive_id, req.offset).await?;
+            Bytes::copy_from_slice(data.as_ref())
+        };
         Ok(proto::ArchiveSliceResponse { data })
     }
 
@@ -489,7 +532,7 @@ impl proto::ControlServer for ControlServer {
         let signature = keypair.sign_raw(&data);
 
         Ok(proto::ElectionsPayloadResponse {
-            data,
+            data: data.into(),
             public_key: HashBytes(keypair.public_key.to_bytes()),
             signature: Box::new(signature),
         })
@@ -506,7 +549,8 @@ impl StateSubscriber for ControlServer {
 }
 
 struct Inner {
-    info: proto::NodeInfoResponse,
+    info_response: proto::NodeInfoResponse,
+    config_response: ArcSwapOption<proto::BlockchainConfigResponse>,
     gc_subscriber: GcSubscriber,
     storage: Storage,
     blockchain_rpc_client: BlockchainRpcClient,
@@ -544,6 +588,16 @@ impl Inner {
         // Update the cache.
         if block_id.is_masterchain() {
             *self.mc_accounts.write() = Some(cached);
+
+            // Update config response cache
+            let config = cx.state.config_params()?;
+            let config_response = Arc::new(proto::BlockchainConfigResponse {
+                global_id: cx.state.as_ref().global_id,
+                mc_seqno: block_id.seqno,
+                gen_utime: cx.state.as_ref().gen_utime,
+                config: BocRepr::encode_base64_rayon(config)?.into(),
+            });
+            self.config_response.store(Some(config_response));
         } else {
             // TODO: Handle split/merge like in `tycho-rpc`.
             self.sc_accounts.write().insert(block_id.shard, cached);
