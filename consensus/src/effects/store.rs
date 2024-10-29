@@ -57,7 +57,34 @@ impl MempoolAdapterStore {
         }
     }
 
-    pub fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) {
+    /// allows to remove no more needed data before sync and store of newly created dag part
+    pub fn report_new_start(&self, new_start: Round) {
+        self.commit_finished.set_max(new_start);
+    }
+
+    pub fn expand_anchor_history(&self, anchor: &PointInfo, history: &[PointInfo]) -> Vec<Bytes> {
+        let payloads = if history.is_empty() {
+            // history is checked at the end of DAG commit, leave traces in case its broken
+            tracing::warn!(
+                "anchor {:?} has empty history, it's ok only for anchor at DAG bottom round \
+                 immediately after an unrecoverable gap",
+                anchor.id().alt()
+            );
+            Vec::new()
+        } else {
+            self.inner
+                .expand_anchor_history(history)
+                .with_context(|| {
+                    format!(
+                        "history points {} rounds [{}..{}]",
+                        history.first().map(|p| p.round().0).unwrap_or_default(),
+                        history.last().map(|p| p.round().0).unwrap_or_default(),
+                        history.len()
+                    )
+                })
+                .expect("DB expand anchor history")
+        };
+        // may skip expand part, but never skip set committed - let it write what it should
         self.inner
             .set_committed(anchor, history)
             .with_context(|| {
@@ -73,25 +100,7 @@ impl MempoolAdapterStore {
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
         self.commit_finished.set_max(anchor.round());
-    }
-
-    /// allows to remove no more needed data before sync and store of newly created dag part
-    pub fn report_new_start(&self, new_start: Round) {
-        self.commit_finished.set_max(new_start);
-    }
-
-    pub fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Bytes> {
-        self.inner
-            .expand_anchor_history(history)
-            .with_context(|| {
-                format!(
-                    "history points {} rounds [{}..{}]",
-                    history.first().map(|p| p.round().0).unwrap_or_default(),
-                    history.last().map(|p| p.round().0).unwrap_or_default(),
-                    history.len()
-                )
-            })
-            .expect("DB expand anchor history")
+        payloads
     }
 }
 
