@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tracing::Subscriber;
 use tracing_appender::rolling::Rotation;
 use tracing_subscriber::filter::Directive;
-use tracing_subscriber::{fmt, Layer};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter, Layer};
 
 pub struct LoggerTargets {
     directives: Vec<Directive>,
@@ -170,9 +172,23 @@ pub fn is_systemd_child() -> bool {
     }
 }
 
+pub fn init_logger_simple(default_filter: &str) {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let mut filter = Cow::Borrowed(default_filter);
+    if let Ok(env) = std::env::var(EnvFilter::DEFAULT_ENV) {
+        filter = Cow::Owned(env);
+    }
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_new(filter).expect("tracing directives"))
+        .with(LoggerStderrOutput.as_layer())
+        .init();
+}
+
 pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::{reload, EnvFilter};
+    use tracing_subscriber::reload;
 
     let try_make_filter = {
         let logger_targets = logger_targets.clone();
