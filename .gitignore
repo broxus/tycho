@@ -1,5 +1,5 @@
-debug/
-target/
+/debug/
+/target/
 **/*.rs.bk
 *.pdb
 
@@ -21,5 +21,5 @@ global-config.json
 keys.json
 logger.json
 
-db/
-.temp/
+/db/
+/.temp/
