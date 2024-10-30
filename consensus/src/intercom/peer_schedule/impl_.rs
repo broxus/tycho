@@ -75,6 +75,8 @@ impl PeerSchedule {
     ) -> bool {
         if next_round <= self.atomic().cur_epoch_start {
             return false; // ignore outdated
+        } else {
+            self.apply_scheduled(next_round);
         }
         let mut locked = self.write();
 
@@ -93,13 +95,13 @@ impl PeerSchedule {
     }
 
     /// on peer set change
-    pub fn apply_scheduled(&self, top_dag_round: Round) {
-        if (self.atomic().next_epoch_start).map_or(true, |next| next < top_dag_round) {
+    pub fn apply_scheduled(&self, current: Round) {
+        if (self.atomic().next_epoch_start).map_or(true, |scheduled| scheduled > current) {
             return;
         }
         let mut locked = self.write();
         tracing::debug!(
-            "peer schedule before rotation at {top_dag_round:?}: {:?} {:?}",
+            "peer schedule before rotation for {current:?}: {:?} {:?}",
             self.atomic(),
             locked.data,
         );
@@ -114,7 +116,7 @@ impl PeerSchedule {
             stateless.rotate();
         });
         tracing::info!(
-            "peer schedule rotated at {top_dag_round:?}: {:?} {:?}",
+            "peer schedule rotated for {current:?}: {:?} {:?}",
             self.atomic(),
             locked.data,
         );

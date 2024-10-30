@@ -74,7 +74,8 @@ impl UnappliedConfig {
                 //  or toggling `shuffle_validators` will require new genesis
                 true, // new_cx.consensus_info.prev_shuffle_validators,
             )?;
-            engine.set_next_peers(&whole_set, Some((round, &subset)));
+            // Note: place first known vset right after Genesis, as if it was from zerostate
+            engine.set_next_peers(&whole_set, Some((0, &subset)));
         }
 
         Ok(())

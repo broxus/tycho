@@ -38,9 +38,9 @@ pub struct EngineHandle {
 impl EngineHandle {
     pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
         if let Some((switch_round, subset)) = subset {
-            let round = if switch_round == Round::BOTTOM.0 {
-                // special zerostate case, genesis is unaligned
-                // TODO align genesis ins mc state or require it aligned
+            // specially for zerostate with unaligned genesis,
+            // and for first (prev) vset after reboot or a new genesis
+            let round = if switch_round <= Genesis::round().0 {
                 Genesis::round().next()
             } else {
                 Round(switch_round)
@@ -164,8 +164,6 @@ impl Engine {
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
     async fn pre_run(&mut self) -> Option<(Point, InclusionState)> {
-        (self.round_task.state.peer_schedule).apply_scheduled(Genesis::round().next());
-
         let genesis_incl_state = self.init_task.take().expect("init task must be set").await;
         let broadcast_points = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
