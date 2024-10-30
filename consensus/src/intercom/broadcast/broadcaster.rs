@@ -47,7 +47,7 @@ pub struct Broadcaster {
 
     sig_request: Request,
     sig_peers: FastHashSet<PeerId>,
-    sig_futures: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
+    sig_futures: FuturesUnordered<BoxFuture<'static, (PeerId, bool, Result<SignatureResponse>)>>,
 
     point: Point,
 }
@@ -144,8 +144,8 @@ impl Broadcaster {
                     self.match_broadcast_result(&peer_id, result);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, result)) = self.sig_futures.next() => {
-                    self.match_signature_result(&peer_id, result);
+                Some((peer_id, after_bcast, result)) = self.sig_futures.next() => {
+                    self.match_signature_result(&peer_id, after_bcast, result);
                 },
                 else => {
                     let _guard = self.effects.span().enter();
@@ -178,7 +178,7 @@ impl Broadcaster {
                 }
                 _ = retry_interval.tick() => {
                     for peer in mem::take(&mut self.sig_peers) {
-                        self.request_signature(&peer);
+                        self.request_signature(false, &peer);
                     }
                 }
                 // either request signature immediately or postpone until retry
@@ -186,8 +186,8 @@ impl Broadcaster {
                     self.match_broadcast_result(&peer_id, result);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, result)) = self.sig_futures.next() => {
-                    self.match_signature_result(&peer_id, result);
+                Some((peer_id, after_bcast, result)) = self.sig_futures.next() => {
+                    self.match_signature_result(&peer_id, after_bcast, result);
                 },
                 else => {
                     let _guard = self.effects.span().enter();
@@ -214,7 +214,7 @@ impl Broadcaster {
                         };
                     }
                     for peer in mem::take(&mut self.sig_peers) {
-                        self.request_signature(&peer);
+                        self.request_signature(false, &peer);
                     }
                     false
                 }
@@ -246,7 +246,7 @@ impl Broadcaster {
             }
             Ok(BroadcastResponse) => {
                 // self.sig_peers.insert(*peer_id); // give some time to validate
-                self.request_signature(peer_id); // fast nodes may have delivered it as a dependency
+                self.request_signature(true, peer_id); // fast nodes may have delivered it as a dependency
                 tracing::trace!(
                     parent: self.effects.span(),
                     peer = display(peer_id.alt()),
@@ -256,7 +256,12 @@ impl Broadcaster {
         }
     }
 
-    fn match_signature_result(&mut self, peer_id: &PeerId, result: Result<SignatureResponse>) {
+    fn match_signature_result(
+        &mut self,
+        peer_id: &PeerId,
+        after_bcast: bool,
+        result: Result<SignatureResponse>,
+    ) {
         match result {
             Err(error) => {
                 self.sig_peers.insert(*peer_id); // let it retry
@@ -291,7 +296,13 @@ impl Broadcaster {
                             }
                         }
                     }
-                    SignatureResponse::NoPoint => self.broadcast(peer_id), // send data immediately
+                    SignatureResponse::NoPoint => {
+                        if after_bcast {
+                            _ = self.sig_peers.insert(*peer_id); // retry on next attempt
+                        } else {
+                            self.broadcast(peer_id); // send data immediately
+                        }
+                    }
                     SignatureResponse::TryLater => _ = self.sig_peers.insert(*peer_id),
                     SignatureResponse::Rejected(_) => {
                         if self.signers.contains(peer_id) {
@@ -323,10 +334,13 @@ impl Broadcaster {
         }
     }
 
-    fn request_signature(&mut self, peer_id: &PeerId) {
+    fn request_signature(&mut self, after_bcast: bool, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) {
-            self.sig_futures
-                .push(self.dispatcher.query_signature(peer_id, &self.sig_request));
+            self.sig_futures.push(self.dispatcher.query_signature(
+                peer_id,
+                after_bcast,
+                &self.sig_request,
+            ));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),

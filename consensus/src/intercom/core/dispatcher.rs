@@ -112,8 +112,9 @@ impl Dispatcher {
     pub fn query_signature(
         &self,
         peer_id: &PeerId,
+        after_bcast: bool,
         request: &Request,
-    ) -> BoxFuture<'static, (PeerId, Result<SignatureResponse>)> {
+    ) -> BoxFuture<'static, (PeerId, bool, Result<SignatureResponse>)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time");
         let overlay = self.overlay.clone();
@@ -125,25 +126,25 @@ impl Dispatcher {
             let _task_duration = metric;
             let response = match overlay.query(&network, &peer_id, request).await {
                 Ok(response) => response,
-                Err(e) => return (peer_id, Err(e)),
+                Err(e) => return (peer_id, after_bcast, Err(e)),
             };
 
             let (constructor, body) = match try_handle_prefix_with_offset(&response.body) {
                 Ok(data) => data,
-                Err(e) => return (peer_id, Err(e.into())),
+                Err(e) => return (peer_id, after_bcast, Err(e.into())),
             };
 
             if constructor != SignatureMpResponse::TL_ID {
                 tracing::error!(received = constructor, tl_id = %SignatureMpResponse::TL_ID, "Wrong constructor tag for signature response");
-                return (peer_id, Err(TlError::InvalidData.into()));
+                return (peer_id, after_bcast, Err(TlError::InvalidData.into()));
             }
 
             let response = match tl_proto::deserialize::<SignatureResponse>(body) {
                 Ok(data) => data,
-                Err(e) => return (peer_id, Err(e.into())),
+                Err(e) => return (peer_id, after_bcast, Err(e.into())),
             };
 
-            (peer_id, Ok(response))
+            (peer_id, after_bcast, Ok(response))
         };
         Box::pin(future)
     }
