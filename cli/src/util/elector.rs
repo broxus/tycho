@@ -6,9 +6,10 @@ use bytes::Bytes;
 use everscale_types::abi::{
     AbiType, AbiValue, AbiVersion, FromAbi, Function, IntoAbi, WithAbiType,
 };
-use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::util::FpTokens;
 
 pub mod methods {
     use super::*;
@@ -86,7 +87,7 @@ pub mod data {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct PartialElectorData {
         pub current_election: Option<Ref<CurrentElectionData>>,
-        pub credits: BTreeMap<HashBytes, Tokens>,
+        pub credits: BTreeMap<HashBytes, FpTokens>,
         pub past_elections: BTreeMap<u32, PastElectionData>,
     }
 
@@ -104,7 +105,7 @@ pub mod data {
         fn abi_type() -> AbiType {
             AbiType::tuple([
                 Option::<Ref<CurrentElectionData>>::abi_type().named("current_election"),
-                BTreeMap::<HashBytes, Tokens>::abi_type().named("credits"),
+                BTreeMap::<HashBytes, FpTokens>::abi_type().named("credits"),
                 BTreeMap::<u32, PastElectionData>::abi_type().named("past_elections"),
             ])
         }
@@ -126,8 +127,8 @@ pub mod data {
     pub struct CurrentElectionData {
         pub elect_at: u32,
         pub elect_close: u32,
-        pub min_stake: Tokens,
-        pub total_stake: Tokens,
+        pub min_stake: FpTokens,
+        pub total_stake: FpTokens,
         pub members: BTreeMap<HashBytes, ElectionMember>,
         pub failed: bool,
         pub finished: bool,
@@ -139,8 +140,8 @@ pub mod data {
             AbiType::tuple([
                 u32::abi_type().named("elect_at"),
                 u32::abi_type().named("elect_close"),
-                Tokens::abi_type().named("min_stake"),
-                Tokens::abi_type().named("total_stake"),
+                FpTokens::abi_type().named("min_stake"),
+                FpTokens::abi_type().named("total_stake"),
                 BTreeMap::<HashBytes, ElectionMember>::abi_type().named("members"),
                 bool::abi_type().named("failed"),
                 bool::abi_type().named("finished"),
@@ -168,7 +169,7 @@ pub mod data {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ElectionMember {
-        pub msg_value: Tokens,
+        pub msg_value: FpTokens,
         pub created_at: u32,
         pub max_factor: u32,
         pub src_addr: HashBytes,
@@ -179,7 +180,7 @@ pub mod data {
     impl WithAbiType for ElectionMember {
         fn abi_type() -> AbiType {
             AbiType::tuple([
-                Tokens::abi_type().named("msg_value"),
+                FpTokens::abi_type().named("msg_value"),
                 u32::abi_type().named("created_at"),
                 u32::abi_type().named("max_factor"),
                 HashBytes::abi_type().named("src_addr"),
