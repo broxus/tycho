@@ -335,7 +335,7 @@ impl Broadcaster {
     }
 
     fn request_signature(&mut self, after_bcast: bool, peer_id: &PeerId) {
-        if !self.removed_peers.contains(peer_id) {
+        if !self.removed_peers.contains(peer_id) && self.signers.contains(peer_id) {
             self.sig_futures.push(self.dispatcher.query_signature(
                 peer_id,
                 after_bcast,
