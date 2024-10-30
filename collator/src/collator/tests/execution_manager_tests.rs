@@ -226,7 +226,7 @@ fn gen_stub_working_state(
             },
             ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
         }),
-        gas_used_from_last_anchor: 0,
+        wu_used_from_last_anchor: 0,
         prev_shard_data: Some(prev_shard_data),
         usage_tree: Some(usage_tree),
         has_unprocessed_messages: Some(true),

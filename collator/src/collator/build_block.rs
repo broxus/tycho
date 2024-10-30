@@ -20,7 +20,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, McData};
+use crate::types::{BlockCandidate, CollationSessionInfo, FinalizeBlockWUParams, McData};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -29,15 +29,20 @@ pub struct FinalizedBlock {
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
+    pub finalize_wu_total: u64,
 }
 
 impl CollatorStdImpl {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn finalize_block(
         mut collation_data: Box<BlockCollationData>,
         collation_session: Arc<CollationSessionInfo>,
         executor: MessagesExecutor,
         working_state: Box<WorkingState>,
         queue_diff: SerializedQueueDiff,
+        finalize_params: FinalizeBlockWUParams,
+        prepare_groups_wu_total: u64,
+        execute_groups_wu_total: u64,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -112,6 +117,7 @@ impl CollatorStdImpl {
             histogram_build_account_blocks_and_messages.finish();
 
         let processed_accounts = processed_accounts_res?;
+        collation_data.accounts_count = processed_accounts.accounts_len as u64;
         let in_msgs = in_msgs_res?;
         let out_msgs = out_msgs_res?;
 
@@ -201,16 +207,43 @@ impl CollatorStdImpl {
         let build_state_update_elapsed;
         let new_state_root;
         let total_validator_fees;
+        let finalize_wu_total;
         let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
             );
 
-            // compute total gas used from last anchor
-            let gas_used_from_last_anchor = working_state
-                .gas_used_from_last_anchor
-                .saturating_add(collation_data.block_limit.gas_used as _);
+            let accounts_count = collation_data.accounts_count;
+            let in_msgs_len = collation_data.in_msgs.len() as u64;
+            let out_msgs_len = collation_data.out_msgs.len() as u64;
+
+            finalize_wu_total = Self::calc_finalize_wu_total(
+                accounts_count,
+                in_msgs_len,
+                out_msgs_len,
+                finalize_params,
+            );
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "finalize_wu_total: {}, accounts_count: {}, in_msgs: {}, out_msgs: {} ",
+                finalize_wu_total,
+                accounts_count,
+                in_msgs_len,
+                out_msgs_len,
+            );
+
+            // compute total wu used from last anchor
+            let wu_used_from_last_anchor = working_state
+                .wu_used_from_last_anchor
+                .saturating_add(prepare_groups_wu_total)
+                .saturating_add(execute_groups_wu_total)
+                .saturating_add(finalize_wu_total);
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "wu_used_from_last_anchor: {:?}",
+                wu_used_from_last_anchor
+            );
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
@@ -225,7 +258,7 @@ impl CollatorStdImpl {
                 processed_upto: Lazy::new(&collation_data.processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
-                overload_history: gas_used_from_last_anchor,
+                overload_history: wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: prev_shard_data.total_validator_fees().clone(),
@@ -439,7 +472,60 @@ impl CollatorStdImpl {
             mc_data,
             new_state_root,
             new_observable_state,
+            finalize_wu_total,
         })
+    }
+
+    fn calc_finalize_wu_total(
+        accounts_count: u64,
+        in_msgs_len: u64,
+        out_msgs_len: u64,
+        finalize_params: FinalizeBlockWUParams,
+    ) -> u64 {
+        let FinalizeBlockWUParams {
+            build_transactions,
+            build_in_msg,
+            build_accounts,
+            build_out_msg,
+            serialize_accounts,
+            serialize_min,
+            serialize_msg,
+            state_update_accounts,
+            state_update_min,
+            state_update_msg,
+        } = finalize_params;
+
+        let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;
+        let build = accounts_count
+            .saturating_mul(accounts_count_logarithm)
+            .saturating_mul(build_accounts as u64);
+        let build_in_msg = in_msgs_len
+            .saturating_mul(in_msgs_len.checked_ilog2().unwrap_or_default() as u64)
+            .saturating_mul(build_in_msg as u64);
+        let build_out_msg = out_msgs_len
+            .saturating_mul(out_msgs_len.checked_ilog2().unwrap_or_default() as u64)
+            .saturating_mul(build_out_msg as u64);
+        let build = build.saturating_add(
+            std::cmp::max(out_msgs_len, in_msgs_len).saturating_mul(build_transactions as u64),
+        );
+        let build = std::cmp::max(build, build_in_msg);
+        let build = std::cmp::max(build, build_out_msg);
+
+        let merkle_calc = std::cmp::max(
+            state_update_min as u64,
+            accounts_count
+                .saturating_mul(accounts_count_logarithm)
+                .saturating_mul(state_update_accounts as u64)
+                .saturating_add(out_msgs_len.saturating_mul(state_update_msg as u64)),
+        );
+
+        let serialize = std::cmp::max(
+            serialize_min as u64,
+            accounts_count.saturating_mul(serialize_accounts as u64),
+        )
+        .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
+
+        build.saturating_add(merkle_calc).saturating_add(serialize)
     }
 
     fn create_mc_state_extra(
@@ -679,6 +765,8 @@ impl CollatorStdImpl {
             account_blocks.insert(updated_account.account_addr, account_block);
         }
 
+        let accounts_len = account_blocks.len();
+
         // TODO: Somehow consume accounts inside an iterator
         let account_blocks = RelaxedAugDict::try_from_sorted_iter_any(
             account_blocks
@@ -690,6 +778,7 @@ impl CollatorStdImpl {
             account_blocks: account_blocks.build()?,
             shard_accounts: shard_accounts.build()?,
             new_config_params,
+            accounts_len,
         })
     }
 
@@ -785,6 +874,7 @@ struct ProcessedAccounts {
     account_blocks: AccountBlocks,
     shard_accounts: ShardAccounts,
     new_config_params: Option<BlockchainConfigParams>,
+    accounts_len: usize,
 }
 
 fn create_merkle_update(

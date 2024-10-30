@@ -23,9 +23,10 @@ pub struct CollationConfig {
     pub mc_block_min_interval: Duration,
     pub min_mc_block_delta_from_bc_to_sync: u32,
     pub max_uncommitted_chain_length: u32,
-    pub gas_used_to_import_next_anchor: u64,
+    pub wu_used_to_import_next_anchor: u64,
 
     pub msgs_exec_params: MsgsExecutionParams,
+    pub block_work_units_params: BlockWUParams,
 }
 
 impl Default for CollationConfig {
@@ -38,9 +39,10 @@ impl Default for CollationConfig {
             min_mc_block_delta_from_bc_to_sync: 3,
 
             max_uncommitted_chain_length: 31,
-            gas_used_to_import_next_anchor: 250_000_000u64,
+            wu_used_to_import_next_anchor: 1_200_000_000u64,
 
             msgs_exec_params: MsgsExecutionParams::default(),
+            block_work_units_params: BlockWUParams::default(),
         }
     }
 }
@@ -83,6 +85,94 @@ impl Default for MsgsExecutionParams {
             buffer_limit: 20000,
             group_limit: 100,
             group_vert_size: 10,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
+#[serde(default)]
+pub struct BlockWUParams {
+    pub prepare: MsgGroupsWUParams,
+    pub execute: ExecuteWUParams,
+    pub finalize: FinalizeBlockWUParams,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct MsgGroupsWUParams {
+    pub const_part: u32,
+    pub read_ext_msgs: u16,
+    pub read_int_msgs: u16,
+    pub read_new_msgs: u32,
+}
+
+impl Default for MsgGroupsWUParams {
+    fn default() -> Self {
+        Self {
+            const_part: 5_000_000, // 5 ms
+            read_ext_msgs: 4_000,  // 4 mcs
+            read_int_msgs: 5_000,  // 5 mcs
+            read_new_msgs: 75_000, // 75 mcs
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct ExecuteWUParams {
+    pub prepare: u32,
+    pub execute: u16,
+    pub execute_err: u16,
+    pub execute_delimiter: u32,
+    pub serialize_enqueue: u16,
+    pub serialize_dequeue: u16,
+    pub insert_new_msgs_to_iterator: u16,
+    pub subgroup_size: u16,
+}
+
+impl Default for ExecuteWUParams {
+    fn default() -> Self {
+        Self {
+            prepare: 114_000,                   // 114 mcs
+            execute_err: 6_000,                 // 6 mcs
+            execute: 25_000,                    // 25 mcs
+            execute_delimiter: 10_000,          //
+            serialize_enqueue: 3_000,           // 3 mcs
+            serialize_dequeue: 3_000,           // 3 mcs
+            insert_new_msgs_to_iterator: 3_000, // 3 mcs
+            subgroup_size: 16,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct FinalizeBlockWUParams {
+    pub build_transactions: u16,
+    pub build_accounts: u16,
+    pub build_in_msg: u16,
+    pub build_out_msg: u16,
+    pub serialize_accounts: u16,
+    pub serialize_min: u32,
+    pub serialize_msg: u16,
+    pub state_update_accounts: u32,
+    pub state_update_min: u32,
+    pub state_update_msg: u16,
+}
+
+impl Default for FinalizeBlockWUParams {
+    fn default() -> Self {
+        Self {
+            build_transactions: 1_000,    // 1 mcs
+            build_accounts: 500,          // 0.5 mcs
+            build_in_msg: 500,            // 0.5 mcs
+            build_out_msg: 500,           // 0.5 mcs
+            serialize_accounts: 1_000,    // 1 mcs
+            serialize_min: 15_000_000,    // 15 ms
+            serialize_msg: 2_000,         // 2 mcs
+            state_update_accounts: 500,   // 0.5 mcs
+            state_update_min: 15_000_000, // 15 ms
+            state_update_msg: 2_000,      // 2 mcs
         }
     }
 }

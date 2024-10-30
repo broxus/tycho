@@ -27,7 +27,8 @@ use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
-    DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
+    DisplayExternalsProcessedUpto, ExecuteWUParams, InternalsProcessedUptoStuff,
+    ProcessedUptoInfoStuff,
 };
 
 #[cfg(test)]
@@ -66,6 +67,8 @@ pub(super) struct MessagesExecutor {
     params: Arc<ExecuteParams>,
     /// shard accounts
     accounts_cache: AccountsCache,
+    /// execute params for work units calculation
+    execute_params: ExecuteWUParams,
 }
 
 pub(super) enum GetNextMessageGroupMode {
@@ -382,12 +385,12 @@ impl ExecutionManager {
         if group_opt.is_none() && self.read_new_messages {
             // when processing new messages we return group immediately when the next message does not fit it
 
+            let timer = std::time::Instant::now();
             // first new messages epoch is from existing internals and externals
             // then we read next epoch of new messages only when the previous epoch processed
             mq_iterator_adapter
                 .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
 
-            let timer = std::time::Instant::now();
             let mut add_to_groups_elapsed = Duration::ZERO;
 
             let mut new_internals_read_count = 0;
@@ -485,6 +488,7 @@ impl MessagesExecutor {
         config: Arc<PreloadedBlockchainConfig>,
         params: Arc<ExecuteParams>,
         shard_accounts: ShardAccounts,
+        execute_params: ExecuteWUParams,
     ) -> Self {
         Self {
             shard_id,
@@ -495,6 +499,7 @@ impl MessagesExecutor {
                 shard_accounts,
                 items: Default::default(),
             },
+            execute_params,
         }
     }
 
@@ -530,7 +535,7 @@ impl MessagesExecutor {
 
         let group_horizontal_size = group.len();
         let group_messages_count = group.messages_count();
-        let group_mean_vert_size = group_messages_count
+        let group_mean_vert_size: usize = group_messages_count
             .checked_div(group_horizontal_size)
             .unwrap_or_default();
         let mut group_max_vert_size = 0;
@@ -549,9 +554,12 @@ impl MessagesExecutor {
         let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
 
+        let mut total_exec_wu = 0u128;
         while let Some(executed_msgs_result) = futures.next().await {
             let executed = executed_msgs_result?;
             ext_msgs_skipped += executed.ext_msgs_skipped;
+
+            let mut current_wu = 0u64;
 
             max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
             total_exec_time += executed.exec_time;
@@ -575,6 +583,15 @@ impl MessagesExecutor {
                 self.min_next_lt =
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
+                current_wu = current_wu
+                    .saturating_add(self.execute_params.prepare as u64)
+                    .saturating_add(
+                        executor_output
+                            .gas_used
+                            .saturating_mul(self.execute_params.execute as u64)
+                            .saturating_div(self.execute_params.execute_delimiter as u64),
+                    );
+
                 items.push(ExecutedTickItem {
                     in_message: tx.in_message,
                     executor_output,
@@ -583,7 +600,15 @@ impl MessagesExecutor {
 
             self.accounts_cache
                 .add_account_stuff(executed.account_state);
+
+            total_exec_wu = total_exec_wu.saturating_add(current_wu as _);
         }
+
+        let subgroup_count = {
+            let subgroup_size = self.execute_params.subgroup_size.max(1) as usize;
+            (group_horizontal_size + subgroup_size - 1) / subgroup_size
+        };
+        let total_exec_wu = (total_exec_wu / subgroup_count as u128) as u64;
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)
@@ -594,6 +619,7 @@ impl MessagesExecutor {
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
             max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
+            total_exec_wu, group_messages_count,
             "execute_group",
         );
 
@@ -620,6 +646,7 @@ impl MessagesExecutor {
             items,
             ext_msgs_error_count,
             ext_msgs_skipped,
+            total_exec_wu,
         })
     }
 
@@ -785,6 +812,7 @@ pub struct ExecutedGroup {
     pub items: Vec<ExecutedTickItem>,
     pub ext_msgs_error_count: u64,
     pub ext_msgs_skipped: u64,
+    pub total_exec_wu: u64,
 }
 
 pub struct ExecutedTickItem {

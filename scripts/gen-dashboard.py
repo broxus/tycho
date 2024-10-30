@@ -975,6 +975,24 @@ def block_metrics() -> RowPanel:
             "Block seqno",
             labels=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_do_collate_tx_per_block",
+            "Number of transactions per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_accounts_per_block",
+            "Number of accounts per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_shard_blocks_count_btw_anchors",
+            "Number of Shard Blocks before import next anchor",
+        ),        
+        create_gauge_panel(
+            "tycho_do_collate_import_next_anchor_count",
+            "Number of imported anchors per tick",
+        ),
     ]
     return create_row("collator: Block Metrics", metrics)
 
@@ -1146,6 +1164,11 @@ def collator_time_metrics() -> RowPanel:
             "tycho_do_collate_from_prev_block_time",
             "Time elapsed from prev block",
             labels=['workchain=~"$workchain"'],
+        ),        
+        create_heatmap_panel(
+            "tycho_do_collate_from_prev_anchor_time",
+            "Time elapsed from prev anchor",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_overhead_time",
@@ -1187,6 +1210,68 @@ def collator_time_metrics() -> RowPanel:
         ),
     ]
     return create_row("collator: Time diffs", metrics)
+
+
+def collator_wu_metrics() -> RowPanel:
+    metrics = [
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare",
+            "Wu spent on prepare",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_execute",
+            "Wu spent on execute",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_finalize",
+            "Wu spent on finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_all",
+            "Wu spent on prepare, execute and finalize",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_prepare",
+            "Wu price on prepare",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_execute_txs_to_wu",
+            "Wu price on execute in vm",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_process_txs_to_wu",
+            "Wu price on process executed txs",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_execute",
+            "Wu price on execute total",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_finalize",
+            "Wu price on finalize",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_total",
+            "Wu price total",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+    ]
+    return create_row("collator: Work units calculation", metrics)
 
 
 def collator_core_operations_metrics() -> RowPanel:
@@ -1880,6 +1965,7 @@ dashboard = Dashboard(
         collator_queue_metrics(),
         collator_special_transactions_metrics(),
         collator_time_metrics(),
+        collator_wu_metrics(),
         collator_core_operations_metrics(),
         collator_finalize_block(),
         collator_execution_manager(),

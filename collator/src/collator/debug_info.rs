@@ -119,7 +119,7 @@ impl std::fmt::Debug for DebugShardStateUnslit<'_> {
                 self.0.processed_upto.inner().repr_hash(),
             )
             .field("accounts.hash", self.0.accounts.inner().repr_hash())
-            .field("gas_used_from_last_anchor", &self.0.overload_history)
+            .field("wu_used_from_last_anchor", &self.0.overload_history)
             .field(
                 "total_balance.tokens",
                 &DebugDisplay(self.0.total_balance.tokens),

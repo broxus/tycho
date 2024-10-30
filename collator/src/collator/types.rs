@@ -24,7 +24,7 @@ use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
-    pub gas_used_from_last_anchor: u64,
+    pub wu_used_from_last_anchor: u64,
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
@@ -54,7 +54,7 @@ pub(super) struct PrevData {
     gen_chain_time: u64,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
-    gas_used_from_last_anchor: u64,
+    wu_used_from_last_anchor: u64,
 
     processed_upto: ProcessedUptoInfoStuff,
 
@@ -87,7 +87,7 @@ impl PrevData {
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
-        let gas_used_from_last_anchor = observable_states[0].state().overload_history;
+        let wu_used_from_last_anchor = observable_states[0].state().overload_history;
 
         let processed_upto_info = pure_prev_states[0].state().processed_upto.load()?;
 
@@ -103,7 +103,7 @@ impl PrevData {
             gen_chain_time,
             gen_lt,
             total_validator_fees,
-            gas_used_from_last_anchor,
+            wu_used_from_last_anchor,
 
             processed_upto: processed_upto_info.try_into()?,
 
@@ -171,8 +171,8 @@ impl PrevData {
         self.gen_lt
     }
 
-    pub fn gas_used_from_last_anchor(&self) -> u64 {
-        self.gas_used_from_last_anchor
+    pub fn wu_used_from_last_anchor(&self) -> u64 {
+        self.wu_used_from_last_anchor
     }
 
     pub fn total_validator_fees(&self) -> &CurrencyCollection {
@@ -300,6 +300,7 @@ impl BlockCollationDataBuilder {
             start_lt,
             next_lt: start_lt + 1,
             tx_count: 0,
+            accounts_count: 0,
             total_execute_msgs_time_mc: 0,
             execute_count_all: 0,
             execute_count_ext: 0,
@@ -331,6 +332,7 @@ pub(super) struct BlockCollationData {
     pub gen_utime_ms: u16,
 
     pub tx_count: u64,
+    pub accounts_count: u64,
 
     pub block_limit: BlockLimitStats,
 
@@ -1038,6 +1040,8 @@ impl MessageGroups {
         let mut merged_group_opt: Option<MessageGroup> = None;
         while let Some(next_group) = self.extract_first_group_inner() {
             if let Some(merged_group) = merged_group_opt.as_mut() {
+                merged_group.int_messages_count += next_group.int_messages_count;
+                merged_group.ext_messages_count += next_group.ext_messages_count;
                 for (account_id, mut account_msgs) in next_group.inner {
                     if let Some(existing_account_msgs) = merged_group.inner.get_mut(&account_id) {
                         existing_account_msgs.append(&mut account_msgs);
@@ -1203,10 +1207,10 @@ impl AnchorsCache {
         self.last_imported_anchor.as_ref().map(|anchor| anchor.ct)
     }
 
-    pub fn get_last_imported_anchor_ct_and_author(&self) -> Option<(u64, HashBytes)> {
+    pub fn get_last_imported_anchor_author(&self) -> Option<HashBytes> {
         self.last_imported_anchor
             .as_ref()
-            .map(|anchor| (anchor.ct, anchor.author.0.into()))
+            .map(|anchor| anchor.author.0.into())
     }
 
     pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
