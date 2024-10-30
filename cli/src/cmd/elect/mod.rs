@@ -23,14 +23,13 @@ use tycho_network::PeerId;
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
-use tycho_util::serde_helpers;
 use tycho_util::time::{now_millis, now_sec};
 
 use crate::node::NodeKeys;
 use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
-use crate::util::{elector, print_json, wallet};
+use crate::util::{elector, print_json, wallet, FpTokens};
 use crate::BaseArgs;
 
 /// Participate in validator elections.
@@ -77,7 +76,7 @@ struct CmdRun {
 
     /// Stake size in nano tokens.
     #[clap(short, long)]
-    stake: u128,
+    stake: FpTokens,
 
     /// Max stake factor. Uses config by default.
     #[clap(long)]
@@ -289,7 +288,7 @@ impl CmdRun {
             let elect_fut = SimpleValidatorParams {
                 wallet_secret: NodeKeys::from_file(validator_keys_path)?.as_secret(),
                 node_secret: NodeKeys::from_file(node_keys_path)?.as_secret(),
-                stake_per_round: self.stake,
+                stake_per_round: self.stake.into(),
                 stake_factor: self.stake_factor,
             }
             .elect(ElectionsContext {
@@ -334,7 +333,7 @@ struct CmdOnce {
 
     /// Stake size in nano tokens.
     #[clap(short, long)]
-    stake: u128,
+    stake: FpTokens,
 
     /// Max stake factor. Uses config by default.
     #[clap(long)]
@@ -360,7 +359,7 @@ impl CmdOnce {
             let config = client.get_blockchain_config().await?;
             let wallet = Wallet::new(&client, &wallet_keys.as_secret(), config.signature_id);
 
-            config.check_stake(self.stake)?;
+            config.check_stake(*self.stake)?;
             let stake_factor = config.compute_stake_factor(self.stake_factor)?;
 
             // Get current elections
@@ -381,13 +380,13 @@ impl CmdOnce {
                     "can make stakes for a public key from one address only"
                 );
 
-                existing_stake = member.msg_value.into_inner();
+                existing_stake = *member.msg_value;
                 update_member = adnl_addr != member.adnl_addr || stake_factor != member.max_factor;
             }
 
             let stake_diff = self.stake.saturating_sub(existing_stake);
             anyhow::ensure!(
-                (stake_diff << 12) >= elections.total_stake.into_inner(),
+                (stake_diff << 12) >= *elections.total_stake,
                 "stake diff is too small"
             );
 
@@ -417,7 +416,7 @@ impl CmdOnce {
                 elections_end: elections.elect_close,
                 public: validator_key,
                 adnl_addr,
-                stake: existing_stake + stake_diff,
+                stake: (existing_stake + stake_diff).into(),
                 max_factor: stake_factor,
             })
         })
@@ -434,8 +433,7 @@ enum ParticipateStatus {
         elections_end: u32,
         public: HashBytes,
         adnl_addr: HashBytes,
-        #[serde(with = "serde_helpers::string")]
-        stake: u128,
+        stake: FpTokens,
         max_factor: u32,
     },
 }
@@ -479,7 +477,7 @@ impl CmdRecover {
             // Done
             print_json(RecoverStatus::Recovered {
                 message,
-                amount: to_recover.into_inner(),
+                amount: *to_recover,
             })
         })
     }
@@ -491,8 +489,7 @@ enum RecoverStatus {
     NoReward,
     Recovered {
         message: SentMessage,
-        #[serde(with = "serde_helpers::string")]
-        amount: u128,
+        amount: FpTokens,
     },
 }
 
@@ -667,13 +664,13 @@ impl ElectionsContext<'_> {
 struct SimpleValidatorParams {
     wallet_secret: ed25519::SecretKey,
     node_secret: ed25519::SecretKey,
-    stake_per_round: u128,
+    stake_per_round: FpTokens,
     stake_factor: Option<u32>,
 }
 
 impl SimpleValidatorParams {
     async fn elect(self, ctx: ElectionsContext<'_>) -> Result<()> {
-        ctx.config.check_stake(self.stake_per_round)?;
+        ctx.config.check_stake(*self.stake_per_round)?;
         let stake_factor = ctx.config.compute_stake_factor(self.stake_factor)?;
         let wallet = Wallet::new(&ctx.client, &self.wallet_secret, ctx.config.signature_id);
 
@@ -682,7 +679,7 @@ impl SimpleValidatorParams {
             if let Some(stake) = ctx.elector_data.credits.get(&wallet.address.address) {
                 // TODO: Lock some guard
 
-                tracing::info!(stake = stake.into_inner(), "recovering stake");
+                tracing::info!(%stake, "recovering stake");
                 let message = ElectionsContext::make_recover_msg(&ctx.config.elector_addr);
                 wallet
                     .transfer(message, TransferParams::reliable())
@@ -708,7 +705,7 @@ impl SimpleValidatorParams {
         tracing::info!(
             election_id = ctx.current.elect_at,
             address = %wallet.address,
-            stake = self.stake_per_round,
+            stake = %self.stake_per_round,
             stake_factor,
             "electing as single",
         );
@@ -718,7 +715,7 @@ impl SimpleValidatorParams {
             &wallet.address,
             &node_keys,
             ctx.current.elect_at,
-            self.stake_per_round,
+            *self.stake_per_round,
             stake_factor,
             ctx.config.signature_id,
         );
@@ -815,8 +812,8 @@ impl Wallet {
 
                 if prev_balance != Some(account_balance) {
                     tracing::warn!(
-                        account_balance,
-                        target_balance,
+                        account_balance = %FpTokens(account_balance),
+                        target_balance = %FpTokens(target_balance),
                         "insufficient balance, waiting for refill"
                     );
                 }
