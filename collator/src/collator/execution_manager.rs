@@ -549,12 +549,12 @@ impl MessagesExecutor {
         }
 
         let mut items = Vec::with_capacity(group_messages_count);
-        let mut wu_items = Vec::with_capacity(group_messages_count);
         let mut ext_msgs_error_count = 0;
 
         let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
 
+        let mut total_exec_wu = 0u128;
         while let Some(executed_msgs_result) = futures.next().await {
             let executed = executed_msgs_result?;
             ext_msgs_skipped += executed.ext_msgs_skipped;
@@ -601,19 +601,14 @@ impl MessagesExecutor {
             self.accounts_cache
                 .add_account_stuff(executed.account_state);
 
-            wu_items.push(current_wu);
+            total_exec_wu = total_exec_wu.saturating_add(current_wu as _);
         }
 
-        let mut subgroups_len = wu_items.len() as u64 / self.execute_params.subgroup_size as u64;
-
-        if (wu_items.len() as u64 % self.execute_params.subgroup_size as u64) > 0 {
-            subgroups_len += 1;
-        }
-
-        let total_exec_wu = wu_items
-            .into_iter()
-            .sum::<u64>()
-            .saturating_div(subgroups_len);
+        let subgroup_count = {
+            let subgroup_size = self.execute_params.subgroup_size.max(1) as usize;
+            (group_horizontal_size + subgroup_size - 1) / subgroup_size
+        };
+        let total_exec_wu = (total_exec_wu / subgroup_count as u128) as u64;
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)
