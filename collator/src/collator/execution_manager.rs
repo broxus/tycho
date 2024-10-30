@@ -144,7 +144,12 @@ impl ExecutionManager {
                 .try_init_next_range_iterator(
                     &mut collation_data.processed_upto,
                     working_state,
-                    init_iterator_mode,
+                    // We always init first iterator during block collation
+                    // with current ranges from processed_upto info
+                    // and do not touch next range before we read all existing messages buffer.
+                    // In this case the initial iterator range will be equal both
+                    // on Refill and on Continue.
+                    InitIteratorMode::OmitNextRange,
                 )
                 .await?;
         }

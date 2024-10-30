@@ -15,7 +15,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitIteratorMode {
     UseNextRange,
     OmitNextRange,
@@ -107,6 +107,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         self.init_iterator_total_elapsed
     }
 
+    #[tracing::instrument(skip_all, fields(mode = ?mode))]
     pub async fn try_init_next_range_iterator(
         &mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
@@ -130,7 +131,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "try_init_next_range_iterator: initialized={}, existing ranges_fully_read={}, \
+            "initialized={}, existing ranges_fully_read={}, \
             ranges_from={}, ranges_to={}",
             self.iterator_opt.is_some(), ranges_fully_read,
             DisplayIter(ranges_from.iter().map(DisplayTuple)),
@@ -159,7 +160,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "try_init_next_range_iterator: ranges updated from current position, ranges_fully_read={}, \
+                "ranges updated from current position, ranges_fully_read={}, \
                 ranges_from={}, ranges_to={}",
                 ranges_fully_read,
                 DisplayIter(ranges_from.iter().map(DisplayTuple)),
@@ -177,7 +178,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             // on refill we do not need to use next range at all
             if self.iterator_is_none() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "try_init_next_range_iterator: init with last ranges, ranges_fully_read={}, \
+                    "init with last ranges, ranges_fully_read={}, \
                     ranges_from={}, ranges_to={}",
                     ranges_fully_read,
                     DisplayIter(ranges_from.iter().map(DisplayTuple)),
@@ -260,7 +261,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 ranges_fully_read = false;
 
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "try_init_next_range_iterator: updated ranges_from={}, ranges_to={}",
+                    "updated ranges_from={}, ranges_to={}",
                     DisplayIter(ranges_from.iter().map(DisplayTuple)),
                     DisplayIter(ranges_to.iter().map(DisplayTuple)),
                 );
