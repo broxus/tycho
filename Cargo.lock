@@ -3438,6 +3438,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "dashmap",
  "everscale-crypto",
  "everscale-types",
  "futures-util",

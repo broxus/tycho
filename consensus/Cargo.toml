@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
+dashmap = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }

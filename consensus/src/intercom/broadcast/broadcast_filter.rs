@@ -139,7 +139,7 @@ impl BroadcastFilterInner {
             match try_by_round_entry {
                 Err(ExtendMapErr::CannotExtend) => (false, None),
                 // grab a lock
-                Ok(mut entry) if verified.is_ok() => {
+                Ok(mut entry) if verified.is_ok() && round >= top_dag_round.round() => {
                     let (peer_count, same_round) = entry.value_mut();
                     // ban the author, if we detect equivocation now; we won't be able to prove it
                     //   if some signatures are invalid (it's another reason for a local ban)
@@ -157,7 +157,7 @@ impl BroadcastFilterInner {
                 }
                 // points must be channelled to Collector only after signal that threshold is reached
                 // (i.e. round is advanced), so had to piggyback on map's locking
-                _ => {
+                Err(ExtendMapErr::RoundIsInDag) | Ok(_) => {
                     assert!(
                         verified.is_err() || round <= top_dag_round.round(),
                         "branch clause is broken, expected {round:?} <= top dag {:?}, \
@@ -194,14 +194,19 @@ impl BroadcastFilterInner {
             (false, None) // should ban sender
         };
 
-        if is_threshold_reached {
+        if is_threshold_reached && round >= top_dag_round.round() {
             // notify collector after max consensus round is updated
             // so engine will be consistent after collector finishes and exits
             self.consensus_round.set_max(round);
             // do not apply peer schedule changes as DagBack may be not ready validating smth old
-            self.output
-                .send(ConsensusEvent::Forward(round))
-                .expect("channel from filter to collector closed");
+            if round == top_dag_round.round() {
+                // do not wait for Collector to exit and advance engine round
+                self.advance_round(top_dag_round, downloader, store, effects);
+            } else {
+                self.output
+                    .send(ConsensusEvent::Forward(round))
+                    .expect("channel from filter to collector closed");
+            }
         }
 
         // we should ban a peer that broadcasts its rounds out of order,
@@ -263,6 +268,7 @@ impl BroadcastFilterInner {
         outdated.sort_unstable_by_key(|(round, _)| *round);
 
         let mut released = Vec::new();
+        let mut not_found = Vec::new();
         let mut missed = Vec::new();
         for (round, points) in outdated {
             let Some(point_round) = top_dag_round.scan(round) else {
@@ -283,19 +289,23 @@ impl BroadcastFilterInner {
             self.output
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
-            if let Some((_, (_, map_by_peer))) = self.by_round.remove(&round) {
-                if let Some(point_round) = top_dag_round.scan(round) {
-                    let points = map_by_peer
-                        .values()
-                        .flat_map(|map_by_digest| map_by_digest.values());
-                    for (point, _) in points {
-                        self.send_validating(&point_round, point, downloader, store, effects);
-                    }
-                    released.push(round.0);
-                } else {
-                    missed.push(round.0);
-                };
-            }
+            let dashmap::mapref::entry::Entry::Occupied(entry) = self.by_round.entry(round) else {
+                not_found.push(round.0);
+                continue;
+            };
+            if let Some(point_round) = top_dag_round.scan(round) {
+                let (_, map_by_peer) = entry.get();
+                let points = map_by_peer
+                    .values()
+                    .flat_map(|map_by_digest| map_by_digest.values());
+                for (point, _) in points {
+                    self.send_validating(&point_round, point, downloader, store, effects);
+                }
+                released.push(round.0);
+            } else {
+                missed.push(round.0);
+            };
+            entry.remove(); // release lock
         }
 
         tracing::debug!(
@@ -303,6 +313,7 @@ impl BroadcastFilterInner {
             to = top_round.0,
             released = debug(released),
             missed = debug(missed),
+            not_found = debug(not_found),
             "advance round"
         );
     }
