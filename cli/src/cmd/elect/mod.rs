@@ -266,10 +266,9 @@ impl CmdRun {
                 interval = 1; // retry nearly immediate
                 continue;
             };
-            let election_id = current_elections.elect_at;
 
             // Wait until stakes are unfrozen
-            if let Some(mut unfreeze_at) = elector_data.nearest_unfreeze_at(election_id) {
+            if let Some(mut unfreeze_at) = elector_data.nearest_unfreeze_at(elections_end) {
                 unfreeze_at += to_sec_or_max(self.stake_unfreeze_offset);
                 if unfreeze_at > elections_end.saturating_sub(elections_end_offset) {
                     tracing::warn!(

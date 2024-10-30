@@ -91,11 +91,11 @@ pub mod data {
     }
 
     impl PartialElectorData {
-        pub fn nearest_unfreeze_at(&self, election_id: u32) -> Option<u32> {
+        pub fn nearest_unfreeze_at(&self, time: u32) -> Option<u32> {
             self.past_elections
                 .values()
                 .map(|election| election.unfreeze_at)
-                .find(|&unfreeze_at| unfreeze_at < election_id)
+                .find(|&unfreeze_at| unfreeze_at < time)
         }
     }
 
