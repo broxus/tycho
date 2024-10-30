@@ -184,14 +184,14 @@ impl CmdRun {
             let client = f.create().await?;
 
             // Compute elections timeline
-            let (Timings { gen_utime }, elector_data) = client
-                .get_elector_data()
-                .await
-                .context("failed to get elector data")?;
             let config = client
                 .get_blockchain_config()
                 .await
                 .context("failed to get blockchain config")?;
+            let (Timings { gen_utime }, elector_data) = client
+                .get_elector_data(&config.elector_addr)
+                .await
+                .context("failed to get elector data")?;
             let timeline = config
                 .compute_elections_timeline(gen_utime)
                 .context("failed to compute elections timeline")?;
@@ -340,9 +340,8 @@ struct CmdOnce {
     #[clap(long)]
     stake_factor: Option<u32>,
 
-    /// Skip waiting for the message delivery.
-    #[clap(long)]
-    no_wait: bool,
+    #[clap(flatten)]
+    transfer: TransferArgs,
 }
 
 impl CmdOnce {
@@ -365,7 +364,7 @@ impl CmdOnce {
             let stake_factor = config.compute_stake_factor(self.stake_factor)?;
 
             // Get current elections
-            let (_, elector_data) = client.get_elector_data().await?;
+            let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
             let Some(Ref(elections)) = elector_data.current_election else {
                 return print_json(ParticipateStatus::NoElections);
             };
@@ -394,22 +393,19 @@ impl CmdOnce {
 
             let message = if stake_diff > 0 || update_member {
                 // Send stake
-                let message = wallet
-                    .transfer(ElectionsContext::make_elector_message(
-                        &wallet.address,
-                        &node_keys,
-                        elections.elect_at,
-                        stake_diff,
-                        stake_factor,
-                        config.signature_id,
-                    ))
-                    .await?;
-
-                if !self.no_wait {
-                    wallet.wait_delivered(&message).await?;
-                }
-
-                Some(message)
+                let internal = ElectionsContext::make_elector_message(
+                    &config.elector_addr,
+                    &wallet.address,
+                    &node_keys,
+                    elections.elect_at,
+                    stake_diff,
+                    stake_factor,
+                    config.signature_id,
+                );
+                wallet
+                    .transfer(internal, self.transfer.into_params())
+                    .await
+                    .map(Some)?
             } else {
                 None
             };
@@ -454,9 +450,8 @@ struct CmdRecover {
     #[clap(long)]
     sign: Option<PathBuf>,
 
-    /// Skip waiting for the message delivery.
-    #[clap(long)]
-    no_wait: bool,
+    #[clap(flatten)]
+    transfer: TransferArgs,
 }
 
 impl CmdRecover {
@@ -470,19 +465,16 @@ impl CmdRecover {
             let wallet = Wallet::new(&client, &wallet_keys.as_secret(), config.signature_id);
 
             // Find reward
-            let (_, elector_data) = client.get_elector_data().await?;
+            let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
             let Some(to_recover) = elector_data.credits.get(&wallet.address.address) else {
                 return print_json(RecoverStatus::NoReward);
             };
 
             // Send recover message
+            let internal = ElectionsContext::make_recover_msg(&config.elector_addr);
             let message = wallet
-                .transfer(ElectionsContext::make_recover_msg())
+                .transfer(internal, self.transfer.into_params())
                 .await?;
-
-            if !self.no_wait {
-                wallet.wait_delivered(&message).await?;
-            }
 
             // Done
             print_json(RecoverStatus::Recovered {
@@ -534,9 +526,8 @@ struct CmdWithdraw {
     #[clap(short, long)]
     payload: Option<String>,
 
-    /// Skip waiting for the message delivery.
-    #[clap(long)]
-    no_wait: bool,
+    #[clap(flatten)]
+    transfer: TransferArgs,
 }
 
 impl CmdWithdraw {
@@ -559,18 +550,16 @@ impl CmdWithdraw {
                 None => Amount::All,
                 Some(amount) => Amount::Exact(amount),
             };
-            let message = wallet
-                .transfer(InternalMessage {
-                    to: self.dest,
-                    amount,
-                    bounce: self.bounce,
-                    payload,
-                })
-                .await?;
 
-            if !self.no_wait {
-                wallet.wait_delivered(&message).await?;
-            }
+            let internal = InternalMessage {
+                to: self.dest,
+                amount,
+                bounce: self.bounce,
+                payload,
+            };
+            let message = wallet
+                .transfer(internal, self.transfer.into_params())
+                .await?;
 
             print_json(serde_json::json!({
                 "message": message,
@@ -589,13 +578,13 @@ struct CmdGetState {
 impl CmdGetState {
     fn run(self, args: BaseArgs) -> Result<()> {
         self.control.rt(args, move |client| async move {
-            let (_, elector_data) = client.get_elector_data().await?;
+            let config = client.get_blockchain_config().await?;
+            let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
             print_json(elector_data)
         })
     }
 }
 
-const ELECTOR_ADDR: StdAddr = StdAddr::new(-1, HashBytes([0x33; 32]));
 const ONE_CC: u128 = 1_000_000_000;
 
 // === Elections Logic ===
@@ -610,6 +599,7 @@ struct ElectionsContext<'a> {
 
 impl ElectionsContext<'_> {
     fn make_elector_message(
+        elector_addr: &StdAddr,
         wallet: &StdAddr,
         node_keys: &ed25519::KeyPair,
         election_id: u32,
@@ -651,14 +641,14 @@ impl ElectionsContext<'_> {
 
         // Final message
         InternalMessage {
-            to: ELECTOR_ADDR,
+            to: elector_addr.clone(),
             amount: Amount::Exact(stake + ONE_CC),
             bounce: true,
             payload,
         }
     }
 
-    fn make_recover_msg() -> InternalMessage {
+    fn make_recover_msg(elector_addr: &StdAddr) -> InternalMessage {
         let payload = elector::methods::recover_stake()
             .encode_internal_input(&[now_millis().into_abi().named("query_id")])
             .unwrap()
@@ -666,7 +656,7 @@ impl ElectionsContext<'_> {
             .unwrap();
 
         InternalMessage {
-            to: ELECTOR_ADDR,
+            to: elector_addr.clone(),
             amount: Amount::Exact(ONE_CC),
             bounce: true,
             payload,
@@ -693,16 +683,11 @@ impl SimpleValidatorParams {
                 // TODO: Lock some guard
 
                 tracing::info!(stake = stake.into_inner(), "recovering stake");
-
-                // TODO: Wait for balance
-                async {
-                    let message = wallet
-                        .transfer(ElectionsContext::make_recover_msg())
-                        .await?;
-                    wallet.wait_delivered(&message).await
-                }
-                .await
-                .context("failed to recover stake")?;
+                let message = ElectionsContext::make_recover_msg(&ctx.config.elector_addr);
+                wallet
+                    .transfer(message, TransferParams::reliable())
+                    .await
+                    .context("failed to recover stake")?;
             }
         }
 
@@ -728,26 +713,55 @@ impl SimpleValidatorParams {
             "electing as single",
         );
 
-        // TODO: Wait for balance
-        async {
-            let message = wallet
-                .transfer(ElectionsContext::make_elector_message(
-                    &wallet.address,
-                    &node_keys,
-                    ctx.current.elect_at,
-                    self.stake_per_round,
-                    stake_factor,
-                    ctx.config.signature_id,
-                ))
-                .await?;
-            wallet.wait_delivered(&message).await
-        }
-        .await
-        .context("failed to send stake")?;
+        let message = ElectionsContext::make_elector_message(
+            &ctx.config.elector_addr,
+            &wallet.address,
+            &node_keys,
+            ctx.current.elect_at,
+            self.stake_per_round,
+            stake_factor,
+            ctx.config.signature_id,
+        );
+        wallet
+            .transfer(message, TransferParams::reliable())
+            .await
+            .context("failed to send stake")?;
 
         // Done
         tracing::info!("sent validator stake");
         Ok(())
+    }
+}
+
+// === Transfer Args ===
+
+#[derive(Parser, Clone, Copy)]
+struct TransferArgs {
+    /// Wait for the account balance to be enough.
+    #[clap(long)]
+    wait_balance: bool,
+
+    /// Skip waiting for the message delivery.
+    #[clap(short, long)]
+    ignore_delivery: bool,
+
+    /// Message TTL.
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "40s")]
+    ttl: Duration,
+}
+
+impl TransferArgs {
+    fn into_params(self) -> TransferParams {
+        TransferParams {
+            reserve: if self.wait_balance {
+                TransferParams::DEFAULT_RESERVE
+            } else {
+                0
+            },
+            timeout: self.ttl,
+            wait_for_balance: self.wait_balance,
+            wait_for_delivery: self.ignore_delivery,
+        }
     }
 }
 
@@ -777,28 +791,49 @@ impl Wallet {
         }
     }
 
-    async fn transfer(&self, msg: InternalMessage) -> Result<SentMessage> {
-        let account = {
-            let (_, account) = self.client.get_account_state(&self.address).await?;
-            account.context("wallet account does not exist")?
-        };
-
-        let init = match account.state {
-            AccountState::Active(_) => None,
-            AccountState::Uninit => Some(wallet::make_state_init(
-                &ed25519::PublicKey::from_bytes(self.public.to_bytes()).unwrap(),
-            )),
-            AccountState::Frozen(_) => anyhow::bail!("wallet account is frozen"),
-        };
+    async fn transfer(&self, msg: InternalMessage, params: TransferParams) -> Result<SentMessage> {
+        const BALANCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
         let (value, flags) = match msg.amount {
             Amount::Exact(value) => (value, wallet::MSG_FLAGS_SIMPLE_SEND),
             Amount::All => (0, wallet::MSG_FLAGS_SEND_ALL),
         };
-        anyhow::ensure!(
-            account.balance.tokens.into_inner() >= value,
-            "insufficient balance"
-        );
+
+        let target_balance = value.saturating_add(params.reserve);
+        let mut prev_balance = None;
+        let init = loop {
+            let account = {
+                let (_, account) = self.client.get_account_state(&self.address).await?;
+                account.context("wallet account does not exist")?
+            };
+            let account_balance = account.balance.tokens.into_inner();
+
+            if account_balance < target_balance {
+                if !params.wait_for_balance {
+                    anyhow::bail!("insufficient balance");
+                }
+
+                if prev_balance != Some(account_balance) {
+                    tracing::warn!(
+                        account_balance,
+                        target_balance,
+                        "insufficient balance, waiting for refill"
+                    );
+                }
+                prev_balance = Some(account_balance);
+
+                tokio::time::sleep(BALANCE_POLL_INTERVAL).await;
+                continue;
+            }
+
+            break match account.state {
+                AccountState::Active(_) => None,
+                AccountState::Uninit => Some(wallet::make_state_init(
+                    &ed25519::PublicKey::from_bytes(self.public.to_bytes()).unwrap(),
+                )),
+                AccountState::Frozen(_) => anyhow::bail!("wallet account is frozen"),
+            };
+        };
 
         let AbiValue::Tuple(inputs) = wallet::methods::SendTransactionInputs {
             dest: msg.to,
@@ -811,8 +846,10 @@ impl Wallet {
             unreachable!();
         };
 
+        let ttl = params.timeout.as_secs().clamp(1, 60) as u32;
+
         let now_ms = now_millis();
-        let expire_at = (now_ms / 1000) as u32 + 40;
+        let expire_at = (now_ms / 1000) as u32 + ttl;
         let body = wallet::methods::send_transaction()
             .encode_external(&inputs)
             .with_address(&self.address)
@@ -837,11 +874,17 @@ impl Wallet {
 
         self.client.broadcast_message(message_cell.as_ref()).await?;
 
-        Ok(SentMessage {
+        let message = SentMessage {
             timestamp: now_ms,
             hash: *message_cell.repr_hash(),
             expire_at,
-        })
+        };
+
+        if params.wait_for_delivery {
+            self.wait_delivered(&message).await?;
+        }
+
+        Ok(message)
     }
 
     // TODO: Use some better way to determine the delivery status.
@@ -880,6 +923,28 @@ impl Wallet {
             if timings.gen_utime > message.expire_at {
                 anyhow::bail!("message was not delivered");
             }
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+struct TransferParams {
+    reserve: u128,
+    timeout: Duration,
+    wait_for_balance: bool,
+    wait_for_delivery: bool,
+}
+
+impl TransferParams {
+    const DEFAULT_RESERVE: u128 = ONE_CC / 2;
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(40);
+
+    fn reliable() -> Self {
+        Self {
+            reserve: Self::DEFAULT_RESERVE,
+            timeout: Self::DEFAULT_TIMEOUT,
+            wait_for_balance: true,
+            wait_for_delivery: true,
         }
     }
 }
@@ -1005,10 +1070,13 @@ struct Client {
 }
 
 impl Client {
-    async fn get_elector_data(&self) -> Result<(Timings, elector::data::PartialElectorData)> {
+    async fn get_elector_data(
+        &self,
+        elector_addr: &StdAddr,
+    ) -> Result<(Timings, elector::data::PartialElectorData)> {
         static ELECTOR_ABI: OnceLock<AbiType> = OnceLock::new();
 
-        let (timings, account) = self.get_account_state(&ELECTOR_ADDR).await?;
+        let (timings, account) = self.get_account_state(elector_addr).await?;
         let account = account.context("elector account not found")?;
 
         let elector_data = match account.state {
@@ -1028,11 +1096,11 @@ impl Client {
         match self.inner.as_ref() {
             ClientImpl::Jrpc(rpc) => {
                 let res = rpc.get_config().await?;
-                ParsedBlockchainConfig::new(res.global_id, res.seqno, res.config)
+                ParsedBlockchainConfig::new(res.global_id, res.config)
             }
             ClientImpl::Control(control) => {
                 let res = control.get_blockchain_config().await?.parse()?;
-                ParsedBlockchainConfig::new(res.global_id, res.mc_seqno, res.config)
+                ParsedBlockchainConfig::new(res.global_id, res.config)
             }
         }
     }
@@ -1090,13 +1158,15 @@ struct Timings {
 }
 
 struct ParsedBlockchainConfig {
+    elector_addr: StdAddr,
     signature_id: Option<i32>,
     stake_params: ValidatorStakeParams,
     config: BlockchainConfig,
 }
 
 impl ParsedBlockchainConfig {
-    fn new(global_id: i32, _mc_seqno: u32, config: BlockchainConfig) -> Result<Self> {
+    fn new(global_id: i32, config: BlockchainConfig) -> Result<Self> {
+        let elector_addr = StdAddr::new(-1, config.get_elector_address()?);
         let version = config.get_global_version()?;
         let signature_id = version
             .capabilities
@@ -1106,6 +1176,7 @@ impl ParsedBlockchainConfig {
         let stake_params = config.get_validator_stake_params()?;
 
         Ok(Self {
+            elector_addr,
             signature_id,
             stake_params,
             config,
