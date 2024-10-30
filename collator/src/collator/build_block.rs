@@ -596,10 +596,7 @@ impl CollatorStdImpl {
             }
         }
 
-        let max_consensus_lag = config
-            .params
-            .get_consensus_config()?
-            .max_consensus_lag_rounds as u32;
+        let consensus_config = config.params.get_consensus_config()?;
         let mut validator_info = None;
         if is_key_block {
             // check if validator set changed by the cells hash
@@ -615,10 +612,23 @@ impl CollatorStdImpl {
                     .as_ref()
                     .map(|ext_upto| ext_upto.processed_to.0)
                     .unwrap_or_default();
-                // `+1` because it will be the first mempool round in the new session,
-                // while `prev_processed_to_anchor` is a round in the ending session,
-                // and there is exactly `max_consensus_lag` rounds between them
-                let session_update_round = prev_processed_to_anchor + max_consensus_lag + 1;
+
+                let session_update_round = {
+                    // consensus session cannot abort until reaching full history amount of rounds,
+                    // because mempool has to re-validate historical points during sync,
+                    // and can hold just one previous vset to check peer authority
+                    let full_history_round = consensus_info.prev_config_round
+                        + consensus_config.max_consensus_lag_rounds as u32
+                        + consensus_config.sync_support_rounds as u32
+                        + consensus_config.deduplicate_rounds as u32
+                        + consensus_config.commit_history_rounds as u32;
+                    // `prev_processed_to_anchor` is a round in the ending session, after which
+                    // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
+                    let mempool_last_created_round =
+                        prev_processed_to_anchor + consensus_config.max_consensus_lag_rounds as u32;
+                    // `+1` because it will be the first mempool round in the new session
+                    full_history_round.max(mempool_last_created_round) + 1
+                };
 
                 // currently we simultaneously update session_seqno in collation and session_update_round in consesus
                 if consensus_info.config_update_round < session_update_round {

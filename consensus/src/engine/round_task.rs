@@ -174,7 +174,8 @@ impl RoundTaskReady {
         let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
         let top_known_anchor = top_known_anchor_recv.get();
         let silent_after = CachedConfig::silent_after(top_known_anchor);
-        // FIXME this must be `<=`, changed to `<` until mempool restart is done to support epoch changes
+        // Note silence bound is exclusive with `<` because new vset must be known for dag top
+        //  (the next after engine round), while vset switch round is exactly silence bound + 1
         let wait_collator_ready = if consensus_round < silent_after {
             future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
         } else {
