@@ -150,10 +150,30 @@ impl ShardStateStorage {
     }
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
-        let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(cell_id)?;
+        tracing::info!(
+            seqno = block_id.seqno,
+            tracker = self.min_ref_mc_state.seqno(),
+            "load state",
+        );
 
-        ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
+        let cell_id = self.load_state_root(block_id)?;
+        tracing::info!(seqno = block_id.seqno,, "state root loaded");
+        let cell = self.cell_storage.load_cell(cell_id)?;
+        tracing::info!(seqno = block_id.seqno,, "cell loaded");
+
+        let state = ShardStateStuff::from_root(
+            block_id,
+            Cell::from(cell as Arc<_>),
+            &self.min_ref_mc_state,
+        )?;
+
+        tracing::info!(
+            seqno = block_id.seqno,
+            tracker = self.min_ref_mc_state.seqno(),
+            "state loaded",
+        );
+
+        Ok(state)
     }
 
     #[tracing::instrument(skip(self))]
