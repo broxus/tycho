@@ -39,10 +39,12 @@ pub(super) struct ExecutionManager {
     shard_id: ShardIdent,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
+
     /// flag indicates that should read ext messages
     read_ext_messages: bool,
     /// flag indicates that should read new messages
     read_new_messages: bool,
+
     /// last read to anchor chain time
     last_read_to_anchor_chain_time: Option<u64>,
 
@@ -92,6 +94,11 @@ impl ExecutionManager {
             add_to_message_groups_total_elapsed: Duration::ZERO,
             last_read_to_anchor_chain_time: None,
         }
+    }
+
+    pub fn reset_read_flags(&mut self) {
+        self.read_ext_messages = false;
+        self.read_new_messages = false;
     }
 
     pub fn get_last_read_to_anchor_chain_time(&self) -> Option<u64> {

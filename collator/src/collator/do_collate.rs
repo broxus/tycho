@@ -224,6 +224,10 @@ impl CollatorStdImpl {
                     break;
                 }
             }
+
+            // next time we should read next message group like we did not make refill before
+            // so we need to reset flags that control from where to read messages
+            exec_manager.reset_read_flags();
         }
 
         let prepare_elapsed = prepare_histogram.finish();
