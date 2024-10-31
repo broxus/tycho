@@ -21,7 +21,7 @@ source "${script_dir}/common.sh"
 CHECK_INTERVAL=10
 TARGET_COUNT=3
 while true; do
-    output=$($tycho_bin node list-archives --sock .temp/control-1.sock)
+    output=$($tycho_bin node list-archives --control-socket .temp/control1.sock)
     echo "$output"
 
     if [ $? -ne 0 ]; then
@@ -46,7 +46,7 @@ ids=$(echo "$output" | jq -r '.[].id')
 counter=1
 for id in $ids; do
     output="$output_dir/archive_${counter}.bin"
-    $tycho_bin node dump-archive --sock .temp/control-1.sock --seqno $id $output
+    $tycho_bin node dump-archive --control-socket .temp/control1.sock --seqno $id $output
 
     echo "Archive '$id' dumped into '$output'."
 
