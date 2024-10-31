@@ -7,12 +7,12 @@ use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::StdAddr;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tycho_core::global_config::GlobalConfig;
 use tycho_util::FastHashMap;
 
-use crate::node::{NodeConfig, NodeKeys};
-use crate::util::{create_dir_all, print_json};
+use crate::node::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
+use crate::util::{create_dir_all, print_json, FpTokens};
 use crate::BaseArgs;
 
 const TYCHO_SERVICE: &str = "tycho";
@@ -26,7 +26,27 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory={work_dir}
-ExecStart={tycho_bin} node run --mempool-start-round 0
+ExecStart={tycho_bin} node run
+Environment=RUST_BACKTRACE=1,RUST_LIB_BACKTRACE=0
+
+[Install]
+WantedBy=multi-user.target
+"#
+    };
+}
+
+const TYCHO_ELECT_SERVICE: &str = "tycho-elect";
+macro_rules! elect_service {
+    () => {
+        r#"[Unit]
+Description=Tycho Node Elections
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory={work_dir}
+ExecStart={tycho_bin} elect run
 Environment=RUST_BACKTRACE=1,RUST_LIB_BACKTRACE=0
 
 [Install]
@@ -44,8 +64,12 @@ pub struct Cmd {
     binary: PathBuf,
 
     /// Whether to init as a validator.
-    #[clap(long)]
+    #[clap(long, requires = "stake")]
     validator: bool,
+
+    /// Validator stake per round.
+    #[clap(long)]
+    stake: Option<FpTokens>,
 
     /// Whether to create a systemd services.
     #[clap(long)]
@@ -80,20 +104,23 @@ impl Cmd {
 
         // Create node keys if not exists
         let node_keys_path = args.node_keys_path(None);
-        let node_keys_updated = !node_keys_path.exists();
-        let node_keys_public =
-            prepare_keys(&node_keys_path).context("failed to prepare node keys")?;
+        let (node_keys_updated, node_keys_public) =
+            prepare_node_keys(&node_keys_path).context("failed to prepare node keys")?;
 
         // Create validator keys if not exists
-        let mut validator_keys = None;
+        let mut elections_config = None;
         if self.validator {
-            let path = args.validator_keys_path(None);
-            let updated = !path.exists();
-            let (public, wallet) =
-                prepare_keys_with_wallet(&path).context("failed to prepare validator keys")?;
-            validator_keys = Some(ValidatorKeysInfo {
-                wallet,
+            let stake = self.stake.unwrap();
+
+            let path = args.elections_config_path(None);
+            let (updated, simple) = prepare_elections_config(&path, stake)
+                .context("failed to prepare elections config")?;
+            let public = simple.public_key();
+
+            elections_config = Some(ElectionsConfigInfo {
+                wallet: simple.wallet_address,
                 public: HashBytes(public.to_bytes()),
+                stake,
                 path,
                 updated,
             });
@@ -134,31 +161,11 @@ impl Cmd {
             .context("failed to save global config")?;
 
         // Create systemd services if requested
-        let mut systemd_services = None;
-        if self.systemd {
-            let systemd_dir = create_user_systemd_dir()?;
-
-            let mut service_info = FastHashMap::default();
-
-            let tycho_service_path = systemd_dir.join(format!("{TYCHO_SERVICE}.service"));
-            let tycho_service_updated = !tycho_service_path.exists();
-            if !tycho_service_path.exists() {
-                let tycho_service = format!(
-                    node_service!(),
-                    work_dir = args.home.display(),
-                    tycho_bin = self.binary.display(),
-                );
-                std::fs::write(&tycho_service_path, tycho_service)
-                    .with_context(|| format!("failed to save {}", tycho_service_path.display()))?
-            }
-
-            service_info.insert(TYCHO_SERVICE, SystemdServiceInfo {
-                updated: tycho_service_updated,
-                path: tycho_service_path,
-            });
-
-            systemd_services = Some(service_info);
-        }
+        let systemd_services = self
+            .systemd
+            .then(|| prepare_systemd_services(&args.home, &self.binary))
+            .transpose()
+            .context("failed to prepare systemd services")?;
 
         // Print
         print_json(serde_json::json!({
@@ -167,7 +174,7 @@ impl Cmd {
                 "path": node_keys_path,
                 "updated": node_keys_updated,
             },
-            "validator_keys": validator_keys,
+            "elections": elections_config,
             "node_config": {
                 "path": config_path,
                 "updated": config_updated,
@@ -227,30 +234,27 @@ impl CmdInitConfig {
 /// Generate validator keys and wallet.
 #[derive(Parser)]
 struct CmdInitValidator {
-    /// Overwrite existing keys (MAKE SURE TO MAKE A BACKUP FIRST).
+    /// Validator stake per round.
     #[clap(long)]
-    force: bool,
+    stake: FpTokens,
 }
 
 impl CmdInitValidator {
     fn run(self, args: BaseArgs) -> Result<()> {
-        let path = args.validator_keys_path(None);
-        if path.exists() && !self.force {
-            anyhow::bail!("validator keys file already exists, use --force to overwrite");
-        }
-
+        let path = args.elections_config_path(None);
         args.create_home_dir()?;
 
-        let (public, wallet) = save_keys_with_wallet(&generate_key(), &path)
-            .context("failed to save validator keys")?;
+        let (updated, simple) = prepare_elections_config(&path, self.stake)
+            .context("failed to prepare elections config")?;
+        let public = simple.public_key();
 
-        // Print
         print_json(serde_json::json!({
-            "validator_keys": ValidatorKeysInfo {
-                wallet,
+            "elections_config": ElectionsConfigInfo {
+                wallet: simple.wallet_address,
                 public: HashBytes(public.to_bytes()),
+                stake: self.stake,
                 path,
-                updated: true,
+                updated,
             },
         }))
     }
@@ -262,135 +266,118 @@ struct CmdInitSystemd {
     /// Path to the `tycho` binary.
     #[clap(short, long, value_parser, default_value_os = default_binary_path().as_os_str())]
     binary: PathBuf,
-
-    /// Overwrite the existing config.
-    #[clap(short, long)]
-    force: bool,
 }
 
 impl CmdInitSystemd {
     fn run(self, args: BaseArgs) -> Result<()> {
-        let systemd_dir = create_user_systemd_dir()?;
+        let service_info = prepare_systemd_services(&args.home, &self.binary)
+            .context("failed to prepare systemd services")?;
 
-        let tycho_service_path = systemd_dir.join(TYCHO_SERVICE);
-        let tycho_service_updated = !tycho_service_path.exists();
-        if !tycho_service_path.exists() {
-            let tycho_service = format!(
-                node_service!(),
-                work_dir = args.home.display(),
-                tycho_bin = self.binary.display(),
-            );
-            std::fs::write(&tycho_service_path, tycho_service)
-                .with_context(|| format!("failed to save {}", tycho_service_path.display()))?
-        }
-
-        let mut service_info = FastHashMap::default();
-        service_info.insert(TYCHO_SERVICE, SystemdServiceInfo {
-            updated: tycho_service_updated,
-            path: tycho_service_path,
-        });
-
-        // Print
         print_json(serde_json::json!({
             "systemd": service_info,
         }))
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ValidatorKeysInfo {
+#[derive(Debug, Serialize)]
+struct ElectionsConfigInfo {
     wallet: StdAddr,
     public: HashBytes,
+    stake: FpTokens,
     path: PathBuf,
     updated: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct SystemdServiceInfo {
     path: PathBuf,
     updated: bool,
 }
 
-fn prepare_keys<P: AsRef<Path>>(path: P) -> Result<ed25519::PublicKey> {
+fn prepare_systemd_services(
+    home_dir: &Path,
+    binary: &Path,
+) -> Result<FastHashMap<&'static str, SystemdServiceInfo>> {
+    let systemd_dir = create_user_systemd_dir()?;
+
+    let service_file = |name: &str| format!("{name}.service");
+
+    let mut service_info = FastHashMap::default();
+
+    let node_service_path = systemd_dir.join(service_file(TYCHO_SERVICE));
+    let node_service_updated = !node_service_path.exists();
+    if !node_service_path.exists() {
+        let node_service = format!(
+            node_service!(),
+            work_dir = home_dir.display(),
+            tycho_bin = binary.display(),
+        );
+        std::fs::write(&node_service_path, node_service)
+            .with_context(|| format!("failed to save {}", node_service_path.display()))?
+    }
+    service_info.insert(TYCHO_SERVICE, SystemdServiceInfo {
+        updated: node_service_updated,
+        path: node_service_path,
+    });
+
+    let elect_service_path = systemd_dir.join(service_file(TYCHO_ELECT_SERVICE));
+    let elect_service_updated = !elect_service_path.exists();
+    if !elect_service_path.exists() {
+        let elect_service = format!(
+            elect_service!(),
+            work_dir = home_dir.display(),
+            tycho_bin = binary.display(),
+        );
+        std::fs::write(&elect_service_path, elect_service)
+            .with_context(|| format!("failed to save {}", elect_service_path.display()))?
+    }
+    service_info.insert(TYCHO_ELECT_SERVICE, SystemdServiceInfo {
+        updated: elect_service_updated,
+        path: elect_service_path,
+    });
+
+    Ok(service_info)
+}
+
+fn prepare_node_keys<P: AsRef<Path>>(path: P) -> Result<(bool, ed25519::PublicKey)> {
     if path.as_ref().exists() {
         let keys = NodeKeys::from_file(path)?;
-        Ok(ed25519::PublicKey::from(&keys.as_secret()))
+        Ok((false, ed25519::PublicKey::from(&keys.as_secret())))
     } else {
-        save_keys(&generate_key(), path)
+        let keys = rand::random::<NodeKeys>();
+
+        let data = serde_json::to_string_pretty(&keys)?;
+        std::fs::write(path, data)?;
+
+        Ok((true, ed25519::PublicKey::from(&keys.as_secret())))
     }
 }
 
-fn save_keys<P: AsRef<Path>>(secret: &ed25519::SecretKey, path: P) -> Result<ed25519::PublicKey> {
-    let public = ed25519::PublicKey::from(secret);
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&serde_json::json!({
-            "public": hex::encode(public.as_bytes()),
-            "secret": hex::encode(secret.as_bytes()),
-        }))?,
-    )?;
-    Ok(public)
-}
-
-fn prepare_keys_with_wallet<P: AsRef<Path>>(path: P) -> Result<(ed25519::PublicKey, StdAddr)> {
-    #[derive(Debug, Clone, Deserialize)]
-    struct NodeKeysPartial {
-        secret: HashBytes,
-        #[serde(default)]
-        public: Option<HashBytes>,
-        #[serde(default)]
-        wallet: Option<StdAddr>,
-    }
-
-    if path.as_ref().exists() {
-        let partial = tycho_util::serde_helpers::load_json_from_file::<NodeKeysPartial, _>(path)?;
-        let secret = ed25519::SecretKey::from_bytes(*partial.secret.as_array());
-
-        let public = ed25519::PublicKey::from(&secret);
-        if let Some(stored_public) = partial.public {
-            anyhow::ensure!(
-                stored_public.as_array() == public.as_bytes(),
-                "public key mismatch (stored: {stored_public}, expected: {public})",
-            );
-        }
-
-        let wallet = validator_wallet(&public);
-        if let Some(stored_wallet) = partial.wallet {
-            anyhow::ensure!(
-                stored_wallet == wallet,
-                "wallet address mismatch (stored: {stored_wallet}, expected: {wallet})",
-            );
-        }
-
-        Ok((public, wallet))
-    } else {
-        save_keys_with_wallet(&generate_key(), path)
-    }
-}
-
-fn save_keys_with_wallet<P: AsRef<Path>>(
-    secret: &ed25519::SecretKey,
+fn prepare_elections_config<P: AsRef<Path>>(
     path: P,
-) -> Result<(ed25519::PublicKey, StdAddr)> {
-    let public = ed25519::PublicKey::from(secret);
-    let wallet = validator_wallet(&public);
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&serde_json::json!({
-            "public": hex::encode(public.as_bytes()),
-            "secret": hex::encode(secret.as_bytes()),
-            "wallet": wallet,
-        }))?,
-    )?;
-    Ok((public, wallet))
+    stake: FpTokens,
+) -> Result<(bool, SimpleElectionsConfig)> {
+    let mut updated = false;
+    let mut simple = if path.as_ref().exists() {
+        match tycho_util::serde_helpers::load_json_from_file::<ElectionsConfig, _>(&path)? {
+            ElectionsConfig::Simple(config) => config,
+        }
+    } else {
+        updated = true;
+        SimpleElectionsConfig::from_key(&generate_key(), Some(stake), None)
+    };
+
+    updated |= simple.stake != Some(stake);
+    simple.stake = Some(stake);
+
+    let data = serde_json::to_string_pretty(&ElectionsConfig::Simple(simple.clone()))?;
+    std::fs::write(path, data)?;
+
+    Ok((updated, simple))
 }
 
 fn generate_key() -> ed25519::SecretKey {
     ed25519::SecretKey::from_bytes(rand::thread_rng().gen())
-}
-
-fn validator_wallet(public: &ed25519::PublicKey) -> StdAddr {
-    crate::util::wallet::compute_address(-1, public)
 }
 
 fn default_binary_path() -> &'static Path {

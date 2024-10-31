@@ -8,7 +8,7 @@ use everscale_types::prelude::*;
 
 pub fn build_elections_data_to_sign(
     election_id: u32,
-    max_factor: u32,
+    stake_factor: u32,
     address: &HashBytes,
     adnl_addr: &HashBytes,
 ) -> Vec<u8> {
@@ -17,7 +17,7 @@ pub fn build_elections_data_to_sign(
     let mut data = Vec::with_capacity(4 + 4 + 4 + 32 + 32);
     data.extend_from_slice(&TL_ID.to_be_bytes());
     data.extend_from_slice(&election_id.to_be_bytes());
-    data.extend_from_slice(&max_factor.to_be_bytes());
+    data.extend_from_slice(&stake_factor.to_be_bytes());
     data.extend_from_slice(address.as_slice());
     data.extend_from_slice(adnl_addr.as_array());
     data

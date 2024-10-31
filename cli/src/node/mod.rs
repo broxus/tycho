@@ -42,13 +42,13 @@ use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{NodeSyncState, Storage};
 use tycho_util::futures::JoinTask;
 
-pub use self::config::{MetricsConfig, NodeConfig, NodeKeys};
+pub use self::config::{
+    ElectionsConfig, MetricsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig,
+};
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
 
 mod config;
-
-const SERVICE_NAME: &str = "tycho-node";
 
 pub struct Node {
     keypair: Arc<ed25519::KeyPair>,
@@ -251,7 +251,11 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    async fn run(self, last_block_id: &BlockId, last_mc_block_seqno: Option<u32>) -> Result<()> {
+    pub async fn run(
+        self,
+        last_block_id: &BlockId,
+        last_mc_block_seqno: Option<u32>,
+    ) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage

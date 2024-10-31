@@ -216,7 +216,7 @@ pub struct BlockListResponse {
 pub struct ElectionsPayloadRequest {
     pub election_id: u32,
     pub address: HashBytes,
-    pub max_factor: u32,
+    pub stake_factor: u32,
     pub public_key: HashBytes,
     pub adnl_addr: HashBytes,
 }

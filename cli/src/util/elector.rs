@@ -39,7 +39,7 @@ pub mod methods {
         pub query_id: u64,
         pub validator_key: HashBytes,
         pub stake_at: u32,
-        pub max_factor: u32,
+        pub stake_factor: u32,
         pub adnl_addr: HashBytes,
         pub signature: Vec<u8>,
     }
@@ -51,7 +51,7 @@ pub mod methods {
                 u64::abi_type().named("query_id"),
                 HashBytes::abi_type().named("validator_key"),
                 u32::abi_type().named("stake_at"),
-                u32::abi_type().named("max_factor"),
+                u32::abi_type().named("stake_factor"),
                 HashBytes::abi_type().named("adnl_addr"),
                 Bytes::abi_type().named("signature"),
             ])
@@ -65,7 +65,7 @@ pub mod methods {
                 self.query_id.into_abi().named("query_id"),
                 self.validator_key.into_abi().named("validator_key"),
                 self.stake_at.into_abi().named("stake_at"),
-                self.max_factor.into_abi().named("max_factor"),
+                self.stake_factor.into_abi().named("stake_factor"),
                 self.adnl_addr.into_abi().named("adnl_addr"),
                 // TODO: Just use `self.signature.as_abi()` when the fix is merged.
                 AbiValue::bytes(self.signature.clone()).named("signature"),
@@ -171,7 +171,7 @@ pub mod data {
     pub struct ElectionMember {
         pub msg_value: FpTokens,
         pub created_at: u32,
-        pub max_factor: u32,
+        pub stake_factor: u32,
         pub src_addr: HashBytes,
         pub adnl_addr: HashBytes,
     }
@@ -182,7 +182,7 @@ pub mod data {
             AbiType::tuple([
                 FpTokens::abi_type().named("msg_value"),
                 u32::abi_type().named("created_at"),
-                u32::abi_type().named("max_factor"),
+                u32::abi_type().named("stake_factor"),
                 HashBytes::abi_type().named("src_addr"),
                 HashBytes::abi_type().named("adnl_addr"),
             ])
@@ -192,12 +192,12 @@ pub mod data {
     // TODO: Replace with macros
     impl FromAbi for ElectionMember {
         fn from_abi(value: AbiValue) -> Result<Self> {
-            let (msg_value, created_at, max_factor, src_addr, adnl_addr) = <_>::from_abi(value)?;
+            let (msg_value, created_at, stake_factor, src_addr, adnl_addr) = <_>::from_abi(value)?;
 
             Ok(Self {
                 msg_value,
                 created_at,
-                max_factor,
+                stake_factor,
                 src_addr,
                 adnl_addr,
             })

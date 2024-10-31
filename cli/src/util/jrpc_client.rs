@@ -41,6 +41,7 @@ impl JrpcClient {
             params: &Params { message },
         })
         .await
+        .context("failed to send message")
     }
 
     pub async fn get_account(&self, address: &StdAddr) -> Result<AccountStateResponse> {
@@ -54,6 +55,7 @@ impl JrpcClient {
             params: &Params { address },
         })
         .await
+        .context("failed to get account state")
     }
 
     pub async fn get_config(&self) -> Result<LatestBlockchainConfig> {
@@ -62,6 +64,7 @@ impl JrpcClient {
             params: &(),
         })
         .await
+        .context("failed to get blockchain config")
     }
 
     pub async fn post<Q, R>(&self, data: &Q) -> Result<R>
@@ -79,7 +82,7 @@ impl JrpcClient {
         let res = response.text().await?;
         tracing::debug!(res);
 
-        match serde_json::from_str(&res)? {
+        match serde_json::from_str(&res).context("invalid JRPC response")? {
             JrpcResponse::Success(res) => Ok(res),
             JrpcResponse::Err(err) => anyhow::bail!(err),
         }

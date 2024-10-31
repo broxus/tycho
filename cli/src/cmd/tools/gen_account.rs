@@ -4,7 +4,7 @@ use everscale_types::models::{Account, AccountState, OptionalAccount, StateInit,
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 
-use crate::util::{compute_storage_used, parse_public_key, print_json};
+use crate::util::{compute_storage_used, parse_public_key, print_json, FpTokens};
 
 /// Generate an account state
 #[derive(clap::Parser)]
@@ -39,13 +39,13 @@ impl SubCmd {
 /// Generate a simple wallet state
 #[derive(clap::Parser)]
 struct WalletCmd {
-    /// account public key
+    /// Account public key.
     #[clap(short, long, required = true)]
     pubkey: String,
 
-    /// initial balance of the wallet (in nano)
+    /// Initial balance of the wallet.
     #[clap(short, long, required = true)]
-    balance: Tokens,
+    balance: FpTokens,
 }
 
 impl WalletCmd {
@@ -55,7 +55,7 @@ impl WalletCmd {
 
         let (account, state) = WalletBuilder {
             pubkey,
-            balance: self.balance,
+            balance: self.balance.into(),
         }
         .build()?;
 
@@ -70,9 +70,9 @@ struct MultisigCmd {
     #[clap(short, long, required = true)]
     pubkey: String,
 
-    /// initial balance of the wallet (in nano)
+    /// initial balance of the wallet
     #[clap(short, long, required = true)]
-    balance: Tokens,
+    balance: FpTokens,
 
     /// list of custodian public keys
     #[clap(short, long)]
@@ -109,7 +109,7 @@ impl MultisigCmd {
             updatable: self.updatable,
             required_confirms: self.req_confirms,
             lifetime: self.lifetime,
-            balance: self.balance,
+            balance: self.balance.into(),
         }
         .build()?;
 
@@ -124,9 +124,9 @@ struct GiverCmd {
     #[clap(short, long, required = true)]
     pubkey: String,
 
-    /// initial balance of the giver (in nano)
+    /// initial balance of the giver
     #[clap(short, long, required = true)]
-    balance: Tokens,
+    balance: FpTokens,
 }
 
 impl GiverCmd {
@@ -136,7 +136,7 @@ impl GiverCmd {
 
         let (account, state) = GiverBuilder {
             pubkey,
-            balance: self.balance,
+            balance: self.balance.into(),
         }
         .build()?;
 
