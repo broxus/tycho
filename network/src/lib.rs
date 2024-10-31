@@ -70,7 +70,6 @@ mod tests {
 
         let network = Network::builder()
             .with_random_private_key()
-            .with_service_name("test-service")
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 

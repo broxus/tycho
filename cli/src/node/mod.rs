@@ -56,8 +56,6 @@ use crate::util::alloc::JemallocMemoryProfiler;
 pub mod config;
 mod control;
 
-const SERVICE_NAME: &str = "tycho-node";
-
 /// Generate a default node config.
 #[derive(Parser)]
 pub struct CmdInitConfig {
@@ -266,7 +264,6 @@ impl Node {
         let network = Network::builder()
             .with_config(node_config.network)
             .with_private_key(keys.secret.0)
-            .with_service_name(SERVICE_NAME)
             .with_remote_addr(public_addr)
             .build(local_addr, router)
             .wrap_err("failed to build node network")?;

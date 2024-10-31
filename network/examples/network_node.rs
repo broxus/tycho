@@ -241,7 +241,6 @@ impl Node {
         let network = Network::builder()
             .with_config(config.network)
             .with_private_key(key.to_bytes())
-            .with_service_name("test-service")
             .with_remote_addr(remote_addr)
             .build(address, router)?;
 

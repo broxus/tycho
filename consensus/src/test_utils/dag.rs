@@ -28,7 +28,6 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 ) -> (DagRound, PeerSchedule, Downloader) {
     let network = Network::builder()
         .with_random_private_key()
-        .with_service_name("mempool-stub-network-service")
         .build("0.0.0.0:0", Router::builder().build())
         .expect("network with unused stub socket");
 

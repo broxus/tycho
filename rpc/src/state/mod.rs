@@ -678,11 +678,10 @@ mod test {
         service_query_fn(handle).boxed_clone()
     }
 
-    fn make_network(service_name: &str) -> Result<Network> {
+    fn make_network() -> Result<Network> {
         Network::builder()
             .with_config(NetworkConfig::default())
             .with_random_private_key()
-            .with_service_name(service_name)
             .build("127.0.0.1:0", echo_service())
     }
 
@@ -729,7 +728,7 @@ mod test {
 
         let config = RpcConfig::default();
 
-        let network = make_network("tycho")?;
+        let network = make_network()?;
 
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
             BlockchainRpcService::builder()
@@ -797,7 +796,7 @@ mod test {
             .build()
             .await?;
 
-        let network = make_network("tycho")?;
+        let network = make_network()?;
 
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
             BlockchainRpcService::builder()

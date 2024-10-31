@@ -84,8 +84,7 @@ pub fn from_validator<T: ToSocket, A: Into<Address>>(
 
     let mut network_builder = Network::builder()
         .with_config(network_config)
-        .with_private_key(secret_key.to_bytes())
-        .with_service_name("mempool-test-network-service");
+        .with_private_key(secret_key.to_bytes());
     if let Some(remote_addr) = remote_addr {
         network_builder = network_builder.with_remote_addr(remote_addr);
     }
