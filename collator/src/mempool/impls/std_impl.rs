@@ -34,7 +34,7 @@ struct UnappliedConfig {
 
 impl UnappliedConfig {
     fn apply_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
-        let round = new_cx.consensus_info.config_update_round;
+        let round = new_cx.consensus_info.vset_switch_round;
         let whole_set = (new_cx.current_validator_set.1.list.iter())
             .map(|descr| PeerId(descr.public_key.0))
             .collect::<Vec<_>>();
@@ -42,7 +42,7 @@ impl UnappliedConfig {
             &new_cx.current_validator_set.1,
             &new_cx.mc_block_id,
             round,
-            true, // new_cx.shuffle_validators, TODO same for prev
+            new_cx.shuffle_validators,
         )?;
         engine.set_next_peers(&whole_set, Some((round, &subset)));
 
@@ -60,7 +60,7 @@ impl UnappliedConfig {
 
     fn apply_prev_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
         if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
-            let round = new_cx.consensus_info.prev_config_round;
+            let round = new_cx.consensus_info.prev_vset_switch_round;
             let whole_set = prev_set
                 .list
                 .iter()
@@ -70,9 +70,7 @@ impl UnappliedConfig {
                 prev_set,
                 &new_cx.mc_block_id,
                 round,
-                // TODO new field in consensus_info for prev subset flag
-                //  or toggling `shuffle_validators` will require new genesis
-                true, // new_cx.consensus_info.prev_shuffle_validators,
+                new_cx.consensus_info.prev_shuffle_mc_validators,
             )?;
             // Note: place first known vset right after Genesis, as if it was from zerostate
             engine.set_next_peers(&whole_set, Some((0, &subset)));
@@ -356,7 +354,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         };
 
         if (config_guard.state_update_ctx.as_ref()).map_or(false, |old_cx| {
-            old_cx.consensus_info.config_update_round >= new_cx.consensus_info.config_update_round
+            old_cx.consensus_info.vset_switch_round >= new_cx.consensus_info.vset_switch_round
         }) {
             tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,

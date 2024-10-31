@@ -105,7 +105,7 @@ do
     metrics_listen_addr="0.0.0.0:$((base_metrics_port + i))"
 
     storage_root_dir="${base_dir}/db${i}"
-    control_socket_path="${base_dir}/control-${i}.sock"
+    control_socket_path="${base_dir}/control${i}.sock"
 
     key=$(jq -r .secret < "${base_dir}/keys${i}.json")
     dht_entry=$($tycho_bin tool gen-dht "127.0.0.1:${node_port}" --key "${key}")

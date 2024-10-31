@@ -20,11 +20,11 @@ cp -f "${root_dir}/.temp/zerostate.boc" "${root_dir}/core/tests/data/zerostate.b
 cp -f "${root_dir}/.temp/zerostate.boc" "${root_dir}/test/data/zerostate.boc"
 
 # dump first empty block
-output=$($tycho_bin node list-blocks --sock .temp/control-1.sock)
+output=$($tycho_bin node list-blocks --control-socket .temp/control1.sock)
 block_id=$(echo "$output" | jq -r '.blocks[0]')
 
 echo ${block_id} > "${root_dir}/test/data/first_block_id.txt"
-$tycho_bin node dump-block -b "${block_id}" --sock .temp/control-1.sock "${root_dir}/test/data/first_block.bin"
-$tycho_bin node dump-queue-diff -b "${block_id}" --sock .temp/control-1.sock "${root_dir}/test/data/first_block_queue_diff.bin"
+$tycho_bin node dump-block -b "${block_id}" --control-socket .temp/control1.sock "${root_dir}/test/data/first_block.bin"
+$tycho_bin node dump-queue-diff -b "${block_id}" --control-socket .temp/control1.sock "${root_dir}/test/data/first_block_queue_diff.bin"
 
 cp -f "${root_dir}/test/data/first_block.bin" "${root_dir}/core/tests/data/empty_block.bin"

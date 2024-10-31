@@ -21,7 +21,7 @@ source "${script_dir}/common.sh"
 CHECK_INTERVAL=10
 TARGET_COUNT=20
 while true; do
-    output=$($tycho_bin node list-blocks --sock .temp/control-1.sock)
+    output=$($tycho_bin node list-blocks --control-socket .temp/control1.sock)
     if [ $? -ne 0 ]; then
         echo "Command 'node list-blocks' returned error. Repeat attempt in $CHECK_INTERVAL seconds..."
     else
@@ -42,5 +42,5 @@ while true; do
 done
 
 echo ${block_id} > "${root_dir}/core/tests/data/block_id.txt"
-$tycho_bin node dump-block -b "${block_id}" --sock .temp/control-1.sock "${root_dir}/core/tests/data/block.bin"
-$tycho_bin node dump-queue-diff -b "${block_id}" --sock .temp/control-1.sock "${root_dir}/core/tests/data/block_queue_diff.bin"
+$tycho_bin node dump-block -b "${block_id}" --control-socket .temp/control1.sock "${root_dir}/core/tests/data/block.bin"
+$tycho_bin node dump-queue-diff -b "${block_id}" --control-socket .temp/control1.sock "${root_dir}/core/tests/data/block_queue_diff.bin"

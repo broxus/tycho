@@ -61,10 +61,11 @@ impl BlockProofStuff {
                     catchain_seqno: 0,
                 },
                 consensus_info: ConsensusInfo {
-                    config_update_round: 0,
-                    prev_config_round: 0,
+                    vset_switch_round: 0,
+                    prev_vset_switch_round: 0,
                     genesis_round: 0,
                     genesis_millis: 0,
+                    prev_shuffle_mc_validators: true,
                 },
                 signature_count: 0,
                 total_weight: 0,
