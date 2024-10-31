@@ -374,7 +374,7 @@ impl ZerostateConfig {
         }
 
         let curr_vset = self.params.get_current_validator_set()?;
-        let collation_config = self.params.get_catchain_config()?;
+        let collation_config = self.params.get_collation_config()?;
         let session_seqno = 0;
         let (_, validator_list_hash_short) = curr_vset
             .compute_mc_subset(session_seqno, collation_config.shuffle_mc_validators)
@@ -603,7 +603,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
         gas: BlockParamLimits {
             underload: 900000,
             soft_limit: 1200000,
-            hard_limit: 2000000,
+            hard_limit: 80_000_000,
         },
         lt_delta: BlockParamLimits {
             underload: 1000,
@@ -633,13 +633,50 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     })?;
 
     // Param 28
-    params.set_catchain_config(&CatchainConfig {
-        isolate_mc_validators: false,
+    params.set_collation_config(&CollationConfig {
         shuffle_mc_validators: true,
-        mc_catchain_lifetime: 250,
-        shard_catchain_lifetime: 250,
-        shard_validators_lifetime: 1000,
-        shard_validators_num: 11,
+
+        mc_block_min_interval_ms: 2500,
+        max_uncommitted_chain_length: 31,
+
+        msgs_exec_params: MsgsExecutionParams {
+            buffer_limit: 20_000,
+            group_limit: 100,
+            group_vert_size: 10,
+        },
+
+        wu_used_to_import_next_anchor: 1_200_000_000,
+
+        work_units_params: WorkUnitsParams {
+            prepare: WorkUnitsParamsPrepare {
+                fixed_part: 5_000_000, // 5 ms
+                read_ext_msgs: 4_000,  // 4 mcs
+                read_int_msgs: 5_000,  // 5 mcs
+                read_new_msgs: 75_000, // 75 mcs
+            },
+            execute: WorkUnitsParamsExecute {
+                prepare: 114_000,                   // 114 mcs
+                execute_err: 6_000,                 // 6 mcs
+                execute: 25_000,                    // 25 mcs
+                execute_delimiter: 10_000,          //
+                serialize_enqueue: 3_000,           // 3 mcs
+                serialize_dequeue: 3_000,           // 3 mcs
+                insert_new_msgs_to_iterator: 3_000, // 3 mcs
+                subgroup_size: 16,
+            },
+            finalize: WorkUnitsParamsFinalize {
+                build_transactions: 1_000,    // 1 mcs
+                build_accounts: 500,          // 0.5 mcs
+                build_in_msg: 500,            // 0.5 mcs
+                build_out_msg: 500,           // 0.5 mcs
+                serialize_min: 15_000_000,    // 15 ms
+                serialize_accounts: 1_000,    // 1 mcs
+                serialize_msg: 2_000,         // 2 mcs
+                state_update_min: 15_000_000, // 15 ms
+                state_update_accounts: 500,   // 0.5 mcs
+                state_update_msg: 2_000,      // 2 mcs
+            },
+        },
     })?;
 
     // Param 29

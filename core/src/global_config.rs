@@ -12,7 +12,8 @@ use crate::proto::blockchain::OverlayIdData;
 pub struct GlobalConfig {
     pub bootstrap_peers: Vec<PeerInfo>,
     pub zerostate: ZerostateId,
-    pub mempool_override: Option<MempoolGlobalConfig>,
+    #[serde(default)]
+    pub mempool: Option<MempoolGlobalConfig>,
 }
 
 impl GlobalConfig {
@@ -57,5 +58,6 @@ pub struct MempoolGlobalConfig {
     /// actual genesis round may be greater after alignment in config builder
     pub start_round: u32,
     pub genesis_time_millis: u64,
+    #[serde(flatten)]
     pub consensus_config: ConsensusConfig,
 }

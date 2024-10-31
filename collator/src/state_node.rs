@@ -46,9 +46,6 @@ pub trait StateNodeEventListener: Send + Sync {
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()>;
     /// When new block was received and applied from blockchain
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()>;
-    // /// When sync context updated, e.g. block strider finished processing archives
-    // /// and started listen for new blocks from collator or blockchain.
-    // async fn on_sync_context_update(&self, sync_context: CollatorSyncContext) -> Result<()>;
 }
 
 #[async_trait]

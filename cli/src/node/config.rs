@@ -6,7 +6,7 @@ use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
 use serde::{Deserialize, Serialize};
 use tycho_collator::internal_queue::queue::QueueConfig;
-use tycho_collator::types::CollationConfig;
+use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::ValidatorStdImplConfig;
 use tycho_consensus::prelude::MempoolNodeConfig;
 use tycho_control::ControlServerConfig;
@@ -72,7 +72,7 @@ pub struct NodeConfig {
 
     pub archive_block_provider: ArchiveBlockProviderConfig,
 
-    pub collator: CollationConfig,
+    pub collator: CollatorConfig,
 
     pub mempool: MempoolNodeConfig,
 
@@ -109,7 +109,7 @@ impl Default for NodeConfig {
             blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
             archive_block_provider: ArchiveBlockProviderConfig::default(),
-            collator: CollationConfig::default(),
+            collator: CollatorConfig::default(),
             mempool: MempoolNodeConfig::default(),
             validator: ValidatorStdImplConfig::default(),
             rpc: Some(RpcConfig::default()),

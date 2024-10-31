@@ -7,10 +7,10 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate, ImportFees, InMsg,
-    IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
-    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
-    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    BlockRef, CollationConfig, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate,
+    ImportFees, InMsg, IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
+    ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent,
+    ShardIdentFull, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -25,6 +25,7 @@ use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
+    pub collation_config: Arc<CollationConfig>,
     pub wu_used_from_last_anchor: u64,
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,

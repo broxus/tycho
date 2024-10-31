@@ -31,7 +31,7 @@ use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, DisplayBlockIdsIntoIter, DisplayBlockIdsIter,
-    DisplayExternalsProcessedUpto, ExecuteWUParams, McData, MsgGroupsWUParams, TopBlockDescription,
+    DisplayExternalsProcessedUpto, McData, TopBlockDescription,
 };
 
 #[cfg(test)]
@@ -61,9 +61,10 @@ impl CollatorStdImpl {
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
         // INFO: this is a temporary implementation, further will just clone messages buffer from the working state
-        let (mut working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+        let (working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
 
         let mc_data = &working_state.mc_data;
+        let collation_config = working_state.collation_config.clone();
         let prev_shard_data = working_state.prev_shard_data_ref();
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -181,13 +182,13 @@ impl CollatorStdImpl {
                 ..ExecuteParams::default()
             }),
             prev_shard_data.observable_accounts().clone(),
-            self.config.block_work_units_params.execute,
+            collation_config.work_units_params.execute.clone(),
         );
 
         // create exec_manager
         let mut exec_manager = ExecutionManager::new(
             self.shard_id,
-            self.config.msgs_exec_params.buffer_limit as _,
+            collation_config.msgs_exec_params.buffer_limit as _,
         );
 
         // create iterator adapter
@@ -288,7 +289,7 @@ impl CollatorStdImpl {
                     execute_groups_wu_vm_only = execute_groups_wu_vm_only
                         .saturating_add(group_result.total_exec_wu)
                         .saturating_add(group_result.ext_msgs_error_count.saturating_mul(
-                            self.config.block_work_units_params.execute.execute_err as u64,
+                            collation_config.work_units_params.execute.execute_err as u64,
                         ));
 
                     // Process transactions
@@ -473,19 +474,19 @@ impl CollatorStdImpl {
             });
 
         let prepare_groups_wu_total = calc_prepare_groups_wu_total(
-            self.config.block_work_units_params.prepare,
             &collation_data,
+            &collation_config.work_units_params.prepare,
         );
 
         let process_txs_wu =
-            calc_process_txs_wu(self.config.block_work_units_params.execute, &collation_data);
+            calc_process_txs_wu(&collation_data, &collation_config.work_units_params.execute);
         let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
-            let finalize_params = self.config.block_work_units_params.finalize;
+            let finalize_params = collation_config.work_units_params.finalize.clone();
             move || {
                 Self::finalize_block(
                     collation_data,
@@ -501,7 +502,7 @@ impl CollatorStdImpl {
         })
         .await?;
         collation_data = finalized.collation_data;
-        working_state = finalized.working_state;
+        let working_state = finalized.working_state;
 
         let block_id = *finalized.block_candidate.block.id();
         let is_key_block = finalized.block_candidate.is_key_block;
@@ -536,6 +537,12 @@ impl CollatorStdImpl {
             );
 
             let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
+
+            let collation_config = match &finalized.mc_data {
+                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
+                None => collation_config,
+            };
+
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
@@ -543,6 +550,7 @@ impl CollatorStdImpl {
                     candidate: finalized.block_candidate,
                     prev_mc_block_id: working_state.mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
+                    collation_config: collation_config.clone(),
                     has_unprocessed_messages,
                 })
                 .await?;
@@ -555,6 +563,7 @@ impl CollatorStdImpl {
                 store_new_state_task,
                 new_queue_diff_hash,
                 finalized.mc_data,
+                collation_config,
                 has_unprocessed_messages,
                 working_state,
                 msgs_buffer,
@@ -1744,17 +1753,17 @@ pub fn contains_prefix(shard_id: &ShardIdent, workchain_id: i32, prefix_without_
 }
 
 fn calc_prepare_groups_wu_total(
-    prepare: MsgGroupsWUParams,
     collation_data: &BlockCollationData,
+    wu_params_prepare: &WorkUnitsParamsPrepare,
 ) -> u64 {
-    let MsgGroupsWUParams {
-        const_part,
+    let &WorkUnitsParamsPrepare {
+        fixed_part,
         read_ext_msgs,
         read_int_msgs,
         read_new_msgs,
-    } = prepare;
+    } = wu_params_prepare;
 
-    (const_part as u64)
+    (fixed_part as u64)
         .saturating_add(
             collation_data
                 .read_ext_msgs
@@ -1772,13 +1781,16 @@ fn calc_prepare_groups_wu_total(
         )
 }
 
-fn calc_process_txs_wu(execute: ExecuteWUParams, collation_data: &BlockCollationData) -> u64 {
-    let ExecuteWUParams {
+fn calc_process_txs_wu(
+    collation_data: &BlockCollationData,
+    wu_params_execute: &WorkUnitsParamsExecute,
+) -> u64 {
+    let &WorkUnitsParamsExecute {
         serialize_enqueue,
         serialize_dequeue,
         insert_new_msgs_to_iterator,
         ..
-    } = execute;
+    } = wu_params_execute;
 
     (collation_data.int_enqueue_count)
         .saturating_mul(serialize_enqueue as u64)
