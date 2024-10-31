@@ -36,6 +36,7 @@ impl InputBufferImpl {
         inner: Arc<Mutex<InputBufferData>>,
         mut externals: mpsc::UnboundedReceiver<Bytes>,
     ) {
+        scopeguard::defer!(tracing::warn!("externals input buffer task stopped"));
         while let Some(payload) = externals.recv().await {
             let mut data = inner.lock();
             data.add(payload);

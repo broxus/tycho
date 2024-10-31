@@ -5,7 +5,7 @@ use everscale_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
-use crate::effects::AltFormat;
+use crate::effects::{AltFmt, AltFormat};
 use crate::models::Round;
 
 #[derive(Clone)]
@@ -83,7 +83,7 @@ impl PeerScheduleStateless {
             &self.empty_set
         };
         if result.is_empty() {
-            tracing::error!("empty peer set for {round:?}: {self:?}");
+            tracing::error!("empty peer set for {round:?}: {:?}", self.alt());
         }
         result
     }
@@ -99,7 +99,7 @@ impl PeerScheduleStateless {
             &self.empty_vec
         };
         if result.is_empty() {
-            tracing::error!("empty peer set for {round:?}: {self:?}");
+            tracing::error!("empty peer set for {round:?}: {:?}", self.alt());
         }
         result
     }
@@ -113,17 +113,19 @@ impl PeerScheduleStateless {
     pub(super) fn rotate(&mut self) {
         assert!(
             self.peer_sets[0].is_empty() && self.peer_vecs[0].is_empty(),
-            "previous peer set was not cleaned; {self:?}"
+            "previous peer set was not cleaned; {:?}",
+            self.alt()
         );
         // make next from previous
         let next = self
             .next_epoch_start
-            .ok_or_else(|| format!("{self:?}"))
+            .ok_or_else(|| format!("{:?}", self.alt()))
             .expect("attempt to change epoch, but next epoch start is not set");
 
         assert!(
             next > self.cur_epoch_start,
-            "next start is not in future {self:?}"
+            "next start is not in future {:?}",
+            self.alt()
         );
 
         self.prev_epoch_start = self.cur_epoch_start;
@@ -140,19 +142,22 @@ impl PeerScheduleStateless {
     }
 }
 
-impl std::fmt::Debug for PeerScheduleStateless {
+impl AltFormat for PeerScheduleStateless {}
+impl std::fmt::Debug for AltFmt<'_, PeerScheduleStateless> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+
         f.write_str("PeerScheduleStateless { ")?;
 
-        write!(f, "prev: {{ start: {}, ", self.prev_epoch_start.0)?;
-        write!(f, "{} }}, ", self.peer_vecs[0].as_slice().alt())?;
+        write!(f, "prev: {{ start: {}, ", inner.prev_epoch_start.0)?;
+        write!(f, "{} }}, ", inner.peer_vecs[0].as_slice().alt())?;
 
-        write!(f, "current: {{ start: {}, ", self.cur_epoch_start.0)?;
-        write!(f, "{} }}, ", self.peer_vecs[1].as_slice().alt())?;
+        write!(f, "current: {{ start: {}, ", inner.cur_epoch_start.0)?;
+        write!(f, "{} }}, ", inner.peer_vecs[1].as_slice().alt())?;
 
-        let next_epoch_start = self.next_epoch_start.map(|a| a.0);
+        let next_epoch_start = inner.next_epoch_start.map(|a| a.0);
         write!(f, "next: {{ start: {:?}, ", next_epoch_start)?;
-        write!(f, "{} }} ", self.peer_vecs[2].as_slice().alt())?;
+        write!(f, "{} }} ", inner.peer_vecs[2].as_slice().alt())?;
 
         f.write_str("}")
     }
