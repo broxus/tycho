@@ -174,7 +174,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
         let state = self
             .storage
