@@ -119,6 +119,10 @@ gen_network *flags:
 node *flags:
     ./scripts/run-node.sh --dir {{local_network_dir}} {{flags}}
 
+# Runs elections on the node `N`.
+elect *flags:
+    ./scripts/elect-node.sh --dir {{local_network_dir}} {{flags}}
+
 # Runs only mempool part of the node `N`.
 # Use `--mempool-start-round {round_id}`
 # to define new mempool genesis at non-default round

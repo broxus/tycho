@@ -595,7 +595,7 @@ impl Inner {
                 global_id: cx.state.as_ref().global_id,
                 mc_seqno: block_id.seqno,
                 gen_utime: cx.state.as_ref().gen_utime,
-                config: BocRepr::encode_base64_rayon(config)?.into(),
+                config: BocRepr::encode_rayon(config)?.into(),
             });
             self.config_response.store(Some(config_response));
         } else {
