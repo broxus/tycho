@@ -623,6 +623,12 @@ impl CollatorStdImpl {
             let prev_vset = prev_config.get_current_validator_set_raw()?;
             let current_vset = config.get_current_validator_set_raw()?;
             if current_vset.repr_hash() != prev_vset.repr_hash() {
+                // TODO: For now we cannot update `consensus_info` when just the
+                // `shuffle_mc_validators` changes, because in that case we
+                // still need to compute some round when this setting will apply.
+                let prev_shuffle_mc_validators =
+                    prev_config.get_collation_config()?.shuffle_mc_validators;
+
                 // calc next session update round
                 let prev_processed_to_anchor = prev_shard_data
                     .processed_upto()
@@ -635,7 +641,7 @@ impl CollatorStdImpl {
                     // consensus session cannot abort until reaching full history amount of rounds,
                     // because mempool has to re-validate historical points during sync,
                     // and can hold just one previous vset to check peer authority
-                    let full_history_round = consensus_info.prev_config_round
+                    let full_history_round = consensus_info.prev_vset_switch_round
                         + consensus_config.max_consensus_lag_rounds as u32
                         + consensus_config.sync_support_rounds as u32
                         + consensus_config.deduplicate_rounds as u32
@@ -649,9 +655,10 @@ impl CollatorStdImpl {
                 };
 
                 // currently we simultaneously update session_seqno in collation and session_update_round in consesus
-                if consensus_info.config_update_round < session_update_round {
-                    consensus_info.prev_config_round = consensus_info.config_update_round;
-                    consensus_info.config_update_round = session_update_round;
+                if consensus_info.vset_switch_round < session_update_round {
+                    consensus_info.prev_vset_switch_round = consensus_info.vset_switch_round;
+                    consensus_info.vset_switch_round = session_update_round;
+                    consensus_info.prev_shuffle_mc_validators = prev_shuffle_mc_validators;
                 }
 
                 // calculate next validator subset and hash

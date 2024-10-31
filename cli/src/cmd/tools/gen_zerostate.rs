@@ -375,12 +375,15 @@ impl ZerostateConfig {
         let curr_vset = self.params.get_current_validator_set()?;
         let collation_config = self.params.get_collation_config()?;
         let session_seqno = 0;
-        let (_, validator_list_hash_short) = curr_vset
-            .compute_mc_subset(session_seqno, collation_config.shuffle_mc_validators)
-            .ok_or(anyhow::anyhow!(
-                "Error calculating subset of validators in zerostate (shard_id = {}, session_seqno = {})",
+        let Some((_, validator_list_hash_short)) =
+            curr_vset.compute_mc_subset(session_seqno, collation_config.shuffle_mc_validators)
+        else {
+            anyhow::bail!(
+                "Failed to compute a validator subset for zerostate (shard_id = {}, session_seqno = {})",
                 ShardIdent::MASTERCHAIN, session_seqno,
-            ))?;
+            );
+        };
+
         state.custom = Some(Lazy::new(&McStateExtra {
             shards: ShardHashes::from_shards(shards.iter().map(|(ident, descr)| (ident, descr)))?,
             config,
@@ -390,10 +393,11 @@ impl ZerostateConfig {
                 nx_cc_updated: true,
             },
             consensus_info: ConsensusInfo {
-                config_update_round: session_seqno,
-                prev_config_round: session_seqno,
+                vset_switch_round: session_seqno,
+                prev_vset_switch_round: session_seqno,
                 genesis_round: 0,
                 genesis_millis: 0,
+                prev_shuffle_mc_validators: collation_config.shuffle_mc_validators,
             },
             prev_blocks: AugDict::new(),
             after_key_block: true,
