@@ -151,15 +151,16 @@ impl ShardStateStorage {
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         tracing::info!(
+            shard = %block_id.shard,
             seqno = block_id.seqno,
             tracker = self.min_ref_mc_state.seqno(),
-            "load state",
+            "load_state",
         );
 
         let cell_id = self.load_state_root(block_id)?;
-        tracing::info!(seqno = block_id.seqno,, "state root loaded");
+        tracing::info!(shard = %block_id.shard, seqno = block_id.seqno, "state root loaded");
         let cell = self.cell_storage.load_cell(cell_id)?;
-        tracing::info!(seqno = block_id.seqno,, "cell loaded");
+        tracing::info!(shard = %block_id.shard, seqno = block_id.seqno, "cell loaded");
 
         let state = ShardStateStuff::from_root(
             block_id,
@@ -168,8 +169,10 @@ impl ShardStateStorage {
         )?;
 
         tracing::info!(
+            shard = %block_id.shard,
             seqno = block_id.seqno,
             tracker = self.min_ref_mc_state.seqno(),
+            handle = state.ref_mc_state_handle().tracker().seqno(),
             "state loaded",
         );
 
@@ -252,7 +255,7 @@ impl ShardStateStorage {
             if block_id.is_masterchain() {
                 metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
             }
-            tracing::debug!(removed_states, removed_cells, %block_id, "removed state");
+            tracing::info!(removed_states, removed_cells, %block_id, "removed state");
         }
 
         // Done
