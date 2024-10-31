@@ -36,7 +36,6 @@ impl NodeBase {
 
         let network = Network::builder()
             .with_private_key(key.to_bytes())
-            .with_service_name("test-service")
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 

@@ -29,7 +29,7 @@ mod peer;
 mod request_handler;
 mod wire;
 
-pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
+pub struct NetworkBuilder<MandatoryFields = ([u8; 32],)> {
     mandatory_fields: MandatoryFields,
     optional_fields: BuilderFields,
 }
@@ -52,26 +52,15 @@ impl<MandatoryFields> NetworkBuilder<MandatoryFields> {
     }
 }
 
-impl<T2> NetworkBuilder<((), T2)> {
-    pub fn with_service_name<T: Into<String>>(self, name: T) -> NetworkBuilder<(String, T2)> {
-        let (_, private_key) = self.mandatory_fields;
+impl NetworkBuilder<((),)> {
+    pub fn with_private_key(self, private_key: [u8; 32]) -> NetworkBuilder<([u8; 32],)> {
         NetworkBuilder {
-            mandatory_fields: (name.into(), private_key),
-            optional_fields: self.optional_fields,
-        }
-    }
-}
-
-impl<T1> NetworkBuilder<(T1, ())> {
-    pub fn with_private_key(self, private_key: [u8; 32]) -> NetworkBuilder<(T1, [u8; 32])> {
-        let (service_name, _) = self.mandatory_fields;
-        NetworkBuilder {
-            mandatory_fields: (service_name, private_key),
+            mandatory_fields: (private_key,),
             optional_fields: self.optional_fields,
         }
     }
 
-    pub fn with_random_private_key(self) -> NetworkBuilder<(T1, [u8; 32])> {
+    pub fn with_random_private_key(self) -> NetworkBuilder<([u8; 32],)> {
         self.with_private_key(rand::random())
     }
 }
@@ -84,12 +73,11 @@ impl NetworkBuilder {
     {
         let config = self.optional_fields.config.unwrap_or_default();
         let quic_config = config.quic.clone().unwrap_or_default();
-        let (service_name, private_key) = self.mandatory_fields;
+        let (private_key,) = self.mandatory_fields;
 
         let keypair = ed25519::KeyPair::from(&ed25519::SecretKey::from_bytes(private_key));
 
         let endpoint_config = EndpointConfig::builder()
-            .with_service_name(service_name)
             .with_private_key(private_key)
             .with_0rtt_enabled(config.enable_0rtt)
             .with_transport_config(quic_config.make_transport_config())
@@ -173,9 +161,9 @@ impl WeakNetwork {
 pub struct Network(Arc<NetworkInner>);
 
 impl Network {
-    pub fn builder() -> NetworkBuilder<((), ())> {
+    pub fn builder() -> NetworkBuilder<((),)> {
         NetworkBuilder {
-            mandatory_fields: ((), ()),
+            mandatory_fields: ((),),
             optional_fields: Default::default(),
         }
     }
@@ -405,14 +393,13 @@ mod tests {
         service_query_fn(handle).boxed_clone()
     }
 
-    fn make_network(service_name: &str) -> Result<Network> {
+    fn make_network() -> Result<Network> {
         Network::builder()
             .with_config(NetworkConfig {
                 enable_0rtt: true,
                 ..Default::default()
             })
             .with_random_private_key()
-            .with_service_name(service_name)
             .build("127.0.0.1:0", echo_service())
     }
 
@@ -430,9 +417,8 @@ mod tests {
     async fn connection_manager_works() -> Result<()> {
         tycho_util::test::init_logger("connection_manager_works", "debug");
 
-        let peer1 = make_network("tycho")?;
-        let peer2 = make_network("tycho")?;
-        let peer3 = make_network("not-tycho")?;
+        let peer1 = make_network()?;
+        let peer2 = make_network()?;
 
         peer1
             .connect(peer2.local_addr(), peer2.peer_id())
@@ -442,24 +428,6 @@ mod tests {
             .connect(peer1.local_addr(), peer1.peer_id())
             .await
             .unwrap();
-
-        peer1
-            .connect(peer3.local_addr(), peer3.peer_id())
-            .await
-            .unwrap_err();
-        peer2
-            .connect(peer3.local_addr(), peer3.peer_id())
-            .await
-            .unwrap_err();
-
-        peer3
-            .connect(peer1.local_addr(), peer1.peer_id())
-            .await
-            .unwrap_err();
-        peer3
-            .connect(peer2.local_addr(), peer2.peer_id())
-            .await
-            .unwrap_err();
 
         Ok(())
     }
@@ -469,8 +437,8 @@ mod tests {
         tycho_util::test::init_logger("simultaneous_queries", "debug");
 
         for _ in 0..10 {
-            let peer1 = make_network("tycho")?;
-            let peer2 = make_network("tycho")?;
+            let peer1 = make_network()?;
+            let peer2 = make_network()?;
 
             let _peer1_peer2_handle = peer1.known_peers().insert(make_peer_info(&peer2), false)?;
             let _peer2_peer1_handle = peer2.known_peers().insert(make_peer_info(&peer1), false)?;
@@ -508,7 +476,6 @@ mod tests {
                     ..Default::default()
                 })
                 .with_random_private_key()
-                .with_service_name("tycho")
                 .build("127.0.0.1:0", noop_service())
         }
 

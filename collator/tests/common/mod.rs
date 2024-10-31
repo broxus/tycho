@@ -32,7 +32,6 @@ pub fn make_validator_network(
 
     let network = Network::builder()
         .with_private_key(secret_key.to_bytes())
-        .with_service_name("test-service")
         .build((Ipv4Addr::LOCALHOST, 0), router)
         .unwrap();
 

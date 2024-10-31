@@ -36,7 +36,6 @@ pin-project-lite = { workspace = true }
 pkcs8 = { workspace = true }
 quinn = { workspace = true }
 rand = { workspace = true }
-rcgen = { workspace = true }
 ring = { workspace = true }
 rustls = { workspace = true }
 rustls-webpki = { workspace = true }
@@ -47,7 +46,6 @@ tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "macros"] }
 tokio-util = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
-x509-parser = { workspace = true }
 
 # local deps
 tycho-util = { workspace = true }

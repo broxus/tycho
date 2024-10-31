@@ -4,10 +4,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::crypto::CryptoProvider;
+use rustls::sign::CertifiedKey;
 use rustls::SupportedCipherSuite;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
-use webpki::types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use crate::network::crypto::{
     generate_cert, peer_id_from_certificate, CertVerifier, CertVerifierWithPeerId,
@@ -154,9 +154,7 @@ impl QuicConfig {
 
 pub(crate) struct EndpointConfig {
     pub peer_id: PeerId,
-    pub service_name: String,
-    pub client_cert: CertificateDer<'static>,
-    pub pkcs8_der: PrivatePkcs8KeyDer<'static>,
+    pub cert_resolver: Arc<rustls::client::AlwaysResolvesClientRawPublicKeys>,
     pub quinn_server_config: quinn::ServerConfig,
     pub transport_config: Arc<quinn::TransportConfig>,
     pub quinn_endpoint_config: quinn::EndpointConfig,
@@ -165,9 +163,9 @@ pub(crate) struct EndpointConfig {
 }
 
 impl EndpointConfig {
-    pub fn builder() -> EndpointConfigBuilder<((), ())> {
+    pub fn builder() -> EndpointConfigBuilder<((),)> {
         EndpointConfigBuilder {
-            mandatory_fields: ((), ()),
+            mandatory_fields: ((),),
             optional_fields: Default::default(),
         }
     }
@@ -178,14 +176,8 @@ impl EndpointConfig {
                 .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
                 .unwrap()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(
-                    self.service_name.clone(),
-                    peer_id,
-                )))
-                .with_client_auth_cert(
-                    vec![self.client_cert.clone()],
-                    PrivateKeyDer::Pkcs8(self.pkcs8_der.clone_key()),
-                )?;
+                .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(peer_id)))
+                .with_client_cert_resolver(self.cert_resolver.clone());
 
         client_config.enable_early_data = self.enable_early_data;
         let quinn_config = QuicClientConfig::try_from(client_config)?;
@@ -196,7 +188,7 @@ impl EndpointConfig {
     }
 }
 
-pub(crate) struct EndpointConfigBuilder<MandatoryFields = (String, [u8; 32])> {
+pub(crate) struct EndpointConfigBuilder<MandatoryFields = ([u8; 32],)> {
     mandatory_fields: MandatoryFields,
     optional_fields: EndpointConfigBuilderFields,
 }
@@ -219,24 +211,10 @@ impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
     }
 }
 
-impl<T2> EndpointConfigBuilder<((), T2)> {
-    pub fn with_service_name<T: Into<String>>(
-        self,
-        service_name: T,
-    ) -> EndpointConfigBuilder<(String, T2)> {
-        let (_, private_key) = self.mandatory_fields;
+impl EndpointConfigBuilder<((),)> {
+    pub fn with_private_key(self, private_key: [u8; 32]) -> EndpointConfigBuilder<([u8; 32],)> {
         EndpointConfigBuilder {
-            mandatory_fields: (service_name.into(), private_key),
-            optional_fields: self.optional_fields,
-        }
-    }
-}
-
-impl<T1> EndpointConfigBuilder<(T1, ())> {
-    pub fn with_private_key(self, private_key: [u8; 32]) -> EndpointConfigBuilder<(T1, [u8; 32])> {
-        let (service_name, _) = self.mandatory_fields;
-        EndpointConfigBuilder {
-            mandatory_fields: (service_name, private_key),
+            mandatory_fields: (private_key,),
             optional_fields: self.optional_fields,
         }
     }
@@ -244,7 +222,7 @@ impl<T1> EndpointConfigBuilder<(T1, ())> {
 
 impl EndpointConfigBuilder {
     pub fn build(self) -> Result<EndpointConfig> {
-        let (service_name, private_key) = self.mandatory_fields;
+        let (private_key,) = self.mandatory_fields;
 
         let keypair = ed25519::KeypairBytes {
             secret_key: private_key,
@@ -256,11 +234,6 @@ impl EndpointConfigBuilder {
         let reset_key = compute_reset_key(&keypair.secret_key);
         let quinn_endpoint_config = quinn::EndpointConfig::new(reset_key);
 
-        let (cert, pkcs8_der) =
-            generate_cert(&keypair, &service_name).context("Failed to generate a certificate")?;
-
-        let cert_verifier = Arc::new(CertVerifier::from(service_name.clone()));
-
         let crypto_provider = Arc::new(CryptoProvider {
             cipher_suites: DEFAULT_CIPHER_SUITES.to_vec(),
             kx_groups: DEFAULT_KX_GROUPS.to_vec(),
@@ -268,23 +241,27 @@ impl EndpointConfigBuilder {
             ..rustls::crypto::ring::default_provider()
         });
 
+        let certified_key = generate_cert(&keypair, crypto_provider.key_provider)
+            .context("Failed to generate a certificate")?;
+
+        let cert_resolver = Arc::new(rustls::client::AlwaysResolvesClientRawPublicKeys::new(
+            certified_key.clone(),
+        ));
+        let cert_verifier = Arc::new(CertVerifier);
+
         let quinn_server_config = make_server_config(
-            &service_name,
-            &pkcs8_der,
-            cert.clone(),
+            certified_key.clone(),
             cert_verifier,
             transport_config.clone(),
             crypto_provider.clone(),
             self.optional_fields.enable_0rtt,
         )?;
 
-        let peer_id = peer_id_from_certificate(&cert)?;
+        let peer_id = peer_id_from_certificate(certified_key.end_entity_cert()?)?;
 
         Ok(EndpointConfig {
             peer_id,
-            service_name,
-            client_cert: cert,
-            pkcs8_der,
+            cert_resolver,
             quinn_server_config,
             transport_config,
             quinn_endpoint_config,
@@ -295,20 +272,14 @@ impl EndpointConfigBuilder {
 }
 
 fn make_server_config(
-    service_name: &str,
-    pkcs8_der: &rustls::pki_types::PrivatePkcs8KeyDer<'_>,
-    cert: rustls::pki_types::CertificateDer<'static>,
+    certified_key: Arc<CertifiedKey>,
     cert_verifier: Arc<CertVerifier>,
     transport_config: Arc<quinn::TransportConfig>,
     crypto_provider: Arc<CryptoProvider>,
     enable_0rtt: bool,
 ) -> Result<quinn::ServerConfig> {
-    let mut server_cert_resolver = rustls::server::ResolvesServerCertUsingSni::new();
-
-    let key =
-        rustls::crypto::ring::sign::any_eddsa_type(pkcs8_der).context("Invalid private key")?;
-    let certified_key = rustls::sign::CertifiedKey::new(vec![cert], key);
-    server_cert_resolver.add(service_name, certified_key)?;
+    let server_cert_resolver =
+        rustls::server::AlwaysResolvesServerRawPublicKeys::new(certified_key);
 
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(crypto_provider.clone())
         .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
