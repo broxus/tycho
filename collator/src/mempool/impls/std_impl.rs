@@ -115,8 +115,7 @@ pub struct MempoolAdapterStdImpl {
     overlay_service: OverlayService,
     store: MempoolAdapterStore,
 
-    externals_rx: InputBuffer,
-    externals_tx: mpsc::UnboundedSender<Bytes>,
+    input_buffer: InputBuffer,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
@@ -132,8 +131,6 @@ impl MempoolAdapterStdImpl {
         let mut config_builder = MempoolConfigBuilder::default();
         config_builder.set_node_config(mempool_node_config);
 
-        let (externals_tx, externals_rx) = mpsc::unbounded_channel();
-
         Self {
             unapplied_config: Mutex::new(UnappliedConfig {
                 builder: config_builder,
@@ -146,8 +143,7 @@ impl MempoolAdapterStdImpl {
             peer_resolver: peer_resolver.clone(),
             overlay_service: overlay_service.clone(),
             store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
-            externals_tx,
-            externals_rx: InputBuffer::new(externals_rx),
+            input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
         }
     }
@@ -184,12 +180,15 @@ impl MempoolAdapterStdImpl {
             &self.peer_resolver,
             &self.overlay_service,
             &self.store,
-            self.externals_rx.clone(),
+            self.input_buffer.clone(),
             anchor_tx,
             &self.top_known_anchor,
             // This will be used as next set after genesis, skipping some existed set
             &mempool_config,
         );
+
+        // TODO support config change; payload size is bound to mempool rounds
+        self.input_buffer.apply_config(&consensus_config);
 
         let handle = engine.get_handle();
 
@@ -217,7 +216,7 @@ impl MempoolAdapterStdImpl {
     }
 
     pub fn send_external(&self, message: Bytes) {
-        self.externals_tx.send(message).ok();
+        self.input_buffer.push(message);
     }
 
     async fn handle_anchors_task(

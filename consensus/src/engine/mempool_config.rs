@@ -107,9 +107,9 @@ impl CachedConfig {
     }
 
     /// hard limit on cached external messages ring buffer, see [`Self::payload_batch_bytes`]
-    pub fn payload_buffer_bytes() -> usize {
-        Self::get().payload_buffer_bytes
-    }
+    // pub fn payload_buffer_bytes() -> usize {
+    //     Self::get().payload_buffer_bytes
+    // }
 
     /// amount of random peers to request at each attempt; does not include mandatory peers;
     /// value increases with each attempt, until 2F successfully responded `None`

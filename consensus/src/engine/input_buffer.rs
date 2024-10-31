@@ -2,23 +2,30 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use everscale_types::models::ConsensusConfig;
 use parking_lot::{Mutex, MutexGuard};
-use tokio::sync::mpsc;
-
-use crate::engine::CachedConfig;
 
 trait InputBufferInner: Send {
+    fn push(&mut self, ext_in_msg: Bytes);
     fn fetch_inner(&mut self, only_fresh: bool) -> Vec<Bytes>;
+    fn apply_config(&mut self, config: &ConsensusConfig);
 }
 
 #[derive(Clone)]
 pub struct InputBuffer(Arc<Mutex<dyn InputBufferInner>>);
 
+impl Default for InputBuffer {
+    fn default() -> Self {
+        InputBuffer(Arc::new(Mutex::new(InputBufferData::default())))
+    }
+}
+
 impl InputBuffer {
-    pub fn new(externals: mpsc::UnboundedReceiver<Bytes>) -> InputBuffer {
-        let inner = Arc::new(Mutex::new(InputBufferData::default()));
-        tokio::spawn(InputBufferImpl::consume(inner.clone(), externals));
-        InputBuffer(inner)
+    pub fn push(&self, ext_in_msg: Bytes) {
+        let mut data = self.0.lock();
+        data.push(ext_in_msg);
+        // `fetch()` is topmost priority
+        MutexGuard::unlock_fair(data);
     }
 
     /// `only_fresh = false` to repeat the same elements if they are still buffered,
@@ -27,32 +34,36 @@ impl InputBuffer {
         let mut inner = self.0.lock();
         inner.fetch_inner(only_fresh)
     }
-}
 
-struct InputBufferImpl;
-
-impl InputBufferImpl {
-    async fn consume(
-        inner: Arc<Mutex<InputBufferData>>,
-        mut externals: mpsc::UnboundedReceiver<Bytes>,
-    ) {
-        scopeguard::defer!(tracing::warn!("externals input buffer task stopped"));
-        while let Some(payload) = externals.recv().await {
-            let mut data = inner.lock();
-            data.add(payload);
-            // `fetch()` is topmost priority
-            MutexGuard::unlock_fair(data);
-        }
-        tracing::error!("externals input channel to mempool is closed");
+    pub fn apply_config(&self, consensus_config: &ConsensusConfig) {
+        let mut inner = self.0.lock();
+        inner.apply_config(consensus_config);
     }
 }
 
 impl InputBufferInner for InputBufferData {
+    fn push(&mut self, ext_in_msg: Bytes) {
+        if self.buffer_bytes == 0 || self.data_bytes == 0 {
+            return; // ignore until config applied
+        }
+        self.add(ext_in_msg);
+    }
+
     fn fetch_inner(&mut self, only_fresh: bool) -> Vec<Bytes> {
         if only_fresh {
             self.commit_offset();
         }
         self.fetch()
+    }
+
+    fn apply_config(&mut self, consensus_config: &ConsensusConfig) {
+        self.buffer_bytes = consensus_config.payload_buffer_bytes as usize;
+        self.batch_bytes = consensus_config.payload_batch_bytes as usize;
+        tracing::info!(
+            payload_batch_bytes = consensus_config.payload_batch_bytes,
+            payload_buffer_bytes = consensus_config.payload_buffer_bytes,
+            "input buffer config applied"
+        );
     }
 }
 
@@ -61,6 +72,8 @@ struct InputBufferData {
     data: VecDeque<Bytes>,
     data_bytes: usize,
     offset_elements: usize,
+    buffer_bytes: usize,
+    batch_bytes: usize,
 }
 
 impl InputBufferData {
@@ -71,7 +84,7 @@ impl InputBufferData {
             .iter()
             .take_while(|elem| {
                 taken_bytes += elem.len();
-                taken_bytes <= CachedConfig::payload_batch_bytes()
+                taken_bytes <= self.batch_bytes
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -82,14 +95,14 @@ impl InputBufferData {
     fn add(&mut self, payload: Bytes) {
         let payload_bytes = payload.len();
         assert!(
-            payload_bytes <= CachedConfig::payload_buffer_bytes(),
+            payload_bytes <= self.buffer_bytes,
             "cannot buffer too large message of {payload_bytes} bytes: \
             increase config value of PAYLOAD_BUFFER_BYTES={} \
             or filter out insanely large messages prior sending them to mempool",
-            CachedConfig::payload_buffer_bytes()
+            self.buffer_bytes
         );
 
-        let max_data_bytes = CachedConfig::payload_buffer_bytes() - payload_bytes;
+        let max_data_bytes = self.buffer_bytes - payload_bytes;
         let data_bytes_pre = self.data_bytes;
         if self.data_bytes > max_data_bytes {
             let to_drop = self
@@ -161,6 +174,7 @@ mod stub {
     use rand::{thread_rng, RngCore};
 
     use super::*;
+    use crate::engine::CachedConfig;
 
     /// External message is limited by 64 KiB
     const EXTERNAL_MSG_MAX_BYTES: usize = 64 * 1024;
@@ -198,6 +212,14 @@ mod stub {
             }
             self.fetch_count = self.fetch_count.saturating_add(1);
             result
+        }
+
+        fn push(&mut self, _: Bytes) {
+            panic!("not available for tests");
+        }
+
+        fn apply_config(&mut self, _: &ConsensusConfig) {
+            panic!("not available for tests");
         }
     }
 }
