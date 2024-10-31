@@ -600,20 +600,6 @@ impl CollatorStdImpl {
         // prev_state_extra.flags is checked in the McStateExtra::load_from
 
         // 5. update validator_info and consensus_info
-        let mut consensus_info = prev_state_extra.consensus_info;
-
-        // update genesis round and time from the mempool global config if present and higher
-        if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
-            if mp_cfg_override.start_round > consensus_info.genesis_round
-                && mp_cfg_override.genesis_time_millis > consensus_info.genesis_millis
-            {
-                consensus_info.genesis_round = mp_cfg_override.start_round;
-                consensus_info.genesis_millis = mp_cfg_override.genesis_time_millis;
-
-                is_key_block = true;
-            }
-        }
-
         let consensus_config = config.params.get_consensus_config()?;
         let mut validator_info = None;
         if is_key_block {
