@@ -113,9 +113,6 @@ where
     /// Last know applied master block seqno
     /// to restart from a new genesis
     from_mc_block_seqno: Option<u32>,
-
-    #[cfg(any(test, feature = "test"))]
-    test_validators_keypairs: Vec<Arc<KeyPair>>,
 }
 
 #[async_trait]
@@ -271,7 +268,6 @@ where
         collator_factory: CF,
         mempool_config_override: Option<MempoolGlobalConfig>,
         from_mc_block_seqno: Option<u32>,
-        #[cfg(any(test, feature = "test"))] test_validators_keypairs: Vec<Arc<KeyPair>>,
     ) -> RunningCollationManager<CF, V>
     where
         STF: StateNodeAdapterFactory,
@@ -323,9 +319,6 @@ where
 
             mempool_config_override,
             from_mc_block_seqno,
-
-            #[cfg(any(test, feature = "test"))]
-            test_validators_keypairs,
         };
         arc_dispatcher.run(Arc::new(processor), tasks_receiver);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
@@ -1429,7 +1422,7 @@ where
             hash_map::Entry::Occupied(entry) => {
                 let (subset, hash_short): &(Arc<FastHashMap<[u8; 32], ValidatorDescription>>, u32) =
                     entry.get();
-                anyhow::Result::<_>::Ok((subset.clone(), *hash_short))
+                Result::<_>::Ok((subset.clone(), *hash_short))
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
@@ -1439,32 +1432,6 @@ where
                         ShardIdent::MASTERCHAIN,
                         current_session_seqno,
                     ))?;
-
-                // TEST: override with test subset with test keypairs defined on test run
-                #[cfg(feature = "test")]
-                let subset = if self.test_validators_keypairs.is_empty() {
-                    subset
-                } else {
-                    let mut test_subset = vec![];
-                    for (i, keypair) in self.test_validators_keypairs.iter().enumerate() {
-                        let val_descr = &subset[i];
-                        test_subset.push(everscale_types::models::ValidatorDescription {
-                            public_key: keypair.public_key.to_bytes().into(),
-                            adnl_addr: val_descr.adnl_addr,
-                            weight: val_descr.weight,
-                            mc_seqno_since: val_descr.mc_seqno_since,
-                            prev_total_weight: val_descr.prev_total_weight,
-                        });
-                    }
-                    test_subset
-                };
-                #[cfg(feature = "test")]
-                tracing::warn!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "FOR TEST: overrided subset of validators to collate shard {}: {:?}",
-                    shard_id,
-                    subset,
-                );
 
                 let subset: FastHashMap<_, _> = subset
                     .into_iter()

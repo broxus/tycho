@@ -694,7 +694,7 @@ impl SimpleValidatorParams {
     async fn elect(self, ctx: ElectionsContext<'_>) -> Result<()> {
         ctx.config.check_stake(*self.stake_per_round)?;
         let stake_factor = ctx.config.compute_stake_factor(self.stake_factor)?;
-        let wallet = Wallet::new(&ctx.client, &self.wallet_secret, ctx.config.signature_id);
+        let wallet = Wallet::new(ctx.client, &self.wallet_secret, ctx.config.signature_id);
 
         // Try to recover tokens
         if ctx.recover_stake {
@@ -1105,7 +1105,7 @@ impl Client {
 
         let abi_type = ELECTOR_ABI.get_or_init(elector::data::PartialElectorData::abi_type);
         let data =
-            AbiValue::load_partial(&abi_type, AbiVersion::V2_1, &mut elector_data.as_slice()?)
+            AbiValue::load_partial(abi_type, AbiVersion::V2_1, &mut elector_data.as_slice()?)
                 .and_then(elector::data::PartialElectorData::from_abi)?;
 
         Ok((timings, data))
