@@ -697,17 +697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "displaydoc"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.79",
-]
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -820,7 +809,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.8"
-source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
+source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#8a7fc2210a3e295946bbf1b35ffb2267560625b3"
 dependencies = [
  "ahash",
  "anyhow",
@@ -843,12 +832,13 @@ dependencies = [
  "smallvec",
  "thiserror",
  "tl-proto",
+ "typeid",
 ]
 
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#7ca5c3e895d3d6dced61e4bd299ba92fa723a38a"
+source = "git+https://www.github.com/broxus/everscale-types.git?rev=8a7fc2210a3e295946bbf1b35ffb2267560625b3#8a7fc2210a3e295946bbf1b35ffb2267560625b3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1398,7 +1388,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -3652,6 +3642,12 @@ dependencies = [
  "zstd-safe",
  "zstd-sys",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e13db2e0ccd5e14a544e8a246ba2312cd25223f616442d7f2cb0e3db614236e"
 
 [[package]]
 name = "typenum"

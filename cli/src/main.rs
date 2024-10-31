@@ -109,10 +109,10 @@ impl BaseArgs {
             .unwrap_or_else(|| self.home.join("node_keys.json"))
     }
 
-    pub fn validator_keys_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+    pub fn elections_config_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
         overwrite
             .cloned()
-            .unwrap_or_else(|| self.home.join("validator_keys.json"))
+            .unwrap_or_else(|| self.home.join("elections.json"))
     }
 
     pub fn global_config_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {

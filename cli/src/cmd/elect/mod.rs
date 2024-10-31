@@ -25,7 +25,7 @@ use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::{now_millis, now_sec};
 
-use crate::node::NodeKeys;
+use crate::node::{ElectionsConfig, NodeKeys};
 use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
@@ -61,22 +61,23 @@ enum SubCmd {
 }
 
 /// Participate in validator elections.
+// TODO: Move offset and other params to `elections.json`.
 #[derive(Parser)]
 struct CmdRun {
     #[clap(flatten)]
     control: ControlArgs,
 
-    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
-    #[clap(long)]
-    sign: Option<PathBuf>,
+    /// Path to elections config. Default: `$TYCHO_HOME/elections.json`
+    #[clap(short, long)]
+    config: Option<PathBuf>,
 
     /// Path to node keys. Default: `$TYCHO_HOME/node_keys.json`
     #[clap(long)]
     node_keys: Option<PathBuf>,
 
-    /// Stake size in nano tokens.
+    /// Overwrite the stake size.
     #[clap(short, long)]
-    stake: FpTokens,
+    stake: Option<FpTokens>,
 
     /// Max stake factor. Uses config by default.
     #[clap(long)]
@@ -114,7 +115,7 @@ struct CmdRun {
 impl CmdRun {
     fn run(mut self, args: BaseArgs) -> Result<()> {
         // Compute paths
-        let validator_keys_path = args.validator_keys_path(self.sign.as_ref());
+        let elections_config_path = args.elections_config_path(self.config.as_ref());
         let node_keys_path = args.node_keys_path(self.node_keys.as_ref());
 
         // Ensure that all timings are reasonable
@@ -130,7 +131,7 @@ impl CmdRun {
                 // each after successful iteration).
                 let before_repeat = || interval = self.min_retry_interval.as_secs();
                 if let Err(e) = self
-                    .try_run(&f, &validator_keys_path, &node_keys_path, before_repeat)
+                    .try_run(&f, &elections_config_path, &node_keys_path, before_repeat)
                     .await
                 {
                     tracing::error!("error occured: {e:?}");
@@ -151,7 +152,7 @@ impl CmdRun {
     async fn try_run<F>(
         &self,
         f: &ClientFactory,
-        validator_keys_path: &Path,
+        elections_config_path: &Path,
         node_keys_path: &Path,
         mut before_repeat: F,
     ) -> Result<()>
@@ -285,13 +286,20 @@ impl CmdRun {
             }
 
             // Try elect
-            let elect_fut = SimpleValidatorParams {
-                wallet_secret: NodeKeys::from_file(validator_keys_path)?.as_secret(),
-                node_secret: NodeKeys::from_file(node_keys_path)?.as_secret(),
-                stake_per_round: self.stake.into(),
-                stake_factor: self.stake_factor,
-            }
-            .elect(ElectionsContext {
+            let node_keys =
+                NodeKeys::from_file(node_keys_path).context("failed to load node keys")?;
+            let params = match ElectionsConfig::from_file(elections_config_path)
+                .context("failed to load elections config")?
+            {
+                ElectionsConfig::Simple(simple) => SimpleValidatorParams {
+                    wallet_secret: ed25519::SecretKey::from_bytes(simple.wallet_secret.0),
+                    node_secret: node_keys.as_secret(),
+                    stake_per_round: self.stake.or(simple.stake).context("no stake specified")?,
+                    stake_factor: self.stake_factor.or(simple.stake_factor),
+                },
+            };
+
+            let elect_fut = params.elect(ElectionsContext {
                 client: &client,
                 elector_data: &elector_data,
                 current: current_elections,
@@ -323,17 +331,17 @@ struct CmdOnce {
     #[clap(flatten)]
     control: ControlArgs,
 
-    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
-    #[clap(long)]
-    sign: Option<PathBuf>,
+    /// Path to elections config. Default: `$TYCHO_HOME/elections.json`
+    #[clap(short, long)]
+    config: Option<PathBuf>,
 
     /// Path to node keys. Default: `$TYCHO_HOME/node_keys.json`
     #[clap(long)]
     node_keys: Option<PathBuf>,
 
-    /// Stake size in nano tokens.
+    /// Overwrite the stake size.
     #[clap(short, long)]
-    stake: FpTokens,
+    stake: Option<FpTokens>,
 
     /// Max stake factor. Uses config by default.
     #[clap(long)]
@@ -346,21 +354,28 @@ struct CmdOnce {
 impl CmdOnce {
     fn run(self, args: BaseArgs) -> Result<()> {
         // Prepare keys
-        let wallet_keys = NodeKeys::from_file(args.validator_keys_path(self.sign.as_ref()))?;
         let node_keys = {
             let path = args.node_keys_path(self.node_keys.as_ref());
-            let secret = NodeKeys::from_file(path)?.as_secret();
-            Arc::new(ed25519::KeyPair::from(&secret))
+            let keys = NodeKeys::from_file(path).context("failed to load node keys")?;
+            Arc::new(ed25519::KeyPair::from(&keys.as_secret()))
         };
         let adnl_addr = PeerId::from(node_keys.public_key);
+
+        let ElectionsConfig::Simple(simple) = {
+            let path = args.elections_config_path(self.config.as_ref());
+            ElectionsConfig::from_file(path).context("failed to load elections config")?
+        };
+
+        let stake = self.stake.or(simple.stake).context("no stake specified")?;
+        let stake_factor = self.stake_factor.or(simple.stake_factor);
 
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
-            let wallet = Wallet::new(&client, &wallet_keys.as_secret(), config.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
-            config.check_stake(*self.stake)?;
-            let stake_factor = config.compute_stake_factor(self.stake_factor)?;
+            config.check_stake(*stake)?;
+            let stake_factor = config.compute_stake_factor(stake_factor)?;
 
             // Get current elections
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
@@ -381,16 +396,17 @@ impl CmdOnce {
                 );
 
                 existing_stake = *member.msg_value;
-                update_member = adnl_addr != member.adnl_addr || stake_factor != member.max_factor;
+                update_member =
+                    adnl_addr != member.adnl_addr || stake_factor != member.stake_factor;
             }
 
-            let stake_diff = self.stake.saturating_sub(existing_stake);
-            anyhow::ensure!(
-                (stake_diff << 12) >= *elections.total_stake,
-                "stake diff is too small"
-            );
-
+            let stake_diff = stake.saturating_sub(existing_stake);
             let message = if stake_diff > 0 || update_member {
+                anyhow::ensure!(
+                    (stake_diff << 12) >= *elections.total_stake,
+                    "stake diff is too small"
+                );
+
                 // Send stake
                 let internal = ElectionsContext::make_elector_message(
                     &config.elector_addr,
@@ -417,7 +433,7 @@ impl CmdOnce {
                 public: validator_key,
                 adnl_addr,
                 stake: (existing_stake + stake_diff).into(),
-                max_factor: stake_factor,
+                stake_factor,
             })
         })
     }
@@ -434,7 +450,7 @@ enum ParticipateStatus {
         public: HashBytes,
         adnl_addr: HashBytes,
         stake: FpTokens,
-        max_factor: u32,
+        stake_factor: u32,
     },
 }
 
@@ -444,9 +460,9 @@ struct CmdRecover {
     #[clap(flatten)]
     control: ControlArgs,
 
-    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
-    #[clap(long)]
-    sign: Option<PathBuf>,
+    /// Path to elections config. Default: `$TYCHO_HOME/elections.json`
+    #[clap(short, long)]
+    config: Option<PathBuf>,
 
     #[clap(flatten)]
     transfer: TransferArgs,
@@ -455,12 +471,15 @@ struct CmdRecover {
 impl CmdRecover {
     fn run(self, args: BaseArgs) -> Result<()> {
         // Prepare keys
-        let wallet_keys = NodeKeys::from_file(&args.validator_keys_path(self.sign.as_ref()))?;
+        let ElectionsConfig::Simple(simple) = {
+            let path = args.elections_config_path(self.config.as_ref());
+            ElectionsConfig::from_file(path).context("failed to load elections config")?
+        };
 
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
-            let wallet = Wallet::new(&client, &wallet_keys.as_secret(), config.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             // Find reward
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
@@ -499,17 +518,17 @@ struct CmdWithdraw {
     #[clap(flatten)]
     control: ControlArgs,
 
-    /// Path to validator keys. Default: `$TYCHO_HOME/validator_keys.json`
-    #[clap(long)]
-    sign: Option<PathBuf>,
+    /// Path to elections config. Default: `$TYCHO_HOME/elections.json`
+    #[clap(short, long)]
+    config: Option<PathBuf>,
 
     /// Destination address.
     #[clap(short, long, allow_hyphen_values(true))]
     dest: StdAddr,
 
-    /// Amount in nano tokens.
+    /// Amount in tokens.
     #[clap(short, long, required_unless_present = "all")]
-    amount: Option<u128>,
+    amount: Option<FpTokens>,
 
     /// Withdraw everything from the wallet.
     #[clap(long)]
@@ -530,7 +549,10 @@ struct CmdWithdraw {
 impl CmdWithdraw {
     fn run(self, args: BaseArgs) -> Result<()> {
         // Prepare keys
-        let wallet_keys = NodeKeys::from_file(&args.validator_keys_path(self.sign.as_ref()))?;
+        let ElectionsConfig::Simple(simple) = {
+            let path = args.elections_config_path(self.config.as_ref());
+            ElectionsConfig::from_file(path).context("failed to load elections config")?
+        };
 
         // Parse paylout
         let payload = match self.payload {
@@ -541,11 +563,11 @@ impl CmdWithdraw {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
-            let wallet = Wallet::new(&client, &wallet_keys.as_secret(), config.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             let amount = match self.amount {
                 None => Amount::All,
-                Some(amount) => Amount::Exact(amount),
+                Some(amount) => Amount::Exact(*amount),
             };
 
             let internal = InternalMessage {
@@ -626,7 +648,7 @@ impl ElectionsContext<'_> {
                 query_id: now_millis(),
                 validator_key,
                 stake_at: election_id,
-                max_factor: stake_factor,
+                stake_factor,
                 adnl_addr,
                 signature,
             }

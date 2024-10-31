@@ -64,11 +64,6 @@ struct CmdRun {
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
 
-    /// Round of a new consensus genesis
-    #[allow(clippy::option_option)]
-    #[clap(long)]
-    pub mempool_start_round: Option<Option<u32>>,
-
     /// Last know applied master block seqno to recover from
     #[allow(clippy::option_option)]
     #[clap(long)]
@@ -148,11 +143,9 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        let mempool_start_round = self.mempool_start_round.unwrap_or_default();
         let from_mc_block_seqno = self.from_mc_block_seqno.unwrap_or_default();
 
-        node.run(&init_block_id, mempool_start_round, from_mc_block_seqno)
-            .await?;
+        node.run(&init_block_id, from_mc_block_seqno).await?;
 
         Ok(())
     }

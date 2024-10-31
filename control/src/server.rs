@@ -525,7 +525,7 @@ impl proto::ControlServer for ControlServer {
 
         let data = build_elections_data_to_sign(
             req.election_id,
-            req.max_factor,
+            req.stake_factor,
             &req.address,
             &req.adnl_addr,
         );
