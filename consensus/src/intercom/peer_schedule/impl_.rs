@@ -91,6 +91,12 @@ impl PeerSchedule {
             stateless.next_epoch_start = Some(next_round);
         });
 
+        tracing::info!(
+            "peer schedule next subset updated for {next_round:?} {:?} {:?}",
+            self.atomic().alt(),
+            locked.data,
+        );
+
         true
     }
 
@@ -102,7 +108,7 @@ impl PeerSchedule {
         let mut locked = self.write();
         tracing::debug!(
             "peer schedule before rotation for {current:?}: {:?} {:?}",
-            self.atomic(),
+            self.atomic().alt(),
             locked.data,
         );
 
@@ -116,8 +122,8 @@ impl PeerSchedule {
             stateless.rotate();
         });
         tracing::info!(
-            "peer schedule rotated for {current:?}: {:?} {:?}",
-            self.atomic(),
+            "peer schedule rotated for {current:?} {:?} {:?}",
+            self.atomic().alt(),
             locked.data,
         );
     }
@@ -150,8 +156,9 @@ impl PeerSchedule {
         self.0.atomic.store(Arc::new(inner));
     }
 
-    pub async fn run_updater(self) -> ! {
+    pub async fn run_updater(self) {
         tracing::info!("starting peer schedule updates");
+        scopeguard::defer!(tracing::warn!("peer schedule updater stopped"));
         let (local_id, mut rx) = {
             let mut guard = self.write();
 
@@ -199,7 +206,10 @@ impl PeerSchedule {
                     );
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    panic!("peer info updates channel closed, cannot maintain node connectivity")
+                    tracing::error!(
+                        "peer info updates channel closed, cannot maintain node connectivity"
+                    );
+                    break;
                 }
                 Err(broadcast::error::RecvError::Lagged(amount)) => {
                     tracing::error!(
@@ -233,11 +243,13 @@ impl PeerSchedule {
             impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
         >,
     ) -> Option<JoinTask<()>> {
-        tracing::info!("restart resolve task");
         if resolved_waiters.is_empty() {
+            tracing::info!("peer schedule resolve task not started: all peers resolved");
             None
         } else {
             let join_task = JoinTask::new(async move {
+                tracing::info!("peer schedule resolve task started");
+                scopeguard::defer!(tracing::info!("peer schedule resolve task stopped"));
                 while let Some(known_peer_handle) = resolved_waiters.next().await {
                     _ = self
                         .write()

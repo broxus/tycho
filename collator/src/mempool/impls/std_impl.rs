@@ -197,6 +197,10 @@ impl MempoolAdapterStdImpl {
         UnappliedConfig::apply_vset(&handle, last_state_update)?;
 
         tokio::spawn(async move {
+            scopeguard::defer!(tracing::warn!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                "mempool engine stopped"
+            ));
             engine.run().await;
         });
 
@@ -222,6 +226,10 @@ impl MempoolAdapterStdImpl {
         config: ConsensusConfig,
         mut anchor_rx: mpsc::UnboundedReceiver<CommitResult>,
     ) {
+        scopeguard::defer!(tracing::warn!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            "handle anchors task stopped"
+        ));
         let mut parser = Parser::new(config.deduplicate_rounds);
         let mut first_after_gap = None;
         while let Some(commit) = anchor_rx.recv().await {

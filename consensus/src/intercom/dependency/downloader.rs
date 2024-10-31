@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures_util::{future, StreamExt};
 use parking_lot::Mutex;
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
@@ -287,7 +287,9 @@ impl<T: DownloadType> DownloadTask<T> {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 Ok(point) = &mut verified_broadcast => break DownloadResult::Verified(point),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
-                update = self.updates.recv() => self.match_peer_updates(update),
+                update = self.updates.recv() => if self.match_peer_updates(update).is_err() {
+                    future::pending::<()>().await;
+                },
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
                         Some(found) => break found,
@@ -476,18 +478,24 @@ impl<T: DownloadType> DownloadTask<T> {
         }
     }
 
-    fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
+    fn match_peer_updates(
+        &mut self,
+        result: Result<(PeerId, PeerState), RecvError>,
+    ) -> Result<(), ()> {
         match result {
             Ok((peer_id, new)) => {
                 self.undone_peers.entry(peer_id).and_modify(|status| {
                     status.state = new;
                 });
+                Ok(())
             }
             Err(err @ RecvError::Lagged(_)) => {
                 tracing::error!(error = display(err), "peer updates");
+                Ok(())
             }
             Err(err @ RecvError::Closed) => {
-                panic!("peer updates {err}")
+                tracing::error!(error = display(err), "peer updates");
+                Err(())
             }
         }
     }

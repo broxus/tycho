@@ -35,14 +35,15 @@ impl InputBufferImpl {
     async fn consume(
         inner: Arc<Mutex<InputBufferData>>,
         mut externals: mpsc::UnboundedReceiver<Bytes>,
-    ) -> ! {
+    ) {
+        scopeguard::defer!(tracing::warn!("externals input buffer task stopped"));
         while let Some(payload) = externals.recv().await {
             let mut data = inner.lock();
             data.add(payload);
             // `fetch()` is topmost priority
             MutexGuard::unlock_fair(data);
         }
-        panic!("externals input channel to mempool is closed");
+        tracing::error!("externals input channel to mempool is closed");
     }
 }
 

@@ -30,6 +30,7 @@ parking_lot = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
 rayon = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tl-proto = { workspace = true }
 tokio = { workspace = true, default-features = false }

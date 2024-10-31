@@ -193,13 +193,19 @@ impl CollectorTask {
                             return Err(round)
                         }
                     },
-                    None => panic!("channel from Broadcast Filter closed"),
+                    None => {
+                        tracing::error!(
+                            parent: self.effects.span(),
+                            "channel from Broadcast Filter closed"
+                        );
+                        future::pending::<()>().await;
+                    },
                 },
                 // frequent event that does not cause completion by itself
                 Some(state) = self.includes.next() => {
                     self.on_inclusion_validated(&state);
                 },
-                else => panic!("unhandled match arm in Collector tokio::select"),
+                else => unreachable!("unhandled match arm in Collector tokio::select"),
             }
         }
     }

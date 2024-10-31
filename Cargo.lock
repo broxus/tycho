@@ -3406,6 +3406,7 @@ dependencies = [
  "rand",
  "rand_pcg",
  "rayon",
+ "scopeguard",
  "serde",
  "serde_json",
  "tikv-jemallocator",
