@@ -7,6 +7,8 @@ root_dir=$(cd "${script_dir}/../" && pwd -P)
 force=""
 base_dir="${root_dir}/.temp"
 N=""
+validator_balance="100000"
+validator_stake="30000"
 while [[ $# -gt 0 ]]; do
   key="$1"
   case $key in
@@ -16,6 +18,28 @@ while [[ $# -gt 0 ]]; do
       ;;
       --dir)
         base_dir="$2"
+        shift # past argument
+        if [ "$#" -gt 0 ]; then shift;
+        else
+          echo 'ERROR: Expected directory path'
+          echo ''
+          print_help
+          exit 1
+        fi
+      ;;
+      --validator-balance)
+        validator_balance="$2"
+        shift # past argument
+        if [ "$#" -gt 0 ]; then shift;
+        else
+          echo 'ERROR: Expected directory path'
+          echo ''
+          print_help
+          exit 1
+        fi
+      ;;
+      --validator-stake)
+        validator_stake="$2"
         shift # past argument
         if [ "$#" -gt 0 ]; then shift;
         else
@@ -60,10 +84,22 @@ base_metrics_port="10000"
 global_config="{}"
 node_config=$(cat "${root_dir}/config.json")
 
+zerostate=$(cat "${root_dir}/zerostate.json" | jq ".validators = []")
+
 for i in $(seq $N);
 do
     $tycho_bin tool gen-key > "${base_dir}/keys${i}.json"
 
+    # Generate validator wallet
+    wallet_keys=$($tycho_bin tool gen-key)
+    wallet_secret=$(echo "$wallet_keys" | jq -r ".secret")
+    wallet_public=$(echo "$wallet_keys" | jq -r ".public")
+    wallet=$($tycho_bin tool gen-account wallet --pubkey "$wallet_public" --balance "$validator_balance")
+    wallet_address=$(echo "$wallet" | jq -r ".account")
+    wallet_boc=$(echo "$wallet" | jq -r ".boc")
+    zerostate=$(echo "${zerostate}" | jq ".accounts[\"$wallet_address\"] = \"$wallet_boc\"")
+
+    # Generate node configs
     node_port=$((base_node_port + i))
     rpc_listen_addr="0.0.0.0:$((base_rpc_port + i))"
     metrics_listen_addr="0.0.0.0:$((base_metrics_port + i))"
@@ -81,9 +117,14 @@ do
     node_config=$(echo "${node_config}" | jq "if .metrics.listen_addr? then .metrics.listen_addr = \"${metrics_listen_addr}\" else . end")
     node_config=$(echo "${node_config}" | jq "if .control.socket_path? then .control.socket_path = \"${control_socket_path}\" else . end")
     echo "${node_config}" > "${base_dir}/config${i}.json"
+
+    elections_config=$(
+      echo '{"ty":"Simple"}' | \
+      jq ".wallet_secret = \"$wallet_secret\" | .wallet_address = \"-1:$wallet_address\" | .stake = \"$validator_stake\""
+    )
+    echo "${elections_config}" > "${base_dir}/elections${i}.json"
 done
 
-zerostate=$(cat "${root_dir}/zerostate.json" | jq ".validators = []")
 for i in $(seq $N);
 do
     pubkey=$(jq .public < "${base_dir}/keys${i}.json")
