@@ -146,9 +146,9 @@ impl Cmd {
                 }
             }
 
-            reqwest::get(path)
+            reqwest::get(&path)
                 .await
-                .with_context(|| format!("failed to fetch a global config"))?
+                .with_context(|| format!("failed to fetch a global config. Path: {path}"))?
                 .bytes()
                 .await
                 .context("failed to receive a global config")?
@@ -313,7 +313,7 @@ fn prepare_systemd_services(
             tycho_bin = binary.display(),
         );
         std::fs::write(&node_service_path, node_service)
-            .with_context(|| format!("failed to save {}", node_service_path.display()))?
+            .with_context(|| format!("failed to save {}", node_service_path.display()))?;
     }
     service_info.insert(TYCHO_SERVICE, SystemdServiceInfo {
         updated: node_service_updated,
@@ -329,7 +329,7 @@ fn prepare_systemd_services(
             tycho_bin = binary.display(),
         );
         std::fs::write(&elect_service_path, elect_service)
-            .with_context(|| format!("failed to save {}", elect_service_path.display()))?
+            .with_context(|| format!("failed to save {}", elect_service_path.display()))?;
     }
     service_info.insert(TYCHO_ELECT_SERVICE, SystemdServiceInfo {
         updated: elect_service_updated,

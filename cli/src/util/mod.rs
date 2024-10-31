@@ -157,7 +157,7 @@ impl std::fmt::Debug for FpTokens {
 
 impl std::fmt::Display for FpTokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let num: u128 = self.0.into();
+        let num: u128 = self.0;
         let int = num / 1000000000;
         let mut frac = num % 1000000000;
 

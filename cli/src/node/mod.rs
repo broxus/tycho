@@ -355,8 +355,6 @@ impl Node {
             CollatorStdImplFactory,
             self.mempool_config_override.clone(),
             last_mc_block_seqno,
-            #[cfg(test)]
-            vec![],
         );
         let collator = CollatorStateSubscriber {
             adapter: collation_manager.state_node_adapter().clone(),

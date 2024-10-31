@@ -120,11 +120,6 @@ async fn test_collation_process_on_stubs() {
         CollatorStdImplFactory,
         None,
         None,
-        #[cfg(feature = "test")]
-        vec![
-            node_1_keypair,
-            // Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd)),
-        ],
     );
 
     let state_node_adapter = StrangeBlockProvider {
