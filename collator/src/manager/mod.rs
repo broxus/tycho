@@ -11,7 +11,6 @@ use everscale_types::models::{
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
-use tracing::Instrument;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
@@ -42,7 +41,6 @@ use crate::types::{
     ShardDescriptionExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
-use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
 use crate::utils::vset_cache::ValidatorSetCache;
 use crate::validator::{AddSession, ValidationStatus, Validator};
@@ -332,21 +330,6 @@ where
         arc_dispatcher.run(Arc::new(processor), tasks_receiver);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
 
-        // start other async processes
-
-        // schedule to check collation sessions and force refresh
-        // if not initialized (when started from zerostate)
-        schedule_async_action(
-            tokio::time::Duration::from_secs(10),
-            || async move {
-                arc_dispatcher
-                    .spawn_task(method_to_async_closure!(check_and_start_collation_sessions,))
-                    .await
-            },
-            "CollationProcessor::check_refresh_collation_sessions()".into(),
-        );
-
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Action scheduled in 10s: CollationProcessor::check_refresh_collation_sessions()");
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");
 
         RunningCollationManager {
@@ -1318,50 +1301,6 @@ where
             );
         }
         (seqno_delta, is_equal)
-    }
-
-    /// Check if collation sessions initialized and try to force refresh them if they not.
-    /// This needed when start from zerostate or whole network was restarted
-    /// and nobody will produce next master block and we need
-    /// to start collation sessions based on the actual state.
-    pub async fn check_and_start_collation_sessions(&self) -> Result<()> {
-        // the sessions list is not enpty so the collation process was already started from
-        // actual state or incoming master block from blockchain
-        if !self.active_collation_sessions.read().is_empty() {
-            tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation sessions already activated");
-            return Ok(());
-        }
-
-        // here we will wait for last applied master block then process it
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Requesting last applied mc block to activate collation sessions...",
-        );
-        let last_mc_block_id = self
-            .state_node_adapter
-            .load_last_applied_mc_block_id()
-            .await?;
-
-        let span = tracing::span!(
-            tracing::Level::TRACE,
-            "check_refresh_collation_session",
-            last_mc_block_id = %last_mc_block_id.as_short_id(),
-        );
-        async {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Running processing last mc block to activate collation sessions...",
-            );
-
-            let state = self
-                .state_node_adapter
-                .load_state(&last_mc_block_id)
-                .await?;
-
-            self.handle_block_from_bc(state).await
-        }
-        .instrument(span)
-        .await
     }
 
     async fn process_mc_state_update(
