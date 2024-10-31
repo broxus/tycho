@@ -88,7 +88,7 @@ impl CmdGetInfo {
                 "public_addr": info.public_addr,
                 "local_addr": info.local_addr.to_string(),
                 "adnl_id": info.adnl_id,
-                "validator_public_key": info.public_addr,
+                "validator_public_key": info.validator_public_key,
             }))
         })
     }
@@ -600,7 +600,7 @@ impl ControlArgs {
         F: FnOnce(ControlClient) -> FT + Send + 'static,
         FT: Future<Output = Result<()>> + Send,
     {
-        init_logger_simple("info");
+        init_logger_simple("info,tarpc=error");
 
         let sock = args.control_socket_path(self.control_socket.as_ref());
 

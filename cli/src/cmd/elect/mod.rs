@@ -1024,7 +1024,7 @@ impl ControlArgs {
         F: FnOnce(ClientFactory) -> FT + Send + 'static,
         FT: Future<Output = Result<()>> + Send + 'static,
     {
-        init_logger_simple("info");
+        init_logger_simple("info,tarpc=error");
 
         let factory = ClientFactory {
             sock: args.control_socket_path(self.control_socket.as_ref()),
