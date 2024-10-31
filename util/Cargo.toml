@@ -1,6 +1,7 @@
 [package]
 name = "tycho-util"
 description = "Shared utilities for node components."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

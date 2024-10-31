@@ -1,35 +1,31 @@
-# tycho
+## Tycho
 
-## Pre-requisites
+Reference implementation of Tycho protocol.
 
-- [rust](https://rustup.rs/)
-- [just](https://pkgs.org/download/just)
-- [zstd](https://pkgs.org/download/zstd)
-- [clang](https://pkgs.org/download/clang)
-- [llvm](https://pkgs.org/download/llvm)
-- [cargo-nextest](https://nexte.st/docs/installation/from-source/)
+## About
 
-## Testing
+Tycho is a high-performance protocol designed for building L1/L2 TVM blockchain networks. By utilizing DAG (Directed Acyclic Graph) for consensus and TVM for parallel execution, Tycho works with high throughput and low latency.
 
-To run tests from ci:
+## Development
 
-```bash
-just ci
-```
+- Install Rust:
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- Install dependencies:
+  ```bash
+  sudo apt install build-essential git libssl-dev zlib1g-dev pkg-config clang jq
+  ```
+- Install tools:
+  ```bash
+  cargo install lychee cargo-shear cargo-nextest
+  ```
+- Test CI locally:
+  ```bash
+  just ci
+  ```
 
-To interactivly choose what to run:
-
-```bash
-just
-```
-
-To format code:
-
-```bash
-just fmt
-```
-
-## Local Network
+## Running a Local Network
 
 ```bash
 # Generate zerostate config stub (with optional --force flag):
@@ -82,3 +78,16 @@ cmake -DWITH_LZ4=ON -DWITH_ZSTD=ON -DWITH_JEMALLOC=ON -DCMAKE_BUILD_TYPE=Release
 make -j16 rocksdb
 export ROCKSDB_LIB_DIR=/path/to/rocksdb/build
 ```
+
+## Contributing
+
+We welcome contributions to the project! If you notice any issues or errors, feel free to open an issue or submit a pull request.
+
+## License
+
+Licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.

@@ -119,7 +119,7 @@ gen_network *flags:
 node *flags:
     ./scripts/run-node.sh --dir {{ local_network_dir }} {{ flags }}
 
-# Runs elections on the node `N`.
+# Participates in elections from the node `N`.
 elect *flags:
     ./scripts/elect-node.sh --dir {{local_network_dir}} {{flags}}
 

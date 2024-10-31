@@ -1,6 +1,7 @@
 [package]
 name = "tycho-core"
 description = "Basic functionality of peer."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

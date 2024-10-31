@@ -1,7 +1,7 @@
 [package]
 name = "tycho-cli"
 description = "Node CLI."
-include = ["src/**/*.rs", "res/**/*.boc"]
+include = ["src/**/*.rs", "res/**/*.boc", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

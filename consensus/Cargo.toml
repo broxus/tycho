@@ -1,6 +1,7 @@
 [package]
 name = "tycho-consensus"
 description = "DAG-based consensus for external messages queue."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

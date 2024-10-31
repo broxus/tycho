@@ -1,5 +1,6 @@
 [package]
 name = "tycho-storage"
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

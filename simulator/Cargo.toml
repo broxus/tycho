@@ -1,7 +1,7 @@
 [package]
 name = "tycho-simulator"
 description = "A network simulation tool."
-include = ["src/**/*.rs"]
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

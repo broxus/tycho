@@ -1,6 +1,7 @@
 [package]
 name = "tycho-block-util"
 description = "Shared utilities for blockchain models."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

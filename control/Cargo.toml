@@ -1,6 +1,7 @@
 [package]
 name = "tycho-control"
 description = "Node control server."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
