@@ -367,7 +367,7 @@ impl Node {
             collator_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
-            mempool_config_override: global_config.mempool_override,
+            mempool_config_override: global_config.mempool,
         })
     }
 
