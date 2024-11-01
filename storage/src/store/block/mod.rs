@@ -60,9 +60,19 @@ impl BlockStorage {
         fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
             const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
 
-            std::mem::size_of::<BlockId>() as u32
-                + BLOCK_STUFF_OVERHEAD
-                + value.data_size().try_into().unwrap_or(u32::MAX)
+            let mut weight = size_of::<BlockId>() as u32;
+
+            weight = weight.saturating_add(BLOCK_STUFF_OVERHEAD);
+            weight = weight.saturating_add(value.data_size().try_into().unwrap_or(u32::MAX));
+
+            // Calculate cells size
+            let cells_size = value
+                .num_uniq_cells()
+                .try_into()
+                .unwrap_or(u32::MAX)
+                .saturating_mul(size_of::<everscale_types::cell::Cell>() as u32); // todo: ask @Rexagon about real size
+
+            weight.saturating_add(cells_size)
         }
 
         let blocks_cache = moka::sync::Cache::builder()
