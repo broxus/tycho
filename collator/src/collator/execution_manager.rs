@@ -20,7 +20,7 @@ use tycho_util::FastHashMap;
 use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
     AccountId, AnchorsCache, BlockCollationData, Dequeued, MessageGroup, MessagesBuffer,
-    ParsedMessage, ShardAccountStuff, WorkingState,
+    ParsedMessage, ShardAccountStuff,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
@@ -56,6 +56,8 @@ pub(super) struct ExecutionManager {
     read_ext_messages_total_elapsed: Duration,
     /// sum total time of adding messages to groups
     add_to_message_groups_total_elapsed: Duration,
+    /// shards description end lt  
+    shards_description_end_lt: Vec<(ShardIdent, u64)>,
 }
 
 pub(super) struct MessagesExecutor {
@@ -79,7 +81,11 @@ pub(super) enum GetNextMessageGroupMode {
 
 impl ExecutionManager {
     /// constructor
-    pub fn new(shard_id: ShardIdent, messages_buffer_limit: usize) -> Self {
+    pub fn new(
+        shard_id: ShardIdent,
+        messages_buffer_limit: usize,
+        shards_description_end_lt: Vec<(ShardIdent, u64)>,
+    ) -> Self {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
             .set(messages_buffer_limit as f64);
 
@@ -93,6 +99,7 @@ impl ExecutionManager {
             read_ext_messages_total_elapsed: Duration::ZERO,
             add_to_message_groups_total_elapsed: Duration::ZERO,
             last_read_to_anchor_chain_time: None,
+            shards_description_end_lt,
         }
     }
 
@@ -122,7 +129,6 @@ impl ExecutionManager {
     }
 
     #[tracing::instrument(skip_all)]
-    #[allow(clippy::too_many_arguments)]
     pub async fn get_next_message_group(
         &mut self,
         msgs_buffer: &mut MessagesBuffer,
@@ -130,7 +136,6 @@ impl ExecutionManager {
         collation_data: &mut BlockCollationData,
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
         max_new_message_key_to_current_shard: &QueueKey,
-        working_state: &WorkingState,
         mode: GetNextMessageGroupMode,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
@@ -141,6 +146,27 @@ impl ExecutionManager {
             GetNextMessageGroupMode::Continue => InitIteratorMode::UseNextRange,
             GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
         };
+
+        // here iterator may not exist (on the first method call during collation)
+        // so init iterator for current not fully processed ranges or next available
+        if mq_iterator_adapter.iterator_is_none() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "current iterator not exist, \
+                will init iterator for current not fully processed ranges or next available"
+            );
+            mq_iterator_adapter
+                .try_init_next_range_iterator(
+                    &mut collation_data.processed_upto,
+                    self.shards_description_end_lt.iter().copied(),
+                    // We always init first iterator during block collation
+                    // with current ranges from processed_upto info
+                    // and do not touch next range before we read all existing messages buffer.
+                    // In this case the initial iterator range will be equal both
+                    // on Refill and on Continue.
+                    InitIteratorMode::OmitNextRange,
+                )
+                .await?;
+        }
 
         // when buffer contains externals from prev collation
         // we should process them all before reading existing internals
@@ -253,7 +279,7 @@ impl ExecutionManager {
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(
                         &mut collation_data.processed_upto,
-                        working_state,
+                        self.shards_description_end_lt.iter().copied(),
                         init_iterator_mode,
                     )
                     .await?;

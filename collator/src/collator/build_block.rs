@@ -161,7 +161,7 @@ impl CollatorStdImpl {
                         address: *config_address,
                         params,
                     }),
-                &working_state,
+                prev_shard_data,
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
 
@@ -406,6 +406,13 @@ impl CollatorStdImpl {
                 0
             };
 
+            let shards = extra
+                .shards
+                .iter()
+                .filter_map(|r| r.ok())
+                .map(|(i, shard_description)| (i, shard_description.into()))
+                .collect();
+
             Arc::new(McData {
                 global_id: new_block.as_ref().global_id,
                 block_id: *new_block.id(),
@@ -417,7 +424,7 @@ impl CollatorStdImpl {
                 total_validator_fees,
 
                 global_balance: extra.global_balance.clone(),
-                shards: extra.shards,
+                shards,
                 config: extra.config,
                 validator_info: extra.validator_info,
                 consensus_info: extra.consensus_info,
@@ -535,9 +542,8 @@ impl CollatorStdImpl {
     fn create_mc_state_extra(
         collation_data: &mut BlockCollationData,
         config_params: Option<BlockchainConfig>,
-        working_state: &WorkingState,
+        prev_shard_data: &PrevData,
     ) -> Result<(McStateExtra, u32)> {
-        let prev_shard_data = working_state.prev_shard_data_ref();
         let prev_state = &prev_shard_data.observable_states()[0];
 
         // 1. update config params and detect key block

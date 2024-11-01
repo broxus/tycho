@@ -187,17 +187,29 @@ impl CollatorStdImpl {
             collation_config.work_units_params.execute.clone(),
         );
 
-        // create exec_manager
-        let mut exec_manager = ExecutionManager::new(
-            self.shard_id,
-            collation_config.msgs_exec_params.buffer_limit as _,
-        );
+        // if this is a masterchain, we must take top shard blocks end lt
+        let shards_description_end_lt: Vec<_> = if self.shard_id.is_masterchain() {
+            collation_data
+                .shards()?
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        } else {
+            working_state
+                .mc_data
+                .shards
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        };
 
         // create iterator adapter
         let mut mq_iterator_adapter = QueueIteratorAdapter::new(
             self.shard_id,
             self.mq_adapter.clone(),
             msgs_buffer.current_iterator_positions.take().unwrap(),
+            working_state.mc_data.gen_lt,
+            working_state.prev_shard_data_ref().gen_lt(),
         );
 
         // we need to init iterator anyway because we need it to add new messages to queue
@@ -207,7 +219,7 @@ impl CollatorStdImpl {
         mq_iterator_adapter
             .try_init_next_range_iterator(
                 &mut collation_data.processed_upto,
-                &working_state,
+                shards_description_end_lt.iter().copied(),
                 // We always init first iterator during block collation
                 // with current ranges from processed_upto info
                 // and do not touch next range before we read all existing messages buffer.
@@ -216,6 +228,13 @@ impl CollatorStdImpl {
                 InitIteratorMode::OmitNextRange,
             )
             .await?;
+
+        // create exec_manager
+        let mut exec_manager = ExecutionManager::new(
+            self.shard_id,
+            collation_config.msgs_exec_params.buffer_limit as _,
+            shards_description_end_lt,
+        );
 
         // refill messages buffer and skip groups upto offset (on node restart)
         let prev_processed_offset = collation_data.processed_upto.processed_offset;
@@ -233,7 +252,6 @@ impl CollatorStdImpl {
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         &QueueKey::MIN,
-                        &working_state,
                         GetNextMessageGroupMode::Refill,
                     )
                     .await?;
@@ -304,7 +322,6 @@ impl CollatorStdImpl {
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         &max_new_message_key_to_current_shard,
-                        &working_state,
                         GetNextMessageGroupMode::Continue,
                     )
                     .await?;
