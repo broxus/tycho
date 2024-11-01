@@ -35,6 +35,13 @@ impl ControlClient {
         self.inner.ping(current_context()).await.map_err(Into::into)
     }
 
+    pub async fn get_status(&self) -> ClientResult<NodeStatusResponse> {
+        self.inner
+            .get_status(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn get_node_info(&self) -> ClientResult<NodeInfoResponse> {
         self.inner
             .get_node_info(current_context())
