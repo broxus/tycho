@@ -624,20 +624,28 @@ impl CollatorStdImpl {
                     .unwrap_or_default();
 
                 let session_update_round = {
-                    // consensus session cannot abort until reaching full history amount of rounds,
-                    // because mempool has to re-validate historical points during sync,
-                    // and can hold just one previous vset to check peer authority
-                    let full_history_round = consensus_info.prev_vset_switch_round
-                        + consensus_config.max_consensus_lag_rounds as u32
-                        + consensus_config.sync_support_rounds as u32
-                        + consensus_config.deduplicate_rounds as u32
-                        + consensus_config.commit_history_rounds as u32;
                     // `prev_processed_to_anchor` is a round in the ending session, after which
                     // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
-                    let mempool_last_created_round =
+                    let mempool_last_round_to_create =
                         prev_processed_to_anchor + consensus_config.max_consensus_lag_rounds as u32;
+                    let session_last_round =
+                        if consensus_info.prev_vset_switch_round > consensus_info.genesis_round {
+                            // consensus session cannot abort until reaching full history amount of rounds,
+                            // because mempool has to re-validate historical points during sync,
+                            // and can hold just one previous vset to check peer authority
+                            let full_history_round = consensus_info.prev_vset_switch_round
+                                + consensus_config.max_consensus_lag_rounds as u32
+                                + consensus_config.sync_support_rounds as u32
+                                + consensus_config.deduplicate_rounds as u32
+                                + consensus_config.commit_history_rounds as u32;
+                            mempool_last_round_to_create.max(full_history_round)
+                        } else {
+                            // mempool history does not span across genesis,
+                            // so can change vset earlier without invalidating points
+                            mempool_last_round_to_create
+                        };
                     // `+1` because it will be the first mempool round in the new session
-                    full_history_round.max(mempool_last_created_round) + 1
+                    session_last_round + 1
                 };
 
                 // currently we simultaneously update session_seqno in collation and session_update_round in consesus
