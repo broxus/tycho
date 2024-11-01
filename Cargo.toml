@@ -21,6 +21,7 @@ members = [
     "simulator",
     "storage",
     "util",
+    "light-node",
 ]
 
 [workspace.dependencies]
