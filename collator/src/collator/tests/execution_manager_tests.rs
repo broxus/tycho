@@ -15,7 +15,7 @@ use tycho_util::FastHashMap;
 
 use super::ExecutionManager;
 use crate::collator::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
-use crate::collator::execution_manager::GetNextMessageGroupMode;
+use crate::collator::execution_manager::{GetNextMessageGroupMode, InitIteratorMode};
 use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
 use crate::collator::types::{AnchorsCache, MessagesBuffer, PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
@@ -333,6 +333,15 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     let prev_processed_offset = collation_data.processed_upto.processed_offset;
     assert!(!msgs_buffer.has_pending_messages());
     assert!(prev_processed_offset > 0);
+
+    mq_iterator_adapter
+        .try_init_next_range_iterator(
+            &mut collation_data.processed_upto,
+            &working_state,
+            InitIteratorMode::OmitNextRange,
+        )
+        .await
+        .unwrap();
 
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
         let msg_group = exec_manager

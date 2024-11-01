@@ -251,7 +251,7 @@ impl CmdRun {
                     // Check if there are still some unsuccessful elections
                     if elector_data.current_election.is_some() && until_round_end == 0 {
                         // Extend their lifetime
-                        break 'after_end gen_utime + 600;
+                        break 'after_end gen_utime + 300;
                     }
 
                     tracing::info!("waiting for the new round to start");

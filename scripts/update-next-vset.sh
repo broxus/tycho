@@ -75,10 +75,11 @@ do
     vset=$(echo "$vset" | jq ".list += [${validator_entry}]")
 done
 
-next_time=$(date +%s)
-next_time=$((next_time + 30))
+now=$(date +%s)
+utime_since=$((now + 30))
+utime_until=$((now + 30))
 
-vset=$(echo "$vset" | jq ".main = ${N} | .total_weight = ${N} | .utime_since = ${next_time} | .utime_until = ${next_time}")
+vset=$(echo "$vset" | jq ".main = ${N} | .total_weight = ${N} | .utime_since = ${utime_since} | .utime_until = ${utime_until}")
 
 echo "vset: $vset"
 
