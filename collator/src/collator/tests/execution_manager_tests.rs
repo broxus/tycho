@@ -297,7 +297,10 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         mc_block_info,
         top_shard_block_info,
     );
-    let (_working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+
+    let WorkingState { msgs_buffer, .. } = *working_state;
+
+    let mut msgs_buffer = msgs_buffer.unwrap();
 
     let mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>> =
         Arc::new(MessageQueueAdapterTestImpl::default());
