@@ -43,4 +43,6 @@ tycho_bin=$(/usr/bin/env bash "${script_dir}/build-node.sh")
 $tycho_bin elect run \
     --node-keys "${base_dir}/keys${N}.json" \
     --config "${base_dir}/elections${N}.json" \
-    --control-socket "${base_dir}/control${N}.sock"
+    --control-socket "${base_dir}/control${N}.sock" \
+    --elections-start-offset 30s \
+    --elections-end-offset 30s
