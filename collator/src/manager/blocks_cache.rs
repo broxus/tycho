@@ -417,9 +417,11 @@ impl BlocksCache {
         block_id: &BlockId,
         validation_result: ValidationStatus,
     ) -> bool {
-        let (new_status, signatures) = match validation_result {
-            ValidationStatus::Complete(signatures) => (CandidateStatus::Validated, signatures),
-            ValidationStatus::Skipped => (CandidateStatus::Synced, Default::default()),
+        let (new_status, signatures, total_weight) = match validation_result {
+            ValidationStatus::Complete(res) => {
+                (CandidateStatus::Validated, res.signatures, res.total_weight)
+            }
+            ValidationStatus::Skipped => (CandidateStatus::Synced, Default::default(), 0),
         };
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -445,6 +447,7 @@ impl BlocksCache {
             } => {
                 let changed = *status != new_status;
                 candidate_stuff.signatures = signatures;
+                candidate_stuff.total_signature_weight = total_weight;
                 *status = new_status;
                 if !changed {
                     tracing::debug!(
