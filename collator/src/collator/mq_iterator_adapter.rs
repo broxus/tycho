@@ -107,8 +107,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     }
 
     #[tracing::instrument(skip_all, fields(mode = ?mode))]
-    pub async fn try_init_next_range_iterator<'a, I>(
-        &'a mut self,
+    pub async fn try_init_next_range_iterator<I>(
+        &mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
         shards: I,
         mc_gen_lt: u64,
