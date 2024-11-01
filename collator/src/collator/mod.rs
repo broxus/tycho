@@ -1090,6 +1090,8 @@ impl CollatorStdImpl {
             self.shard_id,
             self.mq_adapter.clone(),
             msgs_buffer.current_iterator_positions.clone().unwrap(),
+            working_state.mc_data.gen_lt,
+            prev_shard_data.gen_lt(),
         );
 
         let mut current_processed_upto = prev_shard_data.processed_upto().clone();
@@ -1101,8 +1103,6 @@ impl CollatorStdImpl {
                     .shards
                     .iter()
                     .map(|(k, v)| (*k, v.end_lt)),
-                working_state.mc_data.gen_lt,
-                prev_shard_data.gen_lt(),
                 InitIteratorMode::UseNextRange,
             )
             .await?;

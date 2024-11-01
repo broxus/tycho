@@ -36,6 +36,10 @@ pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     current_positions: FastHashMap<ShardIdent, QueueKey>,
     /// sum total iterators initialization time
     init_iterator_total_elapsed: Duration,
+    /// mc data gen lt
+    mc_gen_lt: u64,
+    /// prev shard data gen lt
+    prev_shard_data_gen_lt: u64,
 }
 
 impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
@@ -43,6 +47,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         shard_id: ShardIdent,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
         current_positions: FastHashMap<ShardIdent, QueueKey>,
+        mc_gen_lt: u64,
+        prev_shard_data_gen_lt: u64,
     ) -> Self {
         Self {
             shard_id,
@@ -53,6 +59,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             new_messages_read_to: QueueKey::MIN,
             current_positions,
             init_iterator_total_elapsed: Duration::ZERO,
+            mc_gen_lt,
+            prev_shard_data_gen_lt,
         }
     }
 
@@ -111,8 +119,6 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         &mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
         shards: I,
-        mc_gen_lt: u64,
-        prev_shard_data_gen_lt: u64,
         mode: InitIteratorMode,
     ) -> Result<bool>
     where
@@ -204,20 +210,18 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             // add masterchain default range if not exist
             let mc_shard_id = ShardIdent::new_full(-1);
 
-            let mut ranges_updated = Self::try_update_ranges_for_shard(
+            let mut ranges_updated = self.try_update_ranges_for_shard(
                 mc_shard_id,
-                mc_gen_lt,
-                prev_shard_data_gen_lt,
+                self.mc_gen_lt,
                 &mut ranges_from,
                 &mut ranges_to,
                 || self.shard_id.is_masterchain(),
             );
 
             for (shard_id, shard_description_end_lt) in shards {
-                ranges_updated |= Self::try_update_ranges_for_shard(
+                ranges_updated |= self.try_update_ranges_for_shard(
                     shard_id,
                     shard_description_end_lt,
-                    prev_shard_data_gen_lt,
                     &mut ranges_from,
                     &mut ranges_to,
                     || self.shard_id == shard_id,
@@ -283,9 +287,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     }
 
     fn try_update_ranges_for_shard<F>(
+        &self,
         shard_id: ShardIdent,
         shard_description_end_lt: u64,
-        prev_shard_data_gen_lt: u64,
         ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
         ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
         is_current_shard: F,
@@ -308,7 +312,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         // try update shardchain read_to
         let new_sc_read_to_lt = if is_current_shard() {
             // get new read_to LT from PrevData
-            prev_shard_data_gen_lt
+            self.prev_shard_data_gen_lt
         } else {
             // get new LT from ShardDescription
             shard_description_end_lt
