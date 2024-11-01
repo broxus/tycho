@@ -6,6 +6,8 @@ Reference implementation of Tycho protocol.
 
 Tycho is a high-performance protocol designed for building L1/L2 TVM blockchain networks. By utilizing DAG (Directed Acyclic Graph) for consensus and TVM for parallel execution, Tycho works with high throughput and low latency.
 
+- **[Testnet Validators Guide](./docs/validator.md)**
+
 ## Development
 
 - Install Rust:
