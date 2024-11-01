@@ -172,6 +172,9 @@ impl MempoolAdapterStdImpl {
         let consensus_config = (config_guard.builder.get_consensus_config().cloned())
             .ok_or(anyhow!("consensus config is not set"))?;
 
+        // TODO support config change; payload size is bound to mempool rounds
+        self.input_buffer.apply_config(&consensus_config);
+
         let engine = Engine::new(
             self.key_pair.clone(),
             &self.network,
@@ -184,9 +187,6 @@ impl MempoolAdapterStdImpl {
             // This will be used as next set after genesis, skipping some existed set
             &mempool_config,
         );
-
-        // TODO support config change; payload size is bound to mempool rounds
-        self.input_buffer.apply_config(&consensus_config);
 
         let handle = engine.get_handle();
 
