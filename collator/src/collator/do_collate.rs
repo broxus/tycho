@@ -24,9 +24,11 @@ use super::types::{
 };
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::GetNextMessageGroupMode;
+use crate::collator::mq_iterator_adapter::InitIteratorMode;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
+use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
@@ -198,6 +200,23 @@ impl CollatorStdImpl {
             msgs_buffer.current_iterator_positions.take().unwrap(),
         );
 
+        // we need to init iterator anyway because we need it to add new messages to queue
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "init iterator for current ranges"
+        );
+        mq_iterator_adapter
+            .try_init_next_range_iterator(
+                &mut collation_data.processed_upto,
+                &working_state,
+                // We always init first iterator during block collation
+                // with current ranges from processed_upto info
+                // and do not touch next range before we read all existing messages buffer.
+                // In this case the initial iterator range will be equal both
+                // on Refill and on Continue.
+                InitIteratorMode::OmitNextRange,
+            )
+            .await?;
+
         // refill messages buffer and skip groups upto offset (on node restart)
         let prev_processed_offset = collation_data.processed_upto.processed_offset;
         if !msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
@@ -232,6 +251,10 @@ impl CollatorStdImpl {
 
         let prepare_elapsed = prepare_histogram.finish();
 
+        // holds the max LT_HASH of a new created messages to current shard
+        // it needs to define the read range for new messages when we get next message group
+        let mut max_new_message_key_to_current_shard = QueueKey::MIN;
+
         // execute tick transaction and special transactions (mint, recover)
         let execute_tick_elapsed;
         if is_masterchain {
@@ -243,11 +266,19 @@ impl CollatorStdImpl {
                 TickTock::Tick,
                 &mut collation_data,
                 &mut executor,
+                &mut max_new_message_key_to_current_shard,
+                mq_iterator_adapter.iterator(),
             )
             .await?;
 
-            self.create_special_transactions(mc_data, &mut collation_data, &mut executor)
-                .await?;
+            self.create_special_transactions(
+                mc_data,
+                &mut collation_data,
+                &mut executor,
+                &mut max_new_message_key_to_current_shard,
+                mq_iterator_adapter.iterator(),
+            )
+            .await?;
 
             execute_tick_elapsed = histogram.finish();
         } else {
@@ -264,8 +295,6 @@ impl CollatorStdImpl {
 
         {
             let mut executed_groups_count = 0;
-            let mut max_new_message_key_to_current_shard = QueueKey::MIN;
-
             loop {
                 let mut timer = std::time::Instant::now();
                 let msgs_group_opt = exec_manager
@@ -299,43 +328,14 @@ impl CollatorStdImpl {
                     // Process transactions
                     timer = std::time::Instant::now();
                     for item in group_result.items {
-                        let new_messages = new_transaction(
-                            &mut collation_data,
-                            &self.shard_id,
+                        self.process_transaction(
                             item.executor_output,
-                            item.in_message,
+                            Some(item.in_message),
+                            &mut collation_data,
+                            &executor,
+                            &mut max_new_message_key_to_current_shard,
+                            mq_iterator_adapter.iterator(),
                         )?;
-
-                        collation_data.new_msgs_created += new_messages.len() as u64;
-                        for new_message in new_messages {
-                            let MsgInfo::Int(int_msg_info) = new_message.info else {
-                                continue;
-                            };
-
-                            if new_message.dst_in_current_shard {
-                                let new_message_key = QueueKey {
-                                    lt: int_msg_info.created_lt,
-                                    hash: *new_message.cell.repr_hash(),
-                                };
-                                max_new_message_key_to_current_shard = std::cmp::max(
-                                    max_new_message_key_to_current_shard,
-                                    new_message_key,
-                                );
-                            }
-
-                            collation_data.inserted_new_msgs_to_iterator += 1;
-
-                            let enqueued_message =
-                                EnqueuedMessage::from((int_msg_info, new_message.cell));
-
-                            self.mq_adapter.add_message_to_iterator(
-                                mq_iterator_adapter.iterator(),
-                                enqueued_message,
-                            )?;
-                        }
-
-                        collation_data.next_lt = executor.min_next_lt();
-                        collation_data.block_limit.lt_current = collation_data.next_lt;
                     }
                     process_txs_total_elapsed += timer.elapsed();
 
@@ -397,6 +397,8 @@ impl CollatorStdImpl {
                 TickTock::Tock,
                 &mut collation_data,
                 &mut executor,
+                &mut max_new_message_key_to_current_shard,
+                mq_iterator_adapter.iterator(),
             )
             .await?;
             execute_tock_elapsed = histogram.finish();
@@ -1218,12 +1220,55 @@ impl CollatorStdImpl {
         Ok(to_mint)
     }
 
+    fn process_transaction(
+        &self,
+        executor_output: ExecutorOutput,
+        in_message: Option<Box<ParsedMessage>>,
+        collation_data: &mut BlockCollationData,
+        executor: &MessagesExecutor,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        iterator: &mut Box<dyn QueueIterator<EnqueuedMessage>>,
+    ) -> Result<()> {
+        let new_messages =
+            new_transaction(collation_data, &self.shard_id, executor_output, in_message)?;
+
+        collation_data.new_msgs_created += new_messages.len() as u64;
+        for new_message in new_messages {
+            let MsgInfo::Int(int_msg_info) = new_message.info else {
+                continue;
+            };
+
+            if new_message.dst_in_current_shard {
+                let new_message_key = QueueKey {
+                    lt: int_msg_info.created_lt,
+                    hash: *new_message.cell.repr_hash(),
+                };
+                *max_new_message_key_to_current_shard =
+                    std::cmp::max(*max_new_message_key_to_current_shard, new_message_key);
+            }
+
+            collation_data.inserted_new_msgs_to_iterator += 1;
+
+            let enqueued_message = EnqueuedMessage::from((int_msg_info, new_message.cell));
+
+            self.mq_adapter
+                .add_message_to_iterator(iterator, enqueued_message)?;
+        }
+
+        collation_data.next_lt = executor.min_next_lt();
+        collation_data.block_limit.lt_current = collation_data.next_lt;
+
+        Ok(())
+    }
+
     /// Create special transactions for the collator
     async fn create_special_transactions(
         &self,
         mc_data: &McData,
         collator_data: &mut BlockCollationData,
         executor: &mut MessagesExecutor,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        iterator: &mut Box<dyn QueueIterator<EnqueuedMessage>>,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions");
 
@@ -1238,6 +1283,8 @@ impl CollatorStdImpl {
                 SpecialOrigin::Recover,
                 collator_data,
                 executor,
+                max_new_message_key_to_current_shard,
+                iterator,
             )
             .await?;
         }
@@ -1249,6 +1296,8 @@ impl CollatorStdImpl {
                 SpecialOrigin::Mint,
                 collator_data,
                 executor,
+                max_new_message_key_to_current_shard,
+                iterator,
             )
             .await?;
         }
@@ -1256,6 +1305,7 @@ impl CollatorStdImpl {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_special_transaction(
         &self,
         account_id: &HashBytes,
@@ -1263,6 +1313,8 @@ impl CollatorStdImpl {
         special_origin: SpecialOrigin,
         collation_data: &mut BlockCollationData,
         executor: &mut MessagesExecutor,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        iterator: &mut Box<dyn QueueIterator<EnqueuedMessage>>,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -1311,14 +1363,15 @@ impl CollatorStdImpl {
 
         let executor_output = executed.result?;
 
-        new_transaction(
-            collation_data,
-            &self.shard_id,
+        self.process_transaction(
             executor_output,
-            executed.in_message,
+            Some(executed.in_message),
+            collation_data,
+            executor,
+            max_new_message_key_to_current_shard,
+            iterator,
         )?;
 
-        collation_data.next_lt = executor.min_next_lt();
         Ok(())
     }
 
@@ -1328,6 +1381,8 @@ impl CollatorStdImpl {
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
         executor: &mut MessagesExecutor,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        iterator: &mut Box<dyn QueueIterator<EnqueuedMessage>>,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -1339,12 +1394,26 @@ impl CollatorStdImpl {
 
         let config = &mc_data.config;
         for account_id in config.get_fundamental_addresses()?.keys() {
-            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data, executor)
-                .await?;
+            self.create_ticktock_transaction(
+                &account_id?,
+                tick_tock,
+                collation_data,
+                executor,
+                max_new_message_key_to_current_shard,
+                iterator,
+            )
+            .await?;
         }
 
-        self.create_ticktock_transaction(&config.address, tick_tock, collation_data, executor)
-            .await?;
+        self.create_ticktock_transaction(
+            &config.address,
+            tick_tock,
+            collation_data,
+            executor,
+            max_new_message_key_to_current_shard,
+            iterator,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1354,6 +1423,8 @@ impl CollatorStdImpl {
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
         executor: &mut MessagesExecutor,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        iterator: &mut Box<dyn QueueIterator<EnqueuedMessage>>,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -1371,15 +1442,19 @@ impl CollatorStdImpl {
             return Ok(());
         };
 
-        let _executor_output = executor
+        let executor_output = executor
             .execute_ticktock_transaction(account_stuff, tick_tock)
             .await?;
 
-        // NOTE: It does nothing for ticktock, so commented for now
-        // new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
+        self.process_transaction(
+            executor_output,
+            None,
+            collation_data,
+            executor,
+            max_new_message_key_to_current_shard,
+            iterator,
+        )?;
 
-        collation_data.execute_count_all += 1;
-        collation_data.next_lt = executor.min_next_lt();
         Ok(())
     }
 
@@ -1529,11 +1604,11 @@ fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
     executor_output: ExecutorOutput,
-    in_msg: Box<ParsedMessage>,
+    in_msg: Option<Box<ParsedMessage>>,
 ) -> Result<Vec<Box<ParsedMessage>>> {
     tracing::trace!(
         target: tracing_targets::COLLATOR,
-        message_hash = %in_msg.cell.repr_hash(),
+        message_hash = ?in_msg.as_ref().map(|m| m.cell.repr_hash()),
         transaction_hash = %executor_output.transaction.inner().repr_hash(),
         "process new transaction from message",
     );
@@ -1543,134 +1618,9 @@ fn new_transaction(
     let gas_used = &mut collation_data.block_limit.gas_used;
     *gas_used = gas_used.saturating_add(executor_output.gas_used.try_into().unwrap_or(u32::MAX));
 
-    let import_fees;
-    let in_msg_hash = *in_msg.cell.repr_hash();
-    let in_msg = match (in_msg.info, in_msg.special_origin) {
-        // Messages with special origin are always immediate
-        (_, Some(_)) => {
-            let in_msg = InMsg::Immediate(InMsgFinal {
-                in_msg_envelope: Lazy::new(&MsgEnvelope {
-                    cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
-                    next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
-                    fwd_fee_remaining: Default::default(),
-                    message: Lazy::from_raw(in_msg.cell),
-                })?,
-                transaction: executor_output.transaction.clone(),
-                fwd_fee: Default::default(),
-            });
-
-            import_fees = in_msg.compute_fees()?;
-            Lazy::new(&in_msg)?
-        }
-        // External messages are added as is
-        (MsgInfo::ExtIn(_), _) => {
-            collation_data.execute_count_ext += 1;
-
-            import_fees = ImportFees::default();
-            Lazy::new(&InMsg::External(InMsgExternal {
-                in_msg: Lazy::from_raw(in_msg.cell),
-                transaction: executor_output.transaction.clone(),
-            }))?
-        }
-        // Dequeued messages have a dedicated `InMsg` type
-        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) if in_msg.dequeued.is_some() => {
-            collation_data.execute_count_int += 1;
-
-            let same_shard = in_msg.dequeued.map(|d| d.same_shard).unwrap_or_default();
-
-            let envelope = Lazy::new(&MsgEnvelope {
-                // NOTE: `cur_addr` is not used in current routing between shards logic
-                cur_addr: if same_shard {
-                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
-                } else {
-                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
-                },
-                next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
-                fwd_fee_remaining: fwd_fee,
-                message: Lazy::from_raw(in_msg.cell),
-            })?;
-
-            let in_msg = InMsg::Final(InMsgFinal {
-                in_msg_envelope: envelope.clone(),
-                transaction: executor_output.transaction.clone(),
-                fwd_fee,
-            });
-            import_fees = in_msg.compute_fees()?;
-
-            let in_msg = Lazy::new(&in_msg)?;
-
-            if same_shard {
-                let out_msg = OutMsg::DequeueImmediate(OutMsgDequeueImmediate {
-                    out_msg_envelope: envelope.clone(),
-                    reimport: in_msg.clone(),
-                });
-                let exported_value = out_msg.compute_exported_value()?;
-
-                collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
-                    out_msg: Lazy::new(&out_msg)?,
-                    exported_value,
-                    new_tx: None,
-                });
-            }
-            collation_data.int_dequeue_count += 1;
-
-            in_msg
-        }
-        // New messages are added as is
-        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) => {
-            collation_data.execute_count_new_int += 1;
-
-            let msg_envelope = MsgEnvelope {
-                cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
-                next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
-                fwd_fee_remaining: fwd_fee,
-                message: Lazy::from_raw(in_msg.cell),
-            };
-            let in_msg = InMsg::Immediate(InMsgFinal {
-                in_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: executor_output.transaction.clone(),
-                fwd_fee,
-            });
-
-            import_fees = in_msg.compute_fees()?;
-            let in_msg = Lazy::new(&in_msg)?;
-
-            let prev_transaction = match collation_data.out_msgs.get(&in_msg_hash) {
-                Some(prepared) => match &prepared.new_tx {
-                    Some(tx) => tx.clone(),
-                    None => anyhow::bail!("invalid out message state for in_msg {in_msg_hash}"),
-                },
-                None => anyhow::bail!("immediate in_msg {in_msg_hash} not found in out_msgs"),
-            };
-
-            let out_msg = OutMsg::Immediate(OutMsgImmediate {
-                out_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: prev_transaction,
-                reimport: in_msg.clone(),
-            });
-            let exported_value = out_msg.compute_exported_value()?;
-
-            collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
-                out_msg: Lazy::new(&out_msg)?,
-                exported_value,
-                new_tx: None,
-            });
-            collation_data.int_enqueue_count -= 1;
-
-            in_msg
-        }
-        (msg_info, special_origin) => {
-            unreachable!(
-                "unexpected message. info: {msg_info:?}, \
-                special_origin: {special_origin:?}"
-            )
-        }
-    };
-
-    collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
-        in_msg,
-        import_fees,
-    });
+    if let Some(in_msg) = in_msg {
+        process_in_message(collation_data, executor_output.transaction.clone(), in_msg)?;
+    }
 
     let mut out_messages = vec![];
 
@@ -1743,6 +1693,143 @@ fn new_transaction(
     }
 
     Ok(out_messages)
+}
+
+fn process_in_message(
+    collation_data: &mut BlockCollationData,
+    transaction: Lazy<Transaction>,
+    in_msg: Box<ParsedMessage>,
+) -> Result<()> {
+    let import_fees;
+    let in_msg_hash = *in_msg.cell.repr_hash();
+    let in_msg = match (in_msg.info, in_msg.special_origin) {
+        // Messages with special origin are always immediate
+        (_, Some(_)) => {
+            let in_msg = InMsg::Immediate(InMsgFinal {
+                in_msg_envelope: Lazy::new(&MsgEnvelope {
+                    cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                    next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                    fwd_fee_remaining: Default::default(),
+                    message: Lazy::from_raw(in_msg.cell),
+                })?,
+                transaction,
+                fwd_fee: Default::default(),
+            });
+
+            import_fees = in_msg.compute_fees()?;
+            Lazy::new(&in_msg)?
+        }
+        // External messages are added as is
+        (MsgInfo::ExtIn(_), _) => {
+            collation_data.execute_count_ext += 1;
+
+            import_fees = ImportFees::default();
+            Lazy::new(&InMsg::External(InMsgExternal {
+                in_msg: Lazy::from_raw(in_msg.cell),
+                transaction,
+            }))?
+        }
+        // Dequeued messages have a dedicated `InMsg` type
+        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) if in_msg.dequeued.is_some() => {
+            collation_data.execute_count_int += 1;
+
+            let same_shard = in_msg.dequeued.map(|d| d.same_shard).unwrap_or_default();
+
+            let envelope = Lazy::new(&MsgEnvelope {
+                // NOTE: `cur_addr` is not used in current routing between shards logic
+                cur_addr: if same_shard {
+                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
+                } else {
+                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
+                },
+                next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
+                fwd_fee_remaining: fwd_fee,
+                message: Lazy::from_raw(in_msg.cell),
+            })?;
+
+            let in_msg = InMsg::Final(InMsgFinal {
+                in_msg_envelope: envelope.clone(),
+                transaction,
+                fwd_fee,
+            });
+            import_fees = in_msg.compute_fees()?;
+
+            let in_msg = Lazy::new(&in_msg)?;
+
+            if same_shard {
+                let out_msg = OutMsg::DequeueImmediate(OutMsgDequeueImmediate {
+                    out_msg_envelope: envelope.clone(),
+                    reimport: in_msg.clone(),
+                });
+                let exported_value = out_msg.compute_exported_value()?;
+
+                collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
+                    out_msg: Lazy::new(&out_msg)?,
+                    exported_value,
+                    new_tx: None,
+                });
+            }
+            collation_data.int_dequeue_count += 1;
+
+            in_msg
+        }
+        // New messages are added as is
+        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) => {
+            collation_data.execute_count_new_int += 1;
+
+            let msg_envelope = MsgEnvelope {
+                cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                fwd_fee_remaining: fwd_fee,
+                message: Lazy::from_raw(in_msg.cell),
+            };
+            let in_msg = InMsg::Immediate(InMsgFinal {
+                in_msg_envelope: Lazy::new(&msg_envelope)?,
+                transaction,
+                fwd_fee,
+            });
+
+            import_fees = in_msg.compute_fees()?;
+            let in_msg = Lazy::new(&in_msg)?;
+
+            let prev_transaction = match collation_data.out_msgs.get(&in_msg_hash) {
+                Some(prepared) => match &prepared.new_tx {
+                    Some(tx) => tx.clone(),
+                    None => anyhow::bail!("invalid out message state for in_msg {in_msg_hash}"),
+                },
+                None => anyhow::bail!("immediate in_msg {in_msg_hash} not found in out_msgs"),
+            };
+
+            let out_msg = OutMsg::Immediate(OutMsgImmediate {
+                out_msg_envelope: Lazy::new(&msg_envelope)?,
+                transaction: prev_transaction,
+                reimport: in_msg.clone(),
+            });
+            let exported_value = out_msg.compute_exported_value()?;
+
+            collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
+                out_msg: Lazy::new(&out_msg)?,
+                exported_value,
+                new_tx: None,
+            });
+            collation_data.int_enqueue_count -= 1;
+
+            in_msg
+        }
+        (msg_info, special_origin) => {
+            unreachable!(
+                "unexpected message. info: {msg_info:?}, \
+                special_origin: {special_origin:?}"
+            )
+        }
+    };
+
+    collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
+        in_msg,
+        import_fees,
+    });
+
+    Ok(())
 }
 
 pub fn contains_prefix(shard_id: &ShardIdent, workchain_id: i32, prefix_without_tag: u64) -> bool {
