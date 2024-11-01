@@ -17,6 +17,7 @@ use crate::BaseArgs;
 
 #[derive(Subcommand)]
 pub enum CmdControl {
+    Status(CmdStatus),
     Ping(CmdPing),
     GetInfo(CmdGetInfo),
     GetAccount(CmdGetAccount),
@@ -37,6 +38,7 @@ pub enum CmdControl {
 impl CmdControl {
     pub fn run(self, args: BaseArgs) -> Result<()> {
         match self {
+            Self::Status(cmd) => cmd.run(args),
             Self::Ping(cmd) => cmd.run(args),
             Self::GetInfo(cmd) => cmd.run(args),
             Self::GetAccount(cmd) => cmd.run(args),
@@ -52,6 +54,53 @@ impl CmdControl {
             Self::GcStates(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
         }
+    }
+}
+
+/// Get node status.
+#[derive(Parser)]
+pub struct CmdStatus {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+impl CmdStatus {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
+            const SYNC_THRESHOLD: u32 = 300; // 5m
+
+            let status = client.get_status().await?;
+
+            let (mc_seqno, mc_block_id, time_diff, is_synced) = match status.last_applied_block {
+                None => (None, None, None, false),
+                Some(b) => {
+                    let diff = status.status_at.saturating_sub(b.gen_utime);
+                    (
+                        Some(b.block_id.seqno),
+                        Some(b.block_id),
+                        Some(diff),
+                        diff <= SYNC_THRESHOLD,
+                    )
+                }
+            };
+
+            let (in_current_vset, in_next_vset, is_elected) = match status.validator_status {
+                None => (false, false, false),
+                Some(s) => (s.in_current_vset, s.in_next_vset, s.is_elected),
+            };
+
+            print_json(serde_json::json!({
+                "init_mc_seqno": status.init_block_id.map(|id| id.seqno),
+                "init_mc_block_id": status.init_block_id.map(|id| id.to_string()),
+                "latest_mc_seqno": mc_seqno,
+                "latest_mc_block_id": mc_block_id.map(|id| id.to_string()),
+                "time_diff": time_diff,
+                "is_synced": is_synced,
+                "in_current_vset": in_current_vset,
+                "in_next_vset": in_next_vset,
+                "is_elected": is_elected,
+            }))
+        })
     }
 }
 

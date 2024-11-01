@@ -6,9 +6,12 @@ use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use everscale_crypto::ed25519;
+use everscale_types::cell::Load;
 use everscale_types::models::{
-    DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
+    AccountState, DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
+    StdAddr,
 };
+use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
@@ -252,6 +255,122 @@ impl ControlServer {
 impl proto::ControlServer for ControlServer {
     async fn ping(self, _: Context) -> u64 {
         tycho_util::time::now_millis()
+    }
+
+    async fn get_status(
+        self,
+        ctx: tarpc::context::Context,
+    ) -> ServerResult<proto::NodeStatusResponse> {
+        let node_state = self.inner.storage.node_state();
+        let block_handles = self.inner.storage.block_handle_storage();
+
+        let init_block_id = node_state.load_init_mc_block_id();
+
+        // TODO: Use handle from cached mc accounts.
+        //       (but in that case we must fill the cache on init).
+        let last_applied_block = node_state
+            .load_last_mc_block_id()
+            .and_then(|block_id| block_handles.load_handle(&block_id))
+            .map(|handle| proto::LastAppliedBlock {
+                block_id: *handle.id(),
+                gen_utime: handle.gen_utime(),
+            });
+
+        let status_at = tycho_util::time::now_sec();
+
+        let validator_status = match self.inner.info_response.validator_public_key {
+            None => None,
+            Some(public_key) => {
+                let parse_config = |res: proto::BlockchainConfigResponse| {
+                    let res = res.parse()?;
+                    let elector_address = res.config.get_elector_address()?;
+
+                    let current_vset = res.config.get_current_validator_set()?;
+                    let in_current_vset = current_vset
+                        .list
+                        .iter()
+                        .any(|vld| vld.public_key == public_key);
+
+                    let next_vset = res.config.get_next_validator_set()?;
+                    let has_next_vset = next_vset.is_some();
+                    let in_next_vset = match next_vset {
+                        None => false,
+                        Some(vset) => vset.list.iter().any(|vld| vld.public_key == public_key),
+                    };
+
+                    Ok::<_, anyhow::Error>((
+                        elector_address,
+                        in_current_vset,
+                        in_next_vset,
+                        has_next_vset,
+                    ))
+                };
+
+                let parse_elector = |res: proto::AccountStateResponse| {
+                    #[derive(Debug, Load)]
+                    struct CurrentElectionData {
+                        _elect_at: u32,
+                        _elect_close: u32,
+                        _min_stake: Tokens,
+                        _total_stake: Tokens,
+                        members: Dict<HashBytes, ()>,
+                    }
+
+                    type PartialElectorData = Option<Lazy<CurrentElectionData>>;
+
+                    let res = res.parse()?;
+                    let Some(account) = res.state.load_account()? else {
+                        anyhow::bail!("elector account not found");
+                    };
+
+                    let data = match account.state {
+                        AccountState::Active(state) => state.data,
+                        _ => None,
+                    }
+                    .context("elector data is empty")?;
+
+                    let Some(current_elections) = data.parse::<PartialElectorData>()? else {
+                        // No current elections
+                        return Ok(false);
+                    };
+                    let current_elections = current_elections.load()?;
+
+                    let is_elected = current_elections.members.contains_key(public_key)?;
+                    Ok::<_, anyhow::Error>(is_elected)
+                };
+
+                let res = self.clone().get_blockchain_config(ctx).await?;
+                let (elector_address, in_current_vset, in_next_vset, has_next_vset) =
+                    parse_config(res).map_err(|e| {
+                        ServerError::new(format!("failed to parse blockchain config: {e:?}"))
+                    })?;
+
+                let mut is_elected = in_next_vset;
+                if !is_elected && !has_next_vset {
+                    let req = proto::AccountStateRequest {
+                        address: StdAddr::new(-1, elector_address),
+                    };
+                    let res = self.get_account_state(ctx, req).await?;
+                    is_elected = parse_elector(res).map_err(|e| {
+                        ServerError::new(format!("failed to parse elector state: {e:?}"))
+                    })?;
+                }
+
+                Some(proto::ValidatorStatus {
+                    public_key,
+                    in_current_vset,
+                    in_next_vset,
+                    is_elected,
+                })
+            }
+        };
+
+        Ok(proto::NodeStatusResponse {
+            status_at,
+            init_block_id,
+            last_applied_block,
+            validator_status,
+        })
     }
 
     async fn get_node_info(self, _: tarpc::context::Context) -> proto::NodeInfoResponse {

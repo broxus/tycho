@@ -14,6 +14,9 @@ pub trait ControlServer {
     /// Ping a node. Returns node timestamp in milliseconds.
     async fn ping() -> u64;
 
+    /// Get node status.
+    async fn get_status() -> ServerResult<NodeStatusResponse>;
+
     /// Returns a node info.
     async fn get_node_info() -> NodeInfoResponse;
 
@@ -66,6 +69,28 @@ pub trait ControlServer {
     async fn sign_elections_payload(
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeStatusResponse {
+    pub status_at: u32,
+    pub init_block_id: Option<BlockId>,
+    pub last_applied_block: Option<LastAppliedBlock>,
+    pub validator_status: Option<ValidatorStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastAppliedBlock {
+    pub block_id: BlockId,
+    pub gen_utime: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorStatus {
+    pub public_key: HashBytes,
+    pub in_current_vset: bool,
+    pub in_next_vset: bool,
+    pub is_elected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
