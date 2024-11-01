@@ -161,6 +161,21 @@ impl CmdRun {
     {
         tracing::info!("started validation loop");
 
+        // Max time diff considered ok.
+        const MAX_TIME_DIFF: u32 = 600; // Seconds
+
+        // Interval between failed elections end polling attempts.
+        const FAILED_ELECTIONS_INTERVAL: u32 = 300; // Seconds
+
+        // Interval between polling attempts on empty elections state.
+        const EMPTY_ELECTIONS_INTERVAL: u32 = 60; // Seconds
+
+        // Minimal timeout for participation future.
+        const MIN_ELECTION_DEADLINE: u32 = 60; // Seconds
+
+        // Minimal interval after participation future.
+        const MIN_ELECTION_INTERVAL: u32 = 60; // Seconds
+
         let to_sec_or_max = |d: Duration| d.as_secs().try_into().unwrap_or(u32::MAX);
         let elections_start_offset = to_sec_or_max(self.elections_start_offset);
         let elections_end_offset = to_sec_or_max(self.elections_end_offset);
@@ -192,10 +207,14 @@ impl CmdRun {
                 .get_elector_data(&config.elector_addr)
                 .await
                 .context("failed to get elector data")?;
+
+            let now = now_sec();
+            let time_diff = now.saturating_sub(gen_utime).min(MAX_TIME_DIFF);
             let timeline = config
-                .compute_elections_timeline(gen_utime)
+                .compute_elections_timeline(now)
                 .context("failed to compute elections timeline")?;
-            tracing::info!(gen_utime, ?timeline);
+
+            tracing::info!(gen_utime, time_diff, ?timeline);
 
             // Handle timeline
             let elections_end = match timeline {
@@ -251,7 +270,7 @@ impl CmdRun {
                     // Check if there are still some unsuccessful elections
                     if elector_data.current_election.is_some() && until_round_end == 0 {
                         // Extend their lifetime
-                        break 'after_end gen_utime + 300;
+                        break 'after_end gen_utime + time_diff + FAILED_ELECTIONS_INTERVAL;
                     }
 
                     tracing::info!("waiting for the new round to start");
@@ -263,7 +282,7 @@ impl CmdRun {
             // Participate in elections
             let Some(Ref(current_elections)) = &elector_data.current_election else {
                 tracing::info!("no current elections in the elector state");
-                interval = 1; // retry nearly immediate
+                interval = std::cmp::max(time_diff, EMPTY_ELECTIONS_INTERVAL); // Wait for sync
                 continue;
             };
 
@@ -279,7 +298,7 @@ impl CmdRun {
                 } else if let Some(until_unfreeze) = unfreeze_at.checked_sub(now_sec()) {
                     if until_unfreeze > 0 {
                         tracing::info!(until_unfreeze, "waiting for stakes to unfreeze");
-                        interval = until_unfreeze;
+                        interval = until_unfreeze + time_diff; // Wait for time diff to be able to recover the stake
                         continue;
                     }
                 }
@@ -310,7 +329,8 @@ impl CmdRun {
             let deadline = Duration::from_secs(
                 elections_end
                     .saturating_sub(elections_end_offset)
-                    .saturating_sub(now_sec()) as u64,
+                    .saturating_sub(now)
+                    .max(MIN_ELECTION_DEADLINE) as u64,
             );
 
             match tokio::time::timeout(deadline, elect_fut).await {
@@ -320,7 +340,9 @@ impl CmdRun {
             }
 
             // Done
-            interval = elections_end.saturating_sub(now_sec());
+            interval = elections_end
+                .saturating_sub(now_sec())
+                .max(MIN_ELECTION_INTERVAL);
         }
     }
 }
