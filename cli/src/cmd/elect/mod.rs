@@ -192,10 +192,14 @@ impl CmdRun {
                 .get_elector_data(&config.elector_addr)
                 .await
                 .context("failed to get elector data")?;
+
+            let now = now_sec();
+            let time_diff = now.saturating_sub(gen_utime);
             let timeline = config
-                .compute_elections_timeline(gen_utime)
+                .compute_elections_timeline(now)
                 .context("failed to compute elections timeline")?;
-            tracing::info!(gen_utime, ?timeline);
+
+            tracing::info!(gen_utime, time_diff, ?timeline);
 
             // Handle timeline
             let elections_end = match timeline {
@@ -263,7 +267,7 @@ impl CmdRun {
             // Participate in elections
             let Some(Ref(current_elections)) = &elector_data.current_election else {
                 tracing::info!("no current elections in the elector state");
-                interval = 1; // retry nearly immediate
+                interval = std::cmp::max(time_diff, 1); // Wait for sync
                 continue;
             };
 
@@ -279,7 +283,7 @@ impl CmdRun {
                 } else if let Some(until_unfreeze) = unfreeze_at.checked_sub(now_sec()) {
                     if until_unfreeze > 0 {
                         tracing::info!(until_unfreeze, "waiting for stakes to unfreeze");
-                        interval = until_unfreeze;
+                        interval = until_unfreeze + time_diff; // Wait for time diff to be able to recover the stake
                         continue;
                     }
                 }
@@ -310,7 +314,7 @@ impl CmdRun {
             let deadline = Duration::from_secs(
                 elections_end
                     .saturating_sub(elections_end_offset)
-                    .saturating_sub(now_sec()) as u64,
+                    .saturating_sub(now) as u64,
             );
 
             match tokio::time::timeout(deadline, elect_fut).await {
