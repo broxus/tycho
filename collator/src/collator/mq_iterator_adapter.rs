@@ -8,12 +8,11 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
-use super::types::{PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff, ShardDescriptionShort};
+use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitIteratorMode {
@@ -108,15 +107,18 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     }
 
     #[tracing::instrument(skip_all, fields(mode = ?mode))]
-    pub async fn try_init_next_range_iterator(
-        &mut self,
+    pub async fn try_init_next_range_iterator<'a, I>(
+        &'a mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
-        working_state: &WorkingState,
+        shards: I,
+        mc_gen_lt: u64,
+        prev_shard_data_gen_lt: u64,
         mode: InitIteratorMode,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        I: Iterator<Item = (ShardIdent, u64)>,
+    {
         let timer = std::time::Instant::now();
-
-        let prev_shard_data = working_state.prev_shard_data_ref();
 
         // get current ranges
         let mut ranges_from = FastHashMap::default();
@@ -198,40 +200,29 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             // when current iterator exists or existing ranges fully read
 
             // then try to calc new ranges from current states
-            let mut ranges_updated = false;
 
             // add masterchain default range if not exist
             let mc_shard_id = ShardIdent::new_full(-1);
-            ranges_from.entry(mc_shard_id).or_insert_with(|| {
-                ranges_updated = true;
-                QueueKey::MIN
-            });
-            let mc_read_to = ranges_to.entry(mc_shard_id).or_insert_with(|| {
-                ranges_updated = true;
-                QueueKey::max_for_lt(0)
-            });
 
-            // try update masterchain range read_to border
-            let new_mc_read_to_lt = if self.shard_id.is_masterchain() {
-                prev_shard_data.gen_lt()
-            } else {
-                working_state.mc_data.gen_lt
-            };
-            if mc_read_to.lt < new_mc_read_to_lt {
-                mc_read_to.lt = new_mc_read_to_lt;
-                mc_read_to.hash = HashBytes([255; 32]);
-                ranges_updated = true;
-            }
-
-            // TODO: for mc block here we will read internals from shards on previous mc block
-            //      because we use previous mc_data. Needs to pass actual shards descriptions here
-
-            ranges_updated |= self.try_update_shardchain_ranges(
-                &mut working_state.mc_data.shards.iter(),
+            let mut ranges_updated = Self::try_update_ranges_for_shard(
+                mc_shard_id,
+                mc_gen_lt,
+                prev_shard_data_gen_lt,
                 &mut ranges_from,
                 &mut ranges_to,
-                prev_shard_data,
+                || self.shard_id.is_masterchain(),
             );
+
+            for (shard_id, shard_description_end_lt) in shards {
+                ranges_updated |= Self::try_update_ranges_for_shard(
+                    shard_id,
+                    shard_description_end_lt,
+                    prev_shard_data_gen_lt,
+                    &mut ranges_from,
+                    &mut ranges_to,
+                    || self.shard_id == shard_id,
+                );
+            }
 
             // if ranges changed then init new iterator
             if ranges_updated {
@@ -291,39 +282,41 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         Ok(res)
     }
 
-    fn try_update_shardchain_ranges(
-        &mut self,
-        shards: &mut dyn Iterator<Item = (&ShardIdent, &ShardDescriptionShort)>,
+    fn try_update_ranges_for_shard<F>(
+        shard_id: ShardIdent,
+        shard_description_end_lt: u64,
+        prev_shard_data_gen_lt: u64,
         ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
         ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
-        prev_shard_data: &PrevData,
-    ) -> bool {
+        is_current_shard: F,
+    ) -> bool
+    where
+        F: Fn() -> bool,
+    {
         let mut ranges_updated = false;
         // try update shardchains ranges
-        for (shard_id, shard_descr) in shards {
-            // add default shardchain range if not exist
-            ranges_from.entry(*shard_id).or_insert_with(|| {
-                ranges_updated = true;
-                QueueKey::MIN
-            });
-            let sc_read_to = ranges_to.entry(*shard_id).or_insert_with(|| {
-                ranges_updated = true;
-                QueueKey::max_for_lt(0)
-            });
+        // add default shardchain range if not exist
+        ranges_from.entry(shard_id).or_insert_with(|| {
+            ranges_updated = true;
+            QueueKey::MIN
+        });
+        let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
+            ranges_updated = true;
+            QueueKey::max_for_lt(0)
+        });
 
-            // try update shardchain read_to
-            let new_sc_read_to_lt = if self.shard_id == *shard_id {
-                // get new read_to LT from PrevData
-                prev_shard_data.gen_lt()
-            } else {
-                // get new read_to LT from ShardDescription
-                shard_descr.end_lt
-            };
-            if sc_read_to.lt < new_sc_read_to_lt {
-                sc_read_to.lt = new_sc_read_to_lt;
-                sc_read_to.hash = HashBytes([255; 32]);
-                ranges_updated = true;
-            }
+        // try update shardchain read_to
+        let new_sc_read_to_lt = if is_current_shard() {
+            // get new read_to LT from PrevData
+            prev_shard_data_gen_lt
+        } else {
+            // get new LT from ShardDescription
+            shard_description_end_lt
+        };
+        if sc_read_to.lt < new_sc_read_to_lt {
+            sc_read_to.lt = new_sc_read_to_lt;
+            sc_read_to.hash = HashBytes([255; 32]);
+            ranges_updated = true;
         }
         ranges_updated
     }

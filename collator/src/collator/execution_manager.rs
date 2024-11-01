@@ -142,6 +142,44 @@ impl ExecutionManager {
             GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
         };
 
+        let shards_iter: Vec<_> = if self.shard_id.is_masterchain() {
+            collation_data
+                .shards()?
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        } else {
+            working_state
+                .mc_data
+                .shards
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        };
+
+        // here iterator may not exist (on the first method call during collation)
+        // so init iterator for current not fully processed ranges or next available
+        if mq_iterator_adapter.iterator_is_none() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "current iterator not exist, \
+                will init iterator for current not fully processed ranges or next available"
+            );
+            mq_iterator_adapter
+                .try_init_next_range_iterator(
+                    &mut collation_data.processed_upto,
+                    shards_iter.clone().into_iter(),
+                    working_state.mc_data.gen_lt,
+                    working_state.prev_shard_data_ref().gen_lt(),
+                    // We always init first iterator during block collation
+                    // with current ranges from processed_upto info
+                    // and do not touch next range before we read all existing messages buffer.
+                    // In this case the initial iterator range will be equal both
+                    // on Refill and on Continue.
+                    InitIteratorMode::OmitNextRange,
+                )
+                .await?;
+        }
+
         // when buffer contains externals from prev collation
         // we should process them all before reading existing internals
         if msgs_buffer.message_groups.ext_messages_count() > 0 && !self.read_ext_messages {
@@ -253,7 +291,9 @@ impl ExecutionManager {
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(
                         &mut collation_data.processed_upto,
-                        working_state,
+                        shards_iter.into_iter(),
+                        working_state.mc_data.gen_lt,
+                        working_state.prev_shard_data_ref().gen_lt(),
                         init_iterator_mode,
                     )
                     .await?;

@@ -1096,7 +1096,13 @@ impl CollatorStdImpl {
         mq_iterator_adapter
             .try_init_next_range_iterator(
                 &mut current_processed_upto,
-                working_state,
+                working_state
+                    .mc_data
+                    .shards
+                    .iter()
+                    .map(|(k, v)| (*k, v.end_lt)),
+                working_state.mc_data.gen_lt,
+                prev_shard_data.gen_lt(),
                 InitIteratorMode::UseNextRange,
             )
             .await?;

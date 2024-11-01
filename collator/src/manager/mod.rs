@@ -6,8 +6,8 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
-    BlockId, BlockIdShort, CollationConfig, ExternalsProcessedUpto, ProcessedUptoInfo, ShardHashes,
-    ShardIdent, ValidatorDescription,
+    BlockId, BlockIdShort, CollationConfig, ExternalsProcessedUpto, ProcessedUptoInfo, ShardIdent,
+    ValidatorDescription,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
@@ -367,7 +367,7 @@ where
                     .shards()?
                     .iter()
                     .filter_map(|r| r.ok())
-                    .map(|(_, v)| (&v).into()),
+                    .map(|(_, shard_description)| shard_description.into()),
                 processed_upto.externals.as_ref(),
             )?;
 
@@ -399,10 +399,13 @@ where
     }
 
     /// Returns (`min_top_processed_to_anchor_id`, Option<`mc_processed_to_anchor_id`>)
-    fn detect_top_processed_to_anchor(
-        shards: &mut dyn Iterator<Item = ShardDescriptionShort>,
+    fn detect_top_processed_to_anchor<I>(
+        shards: I,
         externals_processed_upto: Option<&ExternalsProcessedUpto>,
-    ) -> Result<(MempoolAnchorId, Option<MempoolAnchorId>)> {
+    ) -> Result<(MempoolAnchorId, Option<MempoolAnchorId>)>
+    where
+        I: Iterator<Item = ShardDescriptionShort>,
+    {
         let mut min_top_processed_to_anchor_id = 0;
         let mut mc_processed_to_anchor_id = None;
         if let Some(upto) = externals_processed_upto {

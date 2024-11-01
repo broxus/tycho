@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -224,7 +225,7 @@ impl McData {
             .shards
             .iter()
             .filter_map(|r| r.ok())
-            .map(|(i, v)| (i, (&v).into()))
+            .map(|(i, shard_description)| (i, shard_description.into()))
             .collect();
         Ok(Arc::new(Self {
             global_id: state.global_id,
@@ -596,8 +597,11 @@ pub struct ShardDescriptionShort {
     pub file_hash: HashBytes,
 }
 
-impl From<&ShardDescription> for ShardDescriptionShort {
-    fn from(shard: &ShardDescription) -> Self {
+impl<BorrowShardDescription: Borrow<ShardDescription>> From<BorrowShardDescription>
+    for ShardDescriptionShort
+{
+    fn from(borrow_shard: BorrowShardDescription) -> ShardDescriptionShort {
+        let shard = borrow_shard.borrow();
         Self {
             ext_processed_to_anchor_id: shard.ext_processed_to_anchor_id,
             top_sc_block_updated: shard.top_sc_block_updated,
