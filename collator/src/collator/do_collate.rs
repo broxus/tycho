@@ -203,13 +203,6 @@ impl CollatorStdImpl {
                 .collect()
         };
 
-        // create exec_manager
-        let mut exec_manager = ExecutionManager::new(
-            self.shard_id,
-            collation_config.msgs_exec_params.buffer_limit as _,
-            shards_description_end_lt,
-        );
-
         // create iterator adapter
         let mut mq_iterator_adapter = QueueIteratorAdapter::new(
             self.shard_id,
@@ -226,7 +219,7 @@ impl CollatorStdImpl {
         mq_iterator_adapter
             .try_init_next_range_iterator(
                 &mut collation_data.processed_upto,
-                &working_state,
+                shards_description_end_lt.iter().copied(),
                 // We always init first iterator during block collation
                 // with current ranges from processed_upto info
                 // and do not touch next range before we read all existing messages buffer.
@@ -235,6 +228,13 @@ impl CollatorStdImpl {
                 InitIteratorMode::OmitNextRange,
             )
             .await?;
+
+        // create exec_manager
+        let mut exec_manager = ExecutionManager::new(
+            self.shard_id,
+            collation_config.msgs_exec_params.buffer_limit as _,
+            shards_description_end_lt,
+        );
 
         // refill messages buffer and skip groups upto offset (on node restart)
         let prev_processed_offset = collation_data.processed_upto.processed_offset;
