@@ -43,7 +43,8 @@ impl InputBuffer {
 
 impl InputBufferInner for InputBufferData {
     fn push(&mut self, ext_in_msg: Bytes) {
-        if self.buffer_bytes == 0 || self.data_bytes == 0 {
+        if self.payload_buffer_bytes == 0 || self.payload_batch_bytes == 0 {
+            tracing::error!("cannot send msg by config");
             return; // ignore until config applied
         }
         self.add(ext_in_msg);
@@ -57,8 +58,8 @@ impl InputBufferInner for InputBufferData {
     }
 
     fn apply_config(&mut self, consensus_config: &ConsensusConfig) {
-        self.buffer_bytes = consensus_config.payload_buffer_bytes as usize;
-        self.batch_bytes = consensus_config.payload_batch_bytes as usize;
+        self.payload_buffer_bytes = consensus_config.payload_buffer_bytes as usize;
+        self.payload_batch_bytes = consensus_config.payload_batch_bytes as usize;
         tracing::info!(
             payload_batch_bytes = consensus_config.payload_batch_bytes,
             payload_buffer_bytes = consensus_config.payload_buffer_bytes,
@@ -72,8 +73,8 @@ struct InputBufferData {
     data: VecDeque<Bytes>,
     data_bytes: usize,
     offset_elements: usize,
-    buffer_bytes: usize,
-    batch_bytes: usize,
+    payload_buffer_bytes: usize,
+    payload_batch_bytes: usize,
 }
 
 impl InputBufferData {
@@ -84,7 +85,7 @@ impl InputBufferData {
             .iter()
             .take_while(|elem| {
                 taken_bytes += elem.len();
-                taken_bytes <= self.batch_bytes
+                taken_bytes <= self.payload_batch_bytes
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -95,14 +96,14 @@ impl InputBufferData {
     fn add(&mut self, payload: Bytes) {
         let payload_bytes = payload.len();
         assert!(
-            payload_bytes <= self.buffer_bytes,
+            payload_bytes <= self.payload_buffer_bytes,
             "cannot buffer too large message of {payload_bytes} bytes: \
             increase config value of PAYLOAD_BUFFER_BYTES={} \
             or filter out insanely large messages prior sending them to mempool",
-            self.buffer_bytes
+            self.payload_buffer_bytes
         );
 
-        let max_data_bytes = self.buffer_bytes - payload_bytes;
+        let max_data_bytes = self.payload_buffer_bytes - payload_bytes;
         let data_bytes_pre = self.data_bytes;
         if self.data_bytes > max_data_bytes {
             let to_drop = self
