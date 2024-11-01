@@ -29,6 +29,7 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
 };
 use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
+use crate::manager::types::BlockCacheStoreResult;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
     StateUpdateContext,
@@ -662,10 +663,39 @@ where
         };
 
         let candidate_chain_time = collation_result.candidate.chain_time;
+        let shard_ident = collation_result.candidate.block.id().shard;
 
-        let store_res = self
-            .blocks_cache
-            .store_collated(collation_result.candidate, collation_result.mc_data.clone())?;
+        let current_collator_cancelled = {
+            let collator_state = self.active_collators.get(&shard_ident);
+            match collator_state {
+                None => false,
+                Some(current_collator) => current_collator.state == CollatorState::Cancelled,
+            }
+        };
+
+        let store_res = if current_collator_cancelled {
+            self.mq_adapter.clear_session_state()?;
+            let (last_collated_mc_block_id, applied_mc_queue_range) = self
+                .blocks_cache
+                .get_last_collated_block_and_applied_mc_queue_range();
+
+            BlockCacheStoreResult {
+                received_and_collated: false,
+                blocks_mismatch_with_present: false,
+                last_collated_mc_block_id,
+                applied_mc_queue_range,
+            }
+        } else {
+            let store_res = self
+                .blocks_cache
+                .store_collated(collation_result.candidate, collation_result.mc_data.clone())?;
+
+            if store_res.blocks_mismatch_with_present {
+                self.set_collator_state(&shard_ident, CollatorState::Cancelled);
+                self.mq_adapter.clear_session_state()?;
+            }
+            store_res
+        };
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -675,7 +705,9 @@ where
 
         // check if should sync to last applied mc block
         let should_sync_to_last_applied_mc_block = {
-            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+            if current_collator_cancelled || store_res.blocks_mismatch_with_present {
+                true
+            } else if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
                 if let Some(last_collated_mc_block_id) = store_res.last_collated_mc_block_id {
                     let applied_range_end_delta =
                         applied_range_end.saturating_sub(last_collated_mc_block_id.seqno);
@@ -867,6 +899,11 @@ where
             self.ready_to_sync.notify_one();
             return Ok(());
         };
+
+        if store_res.blocks_mismatch_with_present {
+            self.set_collator_state(&block_id.shard, CollatorState::Cancelled);
+            self.mq_adapter.clear_session_state()?;
+        }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ?store_res,
