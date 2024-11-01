@@ -147,21 +147,6 @@ impl ExecutionManager {
             GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
         };
 
-        let shards_iter: Vec<_> = if self.shard_id.is_masterchain() {
-            collation_data
-                .shards()?
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt))
-                .collect()
-        } else {
-            working_state
-                .mc_data
-                .shards
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt))
-                .collect()
-        };
-
         // here iterator may not exist (on the first method call during collation)
         // so init iterator for current not fully processed ranges or next available
         if mq_iterator_adapter.iterator_is_none() {
