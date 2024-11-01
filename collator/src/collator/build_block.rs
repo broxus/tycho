@@ -13,6 +13,7 @@ use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashMap;
 
 use super::execution_manager::MessagesExecutor;
 use super::types::WorkingState;
@@ -20,7 +21,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, McData};
+use crate::types::{BlockCandidate, CollationSessionInfo, McData, ShardDescriptionShort};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -406,6 +407,13 @@ impl CollatorStdImpl {
                 0
             };
 
+            let shards: FastHashMap<ShardIdent, ShardDescriptionShort> = extra
+                .shards
+                .iter()
+                .filter_map(|r| r.ok())
+                .map(|(i, v)| (i, (&v).into()))
+                .collect();
+
             Arc::new(McData {
                 global_id: new_block.as_ref().global_id,
                 block_id: *new_block.id(),
@@ -417,7 +425,7 @@ impl CollatorStdImpl {
                 total_validator_fees,
 
                 global_balance: extra.global_balance.clone(),
-                shards: extra.shards,
+                shards,
                 config: extra.config,
                 validator_info: extra.validator_info,
                 consensus_info: extra.consensus_info,

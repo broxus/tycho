@@ -7,7 +7,7 @@ use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, CurrencyCollection, ExternalsProcessedUpto,
-    ShardDescription, ShardHashes, ShardIdent, ShardStateUnsplit, ValidatorInfo,
+    ShardDescription, ShardIdent, ShardStateUnsplit, ValidatorInfo,
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
@@ -181,7 +181,7 @@ fn gen_stub_working_state(
         copyleft_rewards: Dict::default(),
         proof_chain: None,
     };
-    let shards_info = [(ShardIdent::new_full(0), shard_descr)];
+    let shards_info = [(ShardIdent::new_full(0), (&shard_descr).into())];
 
     let working_state = WorkingState {
         next_block_id_short,
@@ -199,7 +199,7 @@ fn gen_stub_working_state(
             libraries: Dict::default(),
             total_validator_fees: CurrencyCollection::default(),
             global_balance: CurrencyCollection::default(),
-            shards: ShardHashes::from_shards(shards_info.iter().map(|(k, v)| (k, v))).unwrap(),
+            shards: shards_info.into_iter().collect(),
             config: BlockchainConfig::new_empty(HashBytes([0x55; 32])),
             validator_info: ValidatorInfo {
                 validator_list_hash_short: 0,

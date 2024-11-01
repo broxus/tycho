@@ -196,7 +196,7 @@ pub struct McData {
     pub total_validator_fees: CurrencyCollection,
 
     pub global_balance: CurrencyCollection,
-    pub shards: ShardHashes,
+    pub shards: FastHashMap<ShardIdent, ShardDescriptionShort>,
     pub config: BlockchainConfig,
     pub validator_info: ValidatorInfo,
     pub consensus_info: ConsensusInfo,
@@ -220,6 +220,12 @@ impl McData {
             0
         };
 
+        let shards: FastHashMap<ShardIdent, ShardDescriptionShort> = extra
+            .shards
+            .iter()
+            .filter_map(|r| r.ok())
+            .map(|(i, v)| (i, (&v).into()))
+            .collect();
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -231,7 +237,7 @@ impl McData {
             total_validator_fees: state.total_validator_fees.clone(),
 
             global_balance: extra.global_balance.clone(),
-            shards: extra.shards.clone(),
+            shards,
             config: extra.config.clone(),
             validator_info: extra.validator_info,
             consensus_info: extra.consensus_info,
@@ -577,5 +583,39 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTu
 impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple<T1, T2> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {})", self.0 .0, self.0 .1)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ShardDescriptionShort {
+    pub ext_processed_to_anchor_id: u32,
+    pub top_sc_block_updated: bool,
+    pub end_lt: u64,
+    pub seqno: u32,
+    pub root_hash: HashBytes,
+    pub file_hash: HashBytes,
+}
+
+impl From<&ShardDescription> for ShardDescriptionShort {
+    fn from(shard: &ShardDescription) -> Self {
+        Self {
+            ext_processed_to_anchor_id: shard.ext_processed_to_anchor_id,
+            top_sc_block_updated: shard.top_sc_block_updated,
+            end_lt: shard.end_lt,
+            seqno: shard.seqno,
+            root_hash: shard.root_hash,
+            file_hash: shard.file_hash,
+        }
+    }
+}
+
+impl ShardDescriptionExt for ShardDescriptionShort {
+    fn get_block_id(&self, shard_id: ShardIdent) -> BlockId {
+        BlockId {
+            shard: shard_id,
+            seqno: self.seqno,
+            root_hash: self.root_hash,
+            file_hash: self.file_hash,
+        }
     }
 }
