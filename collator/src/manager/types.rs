@@ -57,6 +57,7 @@ impl Debug for BlockCacheStoreResult {
 pub(super) struct BlockCandidateStuff {
     pub candidate: BlockCandidate,
     pub signatures: FastHashMap<PeerId, ArcSignature>,
+    pub total_signature_weight: u64,
 }
 
 impl From<BlockCandidateStuff> for BlockStuffForSync {
@@ -64,6 +65,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
         let BlockCandidateStuff {
             candidate,
             signatures,
+            total_signature_weight,
         } = stuff;
 
         let BlockCandidate {
@@ -81,6 +83,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             block_stuff_aug,
             queue_diff_aug,
             signatures,
+            total_signature_weight,
             prev_blocks_ids,
             top_shard_blocks_ids,
             consensus_info,
@@ -196,6 +199,7 @@ impl BlockCacheEntry {
         let entry = BlockCandidateStuff {
             candidate: *candidate,
             signatures: Default::default(),
+            total_signature_weight: 0,
         };
 
         let mut top_shard_blocks_info = vec![];

@@ -395,6 +395,7 @@ impl StateNodeAdapterStdImpl {
             &block.block_stuff_aug.data,
             &block.consensus_info,
             &block.signatures,
+            block.total_signature_weight,
         )
         .context("failed to prepare block proof")?;
 
@@ -536,6 +537,7 @@ fn prepare_block_proof(
     block_stuff: &BlockStuff,
     consensus_info: &ConsensusInfo,
     signatures: &FastHashMap<PeerId, ArcSignature>,
+    total_signature_weight: u64,
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
 
@@ -575,6 +577,7 @@ fn prepare_block_proof(
         Some(process_signatures(
             block_info.gen_validator_list_hash_short,
             block_info.gen_catchain_seqno,
+            total_signature_weight,
             consensus_info,
             signatures,
         )?)
@@ -595,6 +598,7 @@ fn prepare_block_proof(
 fn process_signatures(
     gen_validator_list_hash_short: u32,
     gen_session_seqno: u32,
+    total_weight: u64,
     consensus_info: &ConsensusInfo,
     block_signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<everscale_types::models::block::BlockSignatures> {
@@ -619,16 +623,14 @@ fn process_signatures(
         &mut Cell::empty_context(),
     )?);
 
-    let sig_count = block_signatures.len() as u32;
-
     Ok(everscale_types::models::block::BlockSignatures {
         validator_info: ValidatorBaseInfo {
             validator_list_hash_short: gen_validator_list_hash_short,
             catchain_seqno: gen_session_seqno,
         },
         consensus_info: *consensus_info,
-        signature_count: sig_count,
-        total_weight: sig_count as u64,
+        signature_count: block_signatures.len() as u32,
+        total_weight,
         signatures,
     })
 }

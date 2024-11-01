@@ -318,6 +318,7 @@ pub struct BlockStuffForSync {
     pub block_stuff_aug: BlockStuffAug,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub signatures: FastHashMap<PeerId, ArcSignature>,
+    pub total_signature_weight: u64,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
 

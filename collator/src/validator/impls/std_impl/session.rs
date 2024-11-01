@@ -24,7 +24,8 @@ use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
 use crate::validator::{
-    proto, AddSession, BriefValidatorDescr, ValidationStatus, ValidatorNetworkContext,
+    proto, AddSession, BriefValidatorDescr, ValidationComplete, ValidationStatus,
+    ValidatorNetworkContext,
 };
 
 // Histograms
@@ -299,7 +300,10 @@ impl ValidatorSession {
         }
 
         tracing::info!(target: tracing_targets::VALIDATOR, "finished");
-        Ok(ValidationStatus::Complete(result))
+        Ok(ValidationStatus::Complete(ValidationComplete {
+            signatures: result,
+            total_weight,
+        }))
     }
 
     fn prepare_new_signatures(&self, block_id: &BlockId) -> BlockSignaturesBuilder {

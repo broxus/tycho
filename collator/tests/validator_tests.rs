@@ -240,8 +240,8 @@ async fn malicious_validators_are_ignored() -> Result<()> {
                 })?;
 
                 match &status {
-                    ValidationStatus::Complete(signatures) => {
-                        assert!(signatures.len() > (NODE_COUNT * 2) / 3);
+                    ValidationStatus::Complete(res) => {
+                        assert!(res.signatures.len() > (NODE_COUNT * 2) / 3);
                     }
                     ValidationStatus::Skipped => panic!("good validator skipped block"),
                 }
@@ -356,7 +356,7 @@ impl From<&ValidationStatus> for BriefStatus {
     fn from(value: &ValidationStatus) -> Self {
         match value {
             ValidationStatus::Skipped => Self::Skipped,
-            ValidationStatus::Complete(signatures) => Self::Complete(signatures.len()),
+            ValidationStatus::Complete(res) => Self::Complete(res.signatures.len()),
         }
     }
 }

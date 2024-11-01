@@ -54,7 +54,13 @@ pub struct AddSession<'a> {
 #[derive(Debug, Clone)]
 pub enum ValidationStatus {
     Skipped,
-    Complete(BlockSignatures),
+    Complete(ValidationComplete),
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidationComplete {
+    pub signatures: BlockSignatures,
+    pub total_weight: u64,
 }
 
 pub type BlockSignatures = FastHashMap<PeerId, Arc<[u8; 64]>>;
