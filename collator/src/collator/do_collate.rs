@@ -1547,7 +1547,7 @@ fn new_transaction(
     let in_msg_hash = *in_msg.cell.repr_hash();
     let in_msg = match (in_msg.info, in_msg.special_origin) {
         // Messages with special origin are always immediate
-        (_, Some(_)) => {
+        (_, Some(special_origin)) => {
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&MsgEnvelope {
                     cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
@@ -1559,6 +1559,15 @@ fn new_transaction(
                 fwd_fee: Default::default(),
             });
 
+            let msg = in_msg.clone();
+            match special_origin {
+                SpecialOrigin::Recover => {
+                    collation_data.recover_create_msg = Some(msg);
+                }
+                SpecialOrigin::Mint => {
+                    collation_data.mint_msg = Some(msg);
+                }
+            }
             import_fees = in_msg.compute_fees()?;
             Lazy::new(&in_msg)?
         }
