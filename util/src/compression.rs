@@ -345,6 +345,8 @@ impl std::error::Error for RawCompressorError {}
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use rand::prelude::StdRng;
     use rand::{RngCore, SeedableRng};
 
@@ -514,5 +516,173 @@ mod tests {
         }
 
         assert_eq!(data, decompressed);
+    }
+
+    #[test]
+    fn test_compressed_file() {
+        const CHUNK_SIZE: usize = 100 * 1024; // 100KB
+        const TOTAL_CHUNKS: usize = 1024; // Will give us ~100MB
+
+        // Create a repeatable pattern for test data
+        let chunk_data: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
+
+        let mut compressed_buffer = Vec::new();
+        let mut compressed_file =
+            ZstdCompressedFile::new(&mut compressed_buffer, 3, CHUNK_SIZE).unwrap();
+
+        // Write chunks
+        for _ in 0..TOTAL_CHUNKS {
+            compressed_file.write_all(&chunk_data).unwrap();
+        }
+
+        compressed_file.finish().unwrap();
+        drop(compressed_file);
+
+        // Verify decompression
+        let mut decompressed = Vec::new();
+        zstd_decompress(compressed_buffer.as_ref(), &mut decompressed).unwrap();
+
+        // Verify size
+        assert_eq!(decompressed.len(), CHUNK_SIZE * TOTAL_CHUNKS);
+
+        // Verify content by checking each chunk matches the original pattern
+        for chunk in decompressed.chunks(CHUNK_SIZE) {
+            assert_eq!(chunk, chunk_data.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_compressed_file_flush() {
+        const CHUNK_SIZE: usize = 100 * 1024;
+        let test_data: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
+
+        let mut compressed_buffer = Vec::new();
+        let mut compressed_file =
+            ZstdCompressedFile::new(&mut compressed_buffer, 3, CHUNK_SIZE).unwrap();
+
+        // Write and flush multiple times
+        for _ in 0..5 {
+            compressed_file.write_all(&test_data).unwrap();
+            compressed_file.flush().unwrap();
+        }
+
+        compressed_file.finish().unwrap();
+        drop(compressed_file);
+
+        // Verify
+        let mut decompressed = Vec::new();
+        zstd_decompress(compressed_buffer.as_ref(), &mut decompressed).unwrap();
+
+        assert_eq!(decompressed.len(), CHUNK_SIZE * 5);
+        for chunk in decompressed.chunks(CHUNK_SIZE) {
+            assert_eq!(chunk, test_data.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_compressed_file_write_after_finish() {
+        const CHUNK_SIZE: usize = 100 * 1024;
+        let test_data: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
+
+        let mut compressed_buffer = Vec::new();
+        let mut compressed_file =
+            ZstdCompressedFile::new(&mut compressed_buffer, 3, CHUNK_SIZE).unwrap();
+
+        compressed_file.write_all(&test_data).unwrap();
+        compressed_file.finish().unwrap();
+
+        // Try writing after finish - should fail
+        assert!(compressed_file.write_all(&test_data).is_err());
+    }
+
+    #[test]
+    fn test_compressed_file_io_copy_parameterized() {
+        use std::io::Read;
+
+        struct ChunkedReader {
+            data: Vec<u8>,
+            pos: usize,
+            chunk_size: usize,
+        }
+
+        impl Read for ChunkedReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    return Ok(0);
+                }
+                let remaining = self.data.len() - self.pos;
+                let to_read = remaining.min(self.chunk_size).min(buf.len());
+                buf[..to_read].copy_from_slice(&self.data[self.pos..self.pos + to_read]);
+                self.pos += to_read;
+                Ok(to_read)
+            }
+        }
+
+        const INPUT_SIZE: usize = 100 * 1024 * 1024; // 100MB total data
+
+        let chunk_sizes = [
+            1,               // 1B - minimal chunks
+            1024,            // 1KB - small chunks
+            64 * 1024,       // 64KB - medium chunks
+            1024 * 1024,     // 1MB - large chunks
+            5 * 1024 * 1024, // 5MB - very large chunks
+        ];
+        let buffer_sizes = [
+            16 * 1024,  // 16KB - small buffer
+            64 * 1024,  // 64KB - medium buffer
+            256 * 1024, // 256KB - large buffer
+        ];
+
+        let input_data: Vec<u8> = (0..INPUT_SIZE).map(|i| (i % 256) as u8).collect();
+
+        for &chunk_size in &chunk_sizes {
+            for &buffer_size in &buffer_sizes {
+                println!(
+                    "Testing with chunk_size={}, buffer_size={}",
+                    chunk_size, buffer_size
+                );
+
+                let mut reader = ChunkedReader {
+                    data: input_data.clone(),
+                    pos: 0,
+                    chunk_size,
+                };
+
+                let mut output_buffer = Vec::new();
+                let mut compressed_file = ZstdCompressedFile::new(
+                    &mut output_buffer,
+                    3, // compression level
+                    buffer_size,
+                )
+                .unwrap();
+
+                let copied = io::copy(&mut reader, &mut compressed_file).unwrap();
+                assert_eq!(
+                    copied, INPUT_SIZE as u64,
+                    "Failed to copy correct number of bytes with chunk_size={}, buffer_size={}",
+                    chunk_size, buffer_size
+                );
+
+                compressed_file.finish().unwrap();
+                drop(compressed_file);
+
+                // Verify decompression
+                let mut decompressed = Vec::new();
+                zstd_decompress(&output_buffer, &mut decompressed).unwrap();
+
+                assert_eq!(
+                    decompressed.len(),
+                    INPUT_SIZE,
+                    "Decompressed size mismatch with chunk_size={}, buffer_size={}",
+                    chunk_size,
+                    buffer_size
+                );
+                assert_eq!(
+                    decompressed, input_data,
+                    "Decompressed data mismatch with chunk_size={}, buffer_size={}",
+                    chunk_size, buffer_size
+                );
+            }
+        }
     }
 }
