@@ -2,6 +2,7 @@ use std::mem;
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt};
 use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
@@ -16,7 +17,7 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
-use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
+use crate::engine::round_watch::{Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
@@ -263,6 +264,27 @@ impl Engine {
                 }
             };
 
+            if let Some(collator_lag) = wait_collator(
+                self.round_task.state.top_known_anchor.receiver(),
+                current_round,
+                &round_effects,
+            ) {
+                tokio::time::timeout(CachedConfig::broadcast_retry(), collator_lag)
+                    .await
+                    .ok();
+
+                if let Some(committer) = ready_committer {
+                    self.committer_run = committer_task(
+                        committer,
+                        full_history_bottom.take(),
+                        self.committed_info_tx.clone(),
+                        round_effects.clone(),
+                    );
+                }
+
+                continue;
+            }
+
             *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
                 current_round.next(),
                 ready_committer.as_mut(),
@@ -278,9 +300,7 @@ impl Engine {
                     future::ready(Ok(Some(point))).boxed(),
                     future::ready(state).boxed(),
                 ),
-                None => self
-                    .round_task
-                    .own_point_task(&collector_signal_rx, &head, &round_effects),
+                None => self.round_task.own_point_task(&head, &round_effects),
             };
 
             let round_task_run = self
@@ -295,33 +315,13 @@ impl Engine {
                 )
                 .until_ready();
 
-            if let Some(mut committer) = ready_committer {
-                let committed_info_tx = self.committed_info_tx.clone();
-                let round_effects = round_effects.clone();
-                let full_history_bottom = full_history_bottom.take();
-
-                self.committer_run = tokio::task::spawn_blocking(move || {
-                    let _guard = round_effects.span().enter();
-
-                    if let Some(full_history_bottom) = full_history_bottom {
-                        committed_info_tx
-                            .send(CommitResult::NewStartAfterGap(full_history_bottom)) // not recoverable
-                            .expect("Failed to send anchor history info to mpsc channel");
-                    };
-
-                    let committed = committer.commit();
-
-                    round_effects.log_committed(&committed);
-
-                    for data in committed {
-                        round_effects.commit_metrics(&data.anchor);
-                        committed_info_tx
-                            .send(CommitResult::Next(data)) // not recoverable
-                            .expect("Failed to send anchor history info to mpsc channel");
-                    }
-
-                    committer
-                });
+            if let Some(committer) = ready_committer {
+                self.committer_run = committer_task(
+                    committer,
+                    full_history_bottom.take(),
+                    self.committed_info_tx.clone(),
+                    round_effects.clone(),
+                );
             }
 
             match round_task_run.await {
@@ -333,6 +333,47 @@ impl Engine {
                 Err(e) => panic!("mempool engine failed: {e:?}"),
             }
         }
+    }
+}
+
+fn wait_collator(
+    mut top_known_anchor_recv: RoundWatcher<TopKnownAnchor>,
+    current_round: Round,
+    round_effects: &Effects<EngineContext>,
+) -> Option<BoxFuture<'static, ()>> {
+    let top_known_anchor = top_known_anchor_recv.get();
+    let silent_after = CachedConfig::silent_after(top_known_anchor);
+    // Note silence bound is exclusive with `<` because new vset must be known for dag top
+    //  (the next after engine round), while vset switch round is exactly silence bound + 1
+    if current_round < silent_after {
+        None
+    } else {
+        tracing::info!(
+            parent: round_effects.span(),
+            top_known_anchor = top_known_anchor.0,
+            silent_after = silent_after.0,
+            "enter silent mode by collator feedback",
+        );
+        let round_effects = round_effects.clone();
+        let task = async move {
+            loop {
+                let top_known_anchor = top_known_anchor_recv.next().await;
+                //  exit if ready to produce point: collator synced enough
+                let silent_after = CachedConfig::silent_after(top_known_anchor);
+                let exit = current_round < silent_after;
+                tracing::info!(
+                    parent: round_effects.span(),
+                    top_known_anchor = top_known_anchor.0,
+                    silent_after = silent_after.0,
+                    exit = exit,
+                    "collator feedback in silent mode"
+                );
+                if exit {
+                    break;
+                }
+            }
+        };
+        Some(task.boxed())
     }
 }
 
@@ -349,6 +390,34 @@ fn take_committer(committer_run: &mut JoinHandle<Committer>) -> Option<Committer
     } else {
         None
     }
+}
+
+fn committer_task(
+    mut committer: Committer,
+    full_history_bottom: Option<Round>,
+    committed_info_tx: mpsc::UnboundedSender<CommitResult>,
+    round_effects: Effects<EngineContext>,
+) -> JoinHandle<Committer> {
+    tokio::task::spawn_blocking(move || {
+        if let Some(full_history_bottom) = full_history_bottom {
+            committed_info_tx
+                .send(CommitResult::NewStartAfterGap(full_history_bottom)) // not recoverable
+                .expect("Failed to send anchor history info to mpsc channel");
+        };
+
+        let committed = committer.commit();
+
+        round_effects.log_committed(&committed);
+
+        for data in committed {
+            round_effects.commit_metrics(&data.anchor);
+            committed_info_tx
+                .send(CommitResult::Next(data)) // not recoverable
+                .expect("Failed to send anchor history info to mpsc channel");
+        }
+
+        committer
+    })
 }
 
 impl Effects<EngineContext> {

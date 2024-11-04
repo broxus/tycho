@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::future::BoxFuture;
-use futures_util::{future, FutureExt, TryFutureExt};
+use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tracing::Instrument;
@@ -15,7 +15,7 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::{CachedConfig, Genesis};
+use crate::engine::Genesis;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
@@ -102,7 +102,6 @@ impl RoundTaskReady {
 
     pub fn own_point_task(
         &self,
-        collector_signal_rx: &watch::Receiver<CollectorSignal>,
         head: &DagHead,
         round_effects: &Effects<EngineContext>,
     ) -> (
@@ -144,12 +143,7 @@ impl RoundTaskReady {
         });
 
         let point_fut = if allowed_to_produce {
-            self.own_point_fut(
-                own_point_state_tx,
-                collector_signal_rx,
-                head.clone(),
-                round_effects,
-            )
+            self.own_point_fut(own_point_state_tx, head.clone(), round_effects)
         } else {
             drop(own_point_state_tx);
             future::ready(Ok(None)).boxed()
@@ -166,92 +160,32 @@ impl RoundTaskReady {
     fn own_point_fut(
         &self,
         own_point_state_tx: oneshot::Sender<InclusionState>,
-        collector_signal_rx: &watch::Receiver<CollectorSignal>,
         head: DagHead,
         round_effects: &Effects<EngineContext>,
     ) -> BoxFuture<'static, Result<Option<Point>, JoinError>> {
-        let consensus_round = head.current().round(); // latest reliably detected consensus round
-        let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
-        let top_known_anchor = top_known_anchor_recv.get();
-        let silent_after = CachedConfig::silent_after(top_known_anchor);
-        // Note silence bound is exclusive with `<` because new vset must be known for dag top
-        //  (the next after engine round), while vset switch round is exactly silence bound + 1
-        let wait_collator_ready = if consensus_round < silent_after {
-            future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
-        } else {
-            tracing::info!(
-                parent: round_effects.span(),
-                top_known_anchor = top_known_anchor.0,
-                silent_after = silent_after.0,
-                "enter silent mode by collator feedback",
-            );
-            // must cancel on collector finish/err signal
-            let mut collector_signal_rx = collector_signal_rx.clone();
-            future::Either::Left(tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        top_known_anchor = top_known_anchor_recv.next() => {
-                            //  exit if ready to produce point: collator synced enough
-                            let silent_after = CachedConfig::silent_after(top_known_anchor);
-                            let exit = consensus_round < silent_after;
-                            tracing::info!(
-                                top_known_anchor = top_known_anchor.0,
-                                silent_after = silent_after.0,
-                                exit = exit,
-                                "collator feedback in silent mode"
-                            );
-                            if exit {
-                                break true;
-                            }
-                        },
-                        collector_signal = collector_signal_rx.changed() => {
-                            match collector_signal {
-                                Ok(()) => {
-                                    match *collector_signal_rx.borrow_and_update() {
-                                        CollectorSignal::Finish | CollectorSignal::Err => break false,
-                                        CollectorSignal::Retry => {}
-                                    };
-                                }
-                                Err(_collector_exited) => break false,
-                            }
-                        }
-                    }
-                }
-            }).instrument(round_effects.span().clone()))
-        };
-
         let input_buffer = self.state.input_buffer.clone();
         let last_own_point = self.last_own_point.clone();
         let store = self.state.store.clone();
 
-        wait_collator_ready
-            .and_then(|is_ready_to_produce| {
-                if is_ready_to_produce {
-                    future::Either::Right(tokio::task::spawn_blocking(move || {
-                        let task_start_time = Instant::now();
-                        let point_opt =
-                            Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
-                        if let Some(own_point) = point_opt.as_ref() {
-                            // Note: actually we should use `.includes_keys()`, this is a WorkAround to support
-                            //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
-                            //   this is safe as any node never changes its keys until restart, after which
-                            //   the node does not recognise points signed with old keypair as locally created
-                            let wa_keys = head.produce_keys();
-                            let state =
-                                head.current().insert_exact_sign(own_point, wa_keys, &store);
-                            own_point_state_tx.send(state).ok();
-                            metrics::histogram!("tycho_mempool_engine_produce_time")
-                                .record(task_start_time.elapsed());
-                        };
-                        point_opt
-                        // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
-                    }))
-                } else {
-                    future::Either::Left(future::ready(Ok(None)))
-                }
-            })
-            .instrument(round_effects.span().clone())
-            .boxed()
+        tokio::task::spawn_blocking(move || {
+            let task_start_time = Instant::now();
+            let point_opt = Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
+            if let Some(own_point) = point_opt.as_ref() {
+                // Note: actually we should use `.includes_keys()`, this is a WorkAround to support
+                //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
+                //   this is safe as any node never changes its keys until restart, after which
+                //   the node does not recognise points signed with old keypair as locally created
+                let wa_keys = head.produce_keys();
+                let state = head.current().insert_exact_sign(own_point, wa_keys, &store);
+                own_point_state_tx.send(state).ok();
+                metrics::histogram!("tycho_mempool_engine_produce_time")
+                    .record(task_start_time.elapsed());
+            };
+            point_opt
+            // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
+        })
+        .instrument(round_effects.span().clone())
+        .boxed()
     }
 
     pub fn run(
