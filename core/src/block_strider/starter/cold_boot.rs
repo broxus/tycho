@@ -462,6 +462,9 @@ impl StarterInner {
     ) -> Result<(BlockHandle, BlockStuff)> {
         // First download the block itself, with all its parts (proof and queue diff).
         let (handle, block) = self.download_block_data(mc_block_id, block_id).await?;
+        self.storage
+            .block_handle_storage()
+            .set_block_persistent(&handle);
 
         // Download persistent shard state
         {
