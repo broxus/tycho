@@ -81,36 +81,31 @@ jobs:
   integration-test:
     name: Integration Test Suite
     runs-on: [self-hosted, linux]
-    needs: test
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: extractions/setup-just@v2
-      - name: Run integration tests
-        env:
-          RUST_LOG: warn
-        run: just run_integration_tests
-
-  cli-builds:
-    name: tycho-cli check
-    runs-on: [self-hosted, linux]
     needs: rustfmt
     steps:
       - uses: actions/checkout@v3
       - name: Install Clang
         run: sudo apt-get update && sudo apt-get install -y clang
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - uses: extractions/setup-just@v2
-      - name: Build CLI
-        run: just build
+      - name: Run integration tests with coverage
+        env:
+          RUST_LOG: warn
+        run: just run_integration_tests_cov
+      - name: Upload integration test coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: github.repository == 'broxus/tycho'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: integration_codecov.json
+          fail_ci_if_error: true
 
   metrics:
     name: Metrics

@@ -1,3 +1,6 @@
 [profile.default]
 slow-timeout = { period = "120s", terminate-after = 1 }
-retries = 3 # for flaky tests
+retries = 3                                             # for flaky tests
+
+[profile.integration]
+slow-timeout = { period = "3600s", terminate-after = 1 }
