@@ -1,4 +1,4 @@
-use std::num::NonZeroU8;
+use std::num::NonZeroU16;
 
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use everscale_types::models::ConsensusConfig;
@@ -27,8 +27,8 @@ pub fn default_test_config() -> MempoolConfig {
 
     let node_config = MempoolNodeConfig {
         log_truncate_long_values: true,
-        clean_db_period_rounds: NonZeroU8::new(10).unwrap(),
-        cache_future_broadcasts_rounds: NonZeroU8::new(105).unwrap(),
+        clean_db_period_rounds: NonZeroU16::new(10).unwrap(),
+        cache_future_broadcasts_rounds: NonZeroU16::new(105).unwrap(),
     };
 
     let mut builder = MempoolConfigBuilder::default();

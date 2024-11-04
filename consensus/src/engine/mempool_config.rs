@@ -1,4 +1,4 @@
-use std::num::NonZeroU8;
+use std::num::NonZeroU16;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -354,16 +354,16 @@ struct GenesisData {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MempoolNodeConfig {
     pub log_truncate_long_values: bool,
-    pub clean_db_period_rounds: NonZeroU8,
-    pub cache_future_broadcasts_rounds: NonZeroU8,
+    pub clean_db_period_rounds: NonZeroU16,
+    pub cache_future_broadcasts_rounds: NonZeroU16,
 }
 
 impl Default for MempoolNodeConfig {
     fn default() -> Self {
         Self {
             log_truncate_long_values: true,
-            clean_db_period_rounds: NonZeroU8::new(105).unwrap(),
-            cache_future_broadcasts_rounds: NonZeroU8::new(105).unwrap(),
+            clean_db_period_rounds: NonZeroU16::new(105).unwrap(),
+            cache_future_broadcasts_rounds: NonZeroU16::new(105).unwrap(),
         }
     }
 }
