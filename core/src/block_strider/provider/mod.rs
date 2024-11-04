@@ -65,11 +65,21 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
 
 pub trait BlockProviderExt: Sized {
     fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T>;
+
+    fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T>;
 }
 
 impl<B: BlockProvider> BlockProviderExt for B {
     fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T> {
         ChainBlockProvider {
+            left: self,
+            right: other,
+            is_right: AtomicBool::new(false),
+        }
+    }
+
+    fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T> {
+        CycleBlockProvider {
             left: self,
             right: other,
             is_right: AtomicBool::new(false),
@@ -100,6 +110,12 @@ pub struct ChainBlockProvider<T1, T2> {
     is_right: AtomicBool,
 }
 
+pub struct CycleBlockProvider<T1, T2> {
+    left: T1,
+    right: T2,
+    is_right: AtomicBool,
+}
+
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
@@ -114,6 +130,46 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
                 self.is_right.store(true, Ordering::Release);
             }
             self.right.get_next_block(prev_block_id).await
+        })
+    }
+
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
+        Box::pin(async {
+            if self.is_right.load(Ordering::Acquire) {
+                self.right.get_block(block_id_relation).await
+            } else {
+                self.left.get_block(block_id_relation).await
+            }
+        })
+    }
+}
+
+impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        Box::pin(async move {
+            let is_right = self.is_right.load(Ordering::Acquire);
+
+            let res = if !is_right {
+                self.left.get_next_block(prev_block_id).await
+            } else {
+                self.right.get_next_block(prev_block_id).await
+            };
+
+            if res.is_some() {
+                return res;
+            }
+
+            let is_right = !is_right;
+            self.is_right.store(is_right, Ordering::Release);
+
+            if !is_right {
+                self.left.get_next_block(prev_block_id).await
+            } else {
+                self.right.get_next_block(prev_block_id).await
+            }
         })
     }
 
@@ -404,6 +460,52 @@ mod test {
             .get_next_block(&get_default_block_id())
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn cycle_block_provider_switches_providers_correctly() {
+        let left_provider = Arc::new(MockBlockProvider {
+            has_block: AtomicBool::new(true),
+        });
+        let right_provider = Arc::new(MockBlockProvider {
+            has_block: AtomicBool::new(false),
+        });
+
+        let chain_provider = CycleBlockProvider {
+            left: Arc::clone(&left_provider),
+            right: Arc::clone(&right_provider),
+            is_right: AtomicBool::new(false),
+        };
+
+        chain_provider
+            .get_next_block(&get_default_block_id())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Now let's pretend the left provider ran out of blocks.
+        left_provider.has_block.store(false, Ordering::Release);
+        right_provider.has_block.store(true, Ordering::Release);
+
+        chain_provider
+            .get_next_block(&get_default_block_id())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(chain_provider.is_right.load(Ordering::Acquire));
+
+        // Cycle switch
+        left_provider.has_block.store(true, Ordering::Release);
+        right_provider.has_block.store(false, Ordering::Release);
+
+        chain_provider
+            .get_next_block(&get_default_block_id())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!chain_provider.is_right.load(Ordering::Acquire));
     }
 
     fn get_empty_block() -> BlockStuffAug {

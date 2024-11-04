@@ -441,10 +441,10 @@ impl Node {
             .with_provider(
                 collator
                     .new_sync_point(CollatorSyncContext::Historical)
-                    .chain(archive_block_provider)
+                    .chain(archive_block_provider.clone())
                     .chain(collator.new_sync_point(CollatorSyncContext::Recent))
                     .chain((
-                        blockchain_block_provider,
+                        blockchain_block_provider.cycle(archive_block_provider),
                         storage_block_provider,
                         collator_block_provider,
                     )),
