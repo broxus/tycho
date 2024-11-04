@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_block_util::block::{BlockIdExt, BlockStuff};
-use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider, StorageBlockProvider};
+use tycho_core::block_strider::{
+    BlockProvider, BlockProviderExt, BlockchainBlockProvider, RetryConfig, StorageBlockProvider,
+};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
@@ -125,7 +128,12 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
             PublicOverlayClientConfig::default(),
         ))
         .build();
-    let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
+    let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default()).retry(
+        RetryConfig {
+            limit: 10,
+            polling_interval: Duration::from_millis(100),
+        },
+    );
 
     let archive_data = utils::read_file("archive_1.bin")?;
     let archive = utils::parse_archive(&archive_data)?;
@@ -144,6 +152,14 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     }
 
     tmp_dir.close()?;
+
+    let block = provider
+        .get_block(&BlockId::default().relative_to_self())
+        .await;
+    assert!(block.is_none());
+
+    let next_block = provider.get_next_block(&BlockId::default()).await;
+    assert!(next_block.is_none());
 
     tracing::info!("done!");
     Ok(())

@@ -433,7 +433,7 @@ impl BlockchainRpcClient {
         .await
     }
 
-    pub async fn find_archive(&self, mc_seqno: u32) -> Result<PendingArchive, Error> {
+    pub async fn find_archive(&self, mc_seqno: u32) -> Result<PendingArchiveResponse, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
         let neighbours = self
             .overlay_client()
@@ -495,7 +495,7 @@ impl BlockchainRpcClient {
             // Stop using archives when enough neighbors
             // have responded ArchiveInfo::TooNew
             if new_archive_count >= neighbour_count {
-                return Err(Error::TooNew);
+                return Ok(PendingArchiveResponse::TooNew);
             }
 
             return match err {
@@ -511,7 +511,7 @@ impl BlockchainRpcClient {
             archuve_chunk_size = %ByteSize(pending_archive.chunk_size.get() as _),
             "found archive",
         );
-        Ok(pending_archive)
+        Ok(PendingArchiveResponse::Found(pending_archive))
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -576,6 +576,11 @@ struct Inner {
     broadcast_timeout_upper_bound: Duration,
     broadcast_timeout_lower_bound: Duration,
     response_tracker: Mutex<tycho_util::time::RollingP2Estimator>,
+}
+
+pub enum PendingArchiveResponse {
+    Found(PendingArchive),
+    TooNew,
 }
 
 #[derive(Clone)]

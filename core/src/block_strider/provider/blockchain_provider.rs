@@ -11,7 +11,7 @@ use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 use tycho_util::sync::rayon_run;
 
-use crate::block_strider::provider::{CheckProof, OptionalBlockStuff, ProofChecker};
+use crate::block_strider::provider::{CheckProof, OptionalBlockStuff, ProofChecker, RetryConfig};
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
@@ -33,6 +33,9 @@ pub struct BlockchainBlockProviderConfig {
     /// Default: 1 second.
     #[serde(with = "serde_helpers::humantime")]
     pub get_block_polling_interval: Duration,
+
+    /// Retry getting next block config.
+    pub retry_config: RetryConfig,
 }
 
 impl Default for BlockchainBlockProviderConfig {
@@ -40,6 +43,10 @@ impl Default for BlockchainBlockProviderConfig {
         Self {
             get_next_block_polling_interval: Duration::from_secs(1),
             get_block_polling_interval: Duration::from_secs(1),
+            retry_config: RetryConfig {
+                limit: 10,
+                polling_interval: Duration::from_secs(1),
+            },
         }
     }
 }
@@ -93,9 +100,9 @@ impl BlockchainBlockProvider {
                             return parsed;
                         }
                     }
-                    None => tracing::warn!(?prev_block_id, "block not found"),
+                    None => return None,
                 },
-                Err(e) => tracing::error!("failed to get block: {e}"),
+                Err(e) => tracing::error!("failed to get next block: {e}"),
             }
 
             interval.tick().await;
@@ -127,7 +134,7 @@ impl BlockchainBlockProvider {
                             return parsed;
                         }
                     }
-                    None => tracing::warn!(%block_id, "block not found"),
+                    None => return None,
                 },
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
