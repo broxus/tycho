@@ -95,7 +95,11 @@ pub struct DownloadContext {
 }
 impl EffectsContext for DownloadContext {}
 impl Effects<DownloadContext> {
-    pub fn new(parent: &Effects<ValidateContext>, point_id: &PointId) -> Self {
+    pub fn new<T>(parent: &Effects<T>, point_id: &PointId) -> Self
+    where
+        T: EffectsContext,
+        for<'a> &'a T: Into<DownloadContext>,
+    {
         parent.new_child(parent.ctx().into(), || {
             tracing::error_span!(
                 "download",
@@ -116,6 +120,14 @@ impl Effects<DownloadContext> {
     }
 }
 
+impl From<&EngineContext> for DownloadContext {
+    fn from(parent: &EngineContext) -> Self {
+        Self {
+            current_round: parent.current_round,
+            download_max_depth: parent.download_max_depth.clone(),
+        }
+    }
+}
 impl From<&ValidateContext> for DownloadContext {
     fn from(parent: &ValidateContext) -> Self {
         Self {
@@ -131,27 +143,36 @@ pub struct ValidateContext {
 }
 impl EffectsContext for ValidateContext {}
 impl Effects<ValidateContext> {
-    pub fn new(parent: &Effects<EngineContext>, info: &PointInfo) -> Self {
-        parent.new_child(
-            ValidateContext {
-                parent_effects: parent.clone(),
-            },
-            || {
-                tracing::error_span!(
-                    "validate",
-                    author = display(info.data().author.alt()),
-                    round = info.round().0,
-                    digest = display(info.digest().alt()),
-                )
-            },
-        )
+    pub fn new<T>(parent: &Effects<T>, info: &PointInfo) -> Self
+    where
+        T: EffectsContext,
+        for<'a> &'a Effects<T>: Into<ValidateContext>,
+    {
+        parent.new_child(parent.into(), || {
+            tracing::error_span!(
+                "validate",
+                author = display(info.data().author.alt()),
+                round = info.round().0,
+                digest = display(info.digest().alt()),
+            )
+        })
     }
+}
 
-    // Links every recursive validation to the same engine context
-    // to produce shorter logs (skip intermediate validation spans).
-    // Notice that current engine round may advance while this spans
-    // will still report the round that initialized the current chain
-    pub fn deeper(&self, info: &PointInfo) -> Self {
-        Self::new(&self.context.parent_effects, info)
+// Root validation
+impl From<&Effects<EngineContext>> for ValidateContext {
+    fn from(parent: &Effects<EngineContext>) -> Self {
+        ValidateContext {
+            parent_effects: parent.clone(),
+        }
+    }
+}
+// Links every recursive validation to the same engine context
+// to produce shorter logs (skip intermediate validation spans).
+// Notice that current engine round may advance while this spans
+// will still report the round that initialized the current chain
+impl From<&Effects<ValidateContext>> for ValidateContext {
+    fn from(neighbour: &Effects<ValidateContext>) -> Self {
+        neighbour.context.clone()
     }
 }

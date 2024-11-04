@@ -13,7 +13,9 @@ use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
-use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::effects::{
+    DownloadContext, Effects, EffectsContext, EngineContext, MempoolStore, ValidateContext,
+};
 use crate::engine::Genesis;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
@@ -164,15 +166,20 @@ impl DagPointFuture {
         })
     }
 
-    pub fn new_load(
+    pub fn new_load<T>(
         point_dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<ValidateContext>,
-    ) -> Self {
+        effects: &Effects<T>,
+    ) -> Self
+    where
+        T: EffectsContext + Clone + Send + 'static,
+        for<'a> &'a T: Into<DownloadContext>,
+        for<'a> &'a Effects<T>: Into<ValidateContext>,
+    {
         let point_id = PointId {
             author: *author,
             round: point_dag_round.round(),
@@ -238,13 +245,9 @@ impl DagPointFuture {
                     return dag_point;
                 }
                 None => {
+                    let download_effects = Effects::<DownloadContext>::new(&effects, &point_id);
                     let downloaded = downloader
-                        .run(
-                            &point_id,
-                            dependers_rx,
-                            broadcast_rx,
-                            Effects::<DownloadContext>::new(&effects, &point_id),
-                        )
+                        .run(&point_id, dependers_rx, broadcast_rx, download_effects)
                         .await;
                     let verified = match downloaded {
                         DownloadResult::Verified(point) => point,
@@ -283,10 +286,11 @@ impl DagPointFuture {
                 }
             };
 
-            let deeper_effects = effects.deeper(&verified);
+            // this may be root validation or child one
+            let validate_effects = Effects::<ValidateContext>::new(&effects, &verified);
             tracing::trace!(
-                parent: deeper_effects.span(),
-                "downloaded, start validating",
+                parent: validate_effects.span(),
+                "loaded, start validating",
             );
 
             if stored_status.map_or(false, |status| status.is_certified) {
@@ -304,7 +308,7 @@ impl DagPointFuture {
                 downloader,
                 store.clone(),
                 certified_rx,
-                deeper_effects,
+                validate_effects,
             );
             // do not abort store if not valid
             let dag_point = match tokio::join!(storage_fut, validated_fut) {

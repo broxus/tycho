@@ -217,6 +217,23 @@ impl DagRound {
 
     /// notice: `round` must exactly match point's round,
     /// otherwise dependency will resolve to [`DagPoint::NotFound`]
+    pub fn add_evicted_broadcast_exact(
+        &self,
+        author: &PeerId,
+        digest: &Digest,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        effects: &Effects<EngineContext>,
+    ) {
+        self.edit(author, |loc| {
+            loc.get_or_init(digest, |state| {
+                DagPointFuture::new_load(self, author, digest, state, downloader, store, effects)
+            });
+        });
+    }
+
+    /// notice: `round` must exactly match point's round,
+    /// otherwise dependency will resolve to [`DagPoint::NotFound`]
     pub fn add_dependency_exact(
         &self,
         author: &PeerId,

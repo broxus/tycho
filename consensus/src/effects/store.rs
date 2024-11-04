@@ -186,13 +186,15 @@ impl MempoolStore {
         mut committed_round: RoundWatcher<Commit>,
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
     ) {
-        fn least_to_keep(consensus: Round, committed: Round) -> Round {
+        fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
             Round(
                 // do not clean history that it can be requested by other peers
                 DagFront::max_history_bottom(consensus)
                     // do not clean history until commit is finished
                     .min(DagFront::default_back_bottom(committed))
-                    .0 // clean history no matter if top known anchor is far behind
+                    // clean broadcasts if node is not in active v_subset
+                    .max(DagFront::max_history_bottom(top_known_anchor))
+                    .0
                     .saturating_div(CachedConfig::clean_rocks_period())
                     .saturating_mul(CachedConfig::clean_rocks_period()),
             )
@@ -201,8 +203,8 @@ impl MempoolStore {
         tokio::spawn(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
-            let mut top_known = top_known_anchor.get(); // for metrics only
-            let mut prev_least_to_keep = least_to_keep(consensus, committed);
+            let mut top_known = top_known_anchor.next().await;
+            let mut prev_least_to_keep = least_to_keep(consensus, committed, top_known);
             loop {
                 tokio::select! {
                     new_consensus = consensus_round.next() => {
@@ -221,7 +223,7 @@ impl MempoolStore {
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
                     .set((committed.0 as f64) - (top_known.0 as f64));
 
-                let new_least_to_keep = least_to_keep(consensus, committed);
+                let new_least_to_keep = least_to_keep(consensus, committed, top_known);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
                     .set((consensus.0 as f64) - (new_least_to_keep.0 as f64));
 

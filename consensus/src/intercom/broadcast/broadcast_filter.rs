@@ -1,3 +1,4 @@
+use std::collections::hash_map;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -5,7 +6,7 @@ use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use super::dto::ConsensusEvent;
-use crate::dag::{DagHead, DagRound, Verifier, VerifyError};
+use crate::dag::{DagFront, DagHead, DagRound, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::{Consensus, RoundWatch};
@@ -66,15 +67,15 @@ impl BroadcastFilter {
     }
 }
 
-type SimpleDagLocations = FastHashMap<PeerId, FastHashMap<Digest, (Point, usize)>>;
+// Result is used to store only `Digest` when point is too far from engine round
+type MapByPeer = FastHashMap<PeerId, (Result<Point, Digest>, usize)>;
 struct BroadcastFilterInner {
     peer_schedule: PeerSchedule,
     consensus_round: RoundWatch<Consensus>,
     output: mpsc::UnboundedSender<ConsensusEvent>,
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
-    // TODO outer by round - scc tree index (?); inner by peer - dash map
-    by_round: FastDashMap<Round, (PeerCount, SimpleDagLocations)>,
+    by_round: FastDashMap<Round, (PeerCount, MapByPeer)>,
 }
 
 impl BroadcastFilterInner {
@@ -84,6 +85,11 @@ impl BroadcastFilterInner {
     //    => we should collect as much points as possible
     //  * we must defend the DAG and current cache from spam from future rounds,
     //    => we should discard points from the far future
+    //  * DAG can account equivocated points, but caching future equivocations is an easy OOM
+    //  On cache eviction:
+    //  * if Engine is [0, CACHE_ROUNDS] behind consensus: BF stores points
+    //  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
+    //  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF drops everything up to consensus
 
     /// channels Vec of points to insert into DAG if consensus round is determined reliably;
     /// returns `true` if round should be advanced;
@@ -110,7 +116,9 @@ impl BroadcastFilterInner {
 
         let top_round = head.next().round();
 
-        let (is_threshold_reached, duplicates) = if let Some(verified) = &verified_result {
+        let (is_threshold_reached, duplicates, equivocation) = if let Some(verified) =
+            &verified_result
+        {
             enum ExtendMapErr {
                 RoundIsInDag,
                 CannotExtend,
@@ -139,23 +147,42 @@ impl BroadcastFilterInner {
                 })
             };
             match try_by_round_entry {
-                Err(ExtendMapErr::CannotExtend) => (false, None),
+                Err(ExtendMapErr::CannotExtend) => (false, None, None),
                 // grab a lock
                 Ok(mut entry) if verified.is_ok() && round >= top_round => {
                     let (peer_count, same_round) = entry.value_mut();
                     // ban the author, if we detect equivocation now; we won't be able to prove it
                     //   if some signatures are invalid (it's another reason for a local ban)
-                    let duplicates = same_round
-                        .entry(author)
-                        .or_default()
-                        .entry(digest)
-                        .and_modify(|(_point, duplicates)| *duplicates += 1)
-                        .or_insert((point.clone(), 0))
-                        .1;
+                    let (duplicates, equivocation) = match same_round.entry(author) {
+                        hash_map::Entry::Occupied(mut existing) => {
+                            let (old_digest, duplicates) = match existing.get_mut() {
+                                (Ok(old_point), duplicates) => (*old_point.digest(), duplicates),
+                                (Err(old_digest), duplicates) => (*old_digest, duplicates),
+                            };
+                            if &old_digest == point.digest() {
+                                *duplicates += 1;
+                                // allow some duplicates in case of network error or sender restart
+                                (Some(*duplicates).filter(|d| *d > 3), None)
+                            } else {
+                                (None, Some(old_digest))
+                            }
+                        }
+                        hash_map::Entry::Vacant(vacant) => {
+                            let cached = if head.current().round().0
+                                <= (self.consensus_round.get().0)
+                                    .saturating_sub(CachedConfig::cache_future_broadcasts_rounds())
+                            {
+                                Ok(point.clone())
+                            } else {
+                                Err(*point.digest())
+                            };
+                            vacant.insert((cached, 0));
+                            (None, None)
+                        }
+                    };
                     // send `Forward` signal inside `add` just once per round, not for every point
                     let is_threshold_reached = same_round.len() == peer_count.reliable_minority();
-                    // allow few duplicates in case of network error
-                    (is_threshold_reached, Some(duplicates).filter(|d| *d > 3))
+                    (is_threshold_reached, duplicates, equivocation)
                 }
                 // points must be channelled to Collector only after signal that threshold is reached
                 // (i.e. round is advanced), so had to piggyback on map's locking
@@ -183,11 +210,11 @@ impl BroadcastFilterInner {
                             }
                         }
                     }
-                    (false, None)
+                    (false, None, None)
                 }
             }
         } else {
-            (false, None) // should ban sender
+            (false, None, None) // should ban sender
         };
 
         if is_threshold_reached && round >= top_round {
@@ -208,7 +235,10 @@ impl BroadcastFilterInner {
         // we should ban a peer that broadcasts its rounds out of order,
         //   though we cannot prove this decision for other nodes;
         // rarely a consecutive pair of broadcasts may be reordered during high CPU load
-        let level = if verified_result.map_or(true, |vr| vr.is_err()) || duplicates.is_some() {
+        let level = if verified_result.map_or(true, |vr| vr.is_err())
+            || duplicates.is_some()
+            || equivocation.is_some()
+        {
             // that's severe errors, that require ban
             tracing::Level::ERROR
         } else {
@@ -224,6 +254,7 @@ impl BroadcastFilterInner {
             sender = verified_result.ok_or(display(sender.alt())).err(),
             malformed = verified_result.and_then(|e| e.err()).map(debug),
             duplicates = duplicates,
+            equivocation = equivocation.as_ref().map(|digest| display(digest.alt())),
             advance = Some(is_threshold_reached).filter(|x| *x),
             "received broadcast"
         );
@@ -237,8 +268,8 @@ impl BroadcastFilterInner {
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
-        let future_limit =
-            (head.next().round().0).saturating_add(CachedConfig::cache_future_broadcasts_rounds());
+        // Engine round task is not running while collator is syncing blocks
+        let history_bottom = DagFront::max_history_bottom(self.consensus_round.get());
 
         // Drain points in historical order that cannot be neither included nor signed,
         // thus out of Collector's interest and needed for validation and commit only.
@@ -249,14 +280,16 @@ impl BroadcastFilterInner {
         self.by_round.retain(|round, (_, map_by_peer)| {
             let is_to_take = *round < prev_round;
             if is_to_take {
+                // no need to pass evicted broadcasts, just points to not download them
                 let points = map_by_peer
                     .values()
-                    .flat_map(|map_by_digest| map_by_digest.values())
-                    .cloned()
+                    .filter(|(r, _)| r.is_ok())
+                    .filter_map(|(r, _)| r.clone().ok())
                     .collect::<Vec<_>>();
                 outdated.push((*round, points));
             }
-            !is_to_take && round.0 <= future_limit
+            // discard elements whose predicates return false
+            !is_to_take || *round >= history_bottom
         });
         outdated.sort_unstable_by_key(|(round, _)| *round);
 
@@ -269,7 +302,7 @@ impl BroadcastFilterInner {
                 continue;
             };
             // Note: no need to channel to Collector, no new local point will reference them anyway
-            for (point, _) in points {
+            for point in points {
                 _ = point_round.add_broadcast_exact(&point, downloader, store, effects);
             }
             released.push(round.0);
@@ -288,11 +321,17 @@ impl BroadcastFilterInner {
                 continue;
             };
             let (_, map_by_peer) = entry.get();
-            let points = map_by_peer
-                .values()
-                .flat_map(|map_by_digest| map_by_digest.values());
-            for (point, _) in points {
-                self.send_validating(dag_round, point, downloader, store, effects);
+            for (peer_id, (point_or_digest, _)) in map_by_peer {
+                match point_or_digest {
+                    Ok(point) => {
+                        _ = dag_round.add_broadcast_exact(point, downloader, store, effects);
+                    }
+                    Err(digest) => {
+                        dag_round.add_evicted_broadcast_exact(
+                            peer_id, digest, downloader, store, effects,
+                        );
+                    }
+                }
             }
             released.push(round.0);
 
