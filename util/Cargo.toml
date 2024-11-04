@@ -38,6 +38,7 @@ zstd-safe = { workspace = true, features = ["std"] }
 zstd-sys = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
@@ -49,7 +50,7 @@ cli = [
     "dep:tracing-appender",
     "dep:tracing-stackdriver",
     "dep:tracing-subscriber",
-    "tokio/signal"
+    "tokio/signal",
 ]
 
 [lints]
