@@ -44,7 +44,8 @@ impl InputBuffer {
 impl InputBufferInner for InputBufferData {
     fn push(&mut self, ext_in_msg: Bytes) {
         if self.payload_buffer_bytes == 0 || self.payload_batch_bytes == 0 {
-            tracing::error!("cannot send msg by config");
+            // TODO log debounce https://github.com/broxus/tycho/issues/406
+            tracing::trace!("cannot send msg by config");
             return; // ignore until config applied
         }
         self.add(ext_in_msg);
