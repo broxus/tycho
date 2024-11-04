@@ -91,7 +91,6 @@ intercom.signatureResponse.rejected                     = intercom.SignatureResp
 *
 */
 intercom.signatureRejectedReason.tooOldRound            = intercom.SignatureRejectedReason;
-intercom.signatureRejectedReason.noDagRound             = intercom.SignatureRejectedReason;
 intercom.signatureRejectedReason.cannotSign             = intercom.SignatureRejectedReason;
 
 /*

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use tycho_network::PeerId;
 
-use crate::dag::DagRound;
+use crate::dag::{DagHead, DagRound};
 use crate::effects::AltFormat;
 use crate::engine::{Genesis, InputBuffer};
 use crate::models::{
@@ -21,18 +21,19 @@ pub struct Producer;
 
 impl Producer {
     pub fn new_point(
-        current_round: &DagRound,
         last_own_point: Option<&LastOwnPoint>,
         input_buffer: &InputBuffer,
+        head: &DagHead,
     ) -> Option<Point> {
-        let finished_round = current_round.prev().upgrade()?;
-        let key_pair = current_round.key_pair()?;
+        let current_round = head.current();
+        let finished_round = head.prev();
+        let key_pair = head.produce_keys()?;
 
         let proven_vertex = last_own_point
             // previous round's point needs 2F signatures from peers scheduled for current round
             .filter(|prev| {
                 // Note: prev point is used only once until weak links are implemented
-                current_round.round().prev() == prev.round
+                finished_round.round() == prev.round
                     && prev.evidence.len() >= prev.signers.majority_of_others()
             });
         let local_id = PeerId::from(key_pair.public_key);
@@ -41,7 +42,7 @@ impl Producer {
             Some(stage) if stage.leader == local_id && proven_vertex.is_none() => return None,
             _ => {}
         };
-        let includes = Self::includes(&finished_round);
+        let includes = Self::includes(finished_round);
         let mut anchor_trigger = Self::link_from_includes(
             &local_id,
             current_round,
@@ -50,7 +51,7 @@ impl Producer {
         );
         let mut anchor_proof =
             Self::link_from_includes(&local_id, current_round, &includes, AnchorStageRole::Proof);
-        let witness = Self::witness(&finished_round);
+        let witness = Self::witness(finished_round);
         Self::update_link_from_witness(
             &mut anchor_trigger,
             current_round.round(),

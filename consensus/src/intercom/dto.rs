@@ -96,8 +96,6 @@ pub struct BroadcastResponse;
 pub enum SignatureRejectedReason {
     #[tl(id = "intercom.signatureRejectedReason.tooOldRound")]
     TooOldRound,
-    #[tl(id = "intercom.signatureRejectedReason.noDagRound")]
-    NoDagRound,
     #[tl(id = "intercom.signatureRejectedReason.cannotSign")]
     CannotSign,
 }

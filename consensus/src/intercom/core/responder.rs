@@ -5,7 +5,7 @@ use arc_swap::ArcSwapOption;
 use futures_util::future;
 use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
 
-use crate::dag::DagRound;
+use crate::dag::DagHead;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::dto::{
@@ -21,7 +21,7 @@ pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
 struct ResponderInner {
     // state and storage components go here
     broadcast_filter: BroadcastFilter,
-    top_dag_round: DagRound,
+    head: DagHead,
     downloader: Downloader,
     store: MempoolStore,
     effects: Effects<EngineContext>,
@@ -31,12 +31,12 @@ impl Responder {
     pub fn update(
         &self,
         broadcast_filter: &BroadcastFilter,
-        top_dag_round: &DagRound,
+        head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         round_effects: &Effects<EngineContext>,
     ) {
-        broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
+        broadcast_filter.advance_round(head, downloader, store, round_effects);
         // Note that `next_dag_round` for Signer should be advanced _after_ new points
         //  are moved from BroadcastFilter into DAG. Then Signer will look for points
         //  (of rounds greater than local engine round, including top dag round exactly)
@@ -48,7 +48,7 @@ impl Responder {
         //  others are being moved into Dag, all of them will be in DAG after one more round.
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
-            top_dag_round: top_dag_round.clone(),
+            head: head.clone(),
             downloader: downloader.clone(),
             store: store.clone(),
             effects: round_effects.clone(),
@@ -100,7 +100,7 @@ impl Responder {
                     Some(inner) => inner.broadcast_filter.add(
                         &req.metadata.peer_id,
                         &r.0,
-                        &inner.top_dag_round,
+                        &inner.head,
                         &inner.downloader,
                         &inner.store,
                         &inner.effects,
@@ -116,7 +116,7 @@ impl Responder {
                     Some(inner) => Uploader::find(
                         &req.metadata.peer_id,
                         &r.0,
-                        &inner.top_dag_round,
+                        &inner.head,
                         &inner.store,
                         &inner.effects,
                     ),
@@ -132,7 +132,7 @@ impl Responder {
                     Some(inner) => Signer::signature_response(
                         &req.metadata.peer_id,
                         r.0,
-                        &inner.top_dag_round,
+                        &inner.head,
                         &inner.broadcast_filter,
                         &inner.effects,
                     ),

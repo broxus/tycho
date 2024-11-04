@@ -9,7 +9,7 @@ use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tracing::Instrument;
 use tycho_util::futures::JoinTask;
 
-use crate::dag::{DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
+use crate::dag::{DagHead, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{
     AltFormat, CollectorContext, Effects, EngineContext, MempoolStore, ValidateContext,
 };
@@ -103,31 +103,31 @@ impl RoundTaskReady {
     pub fn own_point_task(
         &self,
         collector_signal_rx: &watch::Receiver<CollectorSignal>,
-        current_dag_round: &DagRound,
+        head: &DagHead,
         round_effects: &Effects<EngineContext>,
     ) -> (
         BoxFuture<'static, Result<Option<Point>, JoinError>>,
         BoxFuture<'static, InclusionState>,
     ) {
-        metrics::gauge!("tycho_mempool_includes_ready_round_lag").set(
-            current_dag_round.round().0 as f32
-                - self.collector.includes_ready_round().next().0 as f32,
-        );
+        let current_round = head.current().round();
+
+        metrics::gauge!("tycho_mempool_includes_ready_round_lag")
+            .set(current_round.0 as f32 - self.collector.includes_ready_round().next().0 as f32);
         let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
         let allowed_to_produce = match self
             .collector
             .includes_ready_round()
-            .cmp(&current_dag_round.round().prev().max(Genesis::round()))
+            .cmp(&current_round.prev().max(Genesis::round()))
         {
             cmp::Ordering::Less => false,
             cmp::Ordering::Equal => true,
             cmp::Ordering::Greater => panic!(
                 "have includes ready at {:?}, but producing point at {:?}",
                 self.collector.includes_ready_round(),
-                current_dag_round.round(),
+                current_round,
             ),
         } && self.last_own_point.as_ref().map_or(true, |prev_own| {
-            match prev_own.round.next().cmp(&current_dag_round.round()) {
+            match prev_own.round.next().cmp(&current_round) {
                 cmp::Ordering::Less => true,
                 cmp::Ordering::Equal => {
                     prev_own.evidence.len() >= prev_own.signers.majority_of_others()
@@ -138,7 +138,7 @@ impl RoundTaskReady {
                     prev_own.round,
                     prev_own.evidence.len(),
                     prev_own.signers.majority_of_others(),
-                    current_dag_round.round()
+                    current_round
                 ),
             }
         });
@@ -147,7 +147,7 @@ impl RoundTaskReady {
             self.own_point_fut(
                 own_point_state_tx,
                 collector_signal_rx,
-                current_dag_round,
+                head.clone(),
                 round_effects,
             )
         } else {
@@ -167,10 +167,10 @@ impl RoundTaskReady {
         &self,
         own_point_state_tx: oneshot::Sender<InclusionState>,
         collector_signal_rx: &watch::Receiver<CollectorSignal>,
-        current_dag_round: &DagRound,
+        head: DagHead,
         round_effects: &Effects<EngineContext>,
     ) -> BoxFuture<'static, Result<Option<Point>, JoinError>> {
-        let consensus_round = current_dag_round.round(); // latest reliably detected consensus round
+        let consensus_round = head.current().round(); // latest reliably detected consensus round
         let mut top_known_anchor_recv = self.state.top_known_anchor.receiver();
         let top_known_anchor = top_known_anchor_recv.get();
         let silent_after = CachedConfig::silent_after(top_known_anchor);
@@ -220,7 +220,6 @@ impl RoundTaskReady {
             }).instrument(round_effects.span().clone()))
         };
 
-        let current_dag_round = current_dag_round.clone();
         let input_buffer = self.state.input_buffer.clone();
         let last_own_point = self.last_own_point.clone();
         let store = self.state.store.clone();
@@ -230,17 +229,16 @@ impl RoundTaskReady {
                 if is_ready_to_produce {
                     future::Either::Right(tokio::task::spawn_blocking(move || {
                         let task_start_time = Instant::now();
-                        let point_opt = Producer::new_point(
-                            &current_dag_round,
-                            last_own_point.as_deref(),
-                            &input_buffer,
-                        );
+                        let point_opt =
+                            Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
                         if let Some(own_point) = point_opt.as_ref() {
-                            let state = current_dag_round.insert_exact_sign(
-                                own_point,
-                                current_dag_round.key_pair(),
-                                &store,
-                            );
+                            // Note: actually we should use `.includes_keys()`, this is a WorkAround to support
+                            //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
+                            //   this is safe as any node never changes its keys until restart, after which
+                            //   the node does not recognise points signed with old keypair as locally created
+                            let wa_keys = head.produce_keys();
+                            let state =
+                                head.current().insert_exact_sign(own_point, wa_keys, &store);
                             own_point_state_tx.send(state).ok();
                             metrics::histogram!("tycho_mempool_engine_produce_time")
                                 .record(task_start_time.elapsed());
@@ -262,13 +260,13 @@ impl RoundTaskReady {
         own_point_state: BoxFuture<'static, InclusionState>,
         collector_signal_tx: watch::Sender<CollectorSignal>,
         collector_signal_rx: watch::Receiver<CollectorSignal>,
-        next_dag_round: &DagRound,
+        head: &DagHead,
         round_effects: &Effects<EngineContext>,
     ) -> RoundTaskRunning {
         let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
 
         let broadcaster_run = tokio::spawn({
-            let own_point_round = next_dag_round.prev().clone();
+            let own_point_round = head.current().downgrade();
             let round_effects = round_effects.clone();
             let peer_schedule = self.state.peer_schedule.clone();
             let prev_bcast = self.prev_broadcast;
@@ -313,12 +311,12 @@ impl RoundTaskReady {
         let collector_run = tokio::spawn({
             let mut collector = self.collector;
             let effects = Effects::<CollectorContext>::new(round_effects);
-            let next_dag_round = next_dag_round.clone();
+            let head = head.clone();
             async move {
                 let next_round = collector
                     .run(
                         effects,
-                        next_dag_round,
+                        head,
                         own_point_state,
                         collector_signal_tx,
                         bcaster_ready_rx,
@@ -330,7 +328,7 @@ impl RoundTaskReady {
 
         self.state.responder.update(
             &self.state.broadcast_filter,
-            next_dag_round,
+            head,
             &self.state.downloader,
             &self.state.store,
             round_effects,
