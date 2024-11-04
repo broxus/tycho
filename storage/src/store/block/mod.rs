@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use bytes::Buf;
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
@@ -1344,22 +1345,28 @@ fn remove_blocks(
     let package_entries_cf = db.package_entries.cf();
     let block_data_entries_cf = db.block_data_entries.cf();
     let block_handles_cf = db.block_handles.cf();
-    let key_blocks_cf = db.key_blocks.cf();
 
     // Create batch
     let mut batch = rocksdb::WriteBatch::default();
     let mut batch_len = 0;
 
     let package_entries_readopts = db.package_entries.new_read_config();
-    let key_blocks_readopts = db.key_blocks.new_read_config();
+    let block_handles_readopts = db.block_handles.new_read_config();
 
     // Iterate all entries and find expired items
     let mut blocks_iter = raw.raw_iterator_cf_opt(&package_entries_cf, package_entries_readopts);
     blocks_iter.seek_to_first();
 
-    let is_key_block = |seqno: u32| {
-        raw.get_pinned_cf_opt(&key_blocks_cf, seqno.to_be_bytes(), &key_blocks_readopts)
-            .map(|value| value.is_some())
+    let is_persistent = |root_hash: &[u8; 32]| -> Result<bool> {
+        const FLAGS: u64 =
+            ((BlockFlags::IS_KEY_BLOCK.bits() | BlockFlags::IS_PERSISTENT.bits()) as u64) << 32;
+
+        let Some(value) =
+            raw.get_pinned_cf_opt(&block_handles_cf, root_hash, &block_handles_readopts)?
+        else {
+            return Ok(false);
+        };
+        Ok(value.as_ref().get_u64_le() & FLAGS != 0)
     };
 
     let mut key_buffer = [0u8; tables::PackageEntries::KEY_LEN];
@@ -1396,15 +1403,22 @@ fn remove_blocks(
             None => break blocks_iter.status()?,
         };
 
-        // Read only prefix with shard ident and seqno
+        // Key structure:
+        // [workchain id, 4 bytes]  |
+        // [shard id, 8 bytes]      | BlockIdShort
+        // [seqno, 4 bytes]         |
+        // [root hash, 32 bytes] <-
+        // ..
         let block_id = BlockIdShort::from_slice(key);
+        let root_hash: &[u8; 32] = key[16..48].try_into().unwrap();
         let is_masterchain = block_id.shard.is_masterchain();
 
-        // Don't gc latest blocks or key blocks
+        // Don't gc latest blocks, key blocks or persistent blocks
         if block_id.seqno == 0
-            || is_masterchain && (block_id.seqno >= mc_seqno || is_key_block(block_id.seqno)?)
+            || is_masterchain && block_id.seqno >= mc_seqno
             || !is_masterchain
                 && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
+            || is_persistent(root_hash)?
         {
             // Remove the current range
             if let Some((from, to)) = current_range.take() {
@@ -1434,13 +1448,7 @@ fn remove_blocks(
             stats.mc_entries_removed += 1;
         }
 
-        // Key structure:
-        // [workchain id, 4 bytes]
-        // [shard id, 8 bytes]
-        // [seqno, 4 bytes]
-        // [root hash, 32 bytes] <-
-        // ..
-        batch.delete_cf(&block_handles_cf, &key[16..48]);
+        batch.delete_cf(&block_handles_cf, root_hash);
 
         batch_len += 1;
         if matches!(

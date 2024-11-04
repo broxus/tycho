@@ -36,6 +36,14 @@ impl BlockHandleStorage {
         updated
     }
 
+    pub fn set_block_persistent(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::IS_PERSISTENT);
+        if updated {
+            self.store_handle(handle);
+        }
+        updated
+    }
+
     pub fn set_has_persistent_shard_state(&self, handle: &BlockHandle) -> bool {
         let updated = handle
             .meta()

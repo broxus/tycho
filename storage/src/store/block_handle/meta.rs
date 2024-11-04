@@ -124,6 +124,7 @@ bitflags::bitflags! {
         const HAS_PREV_2 = 1 << 9;
         const IS_APPLIED = 1 << 10;
         const IS_KEY_BLOCK = 1 << 11;
+        const IS_PERSISTENT = 1 << 12;
 
         const IS_REMOVED = 1 << 15;
 

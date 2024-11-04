@@ -73,13 +73,12 @@ impl Inner {
         mc_block: BlockStuff,
         mc_state_handle: RefMcStateHandle,
     ) -> Result<()> {
-        let Some(mc_block_handle) = self
-            .storage
-            .block_handle_storage()
-            .load_handle(mc_block.id())
-        else {
+        let block_handles = self.storage.block_handle_storage();
+
+        let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
             anyhow::bail!("masterchain block handle not found: {}", mc_block.id());
         };
+        block_handles.set_block_persistent(&mc_block_handle);
 
         let (state_result, queue_result) = tokio::join!(
             self.save_persistent_shard_states(
@@ -113,6 +112,9 @@ impl Inner {
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
                 anyhow::bail!("top shard block handle not found: {block_id}");
             };
+
+            // NOTE: We could have also called the `set_block_persistent` here, but we
+            //       only do this in the first part of the `save_persistent_queue_states`.
 
             persistent_states
                 .store_shard_state(mc_seqno, &block_handle, mc_state_handle.clone())
@@ -165,6 +167,10 @@ impl Inner {
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
                 anyhow::bail!("top shard block handle not found: {block_id}");
             };
+
+            // NOTE: We set the flag only here because this part will be executed
+            //       first, without waiting for other states or queues to be saved.
+            block_handles.set_block_persistent(&block_handle);
 
             min_processed_upto = merge(block_handle.clone(), min_processed_upto).await?;
             shard_block_handles.push(block_handle);
