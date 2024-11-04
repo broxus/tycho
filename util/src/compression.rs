@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
+use std::mem::ManuallyDrop;
 
 use zstd_safe::{get_error_name, CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective};
 
@@ -82,7 +83,22 @@ impl<W: Write> ZstdCompressedFile<W> {
     }
 
     /// Terminates the compression stream. All subsequent writes will fail.
-    pub fn finish(&mut self) -> std::io::Result<()> {
+    pub fn finish(mut self) -> std::io::Result<W> {
+        self.finish_impl()?;
+
+        let mut this = ManuallyDrop::new(self);
+        let _buffer = std::mem::take(&mut this.buffer);
+
+        // SAFETY: double-drops are prevented by putting `this` in a ManuallyDrop that is never dropped
+        let writer = unsafe { std::ptr::read(&this.writer) };
+
+        // SAFETY: double-drops are prevented by putting `this` in a ManuallyDrop that is never dropped
+        let _compressor = unsafe { std::ptr::read(&this.compressor) };
+
+        Ok(writer)
+    }
+
+    fn finish_impl(&mut self) -> std::io::Result<()> {
         self.compressor.finish(&mut self.buffer)?;
         if !self.buffer.is_empty() {
             self.writer.write_all(&self.buffer)?;
@@ -126,7 +142,7 @@ impl<W: Write> Write for ZstdCompressedFile<W> {
 impl<W: Write> Drop for ZstdCompressedFile<W> {
     fn drop(&mut self) {
         if !self.compressor.finished {
-            let _ = self.finish();
+            let _ = self.finish_impl();
         }
     }
 }
@@ -345,6 +361,8 @@ impl std::error::Error for RawCompressorError {}
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Seek};
+
     use rand::prelude::StdRng;
     use rand::{RngCore, SeedableRng};
 
@@ -514,5 +532,59 @@ mod tests {
         }
 
         assert_eq!(data, decompressed);
+    }
+
+    #[test]
+    fn buffered_compress_decompress() {
+        const BUFFER_LEN: usize = 64 << 20; // 64 MB
+
+        // Prepare
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut original = vec![0; 4 << 20];
+        rng.fill_bytes(&mut original);
+
+        // Try each kind of prealloc: small, exact, huge
+        for prealloc in [1024, 4194409, BUFFER_LEN] {
+            // Compress
+            let mut compressed = Vec::new();
+            {
+                let file = tempfile::tempfile().unwrap();
+                file.set_len(prealloc as _).unwrap();
+                let file = ZstdCompressedFile::new(file, 9, BUFFER_LEN).unwrap();
+
+                let mut buffer = std::io::BufWriter::with_capacity(BUFFER_LEN, file);
+                for chunk in original.chunks(2048) {
+                    buffer.write_all(chunk).unwrap();
+                }
+
+                let file = buffer.into_inner().map_err(|e| e.into_error()).unwrap();
+                let mut file = file.finish().unwrap();
+                file.flush().unwrap();
+
+                let file_size = file.stream_position().unwrap();
+                file.set_len(file_size).unwrap(); // <- Truncate after prealloc
+
+                file.seek(std::io::SeekFrom::Start(0)).unwrap();
+
+                #[allow(clippy::verbose_file_reads)]
+                file.read_to_end(&mut compressed).unwrap();
+            }
+
+            // Decompress
+            {
+                let mut stream = ZstdDecompressStream::new(1 << 20).unwrap();
+
+                let mut decompressed = Vec::new();
+                let mut decompressed_chunk = Vec::new();
+                for chunk in compressed.chunks(1 << 20) {
+                    decompressed_chunk.clear();
+                    stream.write(chunk, &mut decompressed_chunk).unwrap();
+
+                    decompressed.extend_from_slice(&decompressed_chunk);
+                }
+
+                assert_eq!(decompressed, original);
+            }
+        }
     }
 }

@@ -69,9 +69,7 @@ impl<'a> ShardStateWriter<'a> {
         std::io::copy(&mut boc_file, &mut compressed_file)?;
 
         // Terminate the compressor and flush the file
-        compressed_file.finish()?;
-        compressed_file.flush()?;
-        drop(compressed_file);
+        compressed_file.finish()?.flush()?;
 
         // Atomically rename the file
         self.states_dir
@@ -181,9 +179,13 @@ impl<'a> ShardStateWriter<'a> {
         }
 
         match buffer.into_inner() {
-            Ok(mut file) => {
-                file.finish()?;
+            Ok(file) => {
+                let mut file = file.finish()?;
                 file.flush()?;
+
+                // Truncate file to the resulting file size
+                let file_size = file.stream_position()?;
+                file.set_len(file_size)?;
             }
             Err(e) => return Err(e.into_error()).context("failed to flush the compressed buffer"),
         }

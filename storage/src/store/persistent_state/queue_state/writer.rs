@@ -155,9 +155,8 @@ impl<'a> QueueStateWriter<'a> {
         drop(bump);
 
         match buffer.into_inner() {
-            Ok(mut file) => {
-                file.finish()?;
-                file.flush()?;
+            Ok(file) => {
+                file.finish()?.flush()?;
             }
             Err(e) => return Err(e.into_error()).context("failed to flush the compressed buffer"),
         }
