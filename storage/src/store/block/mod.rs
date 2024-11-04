@@ -168,60 +168,78 @@ impl BlockStorage {
 
         tracing::info!("started preloading archive ids");
 
-        let mut iter = self.db.archives.raw_iterator();
-        iter.seek_to_first();
+        let db = self.db.clone();
 
-        let mut archive_ids = BTreeSet::new();
-        let mut archives_to_commit = Vec::new();
-        loop {
-            let Some(key) = iter.key() else {
-                if let Err(e) = iter.status() {
-                    tracing::error!("failed to iterate through archives: {e:?}");
-                }
-                break;
-            };
+        let (archive_ids, archives_to_commit) = tokio::task::spawn_blocking(move || {
+            let mut iter = db.archives.raw_iterator();
+            iter.seek_to_first();
 
-            let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
-            let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
+            let mut archive_ids = BTreeSet::new();
+            let mut archives_to_commit = Vec::new();
+            loop {
+                let Some(key) = iter.key() else {
+                    if let Err(e) = iter.status() {
+                        tracing::error!("failed to iterate through archives: {e:?}");
+                    }
+                    break;
+                };
 
-            const _: () = const {
-                // Rely on the specific order of these constants
-                assert!(
-                    ARCHIVE_STARTED_MAGIC < ARCHIVE_TO_COMMIT_MAGIC
-                        && ARCHIVE_TO_COMMIT_MAGIC < ARCHIVE_SIZE_MAGIC
-                );
-            };
+                let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
+                let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
 
-            // Chunk keys are sorted by offset.
-            match chunk_index {
-                // "Started" magic comes first, and indicates that the archive exists.
-                ARCHIVE_STARTED_MAGIC => {
-                    archive_ids.insert(archive_id);
-                }
-                // "To commit" magic comes next, commit should have been started.
-                ARCHIVE_TO_COMMIT_MAGIC => {
-                    anyhow::ensure!(
-                        archive_ids.contains(&archive_id),
-                        "invalid archive TO_COMMIT entry"
+                const _: () = const {
+                    // Rely on the specific order of these constants
+                    assert!(
+                        ARCHIVE_STARTED_MAGIC < ARCHIVE_TO_COMMIT_MAGIC
+                            && ARCHIVE_TO_COMMIT_MAGIC < ARCHIVE_SIZE_MAGIC
                     );
-                    archives_to_commit.push(archive_id);
-                }
-                // "Size" magic comes last, and indicates that the archive is fully committed.
-                ARCHIVE_SIZE_MAGIC => {
-                    // Last archive is already committed
-                    let last = archives_to_commit.pop();
-                    anyhow::ensure!(last == Some(archive_id), "invalid archive SIZE entry");
+                };
 
-                    // Require only contiguous uncommited archives list
-                    anyhow::ensure!(archives_to_commit.is_empty(), "skipped archive commit");
+                let mut skip = None;
+
+                // Chunk keys are sorted by offset.
+                match chunk_index {
+                    // "Started" magic comes first, and indicates that the archive exists.
+                    ARCHIVE_STARTED_MAGIC => {
+                        archive_ids.insert(archive_id);
+                    }
+                    // "To commit" magic comes next, commit should have been started.
+                    ARCHIVE_TO_COMMIT_MAGIC => {
+                        anyhow::ensure!(
+                            archive_ids.contains(&archive_id),
+                            "invalid archive TO_COMMIT entry"
+                        );
+                        archives_to_commit.push(archive_id);
+                    }
+                    // "Size" magic comes last, and indicates that the archive is fully committed.
+                    ARCHIVE_SIZE_MAGIC => {
+                        // Last archive is already committed
+                        let last = archives_to_commit.pop();
+                        anyhow::ensure!(last == Some(archive_id), "invalid archive SIZE entry");
+
+                        // Require only contiguous uncommited archives list
+                        anyhow::ensure!(archives_to_commit.is_empty(), "skipped archive commit");
+                    }
+                    _ => {
+                        // Skip all chunks until the magic
+                        if chunk_index < ARCHIVE_STARTED_MAGIC {
+                            let mut next_key = [0; tables::Archives::KEY_LEN];
+                            next_key[..4].copy_from_slice(&archive_id.to_be_bytes());
+                            next_key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
+                            skip = Some(next_key);
+                        }
+                    }
                 }
-                _ => {}
+
+                match skip {
+                    None => iter.next(),
+                    Some(key) => iter.seek(key),
+                }
             }
 
-            iter.next();
-        }
-
-        drop(iter);
+            Ok::<_, anyhow::Error>((archive_ids, archives_to_commit))
+        })
+        .await??;
 
         self.archive_ids.write().extend(archive_ids);
 
