@@ -60,12 +60,12 @@ impl Committer {
         let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
 
         // Note that it's always engine round in production, but may differ in local tests
-        let engine_round = self.dag.top().round();
+        let current_round = self.dag.top().round().prev();
 
-        self.commit_up_to(engine_round)
+        self.commit_up_to(current_round)
     }
 
-    fn commit_up_to(&mut self, engine_round: Round) -> Vec<AnchorData> {
+    fn commit_up_to(&mut self, current_round: Round) -> Vec<AnchorData> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -78,11 +78,11 @@ impl Committer {
         // * * otherwise: breaks the chain, so that only its prefix can be committed
         // * in anchor history: cancels current commit and the latter anchor chain
 
-        self.enqueue_new_anchors(engine_round);
+        self.enqueue_new_anchors(current_round);
 
         let _span = if let Some(top) = self.anchor_chain.top() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
-                .set((engine_round.0 as f64) - (top.proof.round().0 as f64));
+                .set((current_round.0 as f64) - (top.proof.round().0 as f64));
 
             tracing::error_span!(
                 "last anchor proof",
@@ -98,7 +98,7 @@ impl Committer {
         self.dequeue_anchors()
     }
 
-    fn enqueue_new_anchors(&mut self, engine_round: Round) {
+    fn enqueue_new_anchors(&mut self, current_round: Round) {
         // some state may have restored from db or resolved from download
 
         // take all ready triggers, skipping not ready ones
@@ -106,12 +106,12 @@ impl Committer {
             self.anchor_chain
                 .top_proof_round()
                 .unwrap_or(self.dag.bottom_round()),
-            engine_round,
+            current_round,
         );
 
         if let Some(last_trigger) = triggers.back() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
-                .set((engine_round.0 as f64) - (last_trigger.round().0 as f64));
+                .set((current_round.0 as f64) - (last_trigger.round().0 as f64));
         }
 
         // traverse from oldest to newest;

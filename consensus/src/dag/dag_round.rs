@@ -27,14 +27,11 @@ pub struct WeakDagRound(Weak<DagRoundInner>);
 pub struct DagRound(Arc<DagRoundInner>);
 
 struct DagRoundInner {
-    round: Round,          // immutable
-    peer_count: PeerCount, // immutable
-    /// if `key_pair` is not empty, then the node may produce block at this round,
-    /// and also sign broadcasts during previous round
-    key_pair: Option<Arc<KeyPair>>, // immutable
-    anchor_stage: Option<AnchorStage>, // immutable
+    round: Round,
+    peer_count: PeerCount,
+    anchor_stage: Option<AnchorStage>,
     locations: FastDashMap<PeerId, DagLocation>,
-    prev: WeakDagRound, // immutable ?
+    prev: WeakDagRound,
 }
 
 impl WeakDagRound {
@@ -53,11 +50,7 @@ impl DagRound {
     }
 
     fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
-        let (peers_len, key_pair) = {
-            let guard = peer_schedule.atomic();
-            let peers_len = guard.peers_for(round).len();
-            (peers_len, guard.local_keys(round))
-        };
+        let peers_len = peer_schedule.atomic().peers_for(round).len();
         let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
         let peer_count = match round.cmp(&Genesis::round()) {
             cmp::Ordering::Less => panic!(
@@ -72,7 +65,6 @@ impl DagRound {
         Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            key_pair,
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
             prev,
@@ -85,10 +77,6 @@ impl DagRound {
 
     pub fn peer_count(&self) -> PeerCount {
         self.0.peer_count
-    }
-
-    pub fn key_pair(&self) -> Option<&'_ KeyPair> {
-        self.0.key_pair.as_deref()
     }
 
     pub fn anchor_stage(&self) -> Option<&'_ AnchorStage> {

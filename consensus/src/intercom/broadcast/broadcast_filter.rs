@@ -5,7 +5,7 @@ use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use super::dto::ConsensusEvent;
-use crate::dag::{DagRound, Verifier, VerifyError};
+use crate::dag::{DagHead, DagRound, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::{Consensus, RoundWatch};
@@ -38,13 +38,13 @@ impl BroadcastFilter {
         &self,
         sender: &PeerId,
         point: &Point,
-        top_dag_round: &DagRound,
+        head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
         self.inner
-            .add(sender, point, top_dag_round, downloader, store, effects);
+            .add(sender, point, head, downloader, store, effects);
     }
 
     pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
@@ -56,13 +56,13 @@ impl BroadcastFilter {
 
     pub fn advance_round(
         &self,
-        top_dag_round: &DagRound,
+        head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         round_effects: &Effects<EngineContext>,
     ) {
         self.inner
-            .advance_round(top_dag_round, downloader, store, round_effects);
+            .advance_round(head, downloader, store, round_effects);
     }
 }
 
@@ -91,7 +91,7 @@ impl BroadcastFilterInner {
         &self,
         sender: &PeerId,
         point: &Point,
-        top_dag_round: &DagRound,
+        head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -108,6 +108,8 @@ impl BroadcastFilterInner {
             Some(Verifier::verify(point))
         };
 
+        let top_round = head.next().round();
+
         let (is_threshold_reached, duplicates) = if let Some(verified) = &verified_result {
             enum ExtendMapErr {
                 RoundIsInDag,
@@ -122,7 +124,7 @@ impl BroadcastFilterInner {
                     // if `point round` > `top dag round`: either consensus moved forward without us,
                     // or we shouldn't accept the point into DAG yet, or it's a spam
 
-                    if round <= top_dag_round.round() {
+                    if round <= top_round {
                         // if entry was removed - do not create one, insert right into DAG
                         Err(ExtendMapErr::RoundIsInDag)
                     } else if verified.is_ok() {
@@ -139,7 +141,7 @@ impl BroadcastFilterInner {
             match try_by_round_entry {
                 Err(ExtendMapErr::CannotExtend) => (false, None),
                 // grab a lock
-                Ok(mut entry) if verified.is_ok() && round >= top_dag_round.round() => {
+                Ok(mut entry) if verified.is_ok() && round >= top_round => {
                     let (peer_count, same_round) = entry.value_mut();
                     // ban the author, if we detect equivocation now; we won't be able to prove it
                     //   if some signatures are invalid (it's another reason for a local ban)
@@ -159,31 +161,25 @@ impl BroadcastFilterInner {
                 // (i.e. round is advanced), so had to piggyback on map's locking
                 Err(ExtendMapErr::RoundIsInDag) | Ok(_) => {
                     assert!(
-                        verified.is_err() || round <= top_dag_round.round(),
+                        verified.is_err() || round <= top_round,
                         "branch clause is broken, expected {round:?} <= top dag {:?}, \
                          also verified {verified:?}",
-                        top_dag_round.round()
+                        top_round
                     );
                     match verified {
                         Ok(()) => {
-                            if let Some(point_round) = top_dag_round.scan(point.round()) {
-                                self.send_validating(
-                                    &point_round,
-                                    point,
-                                    downloader,
-                                    store,
-                                    effects,
-                                );
+                            if let Some(dag_round) = head.next().scan(point.round()) {
+                                self.send_validating(&dag_round, point, downloader, store, effects);
                             }
                         }
                         Err(VerifyError::IllFormed) => {
-                            if let Some(point_round) = top_dag_round.scan(point.round()) {
-                                point_round.add_ill_formed_broadcast_exact(point, store, effects);
+                            if let Some(dag_round) = head.next().scan(point.round()) {
+                                dag_round.add_ill_formed_broadcast_exact(point, store, effects);
                             }
                         }
                         Err(VerifyError::BadSig) => {
-                            if let Some(point_round) = top_dag_round.scan(point.round()) {
-                                point_round.set_bad_sig_in_broadcast_exact(&point.data().author);
+                            if let Some(dag_round) = head.next().scan(point.round()) {
+                                dag_round.set_bad_sig_in_broadcast_exact(&point.data().author);
                             }
                         }
                     }
@@ -194,14 +190,14 @@ impl BroadcastFilterInner {
             (false, None) // should ban sender
         };
 
-        if is_threshold_reached && round >= top_dag_round.round() {
+        if is_threshold_reached && round >= top_round {
             // notify collector after max consensus round is updated
             // so engine will be consistent after collector finishes and exits
             self.consensus_round.set_max(round);
             // do not apply peer schedule changes as DagBack may be not ready validating smth old
-            if round == top_dag_round.round() {
+            if round == top_round {
                 // do not wait for Collector to exit and advance engine round
-                self.advance_round(top_dag_round, downloader, store, effects);
+                self.advance_round(head, downloader, store, effects);
             } else {
                 self.output
                     .send(ConsensusEvent::Forward(round))
@@ -236,25 +232,22 @@ impl BroadcastFilterInner {
     /// drop everything up to the new round (inclusive)
     fn advance_round(
         &self,
-        top_dag_round: &DagRound,
+        head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
-        // concurrent callers may break historical order of messages in channel
-        // until new_round is channeled, and Collector can cope with it;
-        // but engine_round must be set to the greatest value under lock
-        let top_round = top_dag_round.round();
-        let engine_round = top_round.prev(); // cannot add one more `.prev()`
-        let limit = (top_round.0).saturating_add(CachedConfig::cache_future_broadcasts_rounds());
+        let future_limit =
+            (head.next().round().0).saturating_add(CachedConfig::cache_future_broadcasts_rounds());
 
         // Drain points in historical order that cannot be neither included nor signed,
         // thus out of Collector's interest and needed for validation and commit only.
         // We are unlikely to receive such old broadcasts.
 
         let mut outdated = Vec::new();
+        let prev_round = head.prev().round();
         self.by_round.retain(|round, (_, map_by_peer)| {
-            let is_to_take = round.next() < engine_round;
+            let is_to_take = *round < prev_round;
             if is_to_take {
                 let points = map_by_peer
                     .values()
@@ -263,7 +256,7 @@ impl BroadcastFilterInner {
                     .collect::<Vec<_>>();
                 outdated.push((*round, points));
             }
-            !is_to_take && round.0 <= limit
+            !is_to_take && round.0 <= future_limit
         });
         outdated.sort_unstable_by_key(|(round, _)| *round);
 
@@ -271,7 +264,7 @@ impl BroadcastFilterInner {
         let mut not_found = Vec::new();
         let mut missed = Vec::new();
         for (round, points) in outdated {
-            let Some(point_round) = top_dag_round.scan(round) else {
+            let Some(point_round) = head.prev().scan(round) else {
                 missed.push(round.0);
                 continue;
             };
@@ -285,7 +278,8 @@ impl BroadcastFilterInner {
         // broadcasts of points at these rounds are very likely,
         // we are piggybacking dashmap's lock to channel points right after entry removal
 
-        for round in [engine_round.prev(), engine_round, top_round] {
+        for dag_round in [head.prev(), head.current(), head.next()] {
+            let round = dag_round.round();
             self.output
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
@@ -293,24 +287,21 @@ impl BroadcastFilterInner {
                 not_found.push(round.0);
                 continue;
             };
-            if let Some(point_round) = top_dag_round.scan(round) {
-                let (_, map_by_peer) = entry.get();
-                let points = map_by_peer
-                    .values()
-                    .flat_map(|map_by_digest| map_by_digest.values());
-                for (point, _) in points {
-                    self.send_validating(&point_round, point, downloader, store, effects);
-                }
-                released.push(round.0);
-            } else {
-                missed.push(round.0);
-            };
+            let (_, map_by_peer) = entry.get();
+            let points = map_by_peer
+                .values()
+                .flat_map(|map_by_digest| map_by_digest.values());
+            for (point, _) in points {
+                self.send_validating(dag_round, point, downloader, store, effects);
+            }
+            released.push(round.0);
+
             entry.remove(); // release lock
         }
 
         tracing::debug!(
             parent: effects.span(),
-            to = top_round.0,
+            to = head.next().round().0,
             released = debug(released),
             missed = debug(missed),
             not_found = debug(not_found),

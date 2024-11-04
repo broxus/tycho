@@ -1,4 +1,4 @@
-use crate::dag::{Committer, DagRound};
+use crate::dag::{Committer, DagHead, DagRound};
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{CachedConfig, Genesis};
 use crate::intercom::PeerSchedule;
@@ -67,6 +67,10 @@ impl DagFront {
             "committer botom after init does not match"
         );
         committer
+    }
+
+    pub fn head(&self, peer_schedule: &PeerSchedule) -> DagHead {
+        DagHead::new(peer_schedule, self.top(), self.last_back_bottom)
     }
 
     /// the next after current engine round

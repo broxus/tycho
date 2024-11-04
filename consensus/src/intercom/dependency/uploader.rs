@@ -2,7 +2,7 @@ use futures_util::FutureExt;
 use tycho_network::PeerId;
 use weedb::rocksdb::DBPinnableSlice;
 
-use crate::dag::DagRound;
+use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::intercom::dto::PointByIdResponse;
@@ -20,18 +20,22 @@ impl Uploader {
     pub fn find<'a>(
         peer_id: &PeerId,
         point_id: &PointId,
-        top_dag_round: &DagRound,
+        head: &DagHead,
         store: &'a MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> PointByIdResponse<DBPinnableSlice<'a>> {
-        if point_id.round > top_dag_round.round() {
-            // TODO add logs
-            return PointByIdResponse::TryLater;
+        // TODO add logs
+        let status = if point_id.round > head.next().round() {
+            Some(SearchStatus::TryLater)
+        } else if point_id.round >= head.last_back_bottom() {
+            // may be in mem, but not guaranteed
+            head.next()
+                .scan(point_id.round)
+                .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, effects))
+                .or(Self::from_store(peer_id, point_id, store, effects))
+        } else {
+            Self::from_store(peer_id, point_id, store, effects)
         };
-        let status = top_dag_round
-            .scan(point_id.round)
-            .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, effects))
-            .or(Self::from_store(peer_id, point_id, store, effects));
         match status {
             Some(SearchStatus::None) | None => PointByIdResponse::DefinedNone,
             // Fixme return serialized as bytes from DB!

@@ -185,7 +185,7 @@ impl Engine {
         // even if have some history in DB above broadcast rounds, we replay the last broadcasts
         let top_round = match &broadcast_points {
             Some((last_broadcast, _, _)) => last_broadcast.round(),
-            None => Genesis::round(), // will reproduce the first point after genesis,
+            None => Genesis::round().next(), // will reproduce the first point after genesis,
         };
         self.consensus_round.set_max(top_round);
 
@@ -239,43 +239,37 @@ impl Engine {
             // commit may take longer than a round if it ends with a jump to catch up with consensus
             let mut ready_committer = take_committer(&mut self.committer_run);
 
-            let (current_dag_round, round_effects) = {
-                // do not repeat the `get()` - it can give non-reproducible result
-                let consensus_round = self.consensus_round.get();
-                let top_dag_round = self.dag.top().clone();
+            // do not repeat the `get()` - it can give non-reproducible result
+            let current_round = self.consensus_round.get();
+
+            let round_effects = {
+                let top_round = self.dag.top().round();
                 assert!(
-                    consensus_round >= top_dag_round.round(),
+                    current_round >= top_round,
                     "consensus round {} cannot be less than top dag round {}",
-                    consensus_round.0,
-                    top_dag_round.round().0,
+                    current_round.0,
+                    top_round.0,
                 );
                 metrics::gauge!("tycho_mempool_engine_rounds_skipped")
-                    .increment((consensus_round.0 as f64) - (top_dag_round.round().0 as f64));
+                    .increment((current_round.0 as f64) - (top_round.0 as f64));
 
-                if consensus_round == top_dag_round.round() {
-                    let round_effects =
-                        Effects::<EngineContext>::new(&self.effects, consensus_round);
-                    (top_dag_round, round_effects)
+                metrics::gauge!("tycho_mempool_engine_current_round").set(current_round.0);
+
+                if current_round == top_round {
+                    Effects::<EngineContext>::new(&self.effects, current_round)
                 } else {
-                    self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
-                    let round_effects =
-                        Effects::<EngineContext>::new(&self.effects, consensus_round);
-                    *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
-                        consensus_round,
-                        ready_committer.as_mut(),
-                        &self.round_task.state.peer_schedule,
-                    ));
-                    (self.dag.top().clone(), round_effects)
+                    self.effects = Effects::<ChainedRoundsContext>::new(current_round);
+                    Effects::<EngineContext>::new(&self.effects, current_round)
                 }
             };
-            metrics::gauge!("tycho_mempool_engine_current_round").set(current_dag_round.round().0);
 
             *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
-                current_dag_round.round().next(),
+                current_round.next(),
                 ready_committer.as_mut(),
                 &self.round_task.state.peer_schedule,
             ));
-            let next_dag_round = self.dag.top().clone();
+
+            let head = self.dag.head(&self.round_task.state.peer_schedule);
 
             let (collector_signal_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry);
 
@@ -284,11 +278,9 @@ impl Engine {
                     future::ready(Ok(Some(point))).boxed(),
                     future::ready(state).boxed(),
                 ),
-                None => self.round_task.own_point_task(
-                    &collector_signal_rx,
-                    &current_dag_round,
-                    &round_effects,
-                ),
+                None => self
+                    .round_task
+                    .own_point_task(&collector_signal_rx, &head, &round_effects),
             };
 
             let round_task_run = self
@@ -298,7 +290,7 @@ impl Engine {
                     own_point_state,
                     collector_signal_tx,
                     collector_signal_rx,
-                    &next_dag_round,
+                    &head,
                     &round_effects,
                 )
                 .until_ready();

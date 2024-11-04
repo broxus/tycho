@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
-use crate::dag::{DagRound, InclusionState};
+use crate::dag::{DagHead, InclusionState};
 use crate::dyn_event;
 use crate::effects::{AltFormat, CollectorContext, Effects};
 use crate::engine::{CachedConfig, Genesis};
@@ -57,22 +57,17 @@ impl Collector {
     pub async fn run(
         &mut self,
         effects: Effects<CollectorContext>,
-        next_dag_round: DagRound, // r+1
+        head: DagHead,
         own_point_state: BoxFuture<'static, InclusionState>,
         collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Round {
         let span_guard = effects.span().clone().entered();
 
-        let current_dag_round = next_dag_round
-            .prev()
-            .upgrade()
-            .expect("current DAG round must be linked into DAG chain");
-
-        let includes = match current_dag_round.round().cmp(&self.next_round) {
+        let includes = match head.current().round().cmp(&self.next_round) {
             cmp::Ordering::Less => panic!(
                 "attempt to run at {:?}, expected at least {:?}",
-                current_dag_round.round(),
+                head.current().round(),
                 self.next_round
             ),
             cmp::Ordering::Equal => {
@@ -87,12 +82,11 @@ impl Collector {
         };
         includes.push(own_point_state);
 
-        self.next_round = next_dag_round.round();
-        let includes_ready = FastHashSet::with_capacity(current_dag_round.peer_count().full());
+        self.next_round = head.next().round();
+        let includes_ready = FastHashSet::with_capacity(head.current().peer_count().full());
         let mut task = CollectorTask {
             effects,
-            current_round: current_dag_round.clone(),
-            next_dag_round,
+            head,
             includes,
             includes_ready,
             is_includes_ready: false,
@@ -127,8 +121,7 @@ impl Collector {
 struct CollectorTask {
     // for node running @ r+0:
     effects: Effects<CollectorContext>,
-    current_round: DagRound,  // = r+0
-    next_dag_round: DagRound, /* = r+1 is always in DAG; contains the keypair to produce point @ r+1 */
+    head: DagHead,
 
     // @ r+0, will become includes in point @ r+1
     // needed in order to not include same point twice - as an include and as a witness;
@@ -223,7 +216,7 @@ impl CollectorTask {
             result = result,
             bcaster_signal = debug(signal),
             includes = self.includes_ready.len(),
-            majority = self.current_round.peer_count().majority(),
+            majority = self.head.current().peer_count().majority(),
             "should fail?",
         );
         result
@@ -232,11 +225,11 @@ impl CollectorTask {
     fn is_ready(&mut self) -> bool {
         // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
         self.is_includes_ready |=
-            self.includes_ready.len() >= self.current_round.peer_count().majority();
+            self.includes_ready.len() >= self.head.current().peer_count().majority();
         if self.is_includes_ready {
             self.max_ready_includes_round = self
                 .max_ready_includes_round
-                .max(self.current_round.round());
+                .max(self.head.current().round());
         }
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         if result {
@@ -246,7 +239,7 @@ impl CollectorTask {
             parent: self.effects.span(),
             result = result,
             includes = self.includes_ready.len(),
-            majority = self.current_round.peer_count().majority(),
+            majority = self.head.current().peer_count().majority(),
             "ready?",
         );
         result
@@ -259,7 +252,7 @@ impl CollectorTask {
         self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;
         self.max_ready_includes_round = self.max_ready_includes_round.max(point_round.prev());
-        let result = match point_round.cmp(&self.next_dag_round.round()) {
+        let result = match point_round.cmp(&self.head.next().round()) {
             cmp::Ordering::Less => {
                 let _guard = self.effects.span().enter();
                 panic!("Coding error: next includes futures contain current or previous round")
@@ -295,7 +288,7 @@ impl CollectorTask {
         match consensus_event {
             ConsensusEvent::Forward(consensus_round) => {
                 #[allow(clippy::match_same_arms)] // for comments
-                let should_fail = match consensus_round.cmp(&self.next_dag_round.round()) {
+                let should_fail = match consensus_round.cmp(&self.head.next().round()) {
                     // we're too late, consensus moved forward
                     // FIXME (bug!) engine can jump and try to produce own point at received round,
                     //  expecting that some point (from this received round) is locally validated
@@ -328,16 +321,16 @@ impl CollectorTask {
                 }
             }
             ConsensusEvent::Validating { point_id, task } => {
-                if point_id.round > self.next_dag_round.round() {
+                if point_id.round > self.head.next().round() {
                     let _guard = self.effects.span().enter();
                     panic!(
                         "Coding error: broadcast filter advanced \
                          while collector left behind; Validating {:?}",
                         point_id.alt()
                     )
-                } else if point_id.round == self.next_dag_round.round() {
+                } else if point_id.round == self.head.next().round() {
                     self.next_includes.push(task);
-                } else if point_id.round == self.current_round.round() {
+                } else if point_id.round == self.head.current().round() {
                     self.includes.push(task);
                 } // else maybe other's dependency, but too old to be included
                 tracing::debug!(
@@ -361,13 +354,16 @@ impl CollectorTask {
             panic!("Coding error: validated inclusion state must be non empty")
         };
         let signed = match state.signable() {
-            Some(signable) => {
-                signable.sign(self.current_round.round(), self.next_dag_round.key_pair())
+            Some(signable) if dag_point.round() == self.head.current().round() => {
+                signable.sign(self.head.current().round(), self.head.includes_keys())
             }
-            None => false,
+            Some(signable) if dag_point.round() == self.head.prev().round() => {
+                signable.sign(self.head.current().round(), self.head.witness_keys())
+            }
+            _ => false,
         };
         let point_signed = state.signed().map_or(false, |result| result.is_ok());
-        let point_included = point_signed && dag_point.round() == self.current_round.round();
+        let point_included = point_signed && dag_point.round() == self.head.current().round();
         if point_included {
             self.includes_ready.insert(dag_point.author());
         }
