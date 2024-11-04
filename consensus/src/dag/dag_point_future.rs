@@ -166,10 +166,12 @@ impl DagPointFuture {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
     pub fn new_load<T>(
         point_dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
+        first_depender: Option<&PeerId>,
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
@@ -193,6 +195,10 @@ impl DagPointFuture {
         let effects = effects.clone();
 
         let (dependers_tx, dependers_rx) = mpsc::unbounded_channel();
+        _ = dependers_tx.send(*author);
+        if let Some(depender) = first_depender {
+            _ = dependers_tx.send(*depender);
+        }
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let (certified_tx, certified_rx) = oneshot::channel();
         let once_certified_tx = Arc::new(OnceTake::new(certified_tx));

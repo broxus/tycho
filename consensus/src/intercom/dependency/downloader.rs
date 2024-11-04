@@ -282,6 +282,10 @@ impl<T: DownloadType> DownloadTask<T> {
         self.interval
             .set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+        while let Ok(peer_id) = dependers_rx.try_recv() {
+            self.add_depender(&peer_id);
+        }
+
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
