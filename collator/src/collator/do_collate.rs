@@ -187,10 +187,27 @@ impl CollatorStdImpl {
             collation_config.work_units_params.execute.clone(),
         );
 
+        // if this is a masterchain, we must take top shard blocks end lt
+        let shards_description_end_lt: Vec<_> = if self.shard_id.is_masterchain() {
+            collation_data
+                .shards()?
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        } else {
+            working_state
+                .mc_data
+                .shards
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        };
+
         // create exec_manager
         let mut exec_manager = ExecutionManager::new(
             self.shard_id,
             collation_config.msgs_exec_params.buffer_limit as _,
+            shards_description_end_lt,
         );
 
         // create iterator adapter
@@ -198,6 +215,8 @@ impl CollatorStdImpl {
             self.shard_id,
             self.mq_adapter.clone(),
             msgs_buffer.current_iterator_positions.take().unwrap(),
+            working_state.mc_data.gen_lt,
+            working_state.prev_shard_data_ref().gen_lt(),
         );
 
         // we need to init iterator anyway because we need it to add new messages to queue
@@ -233,7 +252,6 @@ impl CollatorStdImpl {
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         &QueueKey::MIN,
-                        &working_state,
                         GetNextMessageGroupMode::Refill,
                     )
                     .await?;
@@ -304,7 +322,6 @@ impl CollatorStdImpl {
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         &max_new_message_key_to_current_shard,
-                        &working_state,
                         GetNextMessageGroupMode::Continue,
                     )
                     .await?;
