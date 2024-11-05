@@ -7,7 +7,7 @@ use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, CurrencyCollection, ExternalsProcessedUpto,
-    ShardDescription, ShardHashes, ShardIdent, ShardStateUnsplit, ValidatorInfo,
+    ShardDescription, ShardIdent, ShardStateUnsplit, ValidatorInfo,
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
@@ -181,7 +181,7 @@ fn gen_stub_working_state(
         copyleft_rewards: Dict::default(),
         proof_chain: None,
     };
-    let shards_info = [(ShardIdent::new_full(0), shard_descr)];
+    let shards_info = [(ShardIdent::new_full(0), (&shard_descr).into())];
 
     let working_state = WorkingState {
         next_block_id_short,
@@ -199,7 +199,7 @@ fn gen_stub_working_state(
             libraries: Dict::default(),
             total_validator_fees: CurrencyCollection::default(),
             global_balance: CurrencyCollection::default(),
-            shards: ShardHashes::from_shards(shards_info.iter().map(|(k, v)| (k, v))).unwrap(),
+            shards: shards_info.into_iter().collect(),
             config: BlockchainConfig::new_empty(HashBytes([0x55; 32])),
             validator_info: ValidatorInfo {
                 validator_list_hash_short: 0,
@@ -244,7 +244,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
 
     let mc_shard_id = ShardIdent::new_full(-1);
     let shard_id = ShardIdent::new_full(0);
-    let mut exec_manager = ExecutionManager::new(shard_id, 20);
 
     let mut anchors_cache = AnchorsCache::default();
     fill_test_anchors_cache(&mut anchors_cache, shard_id);
@@ -298,7 +297,7 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         mc_block_info,
         top_shard_block_info,
     );
-    let (working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+    let (_working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
 
     let mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>> =
         Arc::new(MessageQueueAdapterTestImpl::default());
@@ -306,6 +305,8 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         shard_id,
         mq_adapter,
         msgs_buffer.current_iterator_positions.take().unwrap(),
+        0,
+        0,
     );
 
     // ===================================
@@ -334,14 +335,17 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     assert!(!msgs_buffer.has_pending_messages());
     assert!(prev_processed_offset > 0);
 
+    let mc_top_shards_end_lts = vec![];
     mq_iterator_adapter
         .try_init_next_range_iterator(
             &mut collation_data.processed_upto,
-            &working_state,
+            mc_top_shards_end_lts.iter().copied(),
             InitIteratorMode::OmitNextRange,
         )
         .await
         .unwrap();
+
+    let mut exec_manager = ExecutionManager::new(shard_id, 20, mc_top_shards_end_lts);
 
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
         let msg_group = exec_manager
@@ -351,7 +355,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 &mut collation_data,
                 &mut mq_iterator_adapter,
                 &QueueKey::MIN,
-                &working_state,
                 GetNextMessageGroupMode::Refill,
             )
             .await
@@ -405,7 +408,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 &mut collation_data,
                 &mut mq_iterator_adapter,
                 &QueueKey::MIN,
-                &working_state,
                 GetNextMessageGroupMode::Continue,
             )
             .await
