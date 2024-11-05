@@ -13,7 +13,6 @@ use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
 
 use super::execution_manager::MessagesExecutor;
 use super::types::WorkingState;
@@ -21,7 +20,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, McData, ShardDescriptionShort};
+use crate::types::{BlockCandidate, CollationSessionInfo, McData};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -407,7 +406,7 @@ impl CollatorStdImpl {
                 0
             };
 
-            let shards: FastHashMap<ShardIdent, ShardDescriptionShort> = extra
+            let shards = extra
                 .shards
                 .iter()
                 .filter_map(|r| r.ok())
