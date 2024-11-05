@@ -410,7 +410,7 @@ impl BlockCollationData {
 
 #[derive(Debug)]
 pub struct BlockLimitStats {
-    pub gas_used: u32,
+    pub gas_used: u64,
     pub lt_current: u64,
     pub lt_start: u64,
     pub cells_bits: u32,
@@ -455,10 +455,10 @@ impl BlockLimitStats {
             ..
         } = gas;
 
-        if self.gas_used >= *hard_limit {
+        if self.gas_used >= *hard_limit as u64 {
             return true;
         }
-        if self.gas_used >= *soft_limit && level == BlockLimitsLevel::Soft {
+        if self.gas_used >= *soft_limit as u64 && level == BlockLimitsLevel::Soft {
             return true;
         }
 

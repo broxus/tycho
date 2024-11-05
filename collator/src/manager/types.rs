@@ -207,10 +207,9 @@ impl BlockCacheEntry {
 
         let mut top_shard_blocks_info = vec![];
         if let Some(mc_data) = mc_data {
-            for item in mc_data.shards.iter() {
-                let (shard_id, shard_descr) = item?;
+            for (shard_id, shard_descr) in mc_data.shards.iter() {
                 top_shard_blocks_info.push((
-                    shard_descr.get_block_id(shard_id),
+                    shard_descr.get_block_id(*shard_id),
                     shard_descr.top_sc_block_updated,
                 ));
             }

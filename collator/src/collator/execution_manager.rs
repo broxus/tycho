@@ -20,7 +20,7 @@ use tycho_util::FastHashMap;
 use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
     AccountId, AnchorsCache, BlockCollationData, Dequeued, MessageGroup, MessagesBuffer,
-    ParsedMessage, ShardAccountStuff, WorkingState,
+    ParsedMessage, ShardAccountStuff,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
@@ -56,6 +56,9 @@ pub(super) struct ExecutionManager {
     read_ext_messages_total_elapsed: Duration,
     /// sum total time of adding messages to groups
     add_to_message_groups_total_elapsed: Duration,
+
+    /// end lt list from top shards of mc block
+    mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
 }
 
 pub(super) struct MessagesExecutor {
@@ -79,7 +82,11 @@ pub(super) enum GetNextMessageGroupMode {
 
 impl ExecutionManager {
     /// constructor
-    pub fn new(shard_id: ShardIdent, messages_buffer_limit: usize) -> Self {
+    pub fn new(
+        shard_id: ShardIdent,
+        messages_buffer_limit: usize,
+        mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
+    ) -> Self {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
             .set(messages_buffer_limit as f64);
 
@@ -93,6 +100,7 @@ impl ExecutionManager {
             read_ext_messages_total_elapsed: Duration::ZERO,
             add_to_message_groups_total_elapsed: Duration::ZERO,
             last_read_to_anchor_chain_time: None,
+            mc_top_shards_end_lts,
         }
     }
 
@@ -122,7 +130,6 @@ impl ExecutionManager {
     }
 
     #[tracing::instrument(skip_all)]
-    #[allow(clippy::too_many_arguments)]
     pub async fn get_next_message_group(
         &mut self,
         msgs_buffer: &mut MessagesBuffer,
@@ -130,7 +137,6 @@ impl ExecutionManager {
         collation_data: &mut BlockCollationData,
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
         max_new_message_key_to_current_shard: &QueueKey,
-        working_state: &WorkingState,
         mode: GetNextMessageGroupMode,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
@@ -253,7 +259,7 @@ impl ExecutionManager {
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(
                         &mut collation_data.processed_upto,
-                        working_state,
+                        self.mc_top_shards_end_lts.iter().copied(),
                         init_iterator_mode,
                     )
                     .await?;
