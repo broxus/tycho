@@ -18,7 +18,7 @@ use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
 use super::build_block::FinalizedBlock;
-use super::execution_manager::{MessagesExecutor, MessagesPreparer};
+use super::execution_manager::{MessagesExecutor, MessagesReader};
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
     AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, CollationResult, MessagesBuffer,
@@ -30,7 +30,7 @@ use crate::collator::execution_manager::GetNextMessageGroupMode;
 use crate::collator::mq_iterator_adapter::InitIteratorMode;
 use crate::collator::types::{
     BlockCollationData, ExecuteResult, ParsedMessage, PreparedInMsg, PreparedOutMsg,
-    QueueDiffResult, ShardDescriptionExt,
+    ShardDescriptionExt, UpdateQueueDiffResult,
 };
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::EnqueuedMessage;
@@ -73,17 +73,12 @@ impl CollatorStdImpl {
             wu_used_from_last_anchor,
             prev_shard_data,
             usage_tree,
-            has_unprocessed_messages: _, // TODO: Check why it is not used anywhere
-            msgs_buffer,
+            mut msgs_buffer,
+            ..
         } = *working_state;
 
-        let config = &mc_data.config;
         let prev_shard_data = prev_shard_data.unwrap();
-        let prev_shard_accounts = prev_shard_data.observable_accounts().clone();
-        let prev_data_total_balance = prev_shard_accounts.root_extra().balance.clone();
-        let mut msgs_buffer = msgs_buffer.unwrap();
         let usage_tree = usage_tree.unwrap();
-        let prev_mc_block_id = mc_data.block_id;
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -98,27 +93,23 @@ impl CollatorStdImpl {
         let mut collation_data = self.create_collation_data(
             next_block_id_short,
             next_chain_time,
-            config,
-            &prev_shard_data,
             &mc_data,
-            prev_data_total_balance,
+            &prev_shard_data,
             top_shard_blocks_info,
         )?;
 
         // prepare to read and execute internals and externals
         let PrepareCollation {
+            messages_reader,
             mut executor,
-            mut messages_preparer,
             mut mq_iterator_adapter,
         } = self
             .prepare_collation(
+                &collation_config,
                 &mut collation_data,
-                config,
+                &mut msgs_buffer,
                 &mc_data,
                 &prev_shard_data,
-                &mut msgs_buffer,
-                &collation_config,
-                prev_shard_accounts,
             )
             .await?;
 
@@ -137,7 +128,7 @@ impl CollatorStdImpl {
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
             self.create_ticktock_transactions(
-                config,
+                &mc_data.config,
                 TickTock::Tick,
                 &mut collation_data,
                 &mut executor,
@@ -147,7 +138,7 @@ impl CollatorStdImpl {
             .await?;
 
             self.create_special_transactions(
-                config,
+                &mc_data.config,
                 &mut collation_data,
                 &mut executor,
                 &mut max_new_message_key_to_current_shard,
@@ -173,15 +164,17 @@ impl CollatorStdImpl {
             read_ext_messages_elapsed,
             read_new_messages_elapsed,
             add_to_message_groups_elapsed,
+
+            last_read_to_anchor_chain_time,
         } = self
             .execute(
-                &mut messages_preparer,
-                &mut mq_iterator_adapter,
+                &collation_config,
                 &mut collation_data,
                 &mut msgs_buffer,
-                &mut max_new_message_key_to_current_shard,
+                messages_reader,
                 &mut executor,
-                &collation_config,
+                &mut max_new_message_key_to_current_shard,
+                &mut mq_iterator_adapter,
             )
             .await?;
 
@@ -198,7 +191,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
             self.create_ticktock_transactions(
-                config,
+                &mc_data.config,
                 TickTock::Tock,
                 &mut collation_data,
                 &mut executor,
@@ -215,7 +208,7 @@ impl CollatorStdImpl {
             calc_process_txs_wu(&collation_data, &collation_config.work_units_params.execute);
         let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
 
-        let QueueDiffResult {
+        let UpdateQueueDiffResult {
             queue_diff,
             update_queue_task,
             has_unprocessed_messages,
@@ -257,8 +250,10 @@ impl CollatorStdImpl {
             }
         })
         .await?;
+        let finalize_block_elapsed = finalize_block_timer.elapsed();
 
-        // resolve update queue task
+        // resolve update queue task before returning colaltion result
+        // to be sure that queue was updated before block commit and next block collation
         let apply_queue_diff_elapsed = update_queue_task.await?;
 
         let block_id = *finalized.block_candidate.block.id();
@@ -266,20 +261,17 @@ impl CollatorStdImpl {
 
         let CollationResult {
             handle_block_candidate_elapsed,
-            mut collation_data,
+            collation_data,
         } = self
-            .return_collation_result(
-                finalized,
-                mc_data,
+            .finalize_collation(
                 collation_config,
-                prev_mc_block_id,
-                has_unprocessed_messages,
+                mc_data,
                 msgs_buffer,
+                has_unprocessed_messages,
+                finalized,
                 tracker,
             )
             .await?;
-
-        let finalize_block_elapsed = finalize_block_timer.elapsed();
 
         let total_elapsed = total_collation_histogram.finish();
 
@@ -319,13 +311,11 @@ impl CollatorStdImpl {
         };
 
         // block time diff from min ext chain time
-        let last_read_to_anchor_chain_time = messages_preparer.get_last_read_to_anchor_chain_time();
         let diff_time =
             now_millis() as i64 - last_read_to_anchor_chain_time.unwrap_or(next_chain_time) as i64;
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 
-        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
         self.update_stats(&collation_data);
         tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
@@ -741,7 +731,7 @@ impl CollatorStdImpl {
         &self,
         config: &BlockchainConfig,
         old_global_balance: &CurrencyCollection,
-        prev_data_total_balance: CurrencyCollection,
+        prev_total_balance: &CurrencyCollection,
         total_validator_fees: &CurrencyCollection,
         collation_data: &mut BlockCollationData,
     ) -> Result<()> {
@@ -794,7 +784,7 @@ impl CollatorStdImpl {
             collation_data.value_flow.created.tokens >>=
                 collation_data.block_id_short.shard.prefix_len() as u8;
         }
-        collation_data.value_flow.from_prev_block = prev_data_total_balance;
+        collation_data.value_flow.from_prev_block = prev_total_balance.clone();
         Ok(())
     }
 
@@ -1218,15 +1208,12 @@ impl CollatorStdImpl {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_collation_data(
         &mut self,
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
-        config: &BlockchainConfig,
-        prev_shard_data: &PrevData,
         mc_data: &Arc<McData>,
-        prev_data_total_balance: CurrencyCollection,
+        prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
         let created_by = self
@@ -1247,7 +1234,7 @@ impl CollatorStdImpl {
         }
 
         // prepare block collation data
-        let block_limits = config.get_block_limits(is_masterchain)?;
+        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
             block_limits
@@ -1278,7 +1265,7 @@ impl CollatorStdImpl {
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 Self::import_new_shard_top_blocks_for_masterchain(
-                    config,
+                    &mc_data.config,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
                 )?;
@@ -1312,10 +1299,11 @@ impl CollatorStdImpl {
             });
 
         // compute created / minted / recovered / from_prev_block
+        let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
         self.update_value_flow(
-            config,
+            &mc_data.config,
             &mc_data.global_balance,
-            prev_data_total_balance,
+            prev_total_balance,
             &mc_data.total_validator_fees,
             &mut collation_data,
         )?;
@@ -1323,23 +1311,20 @@ impl CollatorStdImpl {
         Ok(collation_data)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn prepare_collation(
         &mut self,
+        collation_config: &CollationConfig,
         collation_data: &mut Box<BlockCollationData>,
-        config: &BlockchainConfig,
+        msgs_buffer: &mut MessagesBuffer,
         mc_data: &Arc<McData>,
         prev_shard_data: &PrevData,
-        msgs_buffer: &mut MessagesBuffer,
-        collation_config: &Arc<CollationConfig>,
-        prev_shard_accounts: ShardAccounts,
     ) -> Result<PrepareCollation> {
         // init executor
         let executor = MessagesExecutor::new(
             self.shard_id,
             collation_data.next_lt,
             Arc::new(PreloadedBlockchainConfig::with_config(
-                config.clone(),
+                mc_data.config.clone(),
                 mc_data.global_id,
             )?),
             Arc::new(ExecuteParams {
@@ -1353,7 +1338,7 @@ impl CollatorStdImpl {
                 block_version: self.config.supported_block_version,
                 ..ExecuteParams::default()
             }),
-            prev_shard_accounts,
+            prev_shard_data.observable_accounts().clone(),
             collation_config.work_units_params.execute.clone(),
         );
 
@@ -1394,8 +1379,8 @@ impl CollatorStdImpl {
             )
             .await?;
 
-        // create messages_preparer
-        let mut messages_preparer = MessagesPreparer::new(
+        // create messages reader
+        let mut messages_reader = MessagesReader::new(
             self.shard_id,
             collation_config.msgs_exec_params.buffer_limit as _,
             mc_top_shards_end_lts,
@@ -1410,7 +1395,7 @@ impl CollatorStdImpl {
             );
 
             while msgs_buffer.message_groups_offset() < prev_processed_offset {
-                let msg_group = messages_preparer
+                let msg_group = messages_reader
                     .get_next_message_group(
                         msgs_buffer,
                         &mut self.anchors_cache,
@@ -1429,12 +1414,12 @@ impl CollatorStdImpl {
 
             // next time we should read next message group like we did not make refill before
             // so we need to reset flags that control from where to read messages
-            messages_preparer.reset_read_flags();
+            messages_reader.reset_read_flags();
         }
 
         Ok(PrepareCollation {
+            messages_reader,
             executor,
-            messages_preparer,
             mq_iterator_adapter,
         })
     }
@@ -1442,13 +1427,13 @@ impl CollatorStdImpl {
     #[allow(clippy::too_many_arguments)]
     async fn execute(
         &mut self,
-        messages_preparer: &mut MessagesPreparer,
-        mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
+        collation_config: &CollationConfig,
         collation_data: &mut Box<BlockCollationData>,
         msgs_buffer: &mut MessagesBuffer,
-        max_new_message_key_to_current_shard: &mut QueueKey,
+        mut messages_reader: MessagesReader,
         executor: &mut MessagesExecutor,
-        collation_config: &Arc<CollationConfig>,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
     ) -> Result<ExecuteResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
@@ -1460,7 +1445,7 @@ impl CollatorStdImpl {
         let mut executed_groups_count = 0;
         loop {
             let mut timer = std::time::Instant::now();
-            let msgs_group_opt = messages_preparer
+            let msgs_group_opt = messages_reader
                 .get_next_message_group(
                     msgs_buffer,
                     &mut self.anchors_cache,
@@ -1516,6 +1501,8 @@ impl CollatorStdImpl {
             }
         }
 
+        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_millis();
+
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
             .set(executed_groups_count as f64);
 
@@ -1525,17 +1512,16 @@ impl CollatorStdImpl {
         let init_iterator_elapsed = mq_iterator_adapter.init_iterator_total_elapsed();
         metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
             .record(init_iterator_elapsed);
-        let read_existing_messages_elapsed =
-            messages_preparer.read_existing_messages_total_elapsed();
+        let read_existing_messages_elapsed = messages_reader.read_existing_messages_total_elapsed();
         metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
             .record(read_existing_messages_elapsed);
-        let read_new_messages_elapsed = messages_preparer.read_new_messages_total_elapsed();
+        let read_new_messages_elapsed = messages_reader.read_new_messages_total_elapsed();
         metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
             .record(read_new_messages_elapsed);
-        let read_ext_messages_elapsed = messages_preparer.read_ext_messages_total_elapsed();
+        let read_ext_messages_elapsed = messages_reader.read_ext_messages_total_elapsed();
         metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
             .record(read_ext_messages_elapsed);
-        let add_to_message_groups_elapsed = messages_preparer.add_to_message_groups_total_elapsed();
+        let add_to_message_groups_elapsed = messages_reader.add_to_message_groups_total_elapsed();
         metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
             .record(add_to_message_groups_elapsed);
 
@@ -1543,6 +1529,9 @@ impl CollatorStdImpl {
             .record(execute_msgs_total_elapsed);
         metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
             .record(process_txs_total_elapsed);
+
+        let last_read_to_anchor_chain_time = messages_reader.last_read_to_anchor_chain_time();
+
         Ok(ExecuteResult {
             execute_groups_wu_vm_only,
             fill_msgs_total_elapsed,
@@ -1553,6 +1542,8 @@ impl CollatorStdImpl {
             read_ext_messages_elapsed,
             read_new_messages_elapsed,
             add_to_message_groups_elapsed,
+
+            last_read_to_anchor_chain_time,
         })
     }
 
@@ -1562,7 +1553,7 @@ impl CollatorStdImpl {
         collation_data: &mut Box<BlockCollationData>,
         msgs_buffer: &mut MessagesBuffer,
         prev_hash: HashBytes,
-    ) -> Result<QueueDiffResult> {
+    ) -> Result<UpdateQueueDiffResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         // get queue diff and check for pending internals
         let histogram_create_queue_diff =
@@ -1632,7 +1623,7 @@ impl CollatorStdImpl {
                     Ok(apply_queue_diff_elapsed)
                 }
             });
-        Ok(QueueDiffResult {
+        Ok(UpdateQueueDiffResult {
             queue_diff,
             update_queue_task,
             has_unprocessed_messages,
@@ -1641,15 +1632,13 @@ impl CollatorStdImpl {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn return_collation_result(
+    async fn finalize_collation(
         &mut self,
-        finalized: FinalizedBlock,
-        mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
-        prev_mc_block_id: BlockId,
-        has_unprocessed_messages: bool,
+        mc_data: Arc<McData>,
         msgs_buffer: MessagesBuffer,
+        has_unprocessed_messages: bool,
+        finalized: FinalizedBlock,
         tracker: MinRefMcStateTracker,
     ) -> Result<CollationResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -1695,7 +1684,7 @@ impl CollatorStdImpl {
                 .on_block_candidate(BlockCollationResult {
                     collation_session_id: self.collation_session.id(),
                     candidate: finalized.block_candidate,
-                    prev_mc_block_id,
+                    prev_mc_block_id: mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
                     has_unprocessed_messages,

@@ -34,8 +34,7 @@ use crate::types::{
 #[path = "tests/execution_manager_tests.rs"]
 pub(super) mod tests;
 
-/// Prepare Execution Manager
-pub(super) struct MessagesPreparer {
+pub(super) struct MessagesReader {
     shard_id: ShardIdent,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
@@ -66,8 +65,7 @@ pub(super) enum GetNextMessageGroupMode {
     Refill,
 }
 
-impl MessagesPreparer {
-    /// constructor
+impl MessagesReader {
     pub fn new(
         shard_id: ShardIdent,
         messages_buffer_limit: usize,
@@ -95,7 +93,7 @@ impl MessagesPreparer {
         self.read_new_messages = false;
     }
 
-    pub fn get_last_read_to_anchor_chain_time(&self) -> Option<u64> {
+    pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
         self.last_read_to_anchor_chain_time
     }
 

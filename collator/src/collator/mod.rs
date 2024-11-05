@@ -668,7 +668,7 @@ impl CollatorStdImpl {
         new_state_root: Cell,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
-        mc_data: Arc<McData>,
+        new_mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
         has_unprocessed_messages: bool,
         msgs_buffer: MessagesBuffer,
@@ -725,13 +725,13 @@ impl CollatorStdImpl {
 
             Ok(Box::new(WorkingState {
                 next_block_id_short,
-                mc_data,
+                mc_data: new_mc_data,
                 collation_config,
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
-                msgs_buffer: Some(msgs_buffer),
+                msgs_buffer,
             }))
         }));
 
@@ -819,11 +819,11 @@ impl CollatorStdImpl {
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
             has_unprocessed_messages: None,
-            msgs_buffer: Some(MessagesBuffer::new(
+            msgs_buffer: MessagesBuffer::new(
                 next_block_id_short.shard,
                 collation_config.msgs_exec_params.group_limit as _,
                 collation_config.msgs_exec_params.group_vert_size as _,
-            )),
+            ),
             collation_config,
         }))
     }
@@ -1069,7 +1069,7 @@ impl CollatorStdImpl {
         }
 
         // check messages buffer directly
-        let msgs_buffer = working_state.msgs_buffer.as_ref().unwrap();
+        let msgs_buffer = &working_state.msgs_buffer;
 
         let has_pending_messages_in_buffer = msgs_buffer.has_pending_messages();
         if has_pending_messages_in_buffer {
