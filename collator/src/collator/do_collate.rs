@@ -203,6 +203,22 @@ impl CollatorStdImpl {
                 .collect()
         };
 
+        // if this is a masterchain, we must take top shard blocks end lt
+        let shards_description_end_lt: Vec<_> = if self.shard_id.is_masterchain() {
+            collation_data
+                .shards()?
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        } else {
+            working_state
+                .mc_data
+                .shards
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        };
+
         // create iterator adapter
         let mut mq_iterator_adapter = QueueIteratorAdapter::new(
             self.shard_id,
