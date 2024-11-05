@@ -111,7 +111,7 @@ impl BroadcastFilterInner {
         let verified_result = if sender != author {
             None // sender is not author
         } else {
-            Some(Verifier::verify(point))
+            Some(Verifier::verify(point, &self.peer_schedule))
         };
 
         let top_round = head.next().round();
@@ -193,13 +193,17 @@ impl BroadcastFilterInner {
                          also verified {verified:?}",
                         top_round
                     );
-                    match verified {
+                    match &verified {
                         Ok(()) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
                                 self.send_validating(&dag_round, point, downloader, store, effects);
                             }
                         }
-                        Err(VerifyError::IllFormed) => {
+                        Err(
+                            VerifyError::IllFormed
+                            | VerifyError::LackOfPeers(_)
+                            | VerifyError::UnknownPeers(_),
+                        ) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
                                 dag_round.add_ill_formed_broadcast_exact(point, store, effects);
                             }
@@ -209,6 +213,12 @@ impl BroadcastFilterInner {
                                 dag_round.set_bad_sig_in_broadcast_exact(&point.data().author);
                             }
                         }
+                        Err(
+                            VerifyError::BeforeGenesis
+                            | VerifyError::UnknownAuthor
+                            | VerifyError::UnknownRound
+                            | VerifyError::Uninit(_),
+                        ) => {} // nothing to do
                     }
                     (false, None, None)
                 }
@@ -235,7 +245,7 @@ impl BroadcastFilterInner {
         // we should ban a peer that broadcasts its rounds out of order,
         //   though we cannot prove this decision for other nodes;
         // rarely a consecutive pair of broadcasts may be reordered during high CPU load
-        let level = if verified_result.map_or(true, |vr| vr.is_err())
+        let level = if verified_result.as_ref().map_or(true, |vr| vr.is_err())
             || duplicates.is_some()
             || equivocation.is_some()
         {
@@ -251,8 +261,8 @@ impl BroadcastFilterInner {
             author = display(author.alt()),
             round = round.0,
             digest = display(digest.alt()),
-            sender = verified_result.ok_or(display(sender.alt())).err(),
-            malformed = verified_result.and_then(|e| e.err()).map(debug),
+            sender = verified_result.as_ref().ok_or(display(sender.alt())).err(),
+            verified = verified_result.and_then(|e| e.err()).map(display),
             duplicates = duplicates,
             equivocation = equivocation.as_ref().map(|digest| display(digest.alt())),
             advance = Some(is_threshold_reached).filter(|x| *x),

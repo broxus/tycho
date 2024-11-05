@@ -3567,6 +3567,7 @@ dependencies = [
  "rayon",
  "scopeguard",
  "serde",
+ "thiserror",
  "tikv-jemallocator",
  "tl-proto",
  "tokio",

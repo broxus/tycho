@@ -215,6 +215,7 @@ impl RoundTaskReady {
                     let self_check = Self::expect_own_trusted_point(
                         own_point_round,
                         own_point.clone(),
+                        peer_schedule.clone(),
                         downloader,
                         store,
                         round_effects.clone(),
@@ -279,6 +280,7 @@ impl RoundTaskReady {
     fn expect_own_trusted_point(
         point_round: WeakDagRound,
         point: Point,
+        peer_schedule: PeerSchedule,
         downloader: Downloader,
         store: MempoolStore,
         effects: Effects<EngineContext>,
@@ -286,9 +288,9 @@ impl RoundTaskReady {
         JoinTask::new(async move {
             point.verify_hash().expect("Failed to verify own point");
 
-            if let Err(err) = Verifier::verify(&point) {
+            if let Err(error) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = effects.span().enter();
-                panic!("Failed to verify own point: {err:?} {:?}", point)
+                panic!("Failed to verify own point: {error}, {:?}", point)
             }
             let (_, do_not_certify_tx) = oneshot::channel();
             let info = PointInfo::from(&point);

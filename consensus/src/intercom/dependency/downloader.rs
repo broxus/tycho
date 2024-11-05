@@ -145,10 +145,6 @@ impl Downloader {
         }
     }
 
-    pub fn peer_schedule(&self) -> &PeerSchedule {
-        &self.inner.peer_schedule
-    }
-
     pub async fn run(
         &self,
         point_id: &PointId,
@@ -444,19 +440,41 @@ impl<T: DownloadType> DownloadTask<T> {
                 None
             }
             Some(point) => {
-                match Verifier::verify(&point) {
+                match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
+                    Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(error @ VerifyError::BadSig) => {
                         // reliable peer won't return unverifiable point
                         self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                         tracing::error!(
-                            result = debug(error),
+                            result = display(error),
                             peer = display(peer_id.alt()),
                             "downloaded",
                         );
                         None
                     }
-                    Err(VerifyError::IllFormed) => Some(DownloadResult::IllFormed(point)),
-                    Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
+                    Err(
+                        error @ (VerifyError::IllFormed
+                        | VerifyError::LackOfPeers(_)
+                        | VerifyError::UnknownPeers(_)),
+                    ) => {
+                        tracing::error!(
+                            error = display(error),
+                            point = debug(&point),
+                            "downloaded illformed"
+                        );
+                        Some(DownloadResult::IllFormed(point))
+                    }
+                    Err(
+                        error @ (VerifyError::BeforeGenesis
+                        | VerifyError::UnknownRound
+                        | VerifyError::UnknownAuthor
+                        | VerifyError::Uninit(_)),
+                    ) => {
+                        panic!(
+                            "should not receive {error} for downloaded {:?}",
+                            point.id().alt()
+                        )
+                    }
                 }
             }
         }
