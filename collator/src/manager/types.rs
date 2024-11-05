@@ -34,10 +34,40 @@ pub(super) struct ActiveCollator<C> {
 }
 
 #[derive(Default)]
-pub(super) struct ChainTimesSyncState {
-    /// latest known chain time for master block: last imported or next to be collated
+pub(super) struct CollationSyncState {
+    /// Latest known chain time for master block: last imported or next to be collated
     pub mc_block_latest_chain_time: u64,
-    pub last_collated_chain_times_by_shards: FastHashMap<ShardIdent, Vec<(u64, bool)>>,
+    pub states: FastHashMap<ShardIdent, CollationState>,
+}
+
+#[derive(Debug)]
+pub(super) struct CollationState {
+    pub status: CollationStatus,
+    pub mc_collation_forced: bool,
+    pub last_imported_chain_times: Vec<(u64, bool)>,
+}
+
+impl Default for CollationState {
+    fn default() -> Self {
+        Self {
+            status: CollationStatus::AttemptsInProgress,
+            mc_collation_forced: false,
+            last_imported_chain_times: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CollationStatus {
+    AttemptsInProgress,
+    WaitForMasterStatus,
+}
+
+#[derive(Debug)]
+pub(super) enum NextCollationStep {
+    WaitForMasterStatus,
+    ResumeAttemptsIn(Vec<ShardIdent>),
+    CollateMaster(u64),
 }
 
 pub(super) struct BlockCacheStoreResult {

@@ -1073,7 +1073,6 @@ impl CollatorStdImpl {
                     prev_mc_block_id: finalized.old_mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
-                    has_unprocessed_messages,
                 })
                 .await?;
 

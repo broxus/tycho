@@ -89,9 +89,8 @@ where
 
 #[async_trait]
 pub trait CollatorEventListener: Send + Sync {
-    /// Process anchor that was skipped without block collation
-    /// or due to master block force condition
-    async fn on_skipped_anchor(
+    /// Process block collation skip by any reason
+    async fn on_skipped(
         &self,
         prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
@@ -1255,7 +1254,7 @@ impl CollatorStdImpl {
         );
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-        let histogram = HistogramGuardWithLabels::begin(
+        let _histogram = HistogramGuardWithLabels::begin(
             "tycho_collator_try_collate_next_master_block_time",
             &labels,
         );
@@ -1267,142 +1266,151 @@ impl CollatorStdImpl {
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
 
-        // check has unprocessed messages in buffer or queue
+        // check if has unprocessed messages in buffer or queue
         let has_unprocessed_messages = self.check_has_unprocessed_messages(&mut working_state)?;
+
         if has_unprocessed_messages {
-            // collate if has unprocessed messages
+            // do not import next anchor and force collation
             tracing::info!(target: tracing_targets::COLLATOR,
                 top_processed_to_anchor,
                 last_imported_anchor_id,
                 last_imported_chain_time,
                 "there are unprocessed messages from previous block, will collate next block",
             );
-            drop(histogram);
 
-            self.do_collate(working_state, None, last_imported_chain_time)
+            self.listener
+                .on_skipped(
+                    working_state.mc_data.block_id,
+                    working_state.next_block_id_short,
+                    working_state.prev_shard_data_ref().gen_chain_time(),
+                    true,
+                    working_state.collation_config.clone(),
+                )
                 .await?;
-        } else {
-            // otherwise import next anchor and return notify to manager
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                top_processed_to_anchor,
-                last_imported_anchor_id,
-                last_imported_chain_time,
-                "there are no unprocessed messages, will import next anchor",
-            );
+            self.delayed_working_state.delay(working_state);
+            return Ok(());
+        }
 
-            // next anchor importing can stuck if mempool paused
-            // so allow to cancel collation here
-            let collation_cancelled = self.cancel_collation.notified();
-            let import_fut = Self::import_next_anchor(
-                self.shard_id,
-                &mut self.anchors_cache,
-                self.mpool_adapter.clone(),
-                working_state.mc_data.top_processed_to_anchor,
-                working_state
-                    .mc_data
-                    .config
-                    .get_consensus_config()?
-                    .max_consensus_lag_rounds as u32,
-            );
+        // otherwise import next anchor and check if can collate in manager
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            top_processed_to_anchor,
+            last_imported_anchor_id,
+            last_imported_chain_time,
+            "there are no unprocessed messages, will import next anchor",
+        );
 
-            let import_anchor_result = tokio::select! {
-                res = import_fut => res?,
-                _ = collation_cancelled => {
-                    tracing::info!(target: tracing_targets::COLLATOR,
+        // next anchor importing can stuck if mempool paused
+        // so allow to cancel collation here
+        let collation_cancelled = self.cancel_collation.notified();
+        let import_fut = Self::import_next_anchor(
+            self.shard_id,
+            &mut self.anchors_cache,
+            self.mpool_adapter.clone(),
+            working_state.mc_data.top_processed_to_anchor,
+            working_state
+                .mc_data
+                .config
+                .get_consensus_config()?
+                .max_consensus_lag_rounds as u32,
+        );
+
+        let import_anchor_result = tokio::select! {
+            res = import_fut => res?,
+            _ = collation_cancelled => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    top_processed_to_anchor,
+                    last_imported_anchor_id,
+                    last_imported_chain_time,
+                    "collation was cancelled by manager on try_collate_next_master_block",
+                );
+                self.listener
+                    .on_cancelled(
+                        working_state.mc_data.block_id,
+                        working_state.next_block_id_short,
+                        CollationCancelReason::ExternalCancel,
+                    )
+                    .await?;
+                self.delayed_working_state.delay(working_state);
+                return Ok(());
+            }
+        };
+
+        match import_anchor_result {
+            ImportNextAnchor::Result {
+                prev_anchor_id,
+                get_anchor_result,
+                has_our_externals,
+            } => match get_anchor_result {
+                GetAnchorResult::NotExist => {
+                    tracing::warn!(target: tracing_targets::COLLATOR,
                         top_processed_to_anchor,
                         last_imported_anchor_id,
                         last_imported_chain_time,
-                        "collation was cancelled by manager on try_collate_next_master_block",
+                        "next anchor not exist, cancel collation attempts",
                     );
                     self.listener
                         .on_cancelled(
                             working_state.mc_data.block_id,
                             working_state.next_block_id_short,
-                            CollationCancelReason::ExternalCancel,
+                            CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
                         )
                         .await?;
                     self.delayed_working_state.delay(working_state);
                     return Ok(());
                 }
-            };
+                GetAnchorResult::Exist(next_anchor) => {
+                    // time elapsed from prev anchor
+                    let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
+                    self.anchor_timer = std::time::Instant::now();
+                    metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
+                        .record(elapsed_from_prev_anchor);
 
-            match import_anchor_result {
-                ImportNextAnchor::Result {
-                    prev_anchor_id,
-                    get_anchor_result,
-                    has_our_externals,
-                } => match get_anchor_result {
-                    GetAnchorResult::NotExist => {
-                        tracing::warn!(target: tracing_targets::COLLATOR,
-                            top_processed_to_anchor,
-                            last_imported_anchor_id,
-                            last_imported_chain_time,
-                            "next anchor not exist, cancel collation attempts",
-                        );
-                        self.listener
-                            .on_cancelled(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
-                            )
-                            .await?;
-                        self.delayed_working_state.delay(working_state);
-                        return Ok(());
-                    }
-                    GetAnchorResult::Exist(next_anchor) => {
-                        // time elapsed from prev anchor
-                        let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
-                        self.anchor_timer = std::time::Instant::now();
-                        metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
-                            .record(elapsed_from_prev_anchor);
+                    working_state.wu_used_from_last_anchor = 0;
 
-                        working_state.wu_used_from_last_anchor = 0;
-
-                        tracing::debug!(target: tracing_targets::COLLATOR,
-                            force_mc_block = false,
-                            top_processed_to_anchor,
-                            last_imported_anchor_id = next_anchor.id,
-                            last_imported_chain_time = next_anchor.chain_time,
-                            has_externals = has_our_externals,
-                            "imported next anchor, will notify collation manager",
-                        );
-
-                        // this may start master block collation or cause next anchor import
-                        self.listener
-                            .on_skipped_anchor(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                next_anchor.chain_time,
-                                false,
-                                working_state.collation_config.clone(),
-                            )
-                            .await?;
-
-                        self.delayed_working_state.delay(working_state);
-                    }
-                },
-                ImportNextAnchor::Skipped => {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        force_mc_block = true,
+                        force_mc_block = false,
                         top_processed_to_anchor,
-                        last_imported_anchor_id,
-                        last_imported_chain_time,
-                        "mempool paused, will notify collation manager",
+                        last_imported_anchor_id = next_anchor.id,
+                        last_imported_chain_time = next_anchor.chain_time,
+                        has_externals = has_our_externals,
+                        "imported next anchor, will notify collation manager",
                     );
 
                     // this may start master block collation or cause next anchor import
                     self.listener
-                        .on_skipped_anchor(
+                        .on_skipped(
                             working_state.mc_data.block_id,
                             working_state.next_block_id_short,
-                            last_imported_chain_time,
-                            true,
+                            next_anchor.chain_time,
+                            false,
                             working_state.collation_config.clone(),
                         )
                         .await?;
 
                     self.delayed_working_state.delay(working_state);
                 }
+            },
+            ImportNextAnchor::Skipped => {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    force_mc_block = true,
+                    top_processed_to_anchor,
+                    last_imported_anchor_id,
+                    last_imported_chain_time,
+                    "mempool paused, will notify collation manager",
+                );
+
+                // this may start master block collation or cause next anchor import
+                self.listener
+                    .on_skipped(
+                        working_state.mc_data.block_id,
+                        working_state.next_block_id_short,
+                        last_imported_chain_time,
+                        true,
+                        working_state.collation_config.clone(),
+                    )
+                    .await?;
+
+                self.delayed_working_state.delay(working_state);
             }
         }
 
@@ -1694,7 +1702,7 @@ impl CollatorStdImpl {
                 );
 
                 self.listener
-                    .on_skipped_anchor(
+                    .on_skipped(
                         working_state.mc_data.block_id,
                         working_state.next_block_id_short,
                         last_imported_chain_time,

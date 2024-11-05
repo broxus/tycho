@@ -69,9 +69,6 @@ pub struct BlockCollationResult {
     pub prev_mc_block_id: BlockId,
     pub mc_data: Option<Arc<McData>>,
     pub collation_config: Arc<CollationConfig>,
-    /// There are unprocessed messages in buffer
-    /// or shard queue after block collation
-    pub has_unprocessed_messages: bool,
 }
 
 /// Processed up to info for externals and internals.
