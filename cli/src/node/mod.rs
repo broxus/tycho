@@ -531,7 +531,7 @@ struct CollatorBlockProvider {
 impl BlockProvider for CollatorBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = BoxFuture<'a, ()>;
+    type ResetFut<'a> = futures_util::future::Ready<()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.adapter.wait_for_block_next(prev_block_id)
@@ -542,7 +542,7 @@ impl BlockProvider for CollatorBlockProvider {
     }
 
     fn reset(&self) -> Self::ResetFut<'_> {
-        Box::pin(futures_util::future::ready(()))
+        futures_util::future::ready(())
     }
 }
 

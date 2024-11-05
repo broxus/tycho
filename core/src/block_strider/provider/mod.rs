@@ -1,8 +1,7 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapAny;
@@ -97,6 +96,7 @@ impl<B: BlockProvider> BlockProviderExt for B {
             left: self,
             right: other,
             is_right: AtomicBool::new(false),
+            retry_counter: AtomicUsize::new(0),
         }
     }
 }
@@ -133,6 +133,12 @@ pub struct CycleBlockProvider<T1, T2> {
     left: T1,
     right: T2,
     is_right: AtomicBool,
+    retry_counter: AtomicUsize,
+}
+
+impl<T1, T2> CycleBlockProvider<T1, T2> {
+    pub const LEFT_LIMIT: usize = 1;
+    pub const RIGHT_LIMIT: usize = 10;
 }
 
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
@@ -174,54 +180,64 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
     }
 }
 
+macro_rules! cycle_provider_handler {
+    ($self:expr, $method:ident, $param:expr) => {{
+        let is_right = $self.is_right.load(Ordering::Acquire);
+
+        let res = if !is_right {
+            $self.left.$method($param).await
+        } else {
+            $self.right.$method($param).await
+        };
+
+        if res.is_some() {
+            // Reset retry counter when successes
+            $self.retry_counter.store(0, Ordering::Release);
+            return res;
+        }
+
+        let retry_limits = if !is_right {
+            Self::LEFT_LIMIT
+        } else {
+            Self::RIGHT_LIMIT
+        };
+
+        // Increment retry counter when failed
+        let retry_counter = $self.retry_counter.fetch_add(1, Ordering::Release);
+
+        // Switch provider if retry counter exceed
+        if retry_counter + 1 >= retry_limits {
+            let is_right = !is_right;
+            $self.is_right.store(is_right, Ordering::Release);
+
+            let res = if !is_right {
+                $self.left.reset().await;
+                $self.left.$method($param).await
+            } else {
+                $self.right.reset().await;
+                $self.right.$method($param).await
+            };
+
+            // Reset retry counter when provider was switched
+            $self.retry_counter.store(0, Ordering::Release);
+            return res;
+        }
+
+        res
+    }};
+}
+
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async move {
-            let is_right = self.is_right.load(Ordering::Acquire);
-
-            let res = if !is_right {
-                self.left.get_next_block(prev_block_id).await
-            } else {
-                self.right.get_next_block(prev_block_id).await
-            };
-
-            if res.is_some() {
-                return res;
-            }
-
-            // Switch provider
-            let is_right = !is_right;
-            self.is_right.store(is_right, Ordering::Release);
-
-            let res = if !is_right {
-                self.left.reset().await;
-                self.left.get_next_block(prev_block_id).await
-            } else {
-                self.right.reset().await;
-                self.right.get_next_block(prev_block_id).await
-            };
-
-            // Wait for timeout if a new provider also didn't return value
-            if res.is_none() {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
-
-            res
-        })
+        Box::pin(async { cycle_provider_handler!(self, get_next_block, prev_block_id) })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
-        Box::pin(async {
-            if self.is_right.load(Ordering::Acquire) {
-                self.right.get_block(block_id_relation).await
-            } else {
-                self.left.get_block(block_id_relation).await
-            }
-        })
+        Box::pin(async { cycle_provider_handler!(self, get_block, block_id_relation) })
     }
 
     fn reset(&self) -> Self::ResetFut<'_> {
@@ -459,7 +475,7 @@ mod test {
     impl BlockProvider for MockBlockProvider {
         type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
         type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-        type ResetFut<'a> = BoxFuture<'a, ()>;
+        type ResetFut<'a> = future::Ready<()>;
 
         fn get_next_block(&self, _prev_block_id: &BlockId) -> Self::GetNextBlockFut<'_> {
             Box::pin(async {
@@ -482,7 +498,7 @@ mod test {
         }
 
         fn reset(&self) -> Self::ResetFut<'_> {
-            Box::pin(future::ready(()))
+            future::ready(())
         }
     }
 
@@ -540,6 +556,7 @@ mod test {
             left: Arc::clone(&left_provider),
             right: Arc::clone(&right_provider),
             is_right: AtomicBool::new(false),
+            retry_counter: AtomicUsize::new(0),
         };
 
         chain_provider
@@ -551,6 +568,17 @@ mod test {
         // Now let's pretend the left provider ran out of blocks.
         left_provider.has_block.store(false, Ordering::Release);
         right_provider.has_block.store(true, Ordering::Release);
+
+        let mut cnt = 0;
+        while chain_provider
+            .get_next_block(&get_default_block_id())
+            .await
+            .is_none()
+        {
+            cnt += 1;
+            assert_eq!(chain_provider.retry_counter.load(Ordering::Acquire), cnt);
+        }
+        assert_eq!(chain_provider.retry_counter.load(Ordering::Acquire), 0);
 
         chain_provider
             .get_next_block(&get_default_block_id())
@@ -564,12 +592,22 @@ mod test {
         left_provider.has_block.store(true, Ordering::Release);
         right_provider.has_block.store(false, Ordering::Release);
 
+        let mut cnt = 0;
+        while chain_provider
+            .get_next_block(&get_default_block_id())
+            .await
+            .is_none()
+        {
+            cnt += 1;
+            assert_eq!(chain_provider.retry_counter.load(Ordering::Acquire), cnt);
+        }
+        assert_eq!(chain_provider.retry_counter.load(Ordering::Acquire), 0);
+
         chain_provider
             .get_next_block(&get_default_block_id())
             .await
             .unwrap()
             .unwrap();
-
         assert!(!chain_provider.is_right.load(Ordering::Acquire));
     }
 
