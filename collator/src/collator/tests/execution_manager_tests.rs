@@ -244,7 +244,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
 
     let mc_shard_id = ShardIdent::new_full(-1);
     let shard_id = ShardIdent::new_full(0);
-    let mut exec_manager = ExecutionManager::new(shard_id, 20, vec![]);
 
     let mut anchors_cache = AnchorsCache::default();
     fill_test_anchors_cache(&mut anchors_cache, shard_id);
@@ -336,14 +335,17 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     assert!(!msgs_buffer.has_pending_messages());
     assert!(prev_processed_offset > 0);
 
+    let shards = vec![];
     mq_iterator_adapter
         .try_init_next_range_iterator(
             &mut collation_data.processed_upto,
-            &working_state,
+            shards.iter().copied(),
             InitIteratorMode::OmitNextRange,
         )
         .await
         .unwrap();
+
+    let mut exec_manager = ExecutionManager::new(shard_id, 20, shards);
 
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
         let msg_group = exec_manager
