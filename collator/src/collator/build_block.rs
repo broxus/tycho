@@ -161,7 +161,7 @@ impl CollatorStdImpl {
                         address: *config_address,
                         params,
                     }),
-                &working_state,
+                prev_shard_data,
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
 
@@ -542,9 +542,8 @@ impl CollatorStdImpl {
     fn create_mc_state_extra(
         collation_data: &mut BlockCollationData,
         config_params: Option<BlockchainConfig>,
-        working_state: &WorkingState,
+        prev_shard_data: &PrevData,
     ) -> Result<(McStateExtra, u32)> {
-        let prev_shard_data = working_state.prev_shard_data_ref();
         let prev_state = &prev_shard_data.observable_states()[0];
 
         // 1. update config params and detect key block

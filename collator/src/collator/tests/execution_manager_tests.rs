@@ -244,7 +244,7 @@ async fn test_refill_msgs_buffer_with_only_externals() {
 
     let mc_shard_id = ShardIdent::new_full(-1);
     let shard_id = ShardIdent::new_full(0);
-    let mut exec_manager = ExecutionManager::new(shard_id, 20);
+    let mut exec_manager = ExecutionManager::new(shard_id, 20, vec![]);
 
     let mut anchors_cache = AnchorsCache::default();
     fill_test_anchors_cache(&mut anchors_cache, shard_id);
@@ -298,7 +298,7 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         mc_block_info,
         top_shard_block_info,
     );
-    let (working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+    let (_working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
 
     let mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>> =
         Arc::new(MessageQueueAdapterTestImpl::default());
@@ -306,6 +306,8 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         shard_id,
         mq_adapter,
         msgs_buffer.current_iterator_positions.take().unwrap(),
+        0,
+        0,
     );
 
     // ===================================
@@ -351,7 +353,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 &mut collation_data,
                 &mut mq_iterator_adapter,
                 &QueueKey::MIN,
-                &working_state,
                 GetNextMessageGroupMode::Refill,
             )
             .await
@@ -405,7 +406,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 &mut collation_data,
                 &mut mq_iterator_adapter,
                 &QueueKey::MIN,
-                &working_state,
                 GetNextMessageGroupMode::Continue,
             )
             .await
