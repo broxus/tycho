@@ -126,162 +126,95 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     {
         let timer = std::time::Instant::now();
 
-        // get current ranges
-        let mut ranges_from = FastHashMap::default();
-        let mut ranges_to = FastHashMap::default();
         let mut ranges_fully_read = true;
-        for (shard_id, int_processed_upto) in processed_upto.internals.iter() {
-            if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
-                ranges_fully_read = false;
-            }
-            ranges_from.insert(*shard_id, int_processed_upto.processed_to_msg);
-            ranges_to.insert(*shard_id, int_processed_upto.read_to_msg);
-        }
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "initialized={}, existing ranges_fully_read={}, \
-            ranges_from={}, ranges_to={}",
-            self.iterator_opt.is_some(), ranges_fully_read,
-            DisplayIter(ranges_from.iter().map(DisplayTuple)),
-            DisplayIter(ranges_to.iter().map(DisplayTuple)),
+        let mut current_range = Self::get_current_range(
+            processed_upto,
+            &mut ranges_fully_read,
+            self.iterator_opt.is_some(),
         );
 
-        let new_iterator_opt = if self.iterator_opt.is_none() && !ranges_fully_read {
-            // when current iterator is not initialized we have 2 possible cases:
-            // 1. ranges were not fully read in previous collation
-            // 2. ranges were fully read (processed_to == read_to)
+        let result = match (self.iterator_is_none(), ranges_fully_read, mode) {
+            (true, false, _) => {
+                // when current iterator is not initialized we have 2 possible cases:
+                // 1. ranges were not fully read in previous collation
+                // 2. ranges were fully read (processed_to == read_to)
 
-            // we use existing ranges to init iterator only when they were not fully read
-            // but will read from current position
-            // and check if ranges are fully read from current position
-            let current_ranges_from = ranges_from.clone();
-            ranges_fully_read = true;
-
-            for (shard_id, from) in ranges_from.iter_mut() {
-                if let Some(curren_position) = self.current_positions.get(shard_id) {
-                    *from = *curren_position;
-                }
-                let to = ranges_to.get(shard_id).unwrap();
-                if from != to {
-                    ranges_fully_read = false;
-                }
-            }
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "ranges updated from current position, ranges_fully_read={}, \
-                ranges_from={}, ranges_to={}",
-                ranges_fully_read,
-                DisplayIter(ranges_from.iter().map(DisplayTuple)),
-                DisplayIter(ranges_to.iter().map(DisplayTuple)),
-            );
-
-            let mut current_ranges_iterator = self
-                .mq_adapter
-                .create_iterator(self.shard_id, ranges_from, ranges_to)
-                .await?;
-            // set processed messages in iterator by original ranges_from
-            current_ranges_iterator.commit(current_ranges_from.into_iter().collect())?;
-            Some(current_ranges_iterator)
-        } else if mode == InitIteratorMode::OmitNextRange {
-            // on refill we do not need to use next range at all
-            if self.iterator_is_none() {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "init with last ranges, ranges_fully_read={}, \
-                    ranges_from={}, ranges_to={}",
+                // we use existing ranges to init iterator only when they were not fully read
+                // but will read from current position
+                // and check if ranges are fully read from current position
+                let NewIterator {
+                    iterator,
                     ranges_fully_read,
-                    DisplayIter(ranges_from.iter().map(DisplayTuple)),
-                    DisplayIter(ranges_to.iter().map(DisplayTuple)),
-                );
-                let mut current_ranges_iterator = self
-                    .mq_adapter
-                    .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)
-                    .await?;
-                // set processed messages in iterator by ranges_from
-                current_ranges_iterator.commit(ranges_from.into_iter().collect())?;
-                Some(current_ranges_iterator)
-            } else {
-                None
+                } = self.get_new_iterator(current_range, false).await?;
+
+                self.no_pending_existing_internals = ranges_fully_read;
+
+                self.iterator_opt = Some(iterator);
+
+                true
             }
-        } else {
-            // when current iterator exists or existing ranges fully read
+            (true, true, InitIteratorMode::OmitNextRange) => {
+                // on refill we do not need to use next range at all
+                let NewIterator { iterator, .. } =
+                    self.get_new_iterator(current_range, true).await?;
 
-            // then try to calc new ranges from current states
+                self.no_pending_existing_internals = true;
 
-            // add masterchain default range if not exist
-            let mut ranges_updated = self.try_update_ranges_for_shard(
-                ShardIdent::MASTERCHAIN,
-                self.mc_state_gen_lt,
-                &mut ranges_from,
-                &mut ranges_to,
-                || self.shard_id.is_masterchain(),
-            );
+                self.iterator_opt = Some(iterator);
 
-            for (shard_id, mc_top_shard_end_lt) in mc_top_shards_end_lts {
-                ranges_updated |= self.try_update_ranges_for_shard(
-                    shard_id,
-                    mc_top_shard_end_lt,
-                    &mut ranges_from,
-                    &mut ranges_to,
-                    || self.shard_id == shard_id,
-                );
+                true
             }
+            (false, true, InitIteratorMode::OmitNextRange) => false,
+            _ => {
+                // when current iterator exists or existing ranges fully read
+                // then try to calc new ranges from current states
+                // add masterchain default range if not exist
+                let mc_shard_id = ShardIdent::new_full(-1);
 
-            // if ranges changed then init new iterator
-            if ranges_updated {
-                // if ranges changed then to > from, so they are not fully read
-                ranges_fully_read = false;
-
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "updated ranges_from={}, ranges_to={}",
-                    DisplayIter(ranges_from.iter().map(DisplayTuple)),
-                    DisplayIter(ranges_to.iter().map(DisplayTuple)),
+                let mut ranges_updated = self.try_update_ranges_for_shard(
+                    mc_shard_id,
+                    self.mc_state_gen_lt,
+                    &mut current_range.ranges_from,
+                    &mut current_range.ranges_to,
+                    || self.shard_id.is_masterchain(),
                 );
-                // update processed_upto info
-                for (shard_id, new_process_to_key) in ranges_from.iter() {
-                    let new_read_to_key = ranges_to.get(shard_id).unwrap();
-                    update_internals_processed_upto(
-                        processed_upto,
-                        *shard_id,
-                        Some(ProcessedUptoUpdate::Force(*new_process_to_key)),
-                        Some(ProcessedUptoUpdate::Force(*new_read_to_key)),
+
+                for (shard_id, mc_top_shard_end_lt) in mc_top_shards_end_lts {
+                    ranges_updated |= self.try_update_ranges_for_shard(
+                        shard_id,
+                        mc_top_shard_end_lt,
+                        &mut current_range.ranges_from,
+                        &mut current_range.ranges_to,
+                        || self.shard_id == shard_id,
                     );
                 }
-                // and init iterator
-                let mut new_ranges_iterator = self
-                    .mq_adapter
-                    .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)
-                    .await?;
-                // set processed messages in iterator by ranges_from
-                new_ranges_iterator.commit(ranges_from.into_iter().collect())?;
-                // we created iterator for new ranges - clear current position
-                self.current_positions.clear();
-                Some(new_ranges_iterator)
-            } else {
-                None
-            }
-        };
 
-        let res = if self.iterator_opt.is_none() {
-            self.no_pending_existing_internals = ranges_fully_read;
-            assert!(new_iterator_opt.is_some());
-            self.iterator_opt = new_iterator_opt;
-            true
-        } else if let Some(new_iterator) = new_iterator_opt {
-            self.no_pending_existing_internals = false;
-            // replace current iterator
-            let mut prev_iterator = self.iterator_opt.replace(new_iterator).unwrap();
-            // move new messages to new iterator
-            let new_iterator = self.iterator();
-            let full_diff = prev_iterator.extract_full_diff();
-            new_iterator.set_new_messages_from_full_diff(full_diff);
-            true
-        } else {
-            false
+                // if ranges changed then init new iterator
+                if ranges_updated {
+                    self.no_pending_existing_internals = false;
+
+                    let NewIterator { iterator, .. } =
+                        self.update_iterator(current_range, processed_upto).await?;
+
+                    // replace current iterator
+                    if let Some(mut prev_iterator) = self.iterator_opt.replace(iterator) {
+                        // move new messages to new iterator
+                        let new_iterator = self.iterator();
+                        let full_diff = prev_iterator.extract_full_diff();
+                        new_iterator.set_new_messages_from_full_diff(full_diff);
+                    }
+
+                    true
+                } else {
+                    false
+                }
+            }
         };
 
         self.init_iterator_total_elapsed += timer.elapsed();
 
-        Ok(res)
+        Ok(result)
     }
 
     fn try_update_ranges_for_shard<F>(
@@ -384,4 +317,138 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             }
         }
     }
+
+    fn get_current_range(
+        processed_upto: &mut ProcessedUptoInfoStuff,
+        ranges_fully_read: &mut bool,
+        initialized: bool,
+    ) -> CurrentRange {
+        let mut ranges_from = FastHashMap::default();
+        let mut ranges_to = FastHashMap::default();
+        for (shard_id, int_processed_upto) in processed_upto.internals.iter() {
+            if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
+                *ranges_fully_read = false;
+            }
+            ranges_from.insert(*shard_id, int_processed_upto.processed_to_msg);
+            ranges_to.insert(*shard_id, int_processed_upto.read_to_msg);
+        }
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "initialized={}, existing ranges_fully_read={}, \
+            ranges_from={}, ranges_to={}",
+            initialized, ranges_fully_read,
+            DisplayIter(ranges_from.iter().map(DisplayTuple)),
+            DisplayIter(ranges_to.iter().map(DisplayTuple)),
+        );
+
+        CurrentRange {
+            ranges_from,
+            ranges_to,
+        }
+    }
+
+    async fn get_new_iterator(
+        &mut self,
+        current_range: CurrentRange,
+        mut ranges_fully_read: bool,
+    ) -> Result<NewIterator<V>> {
+        let CurrentRange {
+            mut ranges_from,
+            ranges_to,
+        } = current_range;
+
+        let current_ranges_from = if !ranges_fully_read {
+            ranges_fully_read = true;
+            let current_ranges_from = ranges_from.clone();
+            for (shard_id, from) in ranges_from.iter_mut() {
+                if let Some(current_position) = self.current_positions.get(shard_id) {
+                    *from = *current_position;
+                }
+                let to = ranges_to.get(shard_id).unwrap();
+                if from != to {
+                    ranges_fully_read &= false;
+                }
+            }
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "ranges updated from current position, ranges_fully_read={}, \
+                ranges_from={}, ranges_to={}",
+                ranges_fully_read,
+                DisplayIter(ranges_from.iter().map(DisplayTuple)),
+                DisplayIter(ranges_to.iter().map(DisplayTuple)),
+            );
+            current_ranges_from
+        } else {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "init with last ranges, ranges_fully_read={}, \
+                ranges_from={}, ranges_to={}",
+                ranges_fully_read,
+                DisplayIter(ranges_from.iter().map(DisplayTuple)),
+                DisplayIter(ranges_to.iter().map(DisplayTuple)),
+            );
+
+            ranges_from.clone()
+        };
+
+        let mut new_ranges_iterator = self
+            .mq_adapter
+            .create_iterator(self.shard_id, ranges_from, ranges_to)
+            .await?;
+        // set processed messages in iterator by original ranges_from
+        new_ranges_iterator.commit(current_ranges_from.into_iter().collect())?;
+        Ok(NewIterator {
+            iterator: new_ranges_iterator,
+            ranges_fully_read,
+        })
+    }
+
+    async fn update_iterator(
+        &mut self,
+        current_range: CurrentRange,
+        processed_upto: &mut ProcessedUptoInfoStuff,
+    ) -> Result<NewIterator<V>> {
+        let CurrentRange {
+            ranges_from,
+            ranges_to,
+        } = current_range;
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "updated ranges_from={}, ranges_to={}",
+            DisplayIter(ranges_from.iter().map(DisplayTuple)),
+            DisplayIter(ranges_to.iter().map(DisplayTuple)),
+        );
+        // update processed_upto info
+        for (shard_id, new_process_to_key) in ranges_from.iter() {
+            let new_read_to_key = ranges_to.get(shard_id).unwrap();
+            update_internals_processed_upto(
+                processed_upto,
+                *shard_id,
+                Some(ProcessedUptoUpdate::Force(*new_process_to_key)),
+                Some(ProcessedUptoUpdate::Force(*new_read_to_key)),
+            );
+        }
+        // and init iterator
+        let mut new_ranges_iterator = self
+            .mq_adapter
+            .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)
+            .await?;
+        // set processed messages in iterator by ranges_from
+        new_ranges_iterator.commit(ranges_from.into_iter().collect())?;
+        // we created iterator for new ranges - clear current position
+        self.current_positions.clear();
+        Ok(NewIterator {
+            iterator: new_ranges_iterator,
+            ranges_fully_read: false,
+        })
+    }
+}
+
+struct CurrentRange {
+    pub ranges_from: FastHashMap<ShardIdent, QueueKey>,
+    pub ranges_to: FastHashMap<ShardIdent, QueueKey>,
+}
+
+struct NewIterator<V: InternalMessageValue> {
+    pub iterator: Box<dyn QueueIterator<V>>,
+    pub ranges_fully_read: bool,
 }

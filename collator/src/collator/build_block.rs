@@ -780,7 +780,8 @@ impl CollatorStdImpl {
     ) -> Result<ProcessedAccounts> {
         let mut account_blocks = BTreeMap::new();
         let mut new_config_params = None;
-        let (updated_accounts, mut shard_accounts) = executor.into_accounts_cache_raw();
+        let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
+        let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
 
         for updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
@@ -799,7 +800,7 @@ impl CollatorStdImpl {
                         }
                     }
 
-                    shard_accounts.set(
+                    shard_accounts.set_any(
                         &updated_account.account_addr,
                         &DepthBalanceInfo {
                             split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
@@ -837,7 +838,7 @@ impl CollatorStdImpl {
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
-            shard_accounts,
+            shard_accounts: shard_accounts.build()?,
             new_config_params,
             accounts_len,
         })
