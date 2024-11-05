@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
@@ -668,11 +668,11 @@ impl CollatorStdImpl {
         new_state_root: Cell,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
-        mc_data: Option<Arc<McData>>,
+        new_mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
         has_unprocessed_messages: bool,
-        prev_working_state: Box<WorkingState>,
         msgs_buffer: MessagesBuffer,
+        tracker: MinRefMcStateTracker,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
@@ -680,18 +680,12 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
-
         enum GetNewShardStateStuff {
             ReloadFromStorage(JoinTask<Result<bool>>),
             BuildFromNewObservable(ShardStateStuff),
         }
 
         let get_new_state_stuff = {
-            _ = prev_working_state.usage_tree;
-
-            let prev_shard_data = prev_working_state.prev_shard_data.unwrap();
-
             if block_id.is_masterchain() {
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
             } else {
@@ -703,12 +697,10 @@ impl CollatorStdImpl {
                     &block_id,
                     new_observable_state,
                     new_state_root,
-                    prev_shard_data.ref_mc_state_handle().tracker(),
+                    &tracker,
                 )?)
             }
         };
-
-        // NOTE: here prev_shard_data and usage_tree extracted and dropped
 
         let state_node_adapter = self.state_node_adapter.clone();
 
@@ -733,13 +725,13 @@ impl CollatorStdImpl {
 
             Ok(Box::new(WorkingState {
                 next_block_id_short,
-                mc_data,
+                mc_data: new_mc_data,
                 collation_config,
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
-                msgs_buffer: Some(msgs_buffer),
+                msgs_buffer,
             }))
         }));
 
@@ -827,11 +819,11 @@ impl CollatorStdImpl {
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
             has_unprocessed_messages: None,
-            msgs_buffer: Some(MessagesBuffer::new(
+            msgs_buffer: MessagesBuffer::new(
                 next_block_id_short.shard,
                 collation_config.msgs_exec_params.group_limit as _,
                 collation_config.msgs_exec_params.group_vert_size as _,
-            )),
+            ),
             collation_config,
         }))
     }
@@ -1077,7 +1069,7 @@ impl CollatorStdImpl {
         }
 
         // check messages buffer directly
-        let msgs_buffer = working_state.msgs_buffer.as_ref().unwrap();
+        let msgs_buffer = &working_state.msgs_buffer;
 
         let has_pending_messages_in_buffer = msgs_buffer.has_pending_messages();
         if has_pending_messages_in_buffer {

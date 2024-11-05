@@ -221,12 +221,7 @@ impl McData {
             0
         };
 
-        let shards = extra
-            .shards
-            .iter()
-            .filter_map(|r| r.ok())
-            .map(|(i, shard_description)| (i, shard_description.into()))
-            .collect();
+        let shards = extra.shards.as_vec()?;
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -621,5 +616,22 @@ impl ShardDescriptionExt for ShardDescriptionShort {
             root_hash: self.root_hash,
             file_hash: self.file_hash,
         }
+    }
+}
+
+pub trait ShardHashesExt<T> {
+    fn as_vec(&self) -> Result<Vec<(ShardIdent, T)>>;
+}
+impl<T> ShardHashesExt<T> for ShardHashes
+where
+    T: From<ShardDescription>,
+{
+    fn as_vec(&self) -> Result<Vec<(ShardIdent, T)>> {
+        let mut res = vec![];
+        for item in self.iter() {
+            let (shard_id, descr) = item?;
+            res.push((shard_id, descr.into()));
+        }
+        Ok(res)
     }
 }

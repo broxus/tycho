@@ -13,7 +13,7 @@ use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
-use super::ExecutionManager;
+use super::MessagesReader;
 use crate::collator::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
 use crate::collator::execution_manager::{GetNextMessageGroupMode, InitIteratorMode};
 use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
@@ -232,7 +232,7 @@ fn gen_stub_working_state(
         prev_shard_data: Some(prev_shard_data),
         usage_tree: Some(usage_tree),
         has_unprocessed_messages: Some(true),
-        msgs_buffer: Some(msgs_buffer),
+        msgs_buffer,
     };
 
     Box::new(working_state)
@@ -297,7 +297,10 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         mc_block_info,
         top_shard_block_info,
     );
-    let (_working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+
+    let WorkingState {
+        mut msgs_buffer, ..
+    } = *working_state;
 
     let mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>> =
         Arc::new(MessageQueueAdapterTestImpl::default());
@@ -345,10 +348,10 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         .await
         .unwrap();
 
-    let mut exec_manager = ExecutionManager::new(shard_id, 20, mc_top_shards_end_lts);
+    let mut messages_reader = MessagesReader::new(shard_id, 20, mc_top_shards_end_lts);
 
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
-        let msg_group = exec_manager
+        let msg_group = messages_reader
             .get_next_message_group(
                 &mut msgs_buffer,
                 &mut anchors_cache,
@@ -401,7 +404,7 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     // ===================================
     // And finish reading all messages
     loop {
-        let msg_group = exec_manager
+        let msg_group = messages_reader
             .get_next_message_group(
                 &mut msgs_buffer,
                 &mut anchors_cache,
