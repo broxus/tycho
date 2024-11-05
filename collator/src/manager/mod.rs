@@ -364,11 +364,11 @@ where
 
         let (top_processed_to_anchor_id, mc_processed_to_anchor_id) =
             Self::detect_top_processed_to_anchor(
-                &mut state
+                state
                     .shards()?
                     .iter()
                     .filter_map(|r| r.ok())
-                    .map(|(_, shard_description)| shard_description.into()),
+                    .map(|(_, descr)| descr.into()),
                 processed_upto.externals.as_ref(),
             )?;
 
@@ -401,7 +401,7 @@ where
 
     /// Returns (`min_top_processed_to_anchor_id`, Option<`mc_processed_to_anchor_id`>)
     fn detect_top_processed_to_anchor<I>(
-        shards: I,
+        mc_top_shards: I,
         externals_processed_upto: Option<&ExternalsProcessedUpto>,
     ) -> Result<(MempoolAnchorId, Option<MempoolAnchorId>)>
     where
@@ -419,7 +419,7 @@ where
                 top_sc_block_updated,
                 ext_processed_to_anchor_id,
                 ..
-            } in shards
+            } in mc_top_shards
             {
                 if top_sc_block_updated {
                     min_top_processed_to_anchor_id =
@@ -1257,7 +1257,7 @@ where
 
                 // clean anchors cache in mempool
                 let (top_processed_to_anchor_id, _) = Self::detect_top_processed_to_anchor(
-                    &mut mc_data.shards.iter().map(|(_, descr)| *descr),
+                    mc_data.shards.iter().map(|(_, descr)| *descr),
                     state.state().processed_upto.load()?.externals.as_ref(),
                 )?;
                 self.mpool_adapter

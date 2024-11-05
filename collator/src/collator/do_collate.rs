@@ -188,7 +188,7 @@ impl CollatorStdImpl {
         );
 
         // if this is a masterchain, we must take top shard blocks end lt
-        let shards_description_end_lt: Vec<_> = if self.shard_id.is_masterchain() {
+        let mc_top_shards_end_lts: Vec<_> = if self.shard_id.is_masterchain() {
             collation_data
                 .shards()?
                 .iter()
@@ -219,7 +219,7 @@ impl CollatorStdImpl {
         mq_iterator_adapter
             .try_init_next_range_iterator(
                 &mut collation_data.processed_upto,
-                shards_description_end_lt.iter().copied(),
+                mc_top_shards_end_lts.iter().copied(),
                 // We always init first iterator during block collation
                 // with current ranges from processed_upto info
                 // and do not touch next range before we read all existing messages buffer.
@@ -233,7 +233,7 @@ impl CollatorStdImpl {
         let mut exec_manager = ExecutionManager::new(
             self.shard_id,
             collation_config.msgs_exec_params.buffer_limit as _,
-            shards_description_end_lt,
+            mc_top_shards_end_lts,
         );
 
         // refill messages buffer and skip groups upto offset (on node restart)
@@ -1633,7 +1633,7 @@ fn new_transaction(
     collation_data.execute_count_all += 1;
 
     let gas_used = &mut collation_data.block_limit.gas_used;
-    *gas_used = gas_used.saturating_add(executor_output.gas_used.try_into().unwrap_or(u32::MAX));
+    *gas_used = gas_used.saturating_add(executor_output.gas_used);
 
     if let Some(in_msg) = in_msg {
         process_in_message(collation_data, executor_output.transaction.clone(), in_msg)?;
