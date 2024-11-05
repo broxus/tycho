@@ -12,10 +12,10 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::SerializedQueueDiff;
+use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::MessagesExecutor;
-use super::types::WorkingState;
 use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
@@ -24,7 +24,6 @@ use crate::types::{BlockCandidate, CollationSessionInfo, McData};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
-    pub working_state: Box<WorkingState>,
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
     pub new_state_root: Cell,
@@ -38,7 +37,10 @@ impl CollatorStdImpl {
         mut collation_data: Box<BlockCollationData>,
         collation_session: Arc<CollationSessionInfo>,
         executor: MessagesExecutor,
-        working_state: Box<WorkingState>,
+        mc_data: Arc<McData>,
+        prev_shard_data: PrevData,
+        wu_used_from_last_anchor: u64,
+        usage_tree: UsageTree,
         queue_diff: SerializedQueueDiff,
         wu_params_finalize: WorkUnitsParamsFinalize,
         prepare_groups_wu_total: u64,
@@ -51,9 +53,6 @@ impl CollatorStdImpl {
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
-
-        let mc_data = working_state.mc_data.as_ref();
-        let prev_shard_data = working_state.prev_shard_data_ref();
 
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = executor.executor_params().state_libs.clone();
@@ -105,7 +104,6 @@ impl CollatorStdImpl {
 
             processed_accounts_res = Self::build_accounts(
                 executor,
-                prev_shard_data,
                 is_masterchain,
                 config_address,
                 &mut global_libraries,
@@ -153,15 +151,25 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
-                &mut collation_data,
+            let prev_state = &prev_shard_data.observable_states()[0];
+            let prev_processed_to_anchor = prev_shard_data
+                .processed_upto()
+                .externals
+                .as_ref()
+                .map(|ext_upto| ext_upto.processed_to.0)
+                .unwrap_or_default();
+            let config_params =
                 processed_accounts
                     .new_config_params
                     .map(|params| BlockchainConfig {
                         address: *config_address,
                         params,
-                    }),
-                prev_shard_data,
+                    });
+            let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
+                &mut collation_data,
+                config_params,
+                prev_state,
+                prev_processed_to_anchor,
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
 
@@ -234,8 +242,7 @@ impl CollatorStdImpl {
             );
 
             // compute total wu used from last anchor
-            let wu_used_from_last_anchor = working_state
-                .wu_used_from_last_anchor
+            let wu_used_from_last_anchor = wu_used_from_last_anchor
                 .saturating_add(prepare_groups_wu_total)
                 .saturating_add(execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
@@ -289,7 +296,7 @@ impl CollatorStdImpl {
                 &shard,
                 prev_shard_data.pure_state_root(),
                 &new_state_root,
-                working_state.usage_tree.as_ref().unwrap(),
+                &usage_tree,
             )?;
 
             build_state_update_elapsed = histogram.finish();
@@ -478,7 +485,6 @@ impl CollatorStdImpl {
 
         Ok(FinalizedBlock {
             collation_data,
-            working_state,
             block_candidate,
             mc_data: new_mc_data,
             new_state_root,
@@ -542,10 +548,9 @@ impl CollatorStdImpl {
     fn create_mc_state_extra(
         collation_data: &mut BlockCollationData,
         config_params: Option<BlockchainConfig>,
-        prev_shard_data: &PrevData,
+        prev_state: &ShardStateStuff,
+        prev_processed_to_anchor: u32,
     ) -> Result<(McStateExtra, u32)> {
-        let prev_state = &prev_shard_data.observable_states()[0];
-
         // 1. update config params and detect key block
         let prev_state_extra = prev_state.state_extra()?;
         let prev_config = &prev_state_extra.config;
@@ -622,13 +627,6 @@ impl CollatorStdImpl {
                     prev_config.get_collation_config()?.shuffle_mc_validators;
 
                 // calc next session update round
-                let prev_processed_to_anchor = prev_shard_data
-                    .processed_upto()
-                    .externals
-                    .as_ref()
-                    .map(|ext_upto| ext_upto.processed_to.0)
-                    .unwrap_or_default();
-
                 let session_update_round = {
                     // `prev_processed_to_anchor` is a round in the ending session, after which
                     // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
@@ -776,16 +774,15 @@ impl CollatorStdImpl {
 
     fn build_accounts(
         executor: MessagesExecutor,
-        prev_shard_data: &PrevData,
         is_masterchain: bool,
         config_address: &HashBytes,
         global_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<ProcessedAccounts> {
         let mut account_blocks = BTreeMap::new();
-        let mut shard_accounts = RelaxedAugDict::from_full(prev_shard_data.observable_accounts());
         let mut new_config_params = None;
+        let (updated_accounts, mut shard_accounts) = executor.into_accounts_cache_raw();
 
-        for updated_account in executor.into_changed_accounts() {
+        for updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
                 continue;
             }
@@ -802,7 +799,7 @@ impl CollatorStdImpl {
                         }
                     }
 
-                    shard_accounts.set_any(
+                    shard_accounts.set(
                         &updated_account.account_addr,
                         &DepthBalanceInfo {
                             split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
@@ -840,7 +837,7 @@ impl CollatorStdImpl {
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
-            shard_accounts: shard_accounts.build()?,
+            shard_accounts,
             new_config_params,
             accounts_len,
         })

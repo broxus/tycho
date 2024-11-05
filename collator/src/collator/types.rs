@@ -37,11 +37,6 @@ impl WorkingState {
     pub fn prev_shard_data_ref(&self) -> &PrevData {
         self.prev_shard_data.as_ref().unwrap()
     }
-
-    pub fn take_msgs_buffer(mut self: Box<Self>) -> (Box<Self>, MessagesBuffer) {
-        let msgs_buffer = self.msgs_buffer.take().unwrap();
-        (self, msgs_buffer)
-    }
 }
 
 pub(super) struct PrevData {
