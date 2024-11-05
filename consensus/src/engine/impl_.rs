@@ -89,7 +89,7 @@ impl Engine {
         let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
 
         genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis).expect("genesis failed to verify");
+        Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
 
         let store = MempoolStore::new(
             mempool_adapter_store,

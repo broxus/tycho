@@ -5,8 +5,10 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, StreamExt};
 use tokio::sync::oneshot;
 use tracing::Instrument;
+use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
+use tycho_util::FastHashSet;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
@@ -33,10 +35,31 @@ use crate::models::{
 
 pub struct Verifier;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
+pub enum PointMap {
+    Evidence,
+    Includes,
+    Witness,
+}
+
+#[derive(thiserror::Error, Debug)]
 pub enum VerifyError {
+    #[error("point before genesis cannot be verified")]
+    BeforeGenesis,
+    #[error("peer schedule is empty for point round")]
+    UnknownRound,
+    #[error("author is not scheduled")]
+    UnknownAuthor,
+    #[error("signature does not match author")]
     BadSig,
+    #[error("structure check failed")] // TODO enum for each check
     IllFormed,
+    #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
+    UnknownPeers((Vec<PeerId>, PointMap)),
+    #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
+    LackOfPeers((usize, PeerCount, PointMap)),
+    #[error("uninit {:?} peer set of {} len", .0.1, .0.0)]
+    Uninit((usize, PointMap)),
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -44,15 +67,55 @@ pub enum VerifyError {
 // included into valid anchor chain, i.e. validated by consensus.
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
-    pub fn verify(point: &Point) -> Result<(), VerifyError> {
+    pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
-        let result = if !point.is_integrity_ok() {
-            Err(VerifyError::BadSig)
-        } else if !point.is_well_formed() {
-            Err(VerifyError::IllFormed)
+
+        let result = if point.round() > Genesis::round().next() {
+            let [
+                same_round_peers, // @ r+0
+                includes_peers, // @ r-1
+                witness_peers, //  @ r-2
+            ] = peer_schedule.atomic().peers_for_array([
+                point.round(),
+                point.round().prev(),
+                point.round().prev().prev(),
+            ]);
+
+            if same_round_peers.is_empty() {
+                Err(VerifyError::UnknownRound)
+            } else if !same_round_peers.contains(&point.data().author) {
+                Err(VerifyError::UnknownAuthor)
+            } else if !point.is_integrity_ok() {
+                Err(VerifyError::BadSig)
+            } else if !point.is_well_formed() {
+                Err(VerifyError::IllFormed)
+            } else {
+                Self::is_peer_usage_ok(
+                    point,
+                    same_round_peers.as_ref(),
+                    includes_peers.as_ref(),
+                    witness_peers.as_ref(),
+                )
+                .map_or(Ok(()), Err)
+            }
+        } else if point.round() >= Genesis::round() {
+            // genesis and first point after are reproducible so logic is in well-formness check
+            let same_round_peers = peer_schedule.atomic().peers_for(point.round()).clone();
+            if same_round_peers.is_empty() {
+                Err(VerifyError::UnknownRound)
+            } else if !same_round_peers.contains(&point.data().author) {
+                Err(VerifyError::UnknownAuthor)
+            } else if !point.is_integrity_ok() {
+                Err(VerifyError::BadSig)
+            } else if !point.is_well_formed() {
+                Err(VerifyError::IllFormed)
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(VerifyError::BeforeGenesis)
         };
+
         ValidateContext::verified(&result);
         result
     }
@@ -93,11 +156,7 @@ impl Verifier {
                 let dag_point = DagPoint::Trusted(ValidPoint::new(info));
                 return ValidateContext::validated(dag_point);
             }
-            cmp::Ordering::Greater => {
-                if !Self::is_peer_usage_ok(&info, prev_proof.as_ref(), downloader.peer_schedule()) {
-                    return DagPoint::IllFormed(Arc::new(info.id()));
-                }
-            }
+            cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
         let Some(r_0) = r_0.upgrade() else {
@@ -546,76 +605,84 @@ impl Verifier {
 
     /// blame author and every dependent point's author
     fn is_peer_usage_ok(
-        info: &PointInfo, // @ r+0
-        prev_proof: Option<&PrevPointProof>,
-        peer_schedule: &PeerSchedule,
-    ) -> bool {
-        let [
-            proof_peers, // @ r+0
-            includes_peers, // @ r-1
-            witness_peers, //  @ r-2
-        ] = peer_schedule.atomic().peers_for_array([
-            info.round(),
-            info.round().prev(),
-            info.round().prev().prev(),
-        ]);
-
+        point: &Point,                        // @ r+0
+        proof_peers: &FastHashSet<PeerId>,    // @ r+0
+        includes_peers: &FastHashSet<PeerId>, // @ r-1
+        witness_peers: &FastHashSet<PeerId>,  // @ r-2
+    ) -> Option<VerifyError> {
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
-        match PeerCount::try_from(proof_peers.len()).map(|total| total.majority_of_others()) {
-            Ok(_) if prev_proof.is_none() => {
+        match PeerCount::try_from(proof_peers.len()) {
+            Ok(_) if point.evidence().is_empty() => {
                 // ok, continue check; point is well-formed so does not have prev point
             }
-            Ok(required) => {
-                let mut peers = prev_proof.map(|pp| pp.evidence.keys()).unwrap_or_default();
-                if peers.len() < required {
-                    tracing::error!("not enough evidence peers: {} < {required}", peers.len());
-                    return false;
-                } else if !peers.all(|id| proof_peers.contains(id)) {
-                    tracing::error!("wrong peer in evidence list");
-                    return false;
+            Ok(total) => {
+                let peers = point.evidence().keys();
+                if peers.len() < total.majority_of_others() {
+                    return Some(VerifyError::LackOfPeers((
+                        peers.len(),
+                        total,
+                        PointMap::Evidence,
+                    )));
+                }
+                let unknown = peers
+                    .filter(|id| !proof_peers.contains(id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !unknown.is_empty() {
+                    return Some(VerifyError::UnknownPeers((unknown, PointMap::Evidence)));
                 }
             }
-            Err(e) => {
-                tracing::error!("unusable evidence peer set: {e}");
-                return false;
+            Err(_) => {
+                return Some(VerifyError::Uninit((proof_peers.len(), PointMap::Evidence)));
             }
         }
 
-        match PeerCount::try_from(includes_peers.len()).map(|total| total.majority()) {
-            Ok(required) => {
-                let mut peers = info.data().includes.keys();
-                if peers.len() < required {
-                    tracing::error!("not enough includes points: {} < {required}", peers.len());
-                    return false;
-                } else if !peers.all(|id| includes_peers.contains(id)) {
-                    tracing::error!("wrong peer in list of includes");
-                    return false;
+        match PeerCount::try_from(includes_peers.len()) {
+            Ok(total) => {
+                let peers = point.data().includes.keys();
+                if peers.len() < total.majority() {
+                    return Some(VerifyError::LackOfPeers((
+                        peers.len(),
+                        total,
+                        PointMap::Includes,
+                    )));
+                }
+                let unknown = peers
+                    .filter(|id| !includes_peers.contains(id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !unknown.is_empty() {
+                    return Some(VerifyError::UnknownPeers((unknown, PointMap::Includes)));
                 }
             }
-            Err(e) => {
-                tracing::error!("unusable includes peer set: {e}");
-                return false;
+            Err(_) => {
+                return Some(VerifyError::Uninit((
+                    includes_peers.len(),
+                    PointMap::Includes,
+                )));
             }
         }
 
         match PeerCount::try_from(witness_peers.len()) {
-            Ok(_) => {
-                let mut peers = info.data().witness.keys();
-                if !peers.all(|peer| witness_peers.contains(peer)) {
-                    tracing::error!("wrong peer in witness list");
-                    return false;
+            Err(_) if point.round() > Genesis::round().next().next() => {
+                return Some(VerifyError::Uninit((
+                    witness_peers.len(),
+                    PointMap::Witness,
+                )));
+            }
+            _ => {
+                let peers = point.data().witness.keys();
+                let unknown = peers
+                    .filter(|peer| !witness_peers.contains(peer))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !unknown.is_empty() {
+                    return Some(VerifyError::UnknownPeers((unknown, PointMap::Witness)));
                 }
             }
-            Err(_) if info.round().prev().prev() == Genesis::round() => {
-                // ok, as Genesis cannot be in witness, already checked for point to be well-formed
-            }
-            Err(e) => {
-                tracing::error!("unusable witness peer set: {e}");
-                return false;
-            }
         };
-        true
+        None
     }
 
     /// blame author and every dependent point's author
@@ -657,8 +724,11 @@ impl Verifier {
 impl ValidateContext {
     const KIND: &'static str = "kind";
 
-    const VERIFY_LABELS: [(&'static str, &'static str); 2] =
-        [(Self::KIND, "bad_sig"), (Self::KIND, "ill_formed")];
+    const VERIFY_LABELS: [(&'static str, &'static str); 3] = [
+        (Self::KIND, "bad_round"), // mb problem with local or author's peer schedule
+        (Self::KIND, "bad_peer"),  // local peer schedule ok, peer usage is unexpected
+        (Self::KIND, "ill_formed"), // bad point structure
+    ];
 
     const VALIDATE_LABELS: [(&'static str, &'static str); 4] = [
         (Self::KIND, "not_found"),
@@ -669,8 +739,15 @@ impl ValidateContext {
 
     fn verified(result: &Result<(), VerifyError>) {
         let (labels, count) = match result {
-            Err(VerifyError::BadSig) => (&Self::VERIFY_LABELS[0..=0], 1),
-            Err(VerifyError::IllFormed) => (&Self::VERIFY_LABELS[1..=1], 1),
+            Err(
+                VerifyError::BeforeGenesis | VerifyError::UnknownRound | VerifyError::Uninit(_),
+            ) => (&Self::VERIFY_LABELS[0..=0], 1),
+            Err(VerifyError::UnknownAuthor | VerifyError::UnknownPeers(_)) => {
+                (&Self::VERIFY_LABELS[1..=1], 1)
+            }
+            Err(VerifyError::BadSig | VerifyError::IllFormed | VerifyError::LackOfPeers(_)) => {
+                (&Self::VERIFY_LABELS[2..=2], 1)
+            }
             Ok(_) => (&Self::VERIFY_LABELS[..], 0),
         };
         metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);

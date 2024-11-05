@@ -61,6 +61,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 pub async fn populate_points<const PEER_COUNT: usize>(
     dag_round: &DagRound,
     peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peer_schedule: &PeerSchedule,
     downloader: &Downloader,
     store: &MempoolStore,
     effects: &Effects<EngineContext>,
@@ -128,7 +129,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             panic!("Point hash is not valid");
         };
 
-        Verifier::verify(point).expect("well-formed point");
+        Verifier::verify(point, peer_schedule).expect("well-formed point");
         let info = PointInfo::from(point);
         let (_, certified_tx) = oneshot::channel();
         let effects = Effects::<ValidateContext>::new(effects, &info);

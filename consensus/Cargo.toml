@@ -33,6 +33,7 @@ rand_pcg = { workspace = true }
 rayon = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, default-features = false }
 tokio-stream = { workspace = true, optional = true }
