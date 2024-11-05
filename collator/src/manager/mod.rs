@@ -1257,7 +1257,7 @@ where
 
                 // clean anchors cache in mempool
                 let (top_processed_to_anchor_id, _) = Self::detect_top_processed_to_anchor(
-                    &mut mc_data.shards.values().copied(),
+                    &mut mc_data.shards.iter().map(|(_, descr)| *descr),
                     state.state().processed_upto.load()?.externals.as_ref(),
                 )?;
                 self.mpool_adapter

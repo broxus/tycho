@@ -197,7 +197,7 @@ pub struct McData {
     pub total_validator_fees: CurrencyCollection,
 
     pub global_balance: CurrencyCollection,
-    pub shards: FastHashMap<ShardIdent, ShardDescriptionShort>,
+    pub shards: Vec<(ShardIdent, ShardDescriptionShort)>,
     pub config: BlockchainConfig,
     pub validator_info: ValidatorInfo,
     pub consensus_info: ConsensusInfo,
@@ -221,7 +221,7 @@ impl McData {
             0
         };
 
-        let shards: FastHashMap<ShardIdent, ShardDescriptionShort> = extra
+        let shards = extra
             .shards
             .iter()
             .filter_map(|r| r.ok())
