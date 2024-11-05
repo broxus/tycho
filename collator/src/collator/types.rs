@@ -20,7 +20,7 @@ use tycho_network::PeerId;
 use tycho_util::futures::JoinTask;
 use tycho_util::FastHashMap;
 
-use super::execution_manager::{MessagesExecutor, MessagesPreparer};
+use super::execution_manager::{MessagesExecutor, MessagesReader};
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
@@ -35,7 +35,7 @@ pub(super) struct WorkingState {
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
-    pub msgs_buffer: Option<MessagesBuffer>,
+    pub msgs_buffer: MessagesBuffer,
 }
 
 impl WorkingState {
@@ -1297,8 +1297,8 @@ pub(super) enum ReadNextExternalsMode {
 }
 
 pub struct PrepareCollation {
+    pub messages_reader: MessagesReader,
     pub executor: MessagesExecutor,
-    pub messages_preparer: MessagesPreparer,
     pub mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
 }
 
@@ -1312,9 +1312,11 @@ pub struct ExecuteResult {
     pub read_ext_messages_elapsed: Duration,
     pub read_new_messages_elapsed: Duration,
     pub add_to_message_groups_elapsed: Duration,
+
+    pub last_read_to_anchor_chain_time: Option<u64>,
 }
 
-pub struct QueueDiffResult {
+pub struct UpdateQueueDiffResult {
     pub queue_diff: SerializedQueueDiff,
     pub update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>>,
     pub has_unprocessed_messages: bool,
