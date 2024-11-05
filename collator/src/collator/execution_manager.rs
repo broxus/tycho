@@ -34,8 +34,8 @@ use crate::types::{
 #[path = "tests/execution_manager_tests.rs"]
 pub(super) mod tests;
 
-/// Execution manager
-pub(super) struct ExecutionManager {
+/// Prepare Execution Manager
+pub(super) struct MessagesPreparer {
     shard_id: ShardIdent,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
@@ -61,26 +61,12 @@ pub(super) struct ExecutionManager {
     mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
 }
 
-pub(super) struct MessagesExecutor {
-    shard_id: ShardIdent,
-    // this time is used if account's lt is smaller
-    min_next_lt: u64,
-    /// blockchain config
-    config: Arc<PreloadedBlockchainConfig>,
-    /// vm execution params related to current block
-    params: Arc<ExecuteParams>,
-    /// shard accounts
-    accounts_cache: AccountsCache,
-    /// Params to calculate messages execution work in work units
-    wu_params_execute: WorkUnitsParamsExecute,
-}
-
 pub(super) enum GetNextMessageGroupMode {
     Continue,
     Refill,
 }
 
-impl ExecutionManager {
+impl MessagesPreparer {
     /// constructor
     pub fn new(
         shard_id: ShardIdent,
@@ -470,6 +456,20 @@ impl ExecutionManager {
 
         Ok(group_opt)
     }
+}
+
+pub(super) struct MessagesExecutor {
+    shard_id: ShardIdent,
+    // this time is used if account's lt is smaller
+    min_next_lt: u64,
+    /// blockchain config
+    config: Arc<PreloadedBlockchainConfig>,
+    /// vm execution params related to current block
+    params: Arc<ExecuteParams>,
+    /// shard accounts
+    accounts_cache: AccountsCache,
+    /// Params to calculate messages execution work in work units
+    wu_params_execute: WorkUnitsParamsExecute,
 }
 
 impl MessagesExecutor {

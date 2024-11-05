@@ -13,7 +13,7 @@ use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
-use super::ExecutionManager;
+use super::MessagesPreparer;
 use crate::collator::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
 use crate::collator::execution_manager::{GetNextMessageGroupMode, InitIteratorMode};
 use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
@@ -348,7 +348,7 @@ async fn test_refill_msgs_buffer_with_only_externals() {
         .await
         .unwrap();
 
-    let mut exec_manager = ExecutionManager::new(shard_id, 20, mc_top_shards_end_lts);
+    let mut exec_manager = MessagesPreparer::new(shard_id, 20, mc_top_shards_end_lts);
 
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
         let msg_group = exec_manager
