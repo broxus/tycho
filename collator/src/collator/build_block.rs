@@ -411,7 +411,7 @@ impl CollatorStdImpl {
                 .shards
                 .iter()
                 .filter_map(|r| r.ok())
-                .map(|(i, v)| (i, (&v).into()))
+                .map(|(i, shard_description)| (i, shard_description.into()))
                 .collect();
 
             Arc::new(McData {
