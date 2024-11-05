@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
+use std::io::{Seek, Write};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -688,10 +689,31 @@ impl Inner {
             kind,
         };
 
-        let file = self
-            .mc_states_dir(mc_seqno)
-            .file(kind.make_file_name(block_id))
-            .open_as_mapped()?;
+        let load_mapped = || {
+            let mut file = self
+                .mc_states_dir(mc_seqno)
+                .file(kind.make_file_name(block_id))
+                .read(true)
+                .open()?;
+
+            // We create a copy of the original file here to make sure
+            // that the underlying mapped file will not be changed outside
+            // of the node. Otherwise it will randomly fail with exit code 7/BUS.
+            let mut temp_file = tempfile::tempfile_in(self.storage_dir.path())
+                .context("failed to create a temp file")?;
+
+            // Underlying implementation will call something like `copy_file_range`,
+            // and we hope that it will be just COW pages.
+            std::io::copy(&mut file, &mut temp_file).context("failed to copy a temp file")?;
+            temp_file.flush()?;
+            temp_file.seek(std::io::SeekFrom::Start(0))?;
+
+            MappedFile::from_existing_file(temp_file).context("failed to map a temp file")
+        };
+
+        let file =
+            load_mapped().with_context(|| format!("failed to cache {kind:?} for {block_id}"))?;
+
         let new_state = Arc::new(CachedState { mc_seqno, file });
 
         let prev_mc_seqno = match self.descriptor_cache.entry(key) {

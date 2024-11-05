@@ -127,27 +127,6 @@ impl FileBuilder {
         Ok(file)
     }
 
-    pub fn open_as_mapped(&self) -> Result<MappedFile> {
-        anyhow::ensure!(self.prealloc.is_none(), "cannot prealloc an read-only file");
-
-        // Force set `read` flag
-        let file = self.clone().read(true).open()?;
-        MappedFile::from_existing_file(file).map_err(Into::into)
-    }
-
-    pub fn open_as_mapped_mut(&self) -> Result<MappedFileMut> {
-        anyhow::ensure!(self.prealloc.is_none(), "cannot prealloc an read-only file");
-
-        Ok(match self.prealloc {
-            Some(length) => MappedFileMut::new(&self.path, length)?,
-            None => {
-                // Force set `read` and `write` flag
-                let file = self.clone().read(true).write(true).open()?;
-                MappedFileMut::from_existing_file(file)?
-            }
-        })
-    }
-
     pub fn rename<P: AsRef<Path>>(&self, new_path: P) -> std::io::Result<()> {
         let new_path = match self.path.parent() {
             Some(parent) => Cow::Owned(parent.join(new_path)),

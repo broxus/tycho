@@ -1,7 +1,5 @@
-#![expect(clippy::disallowed_types)]
 use std::fs::File;
 use std::os::fd::AsRawFd;
-use std::path::Path;
 
 /// Mutable memory buffer that is mapped to a file
 pub struct MappedFileMut {
@@ -9,24 +7,16 @@ pub struct MappedFileMut {
 }
 
 impl MappedFileMut {
-    /// Opens a file and maps it to memory. Resizes the file to `length` bytes.
-    pub fn new<P: AsRef<Path>>(path: P, length: usize) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .create(true)
-            .open(path)?;
-
-        file.set_len(length as u64)?;
-
-        Self::from_existing_file(file)
-    }
-
     /// Opens an existing file and maps it to memory
     pub fn from_existing_file(file: File) -> std::io::Result<Self> {
-        MappedFile::from_existing_file_ext(file, libc::PROT_READ | libc::PROT_WRITE)
-            .map(|inner| Self { inner })
+        // NOTE: We use `MAP_SHARED` to make sure that all writes will be backed
+        //       by the underlying file.
+        MappedFile::from_existing_file_ext(
+            file,
+            libc::MAP_SHARED,
+            libc::PROT_READ | libc::PROT_WRITE,
+        )
+        .map(|inner| Self { inner })
     }
 
     /// Mapped buffer length in bytes
@@ -110,10 +100,15 @@ pub struct MappedFile {
 impl MappedFile {
     /// Opens an existing file and maps it to memory
     pub fn from_existing_file(file: File) -> std::io::Result<Self> {
-        Self::from_existing_file_ext(file, libc::PROT_READ)
+        // NOTE: `MAP_PRIVATE` here is just in case. For `PROT_READ` is doen't really matter.
+        Self::from_existing_file_ext(file, libc::MAP_PRIVATE, libc::PROT_READ)
     }
 
-    fn from_existing_file_ext(file: File, prot: libc::c_int) -> std::io::Result<Self> {
+    fn from_existing_file_ext(
+        file: File,
+        flags: libc::c_int,
+        prot: libc::c_int,
+    ) -> std::io::Result<Self> {
         let length = file.metadata()?.len() as usize;
 
         // SAFETY: File was opened successfully, offset is aligned
@@ -122,7 +117,7 @@ impl MappedFile {
                 std::ptr::null_mut(),
                 length,
                 prot,
-                libc::MAP_SHARED,
+                flags,
                 file.as_raw_fd(),
                 0,
             )
