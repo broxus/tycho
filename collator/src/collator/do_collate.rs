@@ -10,23 +10,27 @@ use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::NewBlockMeta;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
-use super::execution_manager::{ExecutionManager, MessagesExecutor};
+use super::build_block::FinalizedBlock;
+use super::execution_manager::{MessagesExecutor, MessagesReader};
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
-    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, ParsedExternals,
-    ReadNextExternalsMode, SpecialOrigin, WorkingState,
+    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, CollationResult, MessagesBuffer,
+    ParsedExternals, PrepareCollation, PrevData, ReadNextExternalsMode, SpecialOrigin,
+    WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::GetNextMessageGroupMode;
 use crate::collator::mq_iterator_adapter::InitIteratorMode;
 use crate::collator::types::{
-    BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
+    BlockCollationData, ExecuteResult, ParsedMessage, PreparedInMsg, PreparedOutMsg,
+    ShardDescriptionExt, UpdateQueueDiffResult,
 };
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::EnqueuedMessage;
@@ -62,210 +66,52 @@ impl CollatorStdImpl {
         let prepare_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
-        // INFO: this is a temporary implementation, further will just clone messages buffer from the working state
-        let (working_state, mut msgs_buffer) = working_state.take_msgs_buffer();
+        let WorkingState {
+            next_block_id_short,
+            mc_data,
+            collation_config,
+            wu_used_from_last_anchor,
+            prev_shard_data,
+            usage_tree,
+            mut msgs_buffer,
+            ..
+        } = *working_state;
 
-        let mc_data = &working_state.mc_data;
-        let collation_config = working_state.collation_config.clone();
-        let prev_shard_data = working_state.prev_shard_data_ref();
+        let prev_shard_data = prev_shard_data.unwrap();
+        let usage_tree = usage_tree.unwrap();
+        let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: next_block_id_short={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
-            working_state.next_block_id_short,
+            next_block_id_short,
             DisplayBlockIdsIntoIter(prev_shard_data.blocks_ids()),
             top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
                 v.iter().map(|i| &i.block_id)
             )),
         );
 
-        let created_by = self
-            .anchors_cache
-            .get_last_imported_anchor_author()
-            .unwrap();
-
-        // TODO: need to generate unique for each block
-        // generate seed from the chain_time from the anchor
-        let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
-        let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
-        tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
-
-        let is_masterchain = self.shard_id.is_masterchain();
-
-        if !is_masterchain {
-            self.shard_blocks_count_from_last_anchor += 1;
-        }
-
-        // prepare block collation data
-        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "Block limits: {:?}",
-            block_limits
-        );
-
-        let mut collation_data_builder = BlockCollationDataBuilder::new(
-            working_state.next_block_id_short,
-            rand_seed,
-            mc_data.block_id.seqno,
+        let mut collation_data = self.create_collation_data(
+            next_block_id_short,
             next_chain_time,
-            prev_shard_data.processed_upto().clone(),
-            created_by,
-            GlobalVersion {
-                version: self.config.supported_block_version,
-                capabilities: self.config.supported_capabilities,
-            },
-            self.mempool_config_override.clone(),
-        );
-
-        // init ShardHashes descriptions for master
-        if is_masterchain {
-            let shards = prev_shard_data.observable_states()[0]
-                .shards()?
-                .iter()
-                .map(|entry| entry.map(|(shard_ident, descr)| (shard_ident, Box::new(descr))))
-                .collect::<Result<FastHashMap<_, _>, _>>()?;
-            collation_data_builder.set_shards(shards);
-
-            if let Some(top_shard_blocks_info) = top_shard_blocks_info {
-                Self::import_new_shard_top_blocks_for_masterchain(
-                    &mc_data.config,
-                    &mut collation_data_builder,
-                    top_shard_blocks_info,
-                )?;
-            }
-        }
-
-        let start_lt = Self::calc_start_lt(
-            mc_data,
-            prev_shard_data,
-            is_masterchain,
-            collation_data_builder.shards_max_end_lt,
+            &mc_data,
+            &prev_shard_data,
+            top_shard_blocks_info,
         )?;
 
-        let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
-
-        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
-            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
-        );
-
-        // show internals processed upto
-        collation_data
-            .processed_upto
-            .internals
-            .iter()
-            .for_each(|(shard_ident, processed_upto)| {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "initial processed_upto.internals for shard {}: {}",
-                    shard_ident, processed_upto,
-                );
-            });
-
-        // compute created / minted / recovered / from_prev_block
-        self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
-
         // prepare to read and execute internals and externals
-
-        // init executor
-        let mut executor = MessagesExecutor::new(
-            self.shard_id,
-            collation_data.next_lt,
-            Arc::new(PreloadedBlockchainConfig::with_config(
-                mc_data.config.clone(),
-                mc_data.global_id,
-            )?),
-            Arc::new(ExecuteParams {
-                state_libs: mc_data.libraries.clone(),
-                // generated unix time
-                block_unixtime: collation_data.gen_utime,
-                // block's start logical time
-                block_lt: collation_data.start_lt,
-                // block random seed
-                seed_block: collation_data.rand_seed,
-                block_version: self.config.supported_block_version,
-                ..ExecuteParams::default()
-            }),
-            prev_shard_data.observable_accounts().clone(),
-            collation_config.work_units_params.execute.clone(),
-        );
-
-        // if this is a masterchain, we must take top shard blocks end lt
-        let mc_top_shards_end_lts: Vec<_> = if self.shard_id.is_masterchain() {
-            collation_data
-                .shards()?
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt))
-                .collect()
-        } else {
-            working_state
-                .mc_data
-                .shards
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt))
-                .collect()
-        };
-
-        // create iterator adapter
-        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
-            self.shard_id,
-            self.mq_adapter.clone(),
-            msgs_buffer.current_iterator_positions.take().unwrap(),
-            working_state.mc_data.gen_lt,
-            working_state.prev_shard_data_ref().gen_lt(),
-        );
-
-        // we need to init iterator anyway because we need it to add new messages to queue
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "init iterator for current ranges"
-        );
-        mq_iterator_adapter
-            .try_init_next_range_iterator(
-                &mut collation_data.processed_upto,
-                mc_top_shards_end_lts.iter().copied(),
-                // We always init first iterator during block collation
-                // with current ranges from processed_upto info
-                // and do not touch next range before we read all existing messages buffer.
-                // In this case the initial iterator range will be equal both
-                // on Refill and on Continue.
-                InitIteratorMode::OmitNextRange,
+        let PrepareCollation {
+            messages_reader,
+            mut executor,
+            mut mq_iterator_adapter,
+        } = self
+            .prepare_collation(
+                &collation_config,
+                &mut collation_data,
+                &mut msgs_buffer,
+                &mc_data,
+                &prev_shard_data,
             )
             .await?;
-
-        // create exec_manager
-        let mut exec_manager = ExecutionManager::new(
-            self.shard_id,
-            collation_config.msgs_exec_params.buffer_limit as _,
-            mc_top_shards_end_lts,
-        );
-
-        // refill messages buffer and skip groups upto offset (on node restart)
-        let prev_processed_offset = collation_data.processed_upto.processed_offset;
-        if !msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset,
-                "refill messages buffer and skip groups upto",
-            );
-
-            while msgs_buffer.message_groups_offset() < prev_processed_offset {
-                let msg_group = exec_manager
-                    .get_next_message_group(
-                        &mut msgs_buffer,
-                        &mut self.anchors_cache,
-                        &mut collation_data,
-                        &mut mq_iterator_adapter,
-                        &QueueKey::MIN,
-                        GetNextMessageGroupMode::Refill,
-                    )
-                    .await?;
-                if msg_group.is_none() {
-                    // on restart from a new genesis we will not be able to refill buffer with externals
-                    // so we stop refilling when there is no more groups in buffer
-                    break;
-                }
-            }
-
-            // next time we should read next message group like we did not make refill before
-            // so we need to reset flags that control from where to read messages
-            exec_manager.reset_read_flags();
-        }
 
         let prepare_elapsed = prepare_histogram.finish();
 
@@ -273,14 +119,16 @@ impl CollatorStdImpl {
         // it needs to define the read range for new messages when we get next message group
         let mut max_new_message_key_to_current_shard = QueueKey::MIN;
 
-        // execute tick transaction and special transactions (mint, recover)
+        let is_masterchain = self.shard_id.is_masterchain();
+
         let execute_tick_elapsed;
         if is_masterchain {
+            // execute tick transaction and special transactions (mint, recover)
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
             self.create_ticktock_transactions(
-                mc_data,
+                &mc_data.config,
                 TickTock::Tick,
                 &mut collation_data,
                 &mut executor,
@@ -290,7 +138,7 @@ impl CollatorStdImpl {
             .await?;
 
             self.create_special_transactions(
-                mc_data,
+                &mc_data.config,
                 &mut collation_data,
                 &mut executor,
                 &mut max_new_message_key_to_current_shard,
@@ -306,103 +154,36 @@ impl CollatorStdImpl {
         let execute_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
 
-        let mut fill_msgs_total_elapsed = Duration::ZERO;
-        let mut execute_msgs_total_elapsed = Duration::ZERO;
-        let mut process_txs_total_elapsed = Duration::ZERO;
-        let mut execute_groups_wu_vm_only = 0u64;
+        let ExecuteResult {
+            execute_groups_wu_vm_only,
+            fill_msgs_total_elapsed,
+            execute_msgs_total_elapsed,
+            process_txs_total_elapsed,
+            init_iterator_elapsed,
+            read_existing_messages_elapsed,
+            read_ext_messages_elapsed,
+            read_new_messages_elapsed,
+            add_to_message_groups_elapsed,
 
-        {
-            let mut executed_groups_count = 0;
-            loop {
-                let mut timer = std::time::Instant::now();
-                let msgs_group_opt = exec_manager
-                    .get_next_message_group(
-                        &mut msgs_buffer,
-                        &mut self.anchors_cache,
-                        &mut collation_data,
-                        &mut mq_iterator_adapter,
-                        &max_new_message_key_to_current_shard,
-                        GetNextMessageGroupMode::Continue,
-                    )
-                    .await?;
-                fill_msgs_total_elapsed += timer.elapsed();
-
-                if let Some(msgs_group) = msgs_group_opt {
-                    // Execute messages group
-                    timer = std::time::Instant::now();
-                    let group_result = executor.execute_group(msgs_group).await?;
-                    execute_msgs_total_elapsed += timer.elapsed();
-                    executed_groups_count += 1;
-                    collation_data.tx_count += group_result.items.len() as u64;
-                    collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
-                    collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
-                    execute_groups_wu_vm_only = execute_groups_wu_vm_only
-                        .saturating_add(group_result.total_exec_wu)
-                        .saturating_add(group_result.ext_msgs_error_count.saturating_mul(
-                            collation_config.work_units_params.execute.execute_err as u64,
-                        ));
-
-                    // Process transactions
-                    timer = std::time::Instant::now();
-                    for item in group_result.items {
-                        self.process_transaction(
-                            item.executor_output,
-                            Some(item.in_message),
-                            &mut collation_data,
-                            &executor,
-                            &mut max_new_message_key_to_current_shard,
-                            mq_iterator_adapter.iterator(),
-                        )?;
-                    }
-                    process_txs_total_elapsed += timer.elapsed();
-
-                    if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
-                        tracing::debug!(target: tracing_targets::COLLATOR,
-                            "block limits reached: {:?}", collation_data.block_limit,
-                        );
-                        metrics::counter!(
-                            "tycho_do_collate_blocks_with_limits_reached_count",
-                            &labels
-                        )
-                        .increment(1);
-                        break;
-                    }
-                } else if mq_iterator_adapter.no_pending_existing_internals()
-                    && mq_iterator_adapter.no_pending_new_messages()
-                {
-                    break;
-                }
-            }
-
-            metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
-                .set(executed_groups_count as f64);
-        }
-
-        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
-            .record(fill_msgs_total_elapsed);
-
-        let init_iterator_elapsed = mq_iterator_adapter.init_iterator_total_elapsed();
-        metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
-            .record(init_iterator_elapsed);
-        let read_existing_messages_elapsed = exec_manager.read_existing_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
-            .record(read_existing_messages_elapsed);
-        let read_new_messages_elapsed = exec_manager.read_new_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
-            .record(read_new_messages_elapsed);
-        let read_ext_messages_elapsed = exec_manager.read_ext_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
-            .record(read_ext_messages_elapsed);
-        let add_to_message_groups_elapsed = exec_manager.add_to_message_groups_total_elapsed();
-        metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
-            .record(add_to_message_groups_elapsed);
-
-        metrics::histogram!("tycho_do_collate_exec_msgs_total_time", &labels)
-            .record(execute_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
-            .record(process_txs_total_elapsed);
+            last_read_to_anchor_chain_time,
+        } = self
+            .execute(
+                &collation_config,
+                &mut collation_data,
+                &mut msgs_buffer,
+                messages_reader,
+                &mut executor,
+                &mut max_new_message_key_to_current_shard,
+                &mut mq_iterator_adapter,
+            )
+            .await?;
 
         let execute_elapsed = execute_histogram.finish();
+
+        let prepare_groups_wu_total = calc_prepare_groups_wu_total(
+            &collation_data,
+            &collation_config.work_units_params.prepare,
+        );
 
         // execute tock transaction
         let execute_tock_elapsed;
@@ -410,7 +191,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
             self.create_ticktock_transactions(
-                mc_data,
+                &mc_data.config,
                 TickTock::Tock,
                 &mut collation_data,
                 &mut executor,
@@ -423,99 +204,44 @@ impl CollatorStdImpl {
             execute_tock_elapsed = Duration::ZERO;
         }
 
-        // get queue diff and check for pending internals
-        let histogram_create_queue_diff =
-            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
-
-        let (has_pending_internals_in_iterator, diff_with_messages) = mq_iterator_adapter.release(
-            !msgs_buffer.has_pending_messages(),
-            &mut msgs_buffer.current_iterator_positions,
-        )?;
-
-        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
-
-        let diff_messages_len = diff_with_messages.messages.len();
-        let has_unprocessed_messages =
-            msgs_buffer.has_pending_messages() || has_pending_internals_in_iterator;
-
-        let (min_message, max_message) = {
-            let messages = &diff_with_messages.messages;
-            match messages.first_key_value().zip(messages.last_key_value()) {
-                Some(((min, _), (max, _))) => (*min, *max),
-                None => (
-                    QueueKey::min_for_lt(collation_data.start_lt),
-                    QueueKey::max_for_lt(collation_data.next_lt),
-                ),
-            }
-        };
-
-        let queue_diff = QueueDiffStuff::builder(
-            self.shard_id,
-            collation_data.block_id_short.seqno,
-            &prev_shard_data
-                .prev_queue_diff_hashes()
-                .first()
-                .cloned()
-                .unwrap_or_default(),
-        )
-        .with_processed_upto(
-            diff_with_messages
-                .processed_upto
-                .iter()
-                .map(|(k, v)| (*k, v.lt, &v.hash)),
-        )
-        .with_messages(
-            &min_message,
-            &max_message,
-            diff_with_messages.messages.keys().map(|k| &k.hash),
-        )
-        .serialize();
-
-        let queue_diff_hash = *queue_diff.hash();
-        tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
-
-        // start async update queue task
-        let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
-            JoinTask::<Result<_>>::new({
-                let block_id_short = collation_data.block_id_short;
-                let mq_adapter = self.mq_adapter.clone();
-                let labels = labels.clone();
-                async move {
-                    // apply queue diff
-                    let histogram = HistogramGuard::begin_with_labels(
-                        "tycho_do_collate_apply_queue_diff_time",
-                        &labels,
-                    );
-
-                    mq_adapter
-                        .apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)
-                        .await?;
-                    let apply_queue_diff_elapsed = histogram.finish();
-
-                    Ok(apply_queue_diff_elapsed)
-                }
-            });
-
-        let prepare_groups_wu_total = calc_prepare_groups_wu_total(
-            &collation_data,
-            &collation_config.work_units_params.prepare,
-        );
-
         let process_txs_wu =
             calc_process_txs_wu(&collation_data, &collation_config.work_units_params.execute);
         let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
+
+        let UpdateQueueDiffResult {
+            queue_diff,
+            update_queue_task,
+            has_unprocessed_messages,
+            diff_messages_len,
+            create_queue_diff_elapsed,
+        } = self
+            .update_queue_diff(
+                mq_iterator_adapter,
+                &mut collation_data,
+                &mut msgs_buffer,
+                prev_shard_data
+                    .prev_queue_diff_hashes()
+                    .first()
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .await?;
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
             let finalize_params = collation_config.work_units_params.finalize.clone();
+            let old_mc_data = mc_data.clone();
             move || {
                 Self::finalize_block(
                     collation_data,
                     collation_session,
                     executor,
-                    working_state,
+                    old_mc_data,
+                    prev_shard_data,
+                    wu_used_from_last_anchor,
+                    usage_tree,
                     queue_diff,
                     finalize_params,
                     prepare_groups_wu_total,
@@ -524,172 +250,47 @@ impl CollatorStdImpl {
             }
         })
         .await?;
-        collation_data = finalized.collation_data;
-        let working_state = finalized.working_state;
+        let finalize_block_elapsed = finalize_block_timer.elapsed();
 
-        let block_id = *finalized.block_candidate.block.id();
-        let is_key_block = finalized.block_candidate.is_key_block;
-        let store_new_state_task = JoinTask::new({
-            let meta = NewBlockMeta {
-                is_key_block,
-                gen_utime: collation_data.gen_utime,
-                ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
-            };
-            let adapter = self.state_node_adapter.clone();
-            let labels = labels.clone();
-            let new_state_root = finalized.new_state_root.clone();
-            async move {
-                let _histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_build_new_state_time",
-                    &labels,
-                );
-                adapter
-                    .store_state_root(&block_id, meta, new_state_root)
-                    .await
-            }
-        });
-
-        // resolve update queue task
+        // resolve update queue task before returning colaltion result
+        // to be sure that queue was updated before block commit and next block collation
         let apply_queue_diff_elapsed = update_queue_task.await?;
 
-        let handle_block_candidate_elapsed;
-        {
-            let histogram = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_handle_block_candidate_time",
-                &labels,
-            );
+        let block_id = *finalized.block_candidate.block.id();
+        let finalize_wu_total = finalized.finalize_wu_total;
 
-            let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
-
-            let collation_config = match &finalized.mc_data {
-                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
-                None => collation_config,
-            };
-
-            // return collation result
-            self.listener
-                .on_block_candidate(BlockCollationResult {
-                    collation_session_id: self.collation_session.id(),
-                    candidate: finalized.block_candidate,
-                    prev_mc_block_id: working_state.mc_data.block_id,
-                    mc_data: finalized.mc_data.clone(),
-                    collation_config: collation_config.clone(),
-                    has_unprocessed_messages,
-                })
-                .await?;
-
-            // spawn update PrevData and working state
-            self.prepare_working_state_update(
-                block_id,
-                finalized.new_observable_state,
-                finalized.new_state_root,
-                store_new_state_task,
-                new_queue_diff_hash,
-                finalized.mc_data,
+        let CollationResult {
+            handle_block_candidate_elapsed,
+            collation_data,
+        } = self
+            .finalize_collation(
                 collation_config,
-                has_unprocessed_messages,
-                working_state,
+                mc_data,
                 msgs_buffer,
+                has_unprocessed_messages,
+                finalized,
+                tracker,
             )
             .await?;
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "working state updated prepare spawned",
-            );
-
-            // update next block info
-            self.next_block_info = block_id.get_next_id_short();
-
-            handle_block_candidate_elapsed = histogram.finish();
-        }
-
-        // metrics
-        metrics::counter!("tycho_do_collate_tx_total", &labels).increment(collation_data.tx_count);
-        metrics::gauge!("tycho_do_collate_tx_per_block", &labels)
-            .set(collation_data.tx_count as f64);
-        metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
-            .set(collation_data.accounts_count as f64);
-
-        metrics::counter!("tycho_do_collate_int_enqueue_count")
-            .increment(collation_data.int_enqueue_count);
-        metrics::counter!("tycho_do_collate_int_dequeue_count")
-            .increment(collation_data.int_dequeue_count);
-        metrics::gauge!("tycho_do_collate_int_msgs_queue_calc").increment(
-            (collation_data.int_enqueue_count as i64 - collation_data.int_dequeue_count as i64)
-                as f64,
-        );
-
-        metrics::counter!("tycho_do_collate_msgs_exec_count_all", &labels)
-            .increment(collation_data.execute_count_all);
-
-        // external messages
-        metrics::counter!("tycho_do_collate_msgs_read_count_ext", &labels)
-            .increment(collation_data.read_ext_msgs);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_ext", &labels)
-            .increment(collation_data.execute_count_ext);
-        metrics::counter!("tycho_do_collate_msgs_error_count_ext", &labels)
-            .increment(collation_data.ext_msgs_error_count);
-        metrics::counter!("tycho_do_collate_msgs_skipped_count_ext", &labels)
-            .increment(collation_data.ext_msgs_skipped);
-
-        // existing internals messages
-        metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
-            .increment(collation_data.read_int_msgs_from_iterator);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_int", &labels)
-            .increment(collation_data.execute_count_int);
-
-        // new internals messages
-        metrics::counter!("tycho_do_collate_new_msgs_created_count", &labels)
-            .increment(collation_data.new_msgs_created);
-        metrics::counter!(
-            "tycho_do_collate_new_msgs_inserted_to_iterator_count",
-            &labels
-        )
-        .increment(collation_data.inserted_new_msgs_to_iterator);
-        metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
-            .increment(collation_data.read_new_msgs_from_iterator);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
-            .increment(collation_data.execute_count_new_int);
-
-        // blocks
-        metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
-        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
-            .set(collation_data.block_id_short.seqno);
-
-        // work units
-        let finalize_block_elapsed = finalize_block_timer.elapsed();
-        let finalize_wu_total = finalized.finalize_wu_total;
-
-        metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
-            .set(prepare_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
-            .set(execute_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
-            execute_groups_wu_total as f64
-                + finalize_wu_total as f64
-                + prepare_groups_wu_total as f64,
-        );
-
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
-            .set(fill_msgs_total_elapsed.as_nanos() as f64 / prepare_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
-            (execute_msgs_total_elapsed.as_nanos() as f64
-                + process_txs_total_elapsed.as_nanos() as f64)
-                / execute_groups_wu_total as f64,
-        );
-        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
-            .set(execute_msgs_total_elapsed.as_nanos() as f64 / execute_groups_wu_vm_only as f64);
-        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
-            .set(process_txs_total_elapsed.as_nanos() as f64 / process_txs_wu as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
-            .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
-
         let total_elapsed = total_collation_histogram.finish();
 
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_total", &labels).set(
-            total_elapsed.as_nanos() as f64
-                / (execute_groups_wu_total + finalize_wu_total + prepare_groups_wu_total) as f64,
+        // metrics
+        metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
+
+        self.collation_data_metrics(&collation_data);
+
+        self.wu_metrics(
+            prepare_groups_wu_total,
+            execute_groups_wu_total,
+            finalize_wu_total,
+            execute_groups_wu_vm_only,
+            process_txs_wu,
+            fill_msgs_total_elapsed,
+            execute_msgs_total_elapsed,
+            process_txs_total_elapsed,
+            finalize_block_elapsed,
+            total_elapsed,
         );
 
         // time elapsed from prev block
@@ -710,13 +311,11 @@ impl CollatorStdImpl {
         };
 
         // block time diff from min ext chain time
-        let last_read_to_anchor_chain_time = exec_manager.get_last_read_to_anchor_chain_time();
         let diff_time =
             now_millis() as i64 - last_read_to_anchor_chain_time.unwrap_or(next_chain_time) as i64;
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 
-        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
         self.update_stats(&collation_data);
         tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
@@ -1101,22 +700,22 @@ impl CollatorStdImpl {
 
     /// Get max LT from masterchain (and shardchain) then calc start LT
     fn calc_start_lt(
-        mc_data: &McData,
-        prev_shard_data: &PrevData,
+        mc_data_gen_lt: u64,
+        lt_align: u64,
+        prev_gen_lt: u64,
         is_masterchain: bool,
         shards_max_end_lt: u64,
     ) -> Result<u64> {
         tracing::trace!(target: tracing_targets::COLLATOR, "calc_start_lt()");
 
         let mut start_lt = if !is_masterchain {
-            std::cmp::max(mc_data.gen_lt, prev_shard_data.gen_lt())
+            std::cmp::max(mc_data_gen_lt, prev_gen_lt)
         } else {
-            std::cmp::max(mc_data.gen_lt, shards_max_end_lt)
+            std::cmp::max(mc_data_gen_lt, shards_max_end_lt)
         };
 
-        let align = mc_data.lt_align();
-        let incr = align - start_lt % align;
-        if incr < align || 0 == start_lt {
+        let incr = lt_align - start_lt % lt_align;
+        if incr < lt_align || 0 == start_lt {
             if start_lt >= (!incr + 1) {
                 bail!("cannot compute start logical time (uint64 overflow)");
             }
@@ -1130,15 +729,16 @@ impl CollatorStdImpl {
 
     fn update_value_flow(
         &self,
-        mc_data: &McData,
-        prev_shard_data: &PrevData,
+        config: &BlockchainConfig,
+        old_global_balance: &CurrencyCollection,
+        prev_total_balance: &CurrencyCollection,
+        total_validator_fees: &CurrencyCollection,
         collation_data: &mut BlockCollationData,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR, "update_value_flow()");
 
         if self.shard_id.is_masterchain() {
-            collation_data.value_flow.created.tokens =
-                mc_data.config.get_block_creation_reward(true)?;
+            collation_data.value_flow.created.tokens = config.get_block_creation_reward(true)?;
 
             collation_data.value_flow.recovered = collation_data.value_flow.created.clone();
             collation_data
@@ -1148,9 +748,9 @@ impl CollatorStdImpl {
             collation_data
                 .value_flow
                 .recovered
-                .try_add_assign(&mc_data.total_validator_fees)?;
+                .try_add_assign(total_validator_fees)?;
 
-            match mc_data.config.get_fee_collector_address() {
+            match config.get_fee_collector_address() {
                 Err(_) => {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "fee recovery disabled (no collector smart contract defined in configuration)",
@@ -1167,10 +767,11 @@ impl CollatorStdImpl {
                 }
             };
 
-            collation_data.value_flow.minted = Self::compute_minted_amount(mc_data)?;
+            collation_data.value_flow.minted =
+                Self::compute_minted_amount(config, old_global_balance)?;
 
             if collation_data.value_flow.minted != CurrencyCollection::ZERO
-                && mc_data.config.get_minter_address().is_err()
+                && config.get_minter_address().is_err()
             {
                 tracing::warn!(target: tracing_targets::COLLATOR,
                     "minting of {:?} disabled: no minting smart contract defined",
@@ -1179,26 +780,23 @@ impl CollatorStdImpl {
                 collation_data.value_flow.minted = CurrencyCollection::default();
             }
         } else {
-            collation_data.value_flow.created.tokens =
-                mc_data.config.get_block_creation_reward(false)?;
+            collation_data.value_flow.created.tokens = config.get_block_creation_reward(false)?;
             collation_data.value_flow.created.tokens >>=
                 collation_data.block_id_short.shard.prefix_len() as u8;
         }
-        // info: `prev_data.observable_accounts().root_extra().balance` is `prev_data.total_balance()` in old node
-        collation_data.value_flow.from_prev_block = prev_shard_data
-            .observable_accounts()
-            .root_extra()
-            .balance
-            .clone();
+        collation_data.value_flow.from_prev_block = prev_total_balance.clone();
         Ok(())
     }
 
-    fn compute_minted_amount(mc_data: &McData) -> Result<CurrencyCollection> {
+    fn compute_minted_amount(
+        config: &BlockchainConfig,
+        old_global_balance: &CurrencyCollection,
+    ) -> Result<CurrencyCollection> {
         tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount");
 
         let mut to_mint = CurrencyCollection::default();
 
-        let to_mint_cp = match mc_data.config.get::<ConfigParam7>() {
+        let to_mint_cp = match config.get::<ConfigParam7>() {
             Ok(Some(v)) => v,
             _ => {
                 tracing::warn!(target: tracing_targets::COLLATOR,
@@ -1208,7 +806,6 @@ impl CollatorStdImpl {
             }
         };
 
-        let old_global_balance = &mc_data.global_balance;
         for item in to_mint_cp.as_dict().iter() {
             let (key, amount) = item?;
             let amount2 = old_global_balance
@@ -1281,15 +878,13 @@ impl CollatorStdImpl {
     /// Create special transactions for the collator
     async fn create_special_transactions(
         &self,
-        mc_data: &McData,
+        config: &BlockchainConfig,
         collator_data: &mut BlockCollationData,
         executor: &mut MessagesExecutor,
         max_new_message_key_to_current_shard: &mut QueueKey,
         iterator: &mut Box<dyn QueueIterator<EnqueuedMessage>>,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions");
-
-        let config = &mc_data.config;
 
         // TODO: Execute in parallel if addresses are distinct?
 
@@ -1394,7 +989,7 @@ impl CollatorStdImpl {
 
     async fn create_ticktock_transactions(
         &self,
-        mc_data: &McData,
+        config: &BlockchainConfig,
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
         executor: &mut MessagesExecutor,
@@ -1409,7 +1004,6 @@ impl CollatorStdImpl {
 
         // TODO: Execute in parallel since these are unique accounts
 
-        let config = &mc_data.config;
         for account_id in config.get_fundamental_addresses()?.keys() {
             self.create_ticktock_transaction(
                 &account_id?,
@@ -1612,6 +1206,614 @@ impl CollatorStdImpl {
             self.stats.tps_block = 0;
             self.stats.tps_execute_count = 0;
         }
+    }
+
+    fn create_collation_data(
+        &mut self,
+        next_block_id_short: BlockIdShort,
+        next_chain_time: u64,
+        mc_data: &Arc<McData>,
+        prev_shard_data: &PrevData,
+        top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
+    ) -> Result<Box<BlockCollationData>> {
+        let created_by = self
+            .anchors_cache
+            .get_last_imported_anchor_author()
+            .unwrap();
+
+        // TODO: need to generate unique for each block
+        // generate seed from the chain_time from the anchor
+        let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
+        let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
+        tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
+
+        let is_masterchain = self.shard_id.is_masterchain();
+
+        if !is_masterchain {
+            self.shard_blocks_count_from_last_anchor += 1;
+        }
+
+        // prepare block collation data
+        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "Block limits: {:?}",
+            block_limits
+        );
+
+        let mut collation_data_builder = BlockCollationDataBuilder::new(
+            next_block_id_short,
+            rand_seed,
+            mc_data.block_id.seqno,
+            next_chain_time,
+            prev_shard_data.processed_upto().clone(),
+            created_by,
+            GlobalVersion {
+                version: self.config.supported_block_version,
+                capabilities: self.config.supported_capabilities,
+            },
+            self.mempool_config_override.clone(),
+        );
+
+        // init ShardHashes descriptions for master
+        if is_masterchain {
+            let shards = prev_shard_data.observable_states()[0]
+                .shards()?
+                .iter()
+                .map(|entry| entry.map(|(shard_ident, descr)| (shard_ident, Box::new(descr))))
+                .collect::<Result<FastHashMap<_, _>, _>>()?;
+            collation_data_builder.set_shards(shards);
+
+            if let Some(top_shard_blocks_info) = top_shard_blocks_info {
+                Self::import_new_shard_top_blocks_for_masterchain(
+                    &mc_data.config,
+                    &mut collation_data_builder,
+                    top_shard_blocks_info,
+                )?;
+            }
+        }
+
+        let start_lt = Self::calc_start_lt(
+            mc_data.gen_lt,
+            mc_data.lt_align(),
+            prev_shard_data.gen_lt(),
+            is_masterchain,
+            collation_data_builder.shards_max_end_lt,
+        )?;
+
+        let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
+
+        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
+            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+        );
+
+        // show internals processed upto
+        collation_data
+            .processed_upto
+            .internals
+            .iter()
+            .for_each(|(shard_ident, processed_upto)| {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "initial processed_upto.internals for shard {}: {}",
+                    shard_ident, processed_upto,
+                );
+            });
+
+        // compute created / minted / recovered / from_prev_block
+        let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
+        self.update_value_flow(
+            &mc_data.config,
+            &mc_data.global_balance,
+            prev_total_balance,
+            &mc_data.total_validator_fees,
+            &mut collation_data,
+        )?;
+
+        Ok(collation_data)
+    }
+
+    async fn prepare_collation(
+        &mut self,
+        collation_config: &CollationConfig,
+        collation_data: &mut Box<BlockCollationData>,
+        msgs_buffer: &mut MessagesBuffer,
+        mc_data: &Arc<McData>,
+        prev_shard_data: &PrevData,
+    ) -> Result<PrepareCollation> {
+        // init executor
+        let executor = MessagesExecutor::new(
+            self.shard_id,
+            collation_data.next_lt,
+            Arc::new(PreloadedBlockchainConfig::with_config(
+                mc_data.config.clone(),
+                mc_data.global_id,
+            )?),
+            Arc::new(ExecuteParams {
+                state_libs: mc_data.libraries.clone(),
+                // generated unix time
+                block_unixtime: collation_data.gen_utime,
+                // block's start logical time
+                block_lt: collation_data.start_lt,
+                // block random seed
+                seed_block: collation_data.rand_seed,
+                block_version: self.config.supported_block_version,
+                ..ExecuteParams::default()
+            }),
+            prev_shard_data.observable_accounts().clone(),
+            collation_config.work_units_params.execute.clone(),
+        );
+
+        // if this is a masterchain, we must take top shard blocks end lt
+        let mc_top_shards_end_lts: Vec<_> = if self.shard_id.is_masterchain() {
+            collation_data
+                .shards()?
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        } else {
+            mc_data.shards.iter().map(|(k, v)| (*k, v.end_lt)).collect()
+        };
+
+        // create iterator adapter
+        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
+            self.shard_id,
+            self.mq_adapter.clone(),
+            msgs_buffer.current_iterator_positions.take().unwrap(),
+            mc_data.gen_lt,
+            prev_shard_data.gen_lt(),
+        );
+
+        // we need to init iterator anyway because we need it to add new messages to queue
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "init iterator for current ranges"
+        );
+        mq_iterator_adapter
+            .try_init_next_range_iterator(
+                &mut collation_data.processed_upto,
+                mc_top_shards_end_lts.iter().copied(),
+                // We always init first iterator during block collation
+                // with current ranges from processed_upto info
+                // and do not touch next range before we read all existing messages buffer.
+                // In this case the initial iterator range will be equal both
+                // on Refill and on Continue.
+                InitIteratorMode::OmitNextRange,
+            )
+            .await?;
+
+        // create messages reader
+        let mut messages_reader = MessagesReader::new(
+            self.shard_id,
+            collation_config.msgs_exec_params.buffer_limit as _,
+            mc_top_shards_end_lts,
+        );
+
+        // refill messages buffer and skip groups upto offset (on node restart)
+        let prev_processed_offset = collation_data.processed_upto.processed_offset;
+        if !msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                prev_processed_offset,
+                "refill messages buffer and skip groups upto",
+            );
+
+            while msgs_buffer.message_groups_offset() < prev_processed_offset {
+                let msg_group = messages_reader
+                    .get_next_message_group(
+                        msgs_buffer,
+                        &mut self.anchors_cache,
+                        collation_data,
+                        &mut mq_iterator_adapter,
+                        &QueueKey::MIN,
+                        GetNextMessageGroupMode::Refill,
+                    )
+                    .await?;
+                if msg_group.is_none() {
+                    // on restart from a new genesis we will not be able to refill buffer with externals
+                    // so we stop refilling when there is no more groups in buffer
+                    break;
+                }
+            }
+
+            // next time we should read next message group like we did not make refill before
+            // so we need to reset flags that control from where to read messages
+            messages_reader.reset_read_flags();
+        }
+
+        Ok(PrepareCollation {
+            messages_reader,
+            executor,
+            mq_iterator_adapter,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute(
+        &mut self,
+        collation_config: &CollationConfig,
+        collation_data: &mut Box<BlockCollationData>,
+        msgs_buffer: &mut MessagesBuffer,
+        mut messages_reader: MessagesReader,
+        executor: &mut MessagesExecutor,
+        max_new_message_key_to_current_shard: &mut QueueKey,
+        mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
+    ) -> Result<ExecuteResult> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let mut fill_msgs_total_elapsed = Duration::ZERO;
+        let mut execute_msgs_total_elapsed = Duration::ZERO;
+        let mut process_txs_total_elapsed = Duration::ZERO;
+        let mut execute_groups_wu_vm_only = 0u64;
+
+        let mut executed_groups_count = 0;
+        loop {
+            let mut timer = std::time::Instant::now();
+            let msgs_group_opt = messages_reader
+                .get_next_message_group(
+                    msgs_buffer,
+                    &mut self.anchors_cache,
+                    collation_data,
+                    mq_iterator_adapter,
+                    max_new_message_key_to_current_shard,
+                    GetNextMessageGroupMode::Continue,
+                )
+                .await?;
+            fill_msgs_total_elapsed += timer.elapsed();
+
+            if let Some(msgs_group) = msgs_group_opt {
+                // Execute messages group
+                timer = std::time::Instant::now();
+                let group_result = executor.execute_group(msgs_group).await?;
+                execute_msgs_total_elapsed += timer.elapsed();
+                executed_groups_count += 1;
+                collation_data.tx_count += group_result.items.len() as u64;
+                collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
+                collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
+                execute_groups_wu_vm_only = execute_groups_wu_vm_only
+                    .saturating_add(group_result.total_exec_wu)
+                    .saturating_add(group_result.ext_msgs_error_count.saturating_mul(
+                        collation_config.work_units_params.execute.execute_err as u64,
+                    ));
+
+                // Process transactions
+                timer = std::time::Instant::now();
+                for item in group_result.items {
+                    self.process_transaction(
+                        item.executor_output,
+                        Some(item.in_message),
+                        collation_data,
+                        executor,
+                        max_new_message_key_to_current_shard,
+                        mq_iterator_adapter.iterator(),
+                    )?;
+                }
+                process_txs_total_elapsed += timer.elapsed();
+
+                if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "block limits reached: {:?}", collation_data.block_limit,
+                    );
+                    metrics::counter!("tycho_do_collate_blocks_with_limits_reached_count", &labels)
+                        .increment(1);
+                    break;
+                }
+            } else if mq_iterator_adapter.no_pending_existing_internals()
+                && mq_iterator_adapter.no_pending_new_messages()
+            {
+                break;
+            }
+        }
+
+        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_millis();
+
+        metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
+            .set(executed_groups_count as f64);
+
+        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
+            .record(fill_msgs_total_elapsed);
+
+        let init_iterator_elapsed = mq_iterator_adapter.init_iterator_total_elapsed();
+        metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
+            .record(init_iterator_elapsed);
+        let read_existing_messages_elapsed = messages_reader.read_existing_messages_total_elapsed();
+        metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
+            .record(read_existing_messages_elapsed);
+        let read_new_messages_elapsed = messages_reader.read_new_messages_total_elapsed();
+        metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
+            .record(read_new_messages_elapsed);
+        let read_ext_messages_elapsed = messages_reader.read_ext_messages_total_elapsed();
+        metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
+            .record(read_ext_messages_elapsed);
+        let add_to_message_groups_elapsed = messages_reader.add_to_message_groups_total_elapsed();
+        metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
+            .record(add_to_message_groups_elapsed);
+
+        metrics::histogram!("tycho_do_collate_exec_msgs_total_time", &labels)
+            .record(execute_msgs_total_elapsed);
+        metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
+            .record(process_txs_total_elapsed);
+
+        let last_read_to_anchor_chain_time = messages_reader.last_read_to_anchor_chain_time();
+
+        Ok(ExecuteResult {
+            execute_groups_wu_vm_only,
+            fill_msgs_total_elapsed,
+            execute_msgs_total_elapsed,
+            process_txs_total_elapsed,
+            init_iterator_elapsed,
+            read_existing_messages_elapsed,
+            read_ext_messages_elapsed,
+            read_new_messages_elapsed,
+            add_to_message_groups_elapsed,
+
+            last_read_to_anchor_chain_time,
+        })
+    }
+
+    async fn update_queue_diff(
+        &mut self,
+        mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
+        collation_data: &mut Box<BlockCollationData>,
+        msgs_buffer: &mut MessagesBuffer,
+        prev_hash: HashBytes,
+    ) -> Result<UpdateQueueDiffResult> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        // get queue diff and check for pending internals
+        let histogram_create_queue_diff =
+            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
+
+        let (has_pending_internals_in_iterator, diff_with_messages) = mq_iterator_adapter.release(
+            !msgs_buffer.has_pending_messages(),
+            &mut msgs_buffer.current_iterator_positions,
+        )?;
+
+        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+
+        let diff_messages_len = diff_with_messages.messages.len();
+        let has_unprocessed_messages =
+            msgs_buffer.has_pending_messages() || has_pending_internals_in_iterator;
+
+        let (min_message, max_message) = {
+            let messages = &diff_with_messages.messages;
+            match messages.first_key_value().zip(messages.last_key_value()) {
+                Some(((min, _), (max, _))) => (*min, *max),
+                None => (
+                    QueueKey::min_for_lt(collation_data.start_lt),
+                    QueueKey::max_for_lt(collation_data.next_lt),
+                ),
+            }
+        };
+
+        let queue_diff = QueueDiffStuff::builder(
+            self.shard_id,
+            collation_data.block_id_short.seqno,
+            &prev_hash,
+        )
+        .with_processed_upto(
+            diff_with_messages
+                .processed_upto
+                .iter()
+                .map(|(k, v)| (*k, v.lt, &v.hash)),
+        )
+        .with_messages(
+            &min_message,
+            &max_message,
+            diff_with_messages.messages.keys().map(|k| &k.hash),
+        )
+        .serialize();
+
+        let queue_diff_hash = *queue_diff.hash();
+        tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
+
+        // start async update queue task
+        let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
+            JoinTask::<Result<_>>::new({
+                let block_id_short = collation_data.block_id_short;
+                let mq_adapter = self.mq_adapter.clone();
+                let labels = labels.clone();
+                async move {
+                    // apply queue diff
+                    let histogram = HistogramGuard::begin_with_labels(
+                        "tycho_do_collate_apply_queue_diff_time",
+                        &labels,
+                    );
+
+                    mq_adapter
+                        .apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)
+                        .await?;
+                    let apply_queue_diff_elapsed = histogram.finish();
+
+                    Ok(apply_queue_diff_elapsed)
+                }
+            });
+        Ok(UpdateQueueDiffResult {
+            queue_diff,
+            update_queue_task,
+            has_unprocessed_messages,
+            diff_messages_len,
+            create_queue_diff_elapsed,
+        })
+    }
+
+    async fn finalize_collation(
+        &mut self,
+        collation_config: Arc<CollationConfig>,
+        mc_data: Arc<McData>,
+        msgs_buffer: MessagesBuffer,
+        has_unprocessed_messages: bool,
+        finalized: FinalizedBlock,
+        tracker: MinRefMcStateTracker,
+    ) -> Result<CollationResult> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let block_id = *finalized.block_candidate.block.id();
+        let is_key_block = finalized.block_candidate.is_key_block;
+        let store_new_state_task = JoinTask::new({
+            let meta = NewBlockMeta {
+                is_key_block,
+                gen_utime: finalized.collation_data.gen_utime,
+                ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
+            };
+            let adapter = self.state_node_adapter.clone();
+            let labels = labels.clone();
+            let new_state_root = finalized.new_state_root.clone();
+            async move {
+                let _histogram = HistogramGuard::begin_with_labels(
+                    "tycho_collator_build_new_state_time",
+                    &labels,
+                );
+                adapter
+                    .store_state_root(&block_id, meta, new_state_root)
+                    .await
+            }
+        });
+
+        let handle_block_candidate_elapsed;
+        {
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_do_collate_handle_block_candidate_time",
+                &labels,
+            );
+
+            let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
+
+            let collation_config = match &finalized.mc_data {
+                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
+                None => collation_config,
+            };
+
+            // return collation result
+            self.listener
+                .on_block_candidate(BlockCollationResult {
+                    collation_session_id: self.collation_session.id(),
+                    candidate: finalized.block_candidate,
+                    prev_mc_block_id: mc_data.block_id,
+                    mc_data: finalized.mc_data.clone(),
+                    collation_config: collation_config.clone(),
+                    has_unprocessed_messages,
+                })
+                .await?;
+
+            let new_mc_data = finalized.mc_data.unwrap_or(mc_data);
+
+            // spawn update PrevData and working state
+            self.prepare_working_state_update(
+                block_id,
+                finalized.new_observable_state,
+                finalized.new_state_root,
+                store_new_state_task,
+                new_queue_diff_hash,
+                new_mc_data,
+                collation_config,
+                has_unprocessed_messages,
+                msgs_buffer,
+                tracker,
+            )
+            .await?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "working state updated prepare spawned",
+            );
+
+            // update next block info
+            self.next_block_info = block_id.get_next_id_short();
+
+            handle_block_candidate_elapsed = histogram.finish();
+        }
+        Ok(CollationResult {
+            handle_block_candidate_elapsed,
+            collation_data: finalized.collation_data,
+        })
+    }
+
+    fn collation_data_metrics(&self, collation_data: &BlockCollationData) {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        metrics::counter!("tycho_do_collate_tx_total", &labels).increment(collation_data.tx_count);
+        metrics::gauge!("tycho_do_collate_tx_per_block", &labels)
+            .set(collation_data.tx_count as f64);
+        metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
+            .set(collation_data.accounts_count as f64);
+        metrics::counter!("tycho_do_collate_int_enqueue_count")
+            .increment(collation_data.int_enqueue_count);
+        metrics::counter!("tycho_do_collate_int_dequeue_count")
+            .increment(collation_data.int_dequeue_count);
+        metrics::gauge!("tycho_do_collate_int_msgs_queue_calc").increment(
+            (collation_data.int_enqueue_count as i64 - collation_data.int_dequeue_count as i64)
+                as f64,
+        );
+        metrics::counter!("tycho_do_collate_msgs_exec_count_all", &labels)
+            .increment(collation_data.execute_count_all);
+        // external messages
+        metrics::counter!("tycho_do_collate_msgs_read_count_ext", &labels)
+            .increment(collation_data.read_ext_msgs);
+        metrics::counter!("tycho_do_collate_msgs_exec_count_ext", &labels)
+            .increment(collation_data.execute_count_ext);
+        metrics::counter!("tycho_do_collate_msgs_error_count_ext", &labels)
+            .increment(collation_data.ext_msgs_error_count);
+        metrics::counter!("tycho_do_collate_msgs_skipped_count_ext", &labels)
+            .increment(collation_data.ext_msgs_skipped);
+        // existing internals messages
+        metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
+            .increment(collation_data.read_int_msgs_from_iterator);
+        metrics::counter!("tycho_do_collate_msgs_exec_count_int", &labels)
+            .increment(collation_data.execute_count_int);
+        // new internals messages
+        metrics::counter!("tycho_do_collate_new_msgs_created_count", &labels)
+            .increment(collation_data.new_msgs_created);
+        metrics::counter!(
+            "tycho_do_collate_new_msgs_inserted_to_iterator_count",
+            &labels
+        )
+        .increment(collation_data.inserted_new_msgs_to_iterator);
+        metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
+            .increment(collation_data.read_new_msgs_from_iterator);
+        metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
+            .increment(collation_data.execute_count_new_int);
+        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
+            .set(collation_data.block_id_short.seqno);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wu_metrics(
+        &self,
+        prepare_groups_wu_total: u64,
+        execute_groups_wu_total: u64,
+        finalize_wu_total: u64,
+        execute_groups_wu_vm_only: u64,
+        process_txs_wu: u64,
+        fill_msgs_total_elapsed: Duration,
+        execute_msgs_total_elapsed: Duration,
+        process_txs_total_elapsed: Duration,
+        finalize_block_elapsed: Duration,
+        total_elapsed: Duration,
+    ) {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
+            .set(prepare_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
+            .set(execute_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
+            execute_groups_wu_total as f64
+                + finalize_wu_total as f64
+                + prepare_groups_wu_total as f64,
+        );
+
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
+            .set(fill_msgs_total_elapsed.as_nanos() as f64 / prepare_groups_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
+            (execute_msgs_total_elapsed.as_nanos() as f64
+                + process_txs_total_elapsed.as_nanos() as f64)
+                / execute_groups_wu_total as f64,
+        );
+        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
+            .set(execute_msgs_total_elapsed.as_nanos() as f64 / execute_groups_wu_vm_only as f64);
+        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
+            .set(process_txs_total_elapsed.as_nanos() as f64 / process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
+            .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
+
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_total", &labels).set(
+            total_elapsed.as_nanos() as f64
+                / (execute_groups_wu_total + finalize_wu_total + prepare_groups_wu_total) as f64,
+        );
     }
 }
 

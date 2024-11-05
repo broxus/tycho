@@ -34,8 +34,7 @@ use crate::types::{
 #[path = "tests/execution_manager_tests.rs"]
 pub(super) mod tests;
 
-/// Execution manager
-pub(super) struct ExecutionManager {
+pub(super) struct MessagesReader {
     shard_id: ShardIdent,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
@@ -61,27 +60,12 @@ pub(super) struct ExecutionManager {
     mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
 }
 
-pub(super) struct MessagesExecutor {
-    shard_id: ShardIdent,
-    // this time is used if account's lt is smaller
-    min_next_lt: u64,
-    /// blockchain config
-    config: Arc<PreloadedBlockchainConfig>,
-    /// vm execution params related to current block
-    params: Arc<ExecuteParams>,
-    /// shard accounts
-    accounts_cache: AccountsCache,
-    /// Params to calculate messages execution work in work units
-    wu_params_execute: WorkUnitsParamsExecute,
-}
-
 pub(super) enum GetNextMessageGroupMode {
     Continue,
     Refill,
 }
 
-impl ExecutionManager {
-    /// constructor
+impl MessagesReader {
     pub fn new(
         shard_id: ShardIdent,
         messages_buffer_limit: usize,
@@ -109,7 +93,7 @@ impl ExecutionManager {
         self.read_new_messages = false;
     }
 
-    pub fn get_last_read_to_anchor_chain_time(&self) -> Option<u64> {
+    pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
         self.last_read_to_anchor_chain_time
     }
 
@@ -472,6 +456,20 @@ impl ExecutionManager {
     }
 }
 
+pub(super) struct MessagesExecutor {
+    shard_id: ShardIdent,
+    // this time is used if account's lt is smaller
+    min_next_lt: u64,
+    /// blockchain config
+    config: Arc<PreloadedBlockchainConfig>,
+    /// vm execution params related to current block
+    params: Arc<ExecuteParams>,
+    /// shard accounts
+    accounts_cache: AccountsCache,
+    /// Params to calculate messages execution work in work units
+    wu_params_execute: WorkUnitsParamsExecute,
+}
+
 impl MessagesExecutor {
     pub fn new(
         shard_id: ShardIdent,
@@ -502,8 +500,17 @@ impl MessagesExecutor {
         &self.params
     }
 
-    pub fn into_changed_accounts(self) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
-        self.accounts_cache.items.into_values()
+    pub fn into_accounts_cache_raw(
+        self,
+    ) -> (
+        impl ExactSizeIterator<Item = Box<ShardAccountStuff>>,
+        ShardAccounts,
+    ) {
+        let AccountsCache {
+            shard_accounts,
+            items,
+        } = self.accounts_cache;
+        (items.into_values(), shard_accounts)
     }
 
     pub fn take_account_stuff_if<F>(

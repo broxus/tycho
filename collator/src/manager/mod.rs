@@ -39,7 +39,7 @@ use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEven
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
-    ShardDescriptionExt, ShardDescriptionShort,
+    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::shard::calc_split_merge_actions;
@@ -366,9 +366,9 @@ where
             Self::detect_top_processed_to_anchor(
                 state
                     .shards()?
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .map(|(_, descr)| descr.into()),
+                    .as_vec()?
+                    .into_iter()
+                    .map(|(_, descr)| descr),
                 processed_upto.externals.as_ref(),
             )?;
 
