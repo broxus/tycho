@@ -39,7 +39,7 @@ use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEven
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
-    ShardDescriptionExt,
+    ShardDescriptionExt, ShardDescriptionShort,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::shard::calc_split_merge_actions;
@@ -364,7 +364,11 @@ where
 
         let (top_processed_to_anchor_id, mc_processed_to_anchor_id) =
             Self::detect_top_processed_to_anchor(
-                state.shards()?,
+                &mut state
+                    .shards()?
+                    .iter()
+                    .filter_map(|r| r.ok())
+                    .map(|(_, v)| (&v).into()),
                 processed_upto.externals.as_ref(),
             )?;
 
@@ -397,7 +401,7 @@ where
 
     /// Returns (`min_top_processed_to_anchor_id`, Option<`mc_processed_to_anchor_id`>)
     fn detect_top_processed_to_anchor(
-        shards_info: &ShardHashes,
+        shards: &mut dyn Iterator<Item = ShardDescriptionShort>,
         externals_processed_upto: Option<&ExternalsProcessedUpto>,
     ) -> Result<(MempoolAnchorId, Option<MempoolAnchorId>)> {
         let mut min_top_processed_to_anchor_id = 0;
@@ -408,11 +412,15 @@ where
             min_top_processed_to_anchor_id = upto.processed_to.0;
 
             // read from shard descriptions to get min
-            for item in shards_info.iter() {
-                let (_, shard_descr) = item?;
-                if shard_descr.top_sc_block_updated {
+            for ShardDescriptionShort {
+                top_sc_block_updated,
+                ext_processed_to_anchor_id,
+                ..
+            } in shards
+            {
+                if top_sc_block_updated {
                     min_top_processed_to_anchor_id =
-                        min_top_processed_to_anchor_id.min(shard_descr.ext_processed_to_anchor_id);
+                        min_top_processed_to_anchor_id.min(ext_processed_to_anchor_id);
                 }
             }
         }
@@ -1246,7 +1254,7 @@ where
 
                 // clean anchors cache in mempool
                 let (top_processed_to_anchor_id, _) = Self::detect_top_processed_to_anchor(
-                    &mc_data.shards,
+                    &mut mc_data.shards.values().copied(),
                     state.state().processed_upto.load()?.externals.as_ref(),
                 )?;
                 self.mpool_adapter
@@ -1448,11 +1456,10 @@ where
         // get new shards info from updated master state
         let mut new_shards_info = FastHashMap::default();
         new_shards_info.insert(ShardIdent::MASTERCHAIN, vec![mc_data.block_id]);
-        for shard in mc_data.shards.iter() {
-            let (shard_id, descr) = shard?;
-            let top_block_id = descr.get_block_id(shard_id);
+        for (shard_id, descr) in mc_data.shards.iter() {
+            let top_block_id = descr.get_block_id(*shard_id);
             // TODO: consider split and merge
-            new_shards_info.insert(shard_id, vec![top_block_id]);
+            new_shards_info.insert(*shard_id, vec![top_block_id]);
         }
 
         // update shards in msgs queue
