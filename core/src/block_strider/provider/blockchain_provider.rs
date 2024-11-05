@@ -2,7 +2,7 @@ use std::pin::pin;
 use std::time::Duration;
 
 use everscale_types::models::*;
-use futures_util::future::BoxFuture;
+use futures_util::future::{self, BoxFuture};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockIdRelation, BlockProofStuff, BlockStuff};
@@ -197,6 +197,7 @@ impl BlockchainBlockProvider {
 impl BlockProvider for BlockchainBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(self.get_next_block_impl(prev_block_id))
@@ -204,5 +205,9 @@ impl BlockProvider for BlockchainBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id_relation))
+    }
+
+    fn reset(&self) -> Self::ResetFut<'_> {
+        Box::pin(future::ready(()))
     }
 }

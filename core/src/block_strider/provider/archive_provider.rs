@@ -171,6 +171,16 @@ impl ArchiveBlockProvider {
         Some(Ok(block.clone()))
     }
 
+    async fn reset_impl(&self) {
+        let this = self.inner.as_ref();
+
+        let mut next_archive = this.next_archive.lock().await;
+        *next_archive = None;
+
+        this.last_known_archive.store(None);
+        this.prev_known_archive.store(None);
+    }
+
     async fn get_next_archive(&self, next_block_seqno: u32) -> Result<Option<Archive>> {
         let mut guard = self.inner.next_archive.lock().await;
 
@@ -364,6 +374,7 @@ enum ArchiveData {
 impl BlockProvider for ArchiveBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(self.get_next_block_impl(prev_block_id))
@@ -371,6 +382,10 @@ impl BlockProvider for ArchiveBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id_relation))
+    }
+
+    fn reset(&self) -> Self::ResetFut<'_> {
+        Box::pin(self.reset_impl())
     }
 }
 

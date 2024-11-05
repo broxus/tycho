@@ -1,4 +1,5 @@
 use everscale_types::models::BlockId;
+use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::Storage;
@@ -21,6 +22,7 @@ impl StorageBlockProvider {
 impl BlockProvider for StorageBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
@@ -43,5 +45,9 @@ impl BlockProvider for StorageBlockProvider {
                 Err(e) => Some(Err(e)),
             }
         })
+    }
+
+    fn reset(&self) -> Self::ResetFut<'_> {
+        Box::pin(future::ready(()))
     }
 }
