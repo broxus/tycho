@@ -856,9 +856,8 @@ impl CollatorStdImpl {
 
                 // find top shard block seqno for current shard from mc data
                 let mut top_sc_block_seqno_from_mc_data = 0;
-                for item in working_state.mc_data.shards.iter() {
-                    let (shard_id, shard_descr) = item?;
-                    if working_state_shard_id == shard_id && !shard_descr.top_sc_block_updated {
+                for (shard_id, shard_descr) in working_state.mc_data.shards.iter() {
+                    if working_state_shard_id == *shard_id && !shard_descr.top_sc_block_updated {
                         top_sc_block_seqno_from_mc_data = shard_descr.seqno;
                         break;
                     }
@@ -1297,9 +1296,8 @@ impl CollatorStdImpl {
 
         // calc uncommitted chain length
         let mut last_committed_seqno = 0;
-        for shard in working_state.mc_data.shards.iter() {
-            let (shard_id, shard_descr) = shard?;
-            if shard_id == self.shard_id {
+        for (shard_id, shard_descr) in working_state.mc_data.shards.iter() {
+            if *shard_id == self.shard_id {
                 last_committed_seqno = shard_descr.seqno;
             }
         }
