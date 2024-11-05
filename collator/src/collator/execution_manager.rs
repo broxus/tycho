@@ -502,8 +502,17 @@ impl MessagesExecutor {
         &self.params
     }
 
-    pub fn into_changed_accounts(self) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
-        self.accounts_cache.items.into_values()
+    pub fn into_accounts_cache_raw(
+        self,
+    ) -> (
+        impl ExactSizeIterator<Item = Box<ShardAccountStuff>>,
+        ShardAccounts,
+    ) {
+        let AccountsCache {
+            shard_accounts,
+            items,
+        } = self.accounts_cache;
+        (items.into_values(), shard_accounts)
     }
 
     pub fn take_account_stuff_if<F>(
