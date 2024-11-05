@@ -8,12 +8,12 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
-use super::types::WorkingState;
+use super::types::{PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
+use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff, ShardDescriptionShort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitIteratorMode {
@@ -226,34 +226,12 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             // TODO: for mc block here we will read internals from shards on previous mc block
             //      because we use previous mc_data. Needs to pass actual shards descriptions here
 
-            // try update shardchains ranges
-            for shard in working_state.mc_data.shards.iter() {
-                let (shard_id, shard_descr) = shard?;
-
-                // add default shardchain range if not exist
-                ranges_from.entry(shard_id).or_insert_with(|| {
-                    ranges_updated = true;
-                    QueueKey::MIN
-                });
-                let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
-                    ranges_updated = true;
-                    QueueKey::max_for_lt(0)
-                });
-
-                // try update shardchain read_to
-                let new_sc_read_to_lt = if self.shard_id == shard_id {
-                    // get new read_to LT from PrevData
-                    prev_shard_data.gen_lt()
-                } else {
-                    // get new read_to LT from ShardDescription
-                    shard_descr.end_lt
-                };
-                if sc_read_to.lt < new_sc_read_to_lt {
-                    sc_read_to.lt = new_sc_read_to_lt;
-                    sc_read_to.hash = HashBytes([255; 32]);
-                    ranges_updated = true;
-                }
-            }
+            ranges_updated |= self.try_update_shardchain_ranges(
+                &mut working_state.mc_data.shards.iter(),
+                &mut ranges_from,
+                &mut ranges_to,
+                prev_shard_data,
+            );
 
             // if ranges changed then init new iterator
             if ranges_updated {
@@ -311,6 +289,43 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         self.init_iterator_total_elapsed += timer.elapsed();
 
         Ok(res)
+    }
+
+    fn try_update_shardchain_ranges(
+        &mut self,
+        shards: &mut dyn Iterator<Item = (&ShardIdent, &ShardDescriptionShort)>,
+        ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
+        ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
+        prev_shard_data: &PrevData,
+    ) -> bool {
+        let mut ranges_updated = false;
+        // try update shardchains ranges
+        for (shard_id, shard_descr) in shards {
+            // add default shardchain range if not exist
+            ranges_from.entry(*shard_id).or_insert_with(|| {
+                ranges_updated = true;
+                QueueKey::MIN
+            });
+            let sc_read_to = ranges_to.entry(*shard_id).or_insert_with(|| {
+                ranges_updated = true;
+                QueueKey::max_for_lt(0)
+            });
+
+            // try update shardchain read_to
+            let new_sc_read_to_lt = if self.shard_id == *shard_id {
+                // get new read_to LT from PrevData
+                prev_shard_data.gen_lt()
+            } else {
+                // get new read_to LT from ShardDescription
+                shard_descr.end_lt
+            };
+            if sc_read_to.lt < new_sc_read_to_lt {
+                sc_read_to.lt = new_sc_read_to_lt;
+                sc_read_to.hash = HashBytes([255; 32]);
+                ranges_updated = true;
+            }
+        }
+        ranges_updated
     }
 
     pub fn next_existing_message(&mut self) -> Result<Option<IterItem<V>>> {
