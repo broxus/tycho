@@ -335,17 +335,17 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     assert!(!msgs_buffer.has_pending_messages());
     assert!(prev_processed_offset > 0);
 
-    let shards = vec![];
+    let mc_top_shards_end_lts = vec![];
     mq_iterator_adapter
         .try_init_next_range_iterator(
             &mut collation_data.processed_upto,
-            shards.iter().copied(),
+            mc_top_shards_end_lts.iter().copied(),
             InitIteratorMode::OmitNextRange,
         )
         .await
         .unwrap();
 
-    let mut exec_manager = ExecutionManager::new(shard_id, 20, shards);
+    let mut exec_manager = ExecutionManager::new(shard_id, 20, mc_top_shards_end_lts);
 
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
         let msg_group = exec_manager

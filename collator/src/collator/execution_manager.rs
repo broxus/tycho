@@ -56,8 +56,9 @@ pub(super) struct ExecutionManager {
     read_ext_messages_total_elapsed: Duration,
     /// sum total time of adding messages to groups
     add_to_message_groups_total_elapsed: Duration,
-    /// shards description end lt  
-    shards_description_end_lt: Vec<(ShardIdent, u64)>,
+
+    /// end lt list from top shards of mc block
+    mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
 }
 
 pub(super) struct MessagesExecutor {
@@ -84,7 +85,7 @@ impl ExecutionManager {
     pub fn new(
         shard_id: ShardIdent,
         messages_buffer_limit: usize,
-        shards_description_end_lt: Vec<(ShardIdent, u64)>,
+        mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
     ) -> Self {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
             .set(messages_buffer_limit as f64);
@@ -99,7 +100,7 @@ impl ExecutionManager {
             read_ext_messages_total_elapsed: Duration::ZERO,
             add_to_message_groups_total_elapsed: Duration::ZERO,
             last_read_to_anchor_chain_time: None,
-            shards_description_end_lt,
+            mc_top_shards_end_lts,
         }
     }
 
@@ -258,7 +259,7 @@ impl ExecutionManager {
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(
                         &mut collation_data.processed_upto,
-                        self.shards_description_end_lt.iter().copied(),
+                        self.mc_top_shards_end_lts.iter().copied(),
                         init_iterator_mode,
                     )
                     .await?;
