@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
@@ -12,12 +13,16 @@ use everscale_types::models::{
     ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent,
     ShardIdentFull, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
+use tycho_util::futures::JoinTask;
 use tycho_util::FastHashMap;
 
+use super::execution_manager::{MessagesExecutor, MessagesPreparer};
+use super::mq_iterator_adapter::QueueIteratorAdapter;
+use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
@@ -360,7 +365,7 @@ pub(super) struct BlockCollationData {
     pub read_new_msgs_from_iterator: u64,
 
     pub start_lt: u64,
-    // Should be updated on each tx finalization from ExecutionManager.max_lt
+    // Should be updated on each tx finalization from MessagesPreparer.max_lt
     // which is updating during tx execution
     pub next_lt: u64,
 
@@ -1289,4 +1294,35 @@ pub struct ParsedExternals {
 pub(super) enum ReadNextExternalsMode {
     ToTheEnd,
     ToPreviuosReadTo,
+}
+
+pub struct PrepareCollation {
+    pub executor: MessagesExecutor,
+    pub messages_preparer: MessagesPreparer,
+    pub mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
+}
+
+pub struct ExecuteResult {
+    pub execute_groups_wu_vm_only: u64,
+    pub fill_msgs_total_elapsed: Duration,
+    pub execute_msgs_total_elapsed: Duration,
+    pub process_txs_total_elapsed: Duration,
+    pub init_iterator_elapsed: Duration,
+    pub read_existing_messages_elapsed: Duration,
+    pub read_ext_messages_elapsed: Duration,
+    pub read_new_messages_elapsed: Duration,
+    pub add_to_message_groups_elapsed: Duration,
+}
+
+pub struct QueueDiffResult {
+    pub queue_diff: SerializedQueueDiff,
+    pub update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>>,
+    pub has_unprocessed_messages: bool,
+    pub diff_messages_len: usize,
+    pub create_queue_diff_elapsed: Duration,
+}
+
+pub struct CollationResult {
+    pub handle_block_candidate_elapsed: Duration,
+    pub collation_data: Box<BlockCollationData>,
 }
