@@ -20,12 +20,12 @@ use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{AnchorData, CommitResult, Point, PointInfo, Round};
+use crate::models::{AnchorData, MempoolOutput, Point, PointInfo, Round};
 
 pub struct Engine {
     dag: DagFront,
     committer_run: JoinHandle<Committer>,
-    committed_info_tx: mpsc::UnboundedSender<CommitResult>,
+    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
@@ -64,7 +64,7 @@ impl Engine {
         overlay_service: &OverlayService,
         mempool_adapter_store: &MempoolAdapterStore,
         input_buffer: InputBuffer,
-        committed_info_tx: mpsc::UnboundedSender<CommitResult>,
+        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
         config: &MempoolConfig,
     ) -> Self {
@@ -235,6 +235,7 @@ impl Engine {
         let mut start_point_with_state = self.pre_run().await;
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
+        let mut is_paused = true;
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
@@ -273,6 +274,11 @@ impl Engine {
                     .await
                     .ok();
 
+                if !is_paused {
+                    is_paused = true;
+                    self.committed_info_tx.send(MempoolOutput::Paused).ok();
+                }
+
                 if let Some(committer) = ready_committer {
                     self.committer_run = committer_task(
                         committer,
@@ -283,6 +289,11 @@ impl Engine {
                 }
 
                 continue;
+            }
+
+            if is_paused {
+                is_paused = false;
+                self.committed_info_tx.send(MempoolOutput::Running).ok();
             }
 
             *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
@@ -395,13 +406,13 @@ fn take_committer(committer_run: &mut JoinHandle<Committer>) -> Option<Committer
 fn committer_task(
     mut committer: Committer,
     full_history_bottom: Option<Round>,
-    committed_info_tx: mpsc::UnboundedSender<CommitResult>,
+    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
     round_effects: Effects<EngineContext>,
 ) -> JoinHandle<Committer> {
     tokio::task::spawn_blocking(move || {
         if let Some(full_history_bottom) = full_history_bottom {
             committed_info_tx
-                .send(CommitResult::NewStartAfterGap(full_history_bottom)) // not recoverable
+                .send(MempoolOutput::NewStartAfterGap(full_history_bottom)) // not recoverable
                 .expect("Failed to send anchor history info to mpsc channel");
         };
 
@@ -412,7 +423,7 @@ fn committer_task(
         for data in committed {
             round_effects.commit_metrics(&data.anchor);
             committed_info_tx
-                .send(CommitResult::Next(data)) // not recoverable
+                .send(MempoolOutput::NextAnchor(data)) // not recoverable
                 .expect("Failed to send anchor history info to mpsc channel");
         }
 

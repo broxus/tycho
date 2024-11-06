@@ -12,11 +12,11 @@ use tycho_util::FastHashMap;
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::Genesis;
-use crate::models::{CommitResult, PointId, Round};
+use crate::models::{MempoolOutput, PointId, Round};
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<CommitResult>>,
+    streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
@@ -32,7 +32,7 @@ pub struct AnchorConsumer {
 }
 
 impl AnchorConsumer {
-    pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<CommitResult>) {
+    pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
@@ -53,8 +53,10 @@ impl AnchorConsumer {
                 .await
                 .expect("committed anchor reader must be alive");
             match commit_result {
-                CommitResult::NewStartAfterGap(_) => {}
-                CommitResult::Next(anchor_data) => {
+                MempoolOutput::Running
+                | MempoolOutput::Paused
+                | MempoolOutput::NewStartAfterGap(_) => {}
+                MempoolOutput::NextAnchor(anchor_data) => {
                     self.top_known_anchor.set_max(anchor_data.anchor.round());
                     self.commit_round.set_max(anchor_data.anchor.round());
                 }
@@ -76,11 +78,14 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
 
             let (anchor, history) = match commit_result {
-                CommitResult::NewStartAfterGap(round) => {
+                MempoolOutput::Running | MempoolOutput::Paused => {
+                    continue;
+                }
+                MempoolOutput::NewStartAfterGap(round) => {
                     tracing::warn!("unrecoverable gap at {} for {}", round.0, peer_id.alt());
                     continue;
                 }
-                CommitResult::Next(data) => (data.anchor, data.history),
+                MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             };
 
             let anchor_id = anchor.id();

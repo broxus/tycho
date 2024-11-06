@@ -221,7 +221,7 @@ impl MempoolAdapterStdImpl {
         cache: Arc<Cache>,
         store: MempoolAdapterStore,
         config: ConsensusConfig,
-        mut anchor_rx: mpsc::UnboundedReceiver<CommitResult>,
+        mut anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,
     ) {
         scopeguard::defer!(tracing::warn!(
             target: tracing_targets::MEMPOOL_ADAPTER,
@@ -231,7 +231,7 @@ impl MempoolAdapterStdImpl {
         let mut first_after_gap = None;
         while let Some(commit) = anchor_rx.recv().await {
             let (anchor, history) = match commit {
-                CommitResult::NewStartAfterGap(anchors_full_bottom) => {
+                MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
                     parser = Parser::new(config.deduplicate_rounds);
                     store.report_new_start(anchors_full_bottom);
@@ -246,7 +246,15 @@ impl MempoolAdapterStdImpl {
                     );
                     continue;
                 }
-                CommitResult::Next(data) => (data.anchor, data.history),
+                MempoolOutput::Running => {
+                    cache.set_paused(false);
+                    continue;
+                }
+                MempoolOutput::Paused => {
+                    cache.set_paused(true);
+                    continue;
+                }
+                MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             };
 
             let task = tokio::task::spawn_blocking({
