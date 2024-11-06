@@ -68,16 +68,18 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
     async fn get_anchor_by_id(
         &self,
+        top_processed_to_anchor: MempoolAnchorId,
         anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>>;
+    ) -> Result<GetAnchorResult>;
 
     /// Request, await, and return the next anchor after the specified previous one.
     /// If anchor does not exist then await until it be produced or downloaded during sync.
     /// Return None if anchor cannot be produced or synced from other nodes.
     async fn get_next_anchor(
         &self,
+        top_processed_to_anchor: MempoolAnchorId,
         prev_anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>>;
+    ) -> Result<GetAnchorResult>;
 
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks
@@ -130,5 +132,19 @@ impl MempoolAnchor {
         from_idx: usize,
     ) -> impl Iterator<Item = Arc<ExternalMessage>> + '_ {
         self.externals.iter().skip(from_idx).cloned()
+    }
+}
+
+pub enum GetAnchorResult {
+    NotExist,
+    Exist(Arc<MempoolAnchor>),
+}
+
+impl GetAnchorResult {
+    pub fn anchor(&self) -> Option<&MempoolAnchor> {
+        match self {
+            Self::Exist(arc) => Some(arc),
+            Self::NotExist => None,
+        }
     }
 }

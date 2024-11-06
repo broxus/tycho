@@ -12,5 +12,5 @@ pub mod prelude {
     pub use crate::engine::{
         Engine, EngineHandle, InputBuffer, MempoolConfig, MempoolConfigBuilder, MempoolNodeConfig,
     };
-    pub use crate::models::{AnchorData, CommitResult, PointInfo};
+    pub use crate::models::{AnchorData, MempoolOutput, PointInfo};
 }

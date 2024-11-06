@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, ConsensusConfig, ValidatorSet};
-use parking_lot::lock_api::MutexGuard;
-use parking_lot::{Mutex, RawMutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_storage::MempoolStorage;
@@ -21,18 +19,18 @@ use tycho_util::time::now_millis;
 use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
-    DebugStateUpdateContext, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId,
-    MempoolEventListener, StateUpdateContext,
+    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor,
+    MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 
-struct UnappliedConfig {
+struct EngineConfig {
     builder: MempoolConfigBuilder,
     state_update_ctx: Option<StateUpdateContext>,
     engine_handle: Option<EngineHandle>,
 }
 
-impl UnappliedConfig {
+impl EngineConfig {
     fn apply_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
         let round = new_cx.consensus_info.vset_switch_round;
         let whole_set = (new_cx.current_validator_set.1.list.iter())
@@ -119,7 +117,7 @@ impl UnappliedConfig {
 }
 
 pub struct MempoolAdapterStdImpl {
-    unapplied_config: Mutex<UnappliedConfig>,
+    engine_config: Mutex<EngineConfig>,
 
     cache: Arc<Cache>,
 
@@ -146,7 +144,7 @@ impl MempoolAdapterStdImpl {
         config_builder.set_node_config(mempool_node_config);
 
         Self {
-            unapplied_config: Mutex::new(UnappliedConfig {
+            engine_config: Mutex::new(EngineConfig {
                 builder: config_builder,
                 state_update_ctx: None,
                 engine_handle: None,
@@ -163,19 +161,16 @@ impl MempoolAdapterStdImpl {
     }
 
     /// **Warning:** only to apply changes from `GlobalConfig` json after mempool crash
-    pub fn override_config<F>(&self, fun: F)
+    pub async fn override_config<F>(&self, fun: F)
     where
         F: FnOnce(&mut MempoolConfigBuilder),
     {
-        let mut guard = self.unapplied_config.lock();
+        let mut guard = self.engine_config.lock().await;
         fun(&mut guard.builder);
     }
 
     /// Runs mempool engine
-    fn run(
-        &self,
-        config_guard: &MutexGuard<'_, RawMutex, UnappliedConfig>,
-    ) -> Result<EngineHandle> {
+    fn run(&self, config_guard: &MutexGuard<'_, EngineConfig>) -> Result<EngineHandle> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
@@ -206,8 +201,8 @@ impl MempoolAdapterStdImpl {
 
         let handle = engine.get_handle();
 
-        UnappliedConfig::apply_prev_vset(&handle, last_state_update, &config_guard.builder)?;
-        UnappliedConfig::apply_vset(&handle, last_state_update)?;
+        EngineConfig::apply_prev_vset(&handle, last_state_update, &config_guard.builder)?;
+        EngineConfig::apply_vset(&handle, last_state_update)?;
 
         tokio::spawn(async move {
             scopeguard::defer!(tracing::warn!(
@@ -237,7 +232,7 @@ impl MempoolAdapterStdImpl {
         cache: Arc<Cache>,
         store: MempoolAdapterStore,
         config: ConsensusConfig,
-        mut anchor_rx: mpsc::UnboundedReceiver<CommitResult>,
+        mut anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,
     ) {
         scopeguard::defer!(tracing::warn!(
             target: tracing_targets::MEMPOOL_ADAPTER,
@@ -247,7 +242,7 @@ impl MempoolAdapterStdImpl {
         let mut first_after_gap = None;
         while let Some(commit) = anchor_rx.recv().await {
             let (anchor, history) = match commit {
-                CommitResult::NewStartAfterGap(anchors_full_bottom) => {
+                MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
                     parser = Parser::new(config.deduplicate_rounds);
                     store.report_new_start(anchors_full_bottom);
@@ -262,7 +257,15 @@ impl MempoolAdapterStdImpl {
                     );
                     continue;
                 }
-                CommitResult::Next(data) => (data.anchor, data.history),
+                MempoolOutput::Running => {
+                    cache.set_paused(false);
+                    continue;
+                }
+                MempoolOutput::Paused => {
+                    cache.set_paused(true);
+                    continue;
+                }
+                MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             };
 
             let task = tokio::task::spawn_blocking({
@@ -319,21 +322,22 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            "Processing state update from mc block {}: {:?}",
-            new_cx.mc_block_id.as_short_id(), DebugStateUpdateContext(&new_cx),
+            id = %new_cx.mc_block_id.as_short_id(),
+            new_cx = ?DebugStateUpdateContext(&new_cx),
+            "Processing state update from mc block",
         );
 
         // NOTE: on the first call mempool engine will not be running
         //      and `state_update_ctx` will be `None`
 
-        let mut config_guard = self.unapplied_config.lock();
+        let mut config_guard = self.engine_config.lock().await;
 
         let Some(engine) = config_guard.engine_handle.as_ref() else {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
-                "Will start mempool with state update from mc block {}: {:?}",
-                new_cx.mc_block_id.as_short_id(),
-                DebugStateUpdateContext(&new_cx),
+                id = %new_cx.mc_block_id.as_short_id(),
+                new_cx = ?DebugStateUpdateContext(&new_cx),
+                "Will start mempool with state update from mc block"
             );
 
             if let Some((round, time)) = (config_guard.builder.get_genesis())
@@ -354,7 +358,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
-                    "Using genesis override: round {round} time {time}"
+                    %round,
+                    %time,
+                    "Using genesis override"
                 );
             } else {
                 config_guard.builder.set_genesis(
@@ -374,14 +380,14 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         }) {
             tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
-                "Skipped old state update from mc block {}: {:?}",
-                new_cx.mc_block_id.as_short_id(),
-                DebugStateUpdateContext(&new_cx),
+                id = %new_cx.mc_block_id.as_short_id(),
+                new_cx = ?DebugStateUpdateContext(&new_cx),
+                "Skipped old state update from mc block",
             );
             return Ok(());
         };
 
-        UnappliedConfig::apply_vset(engine, &new_cx)?;
+        EngineConfig::apply_vset(engine, &new_cx)?;
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
     }
@@ -393,16 +399,42 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
     async fn get_anchor_by_id(
         &self,
+        top_processed_to_anchor: MempoolAnchorId,
         anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>> {
-        Ok(self.cache.get_anchor_by_id(anchor_id).await)
+    ) -> Result<GetAnchorResult> {
+        tracing::debug!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            %top_processed_to_anchor,
+            %anchor_id,
+            "get_anchor_by_id"
+        );
+
+        let result = match self.cache.get_anchor_by_id(anchor_id).await {
+            Some(anchor) => GetAnchorResult::Exist(anchor),
+            None => GetAnchorResult::NotExist,
+        };
+
+        Ok(result)
     }
 
     async fn get_next_anchor(
         &self,
+        top_processed_to_anchor: MempoolAnchorId,
         prev_anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>> {
-        Ok(self.cache.get_next_anchor(prev_anchor_id).await)
+    ) -> Result<GetAnchorResult> {
+        tracing::debug!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            %top_processed_to_anchor,
+            %prev_anchor_id,
+            "get_next_anchor"
+        );
+
+        let result = match self.cache.get_next_anchor(prev_anchor_id).await {
+            Some(anchor) => GetAnchorResult::Exist(anchor),
+            None => GetAnchorResult::NotExist,
+        };
+
+        Ok(result)
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {

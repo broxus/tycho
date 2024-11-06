@@ -63,6 +63,16 @@ impl MempoolAdapterStore {
     }
 
     pub fn expand_anchor_history(&self, anchor: &PointInfo, history: &[PointInfo]) -> Vec<Bytes> {
+        fn context(anchor: &PointInfo, history: &[PointInfo]) -> String {
+            format!(
+                "anchor {:?} history {} points rounds [{}..{}]",
+                anchor.id().alt(),
+                history.len(),
+                history.first().map(|p| p.round().0).unwrap_or_default(),
+                history.last().map(|p| p.round().0).unwrap_or_default()
+            )
+        }
+
         let payloads = if history.is_empty() {
             // history is checked at the end of DAG commit, leave traces in case its broken
             tracing::warn!(
@@ -74,28 +84,13 @@ impl MempoolAdapterStore {
         } else {
             self.inner
                 .expand_anchor_history(history)
-                .with_context(|| {
-                    format!(
-                        "history points {} rounds [{}..{}]",
-                        history.first().map(|p| p.round().0).unwrap_or_default(),
-                        history.last().map(|p| p.round().0).unwrap_or_default(),
-                        history.len()
-                    )
-                })
+                .with_context(|| context(anchor, history))
                 .expect("DB expand anchor history")
         };
         // may skip expand part, but never skip set committed - let it write what it should
         self.inner
             .set_committed(anchor, history)
-            .with_context(|| {
-                format!(
-                    "anchor {:?} history points {} rounds [{}..{}]",
-                    anchor.id().alt(),
-                    history.first().map(|p| p.round().0).unwrap_or_default(),
-                    history.last().map(|p| p.round().0).unwrap_or_default(),
-                    history.len()
-                )
-            })
+            .with_context(|| context(anchor, history))
             .expect("DB set committed");
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
@@ -433,7 +428,8 @@ impl MempoolStoreImpl for MempoolStorage {
 
         anyhow::ensure!(
             keys.is_empty(),
-            "some history points were not found id db:\n {}",
+            "{} history points were not found id db:\n{}",
+            keys.len(),
             keys.iter()
                 .map(|key| MempoolStorage::format_key(key))
                 .join(",\n")
