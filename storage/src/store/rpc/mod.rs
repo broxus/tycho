@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -6,10 +6,10 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use metrics::atomics::AtomicU64;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
@@ -233,13 +233,23 @@ impl RpcStorage {
             (guard, virtual_shards)
         };
 
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
         // Rebuild code hashes
         let db = self.db.clone();
+        let mut cancelled = cancelled.debounce(10000);
         let span = tracing::Span::current();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
-            let _guard = span.enter();
+            let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
 
             tracing::info!(split_depth, "started building new code hash indices");
             let started_at = Instant::now();
@@ -264,6 +274,10 @@ impl RpcStorage {
                 let started_at = Instant::now();
 
                 for entry in accounts.iter() {
+                    if cancelled.check() {
+                        anyhow::bail!("accounts reset cancelled");
+                    }
+
                     let (id, (_, account)) = entry?;
 
                     let code_hash = match extract_code_hash(&account)? {
@@ -313,6 +327,8 @@ impl RpcStorage {
             raw.compact_range_cf(code_hashes_cf, bound, bound);
             raw.compact_range_cf(code_hashes_by_address_cf, bound, bound);
 
+            // Done
+            scopeguard::ScopeGuard::into_inner(guard);
             tracing::info!(
                 elapsed = %humantime::format_duration(started_at.elapsed()),
                 "finished flushing code hash indices"
@@ -431,15 +447,25 @@ impl RpcStorage {
             }
         }
 
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
         // Force update min lt and gc flag
         self.min_tx_lt.store(min_lt, Ordering::Release);
 
         let db = self.db.clone();
+        let mut cancelled = cancelled.debounce(10000);
         let span = tracing::Span::current();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
 
             let raw = db.rocksdb().as_ref();
 
@@ -473,6 +499,10 @@ impl RpcStorage {
                     break iter.status()?;
                 };
                 iteration += 1;
+
+                if cancelled.check() {
+                    anyhow::bail!("transactions GC cancelled");
+                }
 
                 let Ok::<&TxKey, _>(key) = key.try_into() else {
                     // Remove invalid entires from the primary index only
@@ -530,6 +560,7 @@ impl RpcStorage {
             raw.put(TX_GC_RUNNING, [])?;
 
             // Done
+            scopeguard::ScopeGuard::into_inner(guard);
             tracing::info!(
                 elapsed = %humantime::format_duration(started_at.elapsed()),
                 total_invalid,
@@ -805,12 +836,25 @@ impl RpcStorage {
             raw.delete_cf_opt(cf, to, writeopts)?;
         }
 
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
         // Full scan the main code hashes index and remove all entires for the shard
         let db = self.db.clone();
+        let mut cancelled = cancelled.debounce(1000);
         let shard = *shard;
+        let span = tracing::Span::current();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
+
             let cf = &db.code_hashes.cf();
 
             let raw = db.rocksdb().as_ref();
@@ -836,6 +880,10 @@ impl RpcStorage {
                     None => break iter.status()?,
                 };
 
+                if cancelled.check() {
+                    anyhow::bail!("remove_code_hashes cancelled");
+                }
+
                 if key.len() != tables::CodeHashes::KEY_LEN
                     || key[32] == workchain
                         && (shard.is_full() || {
@@ -850,6 +898,7 @@ impl RpcStorage {
                 iter.next();
             }
 
+            scopeguard::ScopeGuard::into_inner(guard);
             Ok(())
         })
         .await?

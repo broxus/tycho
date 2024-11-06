@@ -23,7 +23,7 @@ pub mod sync {
     pub use self::once_take::*;
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
     pub use self::rayon::{rayon_run, rayon_run_fifo};
-    pub use self::task::yield_on_complex;
+    pub use self::task::{yield_on_complex, CancellationFlag, DebounceCancellationFlag};
 
     mod once_take;
     mod priority_semaphore;

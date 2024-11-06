@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -16,6 +15,7 @@ use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
+use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashSet;
 
 pub use self::queue_state::reader::QueueStateReader;
@@ -92,7 +92,6 @@ impl PersistentStateStorage {
         const MAX_PARALLEL_CHUNK_READS: usize = 20;
 
         let storage_dir = files_dir.create_subdir(BASE_DIR)?;
-        let is_cancelled = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -103,7 +102,6 @@ impl PersistentStateStorage {
                 shard_states: shard_state_storage,
                 descriptor_cache: Default::default(),
                 mc_seqno_to_block_ids: Default::default(),
-                is_cancelled,
                 chunks_semaphore: Semaphore::new(MAX_PARALLEL_CHUNK_READS),
                 handles_queue: Default::default(),
                 oldest_ps_changed: Default::default(),
@@ -314,12 +312,22 @@ impl PersistentStateStorage {
             return Ok(());
         }
 
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
         let handle = handle.clone();
         let this = self.inner.clone();
-
+        let cancelled = cancelled.clone();
         let span = tracing::Span::current();
+
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
 
             // NOTE: Ensure that the tracker handle will outlive the state writer.
             let _tracker_handle = tracker_handle;
@@ -329,7 +337,7 @@ impl PersistentStateStorage {
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
             let cell_writer = ShardStateWriter::new(&this.db, &states_dir, handle.id());
-            match cell_writer.write(&root_hash, Some(&this.is_cancelled)) {
+            match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(()) => {
                     this.block_handles.set_has_persistent_shard_state(&handle);
                     tracing::info!("persistent shard state saved");
@@ -340,7 +348,10 @@ impl PersistentStateStorage {
                 }
             }
 
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)
+            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+            Ok(())
         })
         .await?
     }
@@ -359,19 +370,32 @@ impl PersistentStateStorage {
             return Ok(());
         }
 
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
         let handle = handle.clone();
         let this = self.inner.clone();
-
+        let cancelled = cancelled.clone();
         let span = tracing::Span::current();
+
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
             let cell_writer = ShardStateWriter::new(&this.db, &states_dir, handle.id());
-            cell_writer.write_file(file, Some(&this.is_cancelled))?;
+            cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_shard_state(&handle);
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)
+            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+            Ok(())
         })
         .await?
     }
@@ -443,15 +467,25 @@ impl PersistentStateStorage {
             queue_diffs,
         };
 
-        let handle = handle.clone();
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
 
+        let handle = handle.clone();
+        let cancelled = cancelled.clone();
         let span = tracing::Span::current();
+
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
+
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
             match QueueStateWriter::new(&states_dir, handle.id(), state, messages)
-                .write(Some(&this.is_cancelled))
+                .write(Some(&cancelled))
             {
                 Ok(()) => {
                     this.block_handles.set_has_persistent_queue_state(&handle);
@@ -462,7 +496,10 @@ impl PersistentStateStorage {
                 }
             }
 
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)
+            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+            Ok(())
         })
         .await?
     }
@@ -610,7 +647,6 @@ struct Inner {
     shard_states: Arc<ShardStateStorage>,
     descriptor_cache: DashMap<CacheKey, Arc<CachedState>>,
     mc_seqno_to_block_ids: Mutex<BTreeMap<u32, FastHashSet<BlockId>>>,
-    is_cancelled: Arc<AtomicBool>,
     chunks_semaphore: Semaphore,
     handles_queue: Mutex<HandlesQueue>,
     oldest_ps_changed: Notify,
@@ -704,6 +740,7 @@ impl Inner {
 
             // Underlying implementation will call something like `copy_file_range`,
             // and we hope that it will be just COW pages.
+            // TODO: Find a way to cancel this operation.
             std::io::copy(&mut file, &mut temp_file).context("failed to copy a temp file")?;
             temp_file.flush()?;
             temp_file.seek(std::io::SeekFrom::Start(0))?;
@@ -759,12 +796,6 @@ impl Inner {
             block_id: *block_id,
             kind: PersistentStateKind::Queue,
         });
-    }
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        self.is_cancelled.store(true, Ordering::Release);
     }
 }
 
