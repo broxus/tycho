@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
-use crate::mempool::{MempoolAnchor, MempoolAnchorId, MempoolError, MempoolResult};
+use crate::mempool::{GetAnchorResult, MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
 #[derive(Default)]
@@ -45,10 +45,7 @@ impl Cache {
         self.anchor_added.notify_waiters();
     }
 
-    pub async fn get_anchor_by_id(
-        &self,
-        anchor_id: MempoolAnchorId,
-    ) -> MempoolResult<Option<Arc<MempoolAnchor>>> {
+    pub async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> GetAnchorResult {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -66,7 +63,7 @@ impl Cache {
                             "Anchor cache is empty"
                         );
                         if data.is_paused {
-                            return Err(MempoolError::Paused);
+                            return GetAnchorResult::MempoolPaused;
                         } // else: continue to wait for the first anchor
                     }
                     // Trying to get anchor that is too old
@@ -78,20 +75,22 @@ impl Cache {
                             is_paused = Some(data.is_paused).filter(|x| *x),
                             "Requested anchor is too old"
                         );
-                        return Ok(None);
+                        return GetAnchorResult::NotExist;
                     }
                     _ => {
-                        let found = data.anchors.get(&anchor_id).cloned();
-                        if found.is_none() {
-                            tracing::warn!(
-                                target: tracing_targets::MEMPOOL_ADAPTER,
-                                %anchor_id,
-                                is_paused = Some(data.is_paused).filter(|x| *x),
-                                ignored_waiting = Some(data.is_paused).filter(|x| !x),
-                                "Anchor is unknown"
-                            );
-                        }
-                        return Ok(found);
+                        return match data.anchors.get(&anchor_id) {
+                            Some(found) => GetAnchorResult::Exist(found.clone()),
+                            None => {
+                                tracing::warn!(
+                                    target: tracing_targets::MEMPOOL_ADAPTER,
+                                    %anchor_id,
+                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    ignored_waiting = Some(data.is_paused).filter(|x| !x),
+                                    "Anchor is unknown"
+                                );
+                                GetAnchorResult::NotExist
+                            }
+                        };
                     }
                 }
             }
@@ -99,10 +98,7 @@ impl Cache {
         }
     }
 
-    pub async fn get_next_anchor(
-        &self,
-        prev_anchor_id: MempoolAnchorId,
-    ) -> MempoolResult<Option<Arc<MempoolAnchor>>> {
+    pub async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> GetAnchorResult {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -120,11 +116,13 @@ impl Cache {
                             "Anchor cache is empty"
                         );
                         if data.is_paused {
-                            return Err(MempoolError::Paused);
+                            return GetAnchorResult::MempoolPaused;
                         } // else: continue to wait for the first anchor
                     }
                     // Return the first anchor on node start
-                    Some((_, first)) if prev_anchor_id == 0 => return Ok(Some(first.clone())),
+                    Some((_, first)) if prev_anchor_id == 0 => {
+                        return GetAnchorResult::Exist(first.clone())
+                    }
                     // Trying to get anchor that is too old
                     Some((first_id, _)) if prev_anchor_id < *first_id => {
                         tracing::warn!(
@@ -134,14 +132,14 @@ impl Cache {
                             is_paused = Some(data.is_paused).filter(|x| *x),
                             "Requested anchor is too old"
                         );
-                        return Ok(None);
+                        return GetAnchorResult::NotExist;
                     }
                     _ => {
                         // Find the index of the previous anchor
                         if let Some(index) = data.anchors.get_index_of(&prev_anchor_id) {
                             // Try to get the next anchor
                             if let Some((_, value)) = data.anchors.get_index(index + 1) {
-                                return Ok(Some(value.clone()));
+                                return GetAnchorResult::Exist(value.clone());
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
@@ -151,7 +149,7 @@ impl Cache {
                                     "Next anchor is unknown"
                                 );
                                 if data.is_paused {
-                                    return Err(MempoolError::Paused);
+                                    return GetAnchorResult::MempoolPaused;
                                 } // else: continue to wait for the next anchor
                             }
                         } else {
@@ -163,7 +161,7 @@ impl Cache {
                                 "Prev anchor is unknown"
                             );
                             if data.is_paused {
-                                return Err(MempoolError::Paused);
+                                return GetAnchorResult::MempoolPaused;
                             } // else: continue to wait for the prev anchor
                         };
                     }

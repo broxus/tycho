@@ -20,7 +20,7 @@ use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
+use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
@@ -914,10 +914,11 @@ impl CollatorStdImpl {
             id
         };
 
-        let Some(next_anchor) = mpool_adapter
-            .get_next_anchor(prev_id)
-            .await
-            .map_err(|e| CollatorError::Anyhow(e.into()))?
+        const TOP_PROCESSED_TO_ANCHOR_STUB: MempoolAnchorId = 0; // FIXME replace
+
+        let GetAnchorResult::Exist(next_anchor) = mpool_adapter
+            .get_next_anchor(TOP_PROCESSED_TO_ANCHOR_STUB, prev_id)
+            .await?
         else {
             return Err(CollatorError::Cancelled(
                 CollationCancelReason::NextAnchorNotFound(id),
@@ -1003,13 +1004,14 @@ impl CollatorStdImpl {
 
         let mut our_exts_count_total = 0;
 
+        const TOP_PROCESSED_TO_ANCHOR_STUB: MempoolAnchorId = 0; // FIXME replace
+
         let mut next_anchor = if let Some(anchor) = last_anchor {
             anchor
         } else {
-            let Some(next_anchor) = mpool_adapter
-                .get_anchor_by_id(processed_to_anchor_id)
-                .await
-                .map_err(|e| CollatorError::Anyhow(e.into()))?
+            let GetAnchorResult::Exist(next_anchor) = mpool_adapter
+                .get_anchor_by_id(TOP_PROCESSED_TO_ANCHOR_STUB, processed_to_anchor_id)
+                .await?
             else {
                 return Err(CollatorError::Cancelled(
                     CollationCancelReason::AnchorNotFound(processed_to_anchor_id),
@@ -1031,10 +1033,9 @@ impl CollatorStdImpl {
         let mut prev_anchor_id = next_anchor.id;
 
         while last_block_chain_time > last_imported_anchor_ct {
-            let Some(anchor) = mpool_adapter
-                .get_next_anchor(prev_anchor_id)
-                .await
-                .map_err(|e| CollatorError::Anyhow(e.into()))?
+            let GetAnchorResult::Exist(anchor) = mpool_adapter
+                .get_next_anchor(TOP_PROCESSED_TO_ANCHOR_STUB, prev_anchor_id)
+                .await?
             else {
                 return Err(CollatorError::Cancelled(
                     CollationCancelReason::NextAnchorNotFound(prev_anchor_id),

@@ -68,16 +68,18 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
     async fn get_anchor_by_id(
         &self,
+        top_processed_to_anchor: MempoolAnchorId,
         anchor_id: MempoolAnchorId,
-    ) -> MempoolResult<Option<Arc<MempoolAnchor>>>;
+    ) -> Result<GetAnchorResult>;
 
     /// Request, await, and return the next anchor after the specified previous one.
     /// If anchor does not exist then await until it be produced or downloaded during sync.
     /// Return None if anchor cannot be produced or synced from other nodes.
     async fn get_next_anchor(
         &self,
+        top_processed_to_anchor: MempoolAnchorId,
         prev_anchor_id: MempoolAnchorId,
-    ) -> MempoolResult<Option<Arc<MempoolAnchor>>>;
+    ) -> Result<GetAnchorResult>;
 
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks
@@ -133,10 +135,17 @@ impl MempoolAnchor {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum MempoolError {
-    #[error("mempool is paused")]
-    Paused,
+pub enum GetAnchorResult {
+    NotExist,
+    Exist(Arc<MempoolAnchor>),
+    MempoolPaused,
 }
 
-pub type MempoolResult<T> = std::result::Result<T, MempoolError>;
+impl GetAnchorResult {
+    pub fn anchor(&self) -> Option<&MempoolAnchor> {
+        match self {
+            Self::Exist(arc) => Some(arc),
+            _ => None,
+        }
+    }
+}
