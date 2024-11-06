@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,7 +20,7 @@ use tycho_block_util::block::{
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::{rayon_run, CancellationFlag};
 use tycho_util::{FastHashSet, FastHasherState};
 use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
 
@@ -829,14 +828,35 @@ impl BlockStorage {
             .block_handle_storage
             .gc_handles_cache(mc_seqno, &shard_heights);
 
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
         let span = tracing::Span::current();
+        let cancelled = cancelled.clone();
         let db = self.db.clone();
+
         let BlockGcStats {
             mc_entries_removed,
             total_entries_removed,
         } = rayon_run(move || {
             let _span = span.enter();
-            remove_blocks(db, max_blocks_per_batch, mc_seqno, shard_heights)
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
+
+            let stats = remove_blocks(
+                db,
+                max_blocks_per_batch,
+                mc_seqno,
+                shard_heights,
+                Some(&cancelled),
+            )?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+            Ok::<_, anyhow::Error>(stats)
         })
         .await?;
 
@@ -1011,9 +1031,11 @@ impl BlockStorage {
         let chunk_size = self.archive_chunk_size().get() as u64;
 
         let span = tracing::Span::current();
-        let is_running = Arc::new(AtomicBool::new(true));
+        let cancelled = CancellationFlag::new();
+
         let handle = tokio::task::spawn_blocking({
-            let is_running = is_running.clone();
+            let cancelled = cancelled.clone();
+
             move || {
                 let _span = span.enter();
 
@@ -1039,7 +1061,7 @@ impl BlockStorage {
                 // Write all entries
                 let mut unique_ids = FastHashSet::default();
                 for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
-                    anyhow::ensure!(is_running.load(Ordering::Relaxed), "task aborted");
+                    anyhow::ensure!(!cancelled.check(), "task aborted");
 
                     let block_id = BlockId::from_slice(raw_block_id);
                     if !unique_ids.insert(block_id) {
@@ -1105,7 +1127,7 @@ impl BlockStorage {
 
         CommitArchiveTask {
             archive_id,
-            is_running,
+            cancelled,
             handle: Some(handle),
         }
     }
@@ -1159,7 +1181,7 @@ impl BlockStorage {
 
 struct CommitArchiveTask {
     archive_id: u32,
-    is_running: Arc<AtomicBool>,
+    cancelled: CancellationFlag,
     handle: Option<JoinHandle<Result<()>>>,
 }
 
@@ -1192,7 +1214,7 @@ impl CommitArchiveTask {
 
 impl Drop for CommitArchiveTask {
     fn drop(&mut self) {
-        self.is_running.store(false, Ordering::Relaxed);
+        self.cancelled.cancel();
         if let Some(handle) = &self.handle {
             handle.abort();
         }
@@ -1337,6 +1359,7 @@ fn remove_blocks(
     max_blocks_per_batch: Option<usize>,
     mc_seqno: u32,
     shard_heights: ShardHeights,
+    cancelled: Option<&CancellationFlag>,
 ) -> Result<BlockGcStats> {
     let mut stats = BlockGcStats::default();
 
@@ -1396,12 +1419,19 @@ fn remove_blocks(
             tracing::debug!(%from, %to, "delete_range");
         };
 
+    let mut cancelled = cancelled.map(|c| c.debounce(100));
     let mut current_range = None::<(BlockIdShort, BlockIdShort)>;
     loop {
         let key = match blocks_iter.key() {
             Some(key) => key,
             None => break blocks_iter.status()?,
         };
+
+        if let Some(cancelled) = &mut cancelled {
+            if cancelled.check() {
+                anyhow::bail!("blocks GC cancelled");
+            }
+        }
 
         // Key structure:
         // [workchain id, 4 bytes]  |
@@ -1715,6 +1745,7 @@ mod tests {
             None,
             70,
             [(ShardIdent::BASECHAIN, 50)].into(),
+            None,
         )?;
         assert_eq!(stats, BlockGcStats {
             mc_entries_removed: 69 * ENTRY_TYPES.len(),
@@ -1760,6 +1791,7 @@ mod tests {
             None,
             71,
             [(ShardIdent::BASECHAIN, 51)].into(),
+            None,
         )?;
         assert_eq!(stats, BlockGcStats {
             mc_entries_removed: ENTRY_TYPES.len(),
@@ -1772,6 +1804,7 @@ mod tests {
             None,
             71,
             [(ShardIdent::BASECHAIN, 51)].into(),
+            None,
         )?;
         assert_eq!(stats, BlockGcStats {
             mc_entries_removed: 0,

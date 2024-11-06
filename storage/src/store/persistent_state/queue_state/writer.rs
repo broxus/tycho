@@ -1,6 +1,5 @@
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
@@ -8,6 +7,7 @@ use everscale_types::boc;
 use everscale_types::models::BlockId;
 use tycho_block_util::queue::{QueueDiffMessagesIter, QueueState, QueueStateHeader};
 use tycho_util::compression::ZstdCompressedFile;
+use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHasherState;
 
 use crate::db::FileDb;
@@ -51,12 +51,12 @@ impl<'a> QueueStateWriter<'a> {
         }
     }
 
-    pub fn write(self, is_cancelled: Option<&AtomicBool>) -> Result<()> {
+    pub fn write(self, cancelled: Option<&CancellationFlag>) -> Result<()> {
         const MAX_ROOTS_PER_CHUNK: usize = 10000;
         const MAX_CHUNK_SIZE: u64 = 10 << 20; // 10 MB
 
-        if let Some(is_cancelled) = is_cancelled {
-            if is_cancelled.load(Ordering::Relaxed) {
+        if let Some(cancelled) = cancelled {
+            if cancelled.check() {
                 anyhow::bail!(Cancelled);
             }
         }
@@ -103,6 +103,7 @@ impl<'a> QueueStateWriter<'a> {
         let mut bump = Bump::new();
 
         // TODO: Balance the chunk size to contain at most N bytes instead
+        let mut cancelled = cancelled.map(|c| c.debounce(1000));
         let mut iter = self.messages.into_iter().flatten();
         loop {
             bump.reset();
@@ -112,8 +113,8 @@ impl<'a> QueueStateWriter<'a> {
             let mut message_count = 0usize;
             let mut total_size = 0u64;
             for entry in iter.by_ref().take(MAX_ROOTS_PER_CHUNK) {
-                if let Some(is_cancelled) = is_cancelled {
-                    if message_count % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
+                if let Some(cancelled) = &mut cancelled {
+                    if cancelled.check() {
                         anyhow::bail!(Cancelled);
                     }
                 }

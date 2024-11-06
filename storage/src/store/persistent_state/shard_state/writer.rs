@@ -2,13 +2,13 @@ use std::collections::hash_map;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use everscale_types::cell::{CellDescriptor, HashBytes};
 use everscale_types::models::*;
 use smallvec::SmallVec;
 use tycho_util::compression::ZstdCompressedFile;
+use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashMap;
 
 use crate::db::{BaseDb, FileDb};
@@ -43,7 +43,11 @@ impl<'a> ShardStateWriter<'a> {
         }
     }
 
-    pub fn write_file(&self, mut boc_file: File, _is_cancelled: Option<&AtomicBool>) -> Result<()> {
+    pub fn write_file(
+        &self,
+        mut boc_file: File,
+        _cancelled: Option<&CancellationFlag>,
+    ) -> Result<()> {
         let temp_file_name = Self::temp_file_name(self.block_id);
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
@@ -66,6 +70,7 @@ impl<'a> ShardStateWriter<'a> {
             FILE_BUFFER_LEN / 2,
         )?;
 
+        // TODO: Find a way to cancel this operation.
         std::io::copy(&mut boc_file, &mut compressed_file)?;
 
         // Terminate the compressor and flush the file
@@ -78,7 +83,7 @@ impl<'a> ShardStateWriter<'a> {
             .map_err(Into::into)
     }
 
-    pub fn write(&self, root_hash: &HashBytes, is_cancelled: Option<&AtomicBool>) -> Result<()> {
+    pub fn write(&self, root_hash: &HashBytes, cancelled: Option<&CancellationFlag>) -> Result<()> {
         let temp_file_name = Self::temp_file_name(self.block_id);
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
@@ -87,7 +92,7 @@ impl<'a> ShardStateWriter<'a> {
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
         let mut intermediate = self
-            .write_rev(&root_hash.0, is_cancelled)
+            .write_rev(&root_hash.0, cancelled)
             .context("Failed to write reversed cells data")?;
         tracing::info!("finished loading cells");
         let cell_count = intermediate.cell_sizes.len() as u32;
@@ -146,10 +151,12 @@ impl<'a> ShardStateWriter<'a> {
 
         // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
-        for (i, &cell_size) in intermediate.cell_sizes.iter().rev().enumerate() {
-            if let Some(is_cancelled) = is_cancelled {
-                if i % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
-                    anyhow::bail!("Cell writing cancelled.")
+
+        let mut cancelled = cancelled.map(|c| c.debounce(1000));
+        for &cell_size in intermediate.cell_sizes.iter().rev() {
+            if let Some(cancelled) = &mut cancelled {
+                if cancelled.check() {
+                    anyhow::bail!("Cell writing cancelled")
                 }
             }
 
@@ -199,7 +206,7 @@ impl<'a> ShardStateWriter<'a> {
     fn write_rev(
         &self,
         root_hash: &[u8; 32],
-        is_cancelled: Option<&AtomicBool>,
+        cancelled: Option<&CancellationFlag>,
     ) -> Result<IntermediateState> {
         enum StackItem {
             New([u8; 32]),
@@ -235,10 +242,11 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut temp_file_buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN, &mut file);
 
+        let mut cancelled = cancelled.map(|c| c.debounce(1000));
         while let Some((index, data)) = stack.pop() {
-            if let Some(is_cancelled) = is_cancelled {
-                if iteration % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
-                    anyhow::bail!("Persistent state writing cancelled.")
+            if let Some(cancelled) = &mut cancelled {
+                if cancelled.check() {
+                    anyhow::bail!("Persistent state writing cancelled")
                 }
             }
 
