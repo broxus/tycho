@@ -497,7 +497,9 @@ where
             CollationCancelReason::AnchorNotFound(_)
             | CollationCancelReason::NextAnchorNotFound(_) => {
                 // mark collator as cancelled
-                self.set_collator_state(&next_block_id_short.shard, CollatorState::Cancelled);
+                self.set_collator_state(&next_block_id_short.shard, |ac| {
+                    ac.state = CollatorState::Cancelled;
+                });
 
                 // run sync if all collators cancelled or waiting
                 self.ready_to_sync.notified().await;
@@ -543,13 +545,19 @@ where
             "Will check if should collate next master block",
         );
 
-        {
-            if let Some(mut collator) = self.active_collators.get_mut(&next_block_id_short.shard) {
-                if collator.state == CollatorState::CancelPending {
-                    collator.state = CollatorState::Cancelled;
-                }
+        let updated_collator_state = self.set_collator_state(&next_block_id_short.shard, |ac| {
+            if ac.state == CollatorState::CancelPending {
+                ac.state = CollatorState::Cancelled;
             }
+        });
+        if updated_collator_state == Some(CollatorState::Cancelled) {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                shard_id = %next_block_id_short.shard,
+                "Collator was cancelled before",
+            );
+            return Ok(());
         }
+
         self.collate_mc_block_by_interval_or_continue_shard_collation(
             &prev_mc_block_id,
             next_block_id_short.shard,
@@ -582,15 +590,16 @@ where
                 force_mc_block,
                 mc_block_min_interval_ms,
             );
-
         if should_collate_mc_block {
             // and if chain time elapsed master block interval in every shard
             // then run master block collation
             if let Some(next_mc_block_chain_time) = next_mc_block_chain_time_opt {
                 if !shard_id.is_masterchain() {
                     // shard collator will wait and master collator will work
-                    self.set_collator_state(&ShardIdent::MASTERCHAIN, CollatorState::Active);
-                    self.set_collator_state(&shard_id, CollatorState::Waiting);
+                    self.set_collator_state(&ShardIdent::MASTERCHAIN, |ac| {
+                        ac.state = CollatorState::Active;
+                    });
+                    self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
                 }
 
                 self.enqueue_mc_block_collation(
@@ -601,7 +610,7 @@ where
                 .await?;
             } else {
                 // current collator will wait
-                self.set_collator_state(&shard_id, CollatorState::Waiting);
+                self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
             }
         } else {
             // if should not collate master block
@@ -634,18 +643,11 @@ where
             "Start processing block candidate",
         );
 
-        let block_id = *collation_result.candidate.block.id();
-
-        {
-            if let Some(mut collator) = self.active_collators.get_mut(&block_id.shard) {
-                if collator.state == CollatorState::CancelPending {
-                    collator.state = CollatorState::Cancelled;
-                }
-            }
-        }
-
         let _histogram =
             HistogramGuard::begin("tycho_collator_handle_collated_block_candidate_time");
+
+        let block_id = *collation_result.candidate.block.id();
+        let candidate_chain_time = collation_result.candidate.chain_time;
 
         debug_assert_eq!(
             block_id.is_masterchain(),
@@ -672,24 +674,25 @@ where
                     "There is no active session related to collated block. Skipped",
                 );
 
-                self.set_collator_state(&block_id.shard, CollatorState::Waiting);
+                self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Waiting);
 
                 return Ok(());
             }
         };
 
-        let candidate_chain_time = collation_result.candidate.chain_time;
-        let shard_ident = collation_result.candidate.block.id().shard;
-
-        let current_collator_cancelled = {
-            let collator_state = self.active_collators.get(&shard_ident);
-            match collator_state {
-                None => false,
-                Some(current_collator) => current_collator.state == CollatorState::Cancelled,
+        let updated_collator_state = self.set_collator_state(&block_id.shard, |ac| {
+            if ac.state == CollatorState::CancelPending {
+                ac.state = CollatorState::Cancelled;
             }
-        };
+        });
+        let collator_cancelled = updated_collator_state == Some(CollatorState::Cancelled);
 
-        let store_res = if current_collator_cancelled {
+        let store_res = if collator_cancelled {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                shard_id = %block_id.shard,
+                "Collator was cancelled before",
+            );
+
             self.mq_adapter.clear_session_state()?;
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
@@ -697,7 +700,7 @@ where
 
             BlockCacheStoreResult {
                 received_and_collated: false,
-                blocks_mismatch_with_present: false,
+                block_mismatch: false,
                 last_collated_mc_block_id,
                 applied_mc_queue_range,
             }
@@ -706,8 +709,8 @@ where
                 .blocks_cache
                 .store_collated(collation_result.candidate, collation_result.mc_data.clone())?;
 
-            if store_res.blocks_mismatch_with_present {
-                self.set_collator_state(&shard_ident, CollatorState::Cancelled);
+            if store_res.block_mismatch {
+                self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
                 self.mq_adapter.clear_session_state()?;
             }
             store_res
@@ -719,8 +722,8 @@ where
             "Saved block candidate to cache",
         );
 
-        let collation_cancelled =
-            current_collator_cancelled || store_res.blocks_mismatch_with_present;
+        let collation_cancelled = collator_cancelled || store_res.block_mismatch;
+
         // check if should sync to last applied mc block
         let should_sync_to_last_applied_mc_block = {
             if collation_cancelled {
@@ -811,7 +814,7 @@ where
                     "sync_to_applied_mc_block: mark shard collator Cancelled for shard",
                 );
 
-                self.set_collator_state(&block_id.shard, CollatorState::Cancelled);
+                self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
 
                 // run sync if all collators cancelled, or waiting, or there are no collators
                 // and we have applied mc blocks
@@ -823,6 +826,7 @@ where
                         "sync_to_applied_mc_block: no active collators in shards and master, \
                         will run sync to last applied mc block",
                     );
+
                     // run sync if have applied mc blocks
                     self.sync_to_applied_mc_block_if_exist(last_collated_block_id, applied_range)
                         .await?;
@@ -903,9 +907,7 @@ where
             }
         }
 
-        if block_id.is_masterchain() {
-            self.ready_to_sync.notified().await;
-        }
+        self.ready_to_sync.notified().await;
 
         let Some(store_res) = self
             .blocks_cache
@@ -916,13 +918,13 @@ where
             return Ok(());
         };
 
-        if store_res.blocks_mismatch_with_present {
-            if let Some(mut active_collator) = self.active_collators.get_mut(&block_id.shard) {
-                active_collator.state = match active_collator.state {
+        if store_res.block_mismatch {
+            self.set_collator_state(&block_id.shard, |ac| {
+                ac.state = match ac.state {
                     CollatorState::Waiting | CollatorState::Cancelled => CollatorState::Cancelled,
                     _ => CollatorState::CancelPending,
-                }
-            }
+                };
+            });
             self.mq_adapter.clear_session_state()?;
         }
 
@@ -931,70 +933,72 @@ where
             "Saved block from bc to cache",
         );
 
+        if !block_id.is_masterchain() {
+            self.ready_to_sync.notify_one();
+            return Ok(());
+        }
+
+        // when received block is master
+
         // stop any running validations up to this block
         self.validator.cancel_validation(&block_id.as_short_id())?;
 
-        if block_id.is_masterchain() {
-            // when received block is master
+        // check if should sync to last applied mc block right now
+        let should_sync_to_last_applied_mc_block = {
+            let last_processed_mc_block_id_opt = self.get_last_processed_mc_block_id();
+            if store_res.last_collated_mc_block_id.is_some()
+                || last_processed_mc_block_id_opt.is_some()
+            {
+                // Should wait for next collated mc block when collators are active
+                // but when all were cancelled or waiting, we can process last received mc block.
+                // Also can process last received mc block when no active collators
 
-            // check if should sync to last applied mc block right now
-            let should_sync_to_last_applied_mc_block = {
-                let last_processed_mc_block_id_opt = self.get_last_processed_mc_block_id();
-                if store_res.last_collated_mc_block_id.is_some()
-                    || last_processed_mc_block_id_opt.is_some()
-                {
-                    // Should wait for next collated mc block when collators are active
-                    // but when all were cancelled or waiting, we can process last received mc block.
-                    // Also can process last received mc block when no active collators
-
-                    let has_active = self.active_collators.iter().any(|ac| {
-                        ac.state == CollatorState::Active
-                            || ac.state == CollatorState::CancelPending
-                    });
-                    if !has_active {
-                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                            last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                            last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
-                            "check_should_sync: should sync to last applied mc block \
-                            when all collators were cancelled, or waiting, or ther are no collators",
-                        );
-                        true
-                    } else {
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                            last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                            last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
-                            "check_should_sync: should wait for next collated own mc block \
-                            because collation is active",
-                        );
-                        false
-                    }
-                } else {
-                    // sync to last applied mc block when no last processed and collator not started
+                let has_active = self.active_collators.iter().any(|ac| {
+                    ac.state == CollatorState::Active || ac.state == CollatorState::CancelPending
+                });
+                if !has_active {
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "should sync to last applied mc block when no last processed",
+                        last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
+                        last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
+                        "check_should_sync: should sync to last applied mc block \
+                        when all collators were cancelled, or waiting, or ther are no collators",
                     );
                     true
+                } else {
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
+                        last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
+                        "check_should_sync: should wait for next collated own mc block \
+                        because collation is active",
+                    );
+                    false
                 }
-            };
-
-            if should_sync_to_last_applied_mc_block {
-                // run sync if have applied mc blocks
-                self.sync_to_applied_mc_block_if_exist(
-                    store_res.last_collated_mc_block_id.as_ref(),
-                    store_res.applied_mc_queue_range.as_ref(),
-                )
-                .await?;
-                self.ready_to_sync.notify_one();
             } else {
-                self.ready_to_sync.notify_one();
-                // try to commit block if it was collated first
-                if store_res.received_and_collated {
-                    // NOTE: here master block subgraph could be already extracted,
-                    //      sent to sync, and removed from cache, because validation task
-                    //      could be finished after `store_received()` but before this point.
+                // sync to last applied mc block when no last processed and collator not started
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    "should sync to last applied mc block when no last processed",
+                );
+                true
+            }
+        };
 
-                    self.commit_valid_master_block(&block_id).await?;
-                }
+        if should_sync_to_last_applied_mc_block {
+            // run sync if have applied mc blocks
+            self.sync_to_applied_mc_block_if_exist(
+                store_res.last_collated_mc_block_id.as_ref(),
+                store_res.applied_mc_queue_range.as_ref(),
+            )
+            .await?;
+            self.ready_to_sync.notify_one();
+        } else {
+            self.ready_to_sync.notify_one();
+            // try to commit block if it was collated first
+            if store_res.received_and_collated {
+                // NOTE: here master block subgraph could be already extracted,
+                //      sent to sync, and removed from cache, because validation task
+                //      could be finished after `store_received()` but before this point.
+
+                self.commit_valid_master_block(&block_id).await?;
             }
         }
 
@@ -1257,7 +1261,7 @@ where
                     .remove_prev_blocks_from_cache(&to_block_keys);
 
                 self.blocks_cache
-                    .remove_next_blocks_from_cache(&to_block_keys);
+                    .remove_next_collated_blocks_from_cache(&to_block_keys);
 
                 self.process_mc_state_update(mc_data, true).await?;
 
@@ -1750,9 +1754,16 @@ where
         Ok(())
     }
 
-    fn set_collator_state(&self, shard_id: &ShardIdent, state: CollatorState) {
-        if let Some(mut active_collator) = self.active_collators.get_mut(shard_id) {
-            active_collator.state = state;
+    fn set_collator_state<F>(&self, shard_id: &ShardIdent, f: F) -> Option<CollatorState>
+    where
+        F: Fn(&mut ActiveCollator<Arc<CF::Collator>>),
+    {
+        match self.active_collators.get_mut(shard_id) {
+            Some(mut active_collator) => {
+                f(&mut active_collator);
+                Some(active_collator.state)
+            }
+            None => None,
         }
     }
 

@@ -150,7 +150,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let top_blocks = vec![(block, true)];
 
-    queue.commit_diff(top_blocks).await?;
+    queue.commit_diff(&top_blocks).await?;
 
     let block2 = BlockIdShort {
         shard: ShardIdent::new_full(1),
@@ -197,7 +197,7 @@ async fn test_queue() -> anyhow::Result<()> {
     queue
         .apply_diff(diff, block2, &HashBytes::from([0; 32]))
         .await?;
-    queue.commit_diff(top_blocks).await?;
+    queue.commit_diff(&top_blocks).await?;
 
     let mut ranges = FastHashMap::default();
     ranges.insert(
