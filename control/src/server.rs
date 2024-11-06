@@ -72,8 +72,36 @@ impl ControlEndpoint {
         use tarpc::tokio_serde::formats::Bincode;
 
         let socket_path = socket_path.as_ref().to_path_buf();
-        if config.overwrite_socket && socket_path.exists() {
-            std::fs::remove_file(&socket_path)?;
+
+        // TODO: Add some kind of file lock and use a raw fd.
+        if socket_path.exists() {
+            // There is no reliable way to guarantee that the socket file
+            // was removed when the node is stopped. In case of panic
+            // or crash it will leave it as is.
+            //
+            // The `overwrite_socket` setting might be a bit dangerous to use,
+            // so we try check here whether the file is in use.
+
+            match std::os::unix::net::UnixStream::connect(&socket_path) {
+                // There is already a listener on this socket, but the
+                // config says that we must replace the file with a new one.
+                Ok(_) if config.overwrite_socket => {
+                    tracing::warn!("overwriting an existing control socket");
+                    std::fs::remove_file(&socket_path)?;
+                }
+                // There is already a listener on this socket. Fallback to `listen`,
+                // it will fail with a proper error.
+                Ok(_) => {}
+                // `ConnectionRefused` error for Unix sockets means that there
+                // are no listeners, so we can safely remove the file.
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(&socket_path)?;
+                }
+                // We can ignore all other errors since the stream creation
+                // is not the main intention of this check. Fallback to `listen`,
+                // it will fail with a proper error.
+                Err(_) => {}
+            }
         }
 
         let mut listener =
