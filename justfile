@@ -79,7 +79,31 @@ update_rpc_proto:
     cargo run -p tycho-gen-protos
 
 # === Integration tests stuff ===
+run_integration_tests_cov: prepare_integration_tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export INTEGRATION_TEST=1
 
+    if [ -n "${CI:-}" ]; then
+        # Running in CI
+        RUST_BACKTRACE=1 cargo llvm-cov nextest \
+            --package tycho-core \
+            --profile integration \
+            --cargo-profile release_check \
+            --test archives heavy_archives \
+            --run-ignored all \
+            --output-path integration_codecov.json \
+            --codecov
+    else
+        # Running locally - show coverage report in browser
+        RUST_BACKTRACE=1 cargo llvm-cov nextest \
+            --package tycho-core \
+            --profile integration \
+            --cargo-profile release_check \
+            --test archives heavy_archives \
+            --run-ignored all \
+            --open
+    fi
 # Runs all tests including ignored. Will take a lot of time to run.
 run_integration_tests: prepare_integration_tests
     ./scripts/run-integration-tests.sh
