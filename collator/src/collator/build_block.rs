@@ -20,7 +20,7 @@ use super::CollatorStdImpl;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, McData};
+use crate::types::{BlockCandidate, CollationSessionInfo, McData, ShardHashesExt};
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -404,43 +404,42 @@ impl CollatorStdImpl {
             },
         );
 
-        let new_mc_data = mc_state_extra.map(|extra| {
-            let prev_key_block_seqno = if extra.after_key_block {
-                new_block_id.seqno
-            } else if let Some(block_ref) = &extra.last_key_block {
-                block_ref.seqno
-            } else {
-                0
-            };
+        let new_mc_data = match mc_state_extra {
+            None => None,
+            Some(extra) => {
+                let prev_key_block_seqno = if extra.after_key_block {
+                    new_block_id.seqno
+                } else if let Some(block_ref) = &extra.last_key_block {
+                    block_ref.seqno
+                } else {
+                    0
+                };
 
-            let shards = extra
-                .shards
-                .iter()
-                .filter_map(|r| r.ok())
-                .map(|(i, shard_description)| (i, shard_description.into()))
-                .collect();
+                let shards = extra.shards.as_vec()?;
 
-            Arc::new(McData {
-                global_id: new_block.as_ref().global_id,
-                block_id: *new_block.id(),
+                let mc_data = Arc::new(McData {
+                    global_id: new_block.as_ref().global_id,
+                    block_id: *new_block.id(),
 
-                prev_key_block_seqno,
-                gen_lt: new_block_info.end_lt,
-                gen_chain_time: collation_data.get_gen_chain_time(),
-                libraries: global_libraries,
-                total_validator_fees,
+                    prev_key_block_seqno,
+                    gen_lt: new_block_info.end_lt,
+                    gen_chain_time: collation_data.get_gen_chain_time(),
+                    libraries: global_libraries,
+                    total_validator_fees,
 
-                global_balance: extra.global_balance.clone(),
-                shards,
-                config: extra.config,
-                validator_info: extra.validator_info,
-                consensus_info: extra.consensus_info,
+                    global_balance: extra.global_balance.clone(),
+                    shards,
+                    config: extra.config,
+                    validator_info: extra.validator_info,
+                    consensus_info: extra.consensus_info,
 
-                processed_upto: collation_data.processed_upto.clone(),
+                    processed_upto: collation_data.processed_upto.clone(),
 
-                ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
-            })
-        });
+                    ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
+                });
+                Some(mc_data)
+            }
+        };
 
         // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
