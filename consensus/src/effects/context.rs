@@ -148,14 +148,15 @@ impl Effects<ValidateContext> {
         T: EffectsContext,
         for<'a> &'a Effects<T>: Into<ValidateContext>,
     {
-        parent.new_child(parent.into(), || {
-            tracing::error_span!(
-                "validate",
-                author = display(info.data().author.alt()),
-                round = info.round().0,
-                digest = display(info.digest().alt()),
-            )
-        })
+        let context = parent.into();
+        let span = tracing::error_span!(
+            parent: context.parent_effects.span(),
+            "validate",
+            author = display(info.data().author.alt()),
+            round = info.round().0,
+            digest = display(info.digest().alt()),
+        );
+        Effects { span, context }
     }
 }
 
