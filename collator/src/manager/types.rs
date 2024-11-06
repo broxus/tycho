@@ -15,7 +15,7 @@ use crate::types::{
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollatorState {
     Active,
     Waiting,
@@ -37,7 +37,7 @@ pub(super) struct ChainTimesSyncState {
 
 pub(super) struct BlockCacheStoreResult {
     pub received_and_collated: bool,
-    pub blocks_mismatch_with_present: bool,
+    pub block_mismatch: bool,
     pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
 }
@@ -46,6 +46,7 @@ impl Debug for BlockCacheStoreResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlockCacheStoreResult")
             .field("received_and_collated", &self.received_and_collated)
+            .field("block_mismatch", &self.block_mismatch)
             .field(
                 "last_collated_mc_block_id",
                 &DebugDisplayOpt(self.last_collated_mc_block_id),

@@ -107,14 +107,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let processed_upto = diff.processed_upto.clone();
         self.queue.apply_diff(diff, block_id_short, hash).await?;
 
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-                        new_messages_len = len,
-                        elapsed = ?time.elapsed(),
-                        processed_upto = %DisplayIter(
-                            processed_upto.iter().map(DisplayTuple)
-                        ),
-
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            new_messages_len = len,
+            elapsed = ?time.elapsed(),
+            processed_upto = %DisplayIter(processed_upto.iter().map(DisplayTuple)),
             "Diff applied",
         );
         Ok(())
@@ -123,11 +119,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
         let time = std::time::Instant::now();
 
-        self.queue.commit_diff(mc_top_blocks).await?;
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        self.queue.commit_diff(&mc_top_blocks).await?;
+
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            mc_top_blocks = %DisplayIter(mc_top_blocks.iter().map(DisplayTupleRef)),
             elapsed = ?time.elapsed(),
-            "Diff commited",
+            "Diff committed",
         );
 
         Ok(())

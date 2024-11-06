@@ -278,15 +278,17 @@ impl BlocksCache {
         mc_data: Option<Arc<McData>>,
     ) -> Result<BlockCacheStoreResult> {
         let block_id = *candidate.block.id();
+
         let received_and_collated;
         let last_collated_mc_block_id;
         let applied_mc_queue_range;
         let mut set_containing_mc_block = None;
-        let blocks_mismatch_with_present;
+
+        let block_mismatch;
         if mc_data.is_some() {
             let mut masters_guard = self.masters.lock();
             let res = masters_guard.store_collated_block(candidate, mc_data)?;
-            blocks_mismatch_with_present = res.blocks_mismatch;
+            block_mismatch = res.block_mismatch;
             received_and_collated = res.received_and_collated;
             last_collated_mc_block_id = masters_guard.data.last_collated_mc_block_id;
             applied_mc_queue_range = masters_guard.data.applied_mc_queue_range;
@@ -301,7 +303,7 @@ impl BlocksCache {
             };
 
             received_and_collated = res.received_and_collated;
-            blocks_mismatch_with_present = res.blocks_mismatch;
+            block_mismatch = res.block_mismatch;
 
             (last_collated_mc_block_id, applied_mc_queue_range) =
                 self.get_last_collated_block_and_applied_mc_queue_range();
@@ -311,11 +313,12 @@ impl BlocksCache {
             // Traverse shard blocks and update their link to the containing master block
             self.set_containing_mc_block(block_id.as_short_id(), ids);
         }
+
         Ok(BlockCacheStoreResult {
             received_and_collated,
+            block_mismatch,
             last_collated_mc_block_id,
             applied_mc_queue_range,
-            blocks_mismatch_with_present,
         })
     }
 
@@ -327,12 +330,15 @@ impl BlocksCache {
         state: ShardStateStuff,
     ) -> Result<Option<BlockCacheStoreResult>> {
         let block_id = *state.block_id();
+
         let ctx = ReceivedBlockContext::load(state_node_adapter.as_ref(), state).await?;
+
         let received_and_collated;
         let last_collated_mc_block_id;
         let applied_mc_queue_range;
         let mut set_containing_mc_block = None;
-        let blocks_mismatch_with_present;
+
+        let block_mismatch;
         let last_known_synced = 'sync: {
             if block_id.is_masterchain() {
                 let mut masters_guard = self.masters.lock();
@@ -343,7 +349,7 @@ impl BlocksCache {
                 }
 
                 let res = masters_guard.store_received_block(ctx)?;
-                blocks_mismatch_with_present = res.blocks_mismatch;
+                block_mismatch = res.block_mismatch;
 
                 received_and_collated = res.received_and_collated;
 
@@ -365,7 +371,7 @@ impl BlocksCache {
                 };
 
                 received_and_collated = res.received_and_collated;
-                blocks_mismatch_with_present = res.blocks_mismatch;
+                block_mismatch = res.block_mismatch;
 
                 (last_collated_mc_block_id, applied_mc_queue_range) =
                     self.get_last_collated_block_and_applied_mc_queue_range();
@@ -378,7 +384,7 @@ impl BlocksCache {
 
             return Ok(Some(BlockCacheStoreResult {
                 received_and_collated,
-                blocks_mismatch_with_present,
+                block_mismatch,
                 last_collated_mc_block_id,
                 applied_mc_queue_range,
             }));
@@ -598,83 +604,65 @@ impl BlocksCache {
 
     pub fn remove_prev_blocks_from_cache(&self, to_blocks_keys: &[BlockCacheKey]) {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Removing prev blocks from cache before: {}",
-            DisplayIntoIter(to_blocks_keys),
+            to_blocks_keys = %DisplayIntoIter(to_blocks_keys),
+            "Removing prev blocks from cache before",
         );
 
         for block_key in to_blocks_keys {
             if block_key.is_masterchain() {
                 let mut guard = self.masters.lock();
                 guard.blocks.retain(|key, _| {
-                    let retain = key >= &block_key.seqno;
-                    tracing::debug!(
-                        "Masterchain block {}: {}",
-                        key,
-                        if retain {
-                            "Retained in cache"
-                        } else {
-                            "Removed from cache"
-                        }
-                    );
-                    retain
+                    let retained = key >= &block_key.seqno;
+                    if !retained {
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            key,
+                            "Previous master block removed from cache",
+                        );
+                    }
+                    retained
                 });
             } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
                 shard_cache.blocks.retain(|key, _| {
-                    let retain = key >= &block_key.seqno;
-                    tracing::debug!(
-                        "Shard block {}: {}",
-                        key,
-                        if retain {
-                            "Retained in cache"
-                        } else {
-                            "Removed from cache"
-                        }
-                    );
-                    retain
+                    let retained = key >= &block_key.seqno;
+                    if !retained {
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            key,
+                            "Previous shard block removed from cache",
+                        );
+                    }
+                    retained
                 });
             }
         }
     }
 
-    pub fn remove_next_blocks_from_cache(&self, to_blocks_keys: &[BlockCacheKey]) {
+    pub fn remove_next_collated_blocks_from_cache(&self, after_blocks_keys: &[BlockCacheKey]) {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Removing next blocks from cache after: {}",
-            DisplayIntoIter(to_blocks_keys),
+            after_blocks_keys = %DisplayIntoIter(after_blocks_keys),
+            "Removing next blocks from cache after",
         );
 
-        for block_key in to_blocks_keys {
+        for block_key in after_blocks_keys {
             if block_key.is_masterchain() {
                 let mut guard = self.masters.lock();
                 guard.blocks.retain(|key, value| {
-                    let retain = key <= &block_key.seqno
-                        && matches!(value.data, BlockCacheEntryData::Received { .. });
-                    tracing::debug!(
-                        "Masterchain block {} (Received data: {}): {}",
-                        key,
-                        matches!(value.data, BlockCacheEntryData::Received { .. }),
-                        if retain {
-                            "Retained in cache"
-                        } else {
-                            "Removed from cache"
-                        }
+                    let is_received = matches!(value.data, BlockCacheEntryData::Received { .. });
+                    let retained = key <= &block_key.seqno || is_received;
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        retained, is_received, key,
+                        "Remove next collated master block from cache",
                     );
-                    retain
+                    retained
                 });
             } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
                 shard_cache.blocks.retain(|key, value| {
-                    let retain = key <= &block_key.seqno
-                        || matches!(value.data, BlockCacheEntryData::Received { .. });
-                    tracing::debug!(
-                        "Shard block {} (Received data: {}): {}",
-                        key,
-                        matches!(value.data, BlockCacheEntryData::Received { .. }),
-                        if retain {
-                            "Retained in cache"
-                        } else {
-                            "Removed from cache"
-                        }
+                    let is_received = matches!(value.data, BlockCacheEntryData::Received { .. });
+                    let retained = key <= &block_key.seqno || is_received;
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        retained, is_received, key,
+                        "Remove next collated shard block from cache",
                     );
-                    retain
+                    retained
                 });
             }
         }
@@ -700,27 +688,27 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
     ) -> Result<StoredBlock<T::NewCollated>> {
         let block_id = *candidate.block.id();
         match self.blocks.entry(block_id.seqno) {
-            btree_map::Entry::Occupied(mut entry) => {
-                let entry_data = entry.get_mut();
+            btree_map::Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
-                    data = %entry_data.data,
+                    data = %entry.data,
                     "blocks_cache contains block"
                 );
                 let BlockCacheEntryData::Received {
                     collated_after_receive,
                     additional_shard_block_cache_info,
                     ..
-                } = &mut entry_data.data
+                } = &mut entry.data
                 else {
                     bail!("Should not store collated candidate with same block again: {block_id}",);
                 };
 
-                if entry_data.block_id != block_id {
+                if entry.block_id != block_id {
                     return Ok(StoredBlock {
                         received_and_collated: false,
                         new_data: None,
-                        blocks_mismatch: true,
+                        block_mismatch: true,
                     });
                 }
 
@@ -738,7 +726,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 Ok(StoredBlock {
                     received_and_collated: true,
                     new_data: None,
-                    blocks_mismatch: false,
+                    block_mismatch: false,
                 })
             }
             btree_map::Entry::Vacant(vacant) => {
@@ -749,7 +737,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 Ok(StoredBlock {
                     received_and_collated: false,
                     new_data: Some(new_data),
-                    blocks_mismatch: false,
+                    block_mismatch: false,
                 })
             }
         }
@@ -761,15 +749,15 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
         ctx: ReceivedBlockContext,
     ) -> Result<StoredBlock<T::NewReceived>> {
         let block_id = *ctx.state.block_id();
-        let mut prev_ids_to_clear = Vec::new();
 
+        let mut prev_ids_to_clear = Vec::new();
         let res = match self.blocks.entry(block_id.seqno) {
-            btree_map::Entry::Occupied(mut entry) => {
-                let entry_data = entry.get_mut();
+            btree_map::Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
 
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
-                    data = %entry_data.data,
+                    data = %entry.data,
                     "blocks_cache contains block"
                 );
 
@@ -777,16 +765,16 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     received_after_collation,
                     status,
                     ..
-                } = &mut entry_data.data
+                } = &mut entry.data
                 else {
                     bail!("Should not store received block with same block again: {block_id}");
                 };
 
                 if block_id.is_masterchain() {
-                    prev_ids_to_clear = entry_data.prev_blocks_ids.clone();
+                    prev_ids_to_clear = entry.prev_blocks_ids.clone();
                 }
 
-                if entry_data.block_id != block_id {
+                if entry.block_id != block_id {
                     let new_entry = BlockCacheEntry::from_received(
                         ctx.state,
                         ctx.prev_ids,
@@ -795,23 +783,23 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     )?;
 
                     let new_data = self.data.on_insert_received(&new_entry)?;
-                    let _ = entry.insert(new_entry);
+                    occupied.insert(new_entry);
 
                     StoredBlock {
                         received_and_collated: false,
                         new_data: Some(new_data),
-                        blocks_mismatch: true,
+                        block_mismatch: true,
                     }
                 } else {
                     *received_after_collation = true;
                     *status = CandidateStatus::Synced;
 
-                    self.data.on_update_received(entry_data)?;
+                    self.data.on_update_received(entry)?;
 
                     StoredBlock {
                         received_and_collated: true,
                         new_data: None,
-                        blocks_mismatch: false,
+                        block_mismatch: false,
                     }
                 }
             }
@@ -833,7 +821,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 StoredBlock {
                     received_and_collated: false,
                     new_data: Some(new_data),
-                    blocks_mismatch: false,
+                    block_mismatch: false,
                 }
             }
         };
@@ -1056,7 +1044,7 @@ impl ReceivedBlockContext {
 struct StoredBlock<T> {
     received_and_collated: bool,
     new_data: Option<T>,
-    blocks_mismatch: bool,
+    block_mismatch: bool,
 }
 
 struct MasterBlockIds {

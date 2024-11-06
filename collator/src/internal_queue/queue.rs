@@ -79,7 +79,7 @@ where
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
     ) -> Result<()>;
-    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
+    async fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
     fn clear_session_state(&self) -> Result<()>;
 }
 
@@ -208,12 +208,12 @@ where
         Ok(())
     }
 
-    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
+    async fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
         let mut diffs_for_commit = vec![];
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();
 
-        for (block_id_short, top_shard_block_changed) in mc_top_blocks.iter() {
+        for (block_id_short, top_shard_block_changed) in mc_top_blocks {
             let mut diffs_to_remove = vec![];
             let prev_shard_diffs = self.diffs.get_mut(&block_id_short.shard);
 
