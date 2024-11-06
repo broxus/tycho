@@ -8,27 +8,40 @@ use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
 #[derive(Default)]
+struct CacheData {
+    anchors: IndexMap<MempoolAnchorId, Arc<MempoolAnchor>, ahash::RandomState>,
+    is_paused: bool,
+}
+
+#[derive(Default)]
 pub struct Cache {
-    anchors: RwLock<IndexMap<MempoolAnchorId, Arc<MempoolAnchor>, ahash::RandomState>>,
+    data: RwLock<CacheData>,
     anchor_added: Notify,
 }
 
 impl Cache {
     pub fn reset(&self) {
-        let mut cache = self.anchors.write();
-        *cache = Default::default();
+        let mut data = self.data.write();
+        data.anchors = Default::default();
         // let waiters wait for new data to be pushed
     }
 
     pub fn push(&self, anchor: Arc<MempoolAnchor>) {
-        let old = self.anchors.write().insert(anchor.id, anchor);
+        let mut data = self.data.write();
+        let old = data.anchors.insert(anchor.id, anchor);
         if let Some(old) = old {
             tracing::error!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = old.id,
+                is_paused = Some(data.is_paused).filter(|x| *x),
                 "received same anchor more than once"
             );
         }
+        self.anchor_added.notify_waiters();
+    }
+
+    pub fn set_paused(&self, is_paused: bool) {
+        self.data.write().is_paused = is_paused;
         self.anchor_added.notify_waiters();
     }
 
@@ -38,14 +51,15 @@ impl Cache {
             let anchor_added = self.anchor_added.notified();
 
             {
-                let anchors = self.anchors.read();
+                let data = &self.data.read();
 
-                match anchors.first() {
+                match data.anchors.first() {
                     // Continue to wait for the first anchor
                     None => {
                         tracing::info!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
+                            is_paused = Some(data.is_paused).filter(|x| *x),
                             "Anchor cache is empty, waiting"
                         );
                     }
@@ -55,15 +69,16 @@ impl Cache {
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
                             %first_id,
+                            is_paused = Some(data.is_paused).filter(|x| *x),
                             "Requested anchor is too old"
                         );
                         return None;
                     }
                     Some(_) => {
-                        if let Some(found) = anchors.get(&anchor_id) {
+                        if let Some(found) = data.anchors.get(&anchor_id) {
                             return Some(found.clone());
                         }
-                        let (last_id, _) = anchors.last().expect("map is not empty");
+                        let (last_id, _) = data.anchors.last().expect("map is not empty");
                         if *last_id > anchor_id {
                             return None; // will not be received
                         } else {
@@ -89,14 +104,15 @@ impl Cache {
             let anchor_added = self.anchor_added.notified();
 
             {
-                let anchors = self.anchors.read();
+                let data = &self.data.read();
 
-                match anchors.first() {
-                    // Continue to wait for the first anchor
+                match data.anchors.first() {
                     None => {
+                        // Continue to wait for the first anchor
                         tracing::info!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %prev_anchor_id,
+                            is_paused = Some(data.is_paused).filter(|x| *x),
                             "Anchor cache is empty, waiting"
                         );
                     }
@@ -108,35 +124,38 @@ impl Cache {
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %prev_anchor_id,
                             %first_id,
+                            is_paused = Some(data.is_paused).filter(|x| *x),
                             "Requested anchor is too old"
                         );
                         return None;
                     }
                     Some(_) => {
                         // Find the index of the previous anchor
-                        if let Some(index) = anchors.get_index_of(&prev_anchor_id) {
+                        if let Some(index) = data.anchors.get_index_of(&prev_anchor_id) {
                             // Try to get the next anchor
-                            if let Some((_, value)) = anchors.get_index(index + 1) {
+                            if let Some((_, value)) = data.anchors.get_index(index + 1) {
                                 return Some(value.clone());
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
+                                    is_paused = Some(data.is_paused).filter(|x| *x),
                                     "Next anchor is unknown, waiting"
                                 );
                             }
                         } else {
-                            let (last_id, _) = anchors.last().expect("map is not empty");
+                            let (last_id, _) = data.anchors.last().expect("map is not empty");
                             if *last_id > prev_anchor_id {
                                 return None; // will not be received
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
+                                    is_paused = Some(data.is_paused).filter(|x| *x),
                                     "Prev anchor is unknown, waiting"
                                 );
                             }
-                        }
+                        };
                     }
                 }
             }
@@ -146,19 +165,21 @@ impl Cache {
     }
 
     pub fn clear(&self, before_anchor_id: MempoolAnchorId) {
-        let mut anchors_cache_rw = self.anchors.write();
+        let data = &mut self.data.write();
 
-        anchors_cache_rw.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
+        data.anchors
+            .retain(|anchor_id, _| anchor_id >= &before_anchor_id);
 
-        let len = anchors_cache_rw.len();
-        if anchors_cache_rw.capacity() > len.saturating_mul(4) {
-            anchors_cache_rw.shrink_to(len.saturating_mul(2));
+        let len = data.anchors.len();
+        if data.anchors.capacity() > len.saturating_mul(4) {
+            data.anchors.shrink_to(len.saturating_mul(2));
         }
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            "anchors cache was cleared before anchor {}",
-            before_anchor_id,
+            %before_anchor_id,
+            is_paused = Some(data.is_paused).filter(|x| *x),
+            "anchors cache was cleared",
         );
     }
 }
