@@ -16,7 +16,7 @@ use tycho_network::PeerId;
 
 use crate::mempool::{
     DebugStateUpdateContext, ExternalMessage, MempoolAdapter, MempoolAnchor, MempoolAnchorId,
-    MempoolEventListener, StateUpdateContext,
+    MempoolEventListener, MempoolResult, StateUpdateContext,
 };
 use crate::tracing_targets;
 
@@ -177,7 +177,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
     async fn get_anchor_by_id(
         &self,
         anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>> {
+    ) -> MempoolResult<Option<Arc<MempoolAnchor>>> {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
@@ -257,7 +257,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
     async fn get_next_anchor(
         &self,
         prev_anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>> {
+    ) -> MempoolResult<Option<Arc<MempoolAnchor>>> {
         let range = (
             std::ops::Bound::Excluded(prev_anchor_id),
             std::ops::Bound::Unbounded,

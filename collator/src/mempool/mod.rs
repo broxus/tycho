@@ -69,7 +69,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     async fn get_anchor_by_id(
         &self,
         anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>>;
+    ) -> MempoolResult<Option<Arc<MempoolAnchor>>>;
 
     /// Request, await, and return the next anchor after the specified previous one.
     /// If anchor does not exist then await until it be produced or downloaded during sync.
@@ -77,7 +77,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     async fn get_next_anchor(
         &self,
         prev_anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>>;
+    ) -> MempoolResult<Option<Arc<MempoolAnchor>>>;
 
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks
@@ -132,3 +132,11 @@ impl MempoolAnchor {
         self.externals.iter().skip(from_idx).cloned()
     }
 }
+
+#[derive(thiserror::Error, Debug)]
+pub enum MempoolError {
+    #[error("mempool is paused")]
+    Paused,
+}
+
+pub type MempoolResult<T> = std::result::Result<T, MempoolError>;

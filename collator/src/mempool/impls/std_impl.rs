@@ -22,7 +22,7 @@ use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
     DebugStateUpdateContext, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId,
-    MempoolEventListener, StateUpdateContext,
+    MempoolEventListener, MempoolResult, StateUpdateContext,
 };
 use crate::tracing_targets;
 
@@ -386,15 +386,15 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn get_anchor_by_id(
         &self,
         anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>> {
-        Ok(self.cache.get_anchor_by_id(anchor_id).await)
+    ) -> MempoolResult<Option<Arc<MempoolAnchor>>> {
+        self.cache.get_anchor_by_id(anchor_id).await
     }
 
     async fn get_next_anchor(
         &self,
         prev_anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>> {
-        Ok(self.cache.get_next_anchor(prev_anchor_id).await)
+    ) -> MempoolResult<Option<Arc<MempoolAnchor>>> {
+        self.cache.get_next_anchor(prev_anchor_id).await
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {

@@ -914,7 +914,11 @@ impl CollatorStdImpl {
             id
         };
 
-        let Some(next_anchor) = mpool_adapter.get_next_anchor(prev_id).await? else {
+        let Some(next_anchor) = mpool_adapter
+            .get_next_anchor(prev_id)
+            .await
+            .map_err(|e| CollatorError::Anyhow(e.into()))?
+        else {
             return Err(CollatorError::Cancelled(
                 CollationCancelReason::NextAnchorNotFound(id),
             ));
@@ -1004,7 +1008,8 @@ impl CollatorStdImpl {
         } else {
             let Some(next_anchor) = mpool_adapter
                 .get_anchor_by_id(processed_to_anchor_id)
-                .await?
+                .await
+                .map_err(|e| CollatorError::Anyhow(e.into()))?
             else {
                 return Err(CollatorError::Cancelled(
                     CollationCancelReason::AnchorNotFound(processed_to_anchor_id),
@@ -1026,7 +1031,11 @@ impl CollatorStdImpl {
         let mut prev_anchor_id = next_anchor.id;
 
         while last_block_chain_time > last_imported_anchor_ct {
-            let Some(anchor) = mpool_adapter.get_next_anchor(prev_anchor_id).await? else {
+            let Some(anchor) = mpool_adapter
+                .get_next_anchor(prev_anchor_id)
+                .await
+                .map_err(|e| CollatorError::Anyhow(e.into()))?
+            else {
                 return Err(CollatorError::Cancelled(
                     CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
                 ));
