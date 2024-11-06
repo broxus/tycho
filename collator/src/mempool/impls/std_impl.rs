@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, ConsensusConfig, ValidatorSet};
-use parking_lot::lock_api::MutexGuard;
-use parking_lot::{Mutex, RawMutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_storage::MempoolStorage;
@@ -147,16 +145,16 @@ impl MempoolAdapterStdImpl {
     }
 
     /// **Warning:** only to apply changes from `GlobalConfig` json after mempool crash
-    pub fn override_config<F>(&self, fun: F)
+    pub async fn override_config<F>(&self, fun: F)
     where
         F: FnOnce(&mut MempoolConfigBuilder),
     {
-        let mut guard = self.engine_config.lock();
+        let mut guard = self.engine_config.lock().await;
         fun(&mut guard.builder);
     }
 
     /// Runs mempool engine
-    fn run(&self, config_guard: &MutexGuard<'_, RawMutex, EngineConfig>) -> Result<EngineHandle> {
+    fn run(&self, config_guard: &MutexGuard<'_, EngineConfig>) -> Result<EngineHandle> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
@@ -294,8 +292,8 @@ impl MempoolAdapterStdImpl {
         }
     }
 
-    fn expect_running(&self, top_processed_to_anchor: MempoolAnchorId) -> bool {
-        let config = self.engine_config.lock();
+    async fn expect_running(&self, top_processed_to_anchor: MempoolAnchorId) -> bool {
+        let config = self.engine_config.lock().await;
         match &config.engine_handle {
             Some(handle) => handle.expect_running(&self.top_known_anchor, top_processed_to_anchor),
             None => false, // not yet init
@@ -323,7 +321,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         // NOTE: on the first call mempool engine will not be running
         //      and `state_update_ctx` will be `None`
 
-        let mut config_guard = self.engine_config.lock();
+        let mut config_guard = self.engine_config.lock().await;
 
         let Some(engine) = config_guard.engine_handle.as_ref() else {
             tracing::info!(
@@ -394,7 +392,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         anchor_id: MempoolAnchorId,
     ) -> Result<GetAnchorResult> {
         // to be reproducible on all nodes regardless already committed data
-        Ok(if self.expect_running(top_processed_to_anchor) {
+        Ok(if self.expect_running(top_processed_to_anchor).await {
             self.cache.get_anchor_by_id(anchor_id).await
         } else {
             GetAnchorResult::MempoolPaused
@@ -407,7 +405,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         prev_anchor_id: MempoolAnchorId,
     ) -> Result<GetAnchorResult> {
         // to be reproducible on all nodes regardless already committed data
-        Ok(if self.expect_running(top_processed_to_anchor) {
+        Ok(if self.expect_running(top_processed_to_anchor).await {
             self.cache.get_next_anchor(prev_anchor_id).await
         } else {
             GetAnchorResult::MempoolPaused
