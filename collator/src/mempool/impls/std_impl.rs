@@ -406,7 +406,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 Some(anchor) => GetAnchorResult::Exist(anchor),
                 None => GetAnchorResult::NotExist,
             },
-            Some(false) | None => GetAnchorResult::MempoolPaused, // also paused until init
+            Some(false) => GetAnchorResult::MempoolPaused,
+            None => bail!("mempool engine is not stated yet"),
         };
         Ok(result)
     }
@@ -425,7 +426,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 Some(anchor) => GetAnchorResult::Exist(anchor),
                 None => GetAnchorResult::NotExist,
             },
-            Some(false) | None => GetAnchorResult::MempoolPaused, // also paused until init
+            Some(false) => GetAnchorResult::MempoolPaused,
+            None => bail!("mempool engine is not stated yet"),
         };
         Ok(result)
     }
