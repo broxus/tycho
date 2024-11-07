@@ -20,14 +20,16 @@ if ! [ -f "$logger_path" ]; then
     "tycho": "info",
     "tycho_core": "debug",
     "tycho_network": "info",
+    "async_queued_dispatcher": "error",
     "collation_manager": "debug",
     "mempool_adapter": "debug",
     "state_node_adapter": "debug",
     "mq_adapter": "debug",
-    "collator": "debug",
-    "exec_manager": "debug",
     "validator": "debug",
-    "async_queued_dispatcher": "debug"
+    "collator": "debug",
+    "collator::read_next_externals": "warn",
+    "exec_manager": "error",
+    "tycho_consensus::engine::input_buffer": "error"
 }
 EOF
 fi

@@ -31,7 +31,8 @@ use crate::collator::{
 use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
 use crate::manager::types::BlockCacheStoreResult;
 use crate::mempool::{
-    MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener, StateUpdateContext,
+    MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+    StateUpdateContext,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
@@ -377,22 +378,38 @@ where
     where
         I: Iterator<Item = ShardDescriptionShort>,
     {
-        let top_processed_to_anchor_id =
+        let top_processed_to_anchor =
             detect_top_processed_to_anchor(mc_top_shards, mc_ext_processed_upto);
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            mc_processed_to_anchor_id = mc_ext_processed_upto.map(|upto| upto.processed_to.0),
-            "detected min_top_processed_to_anchor_id={}, will notify mempool",
-            top_processed_to_anchor_id,
+            top_processed_to_anchor,
+            mc_processed_to_anchor = mc_ext_processed_upto.map(|upto| upto.processed_to.0),
+            "detected minimal top_processed_to_anchor, will notify mempool",
+
+        );
+
+        self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn notify_top_processed_to_anchor_to_mempool(
+        &self,
+        top_processed_to_anchor: MempoolAnchorId,
+    ) -> Result<()> {
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            top_processed_to_anchor,
+            "will notify top_processed_to_anchor to mempool",
         );
 
         self.mpool_adapter
-            .handle_top_processed_to_anchor(top_processed_to_anchor_id)
+            .handle_top_processed_to_anchor(top_processed_to_anchor)
             .await?;
 
         // clean anchors cache in mempool
         self.mpool_adapter
-            .clear_anchors_cache(top_processed_to_anchor_id)
+            .clear_anchors_cache(top_processed_to_anchor)
             .await?;
 
         Ok(())
@@ -759,6 +776,16 @@ where
         if block_id.is_masterchain() && !collation_cancelled {
             // run validation or commit block
             if store_res.received_and_collated {
+                // here commit will not cause on_block_accepted event
+                // because block already exist in bc state
+                // so we can report top processed anchor here
+                let mc_data = collation_result
+                    .mc_data
+                    .as_ref()
+                    .expect("should not be None for master block");
+                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)
+                    .await?;
+
                 self.commit_valid_master_block(&block_id).await?;
             } else {
                 let validator = self.validator.clone();
@@ -905,7 +932,7 @@ where
 
         let Some(store_res) = self
             .blocks_cache
-            .store_received(self.state_node_adapter.clone(), state)
+            .store_received(self.state_node_adapter.clone(), state.clone())
             .await?
         else {
             self.ready_to_sync.notify_one();
@@ -988,6 +1015,15 @@ where
             self.ready_to_sync.notify_one();
             // try to commit block if it was collated first
             if store_res.received_and_collated {
+                // here commit will not cause on_block_accepted event
+                // because block already exist in bc state
+                // so we can report top processed anchor here
+                self.detect_top_processed_to_anchor_and_notify_mempool_impl(
+                    state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
+                    state.state().processed_upto.load()?.externals.as_ref(),
+                )
+                .await?;
+
                 // NOTE: here master block subgraph could be already extracted,
                 //      sent to sync, and removed from cache, because validation task
                 //      could be finished after `store_received()` but before this point.
@@ -1231,11 +1267,8 @@ where
                 let mc_data = McData::load_from_state(state)?;
 
                 // handle top processed to anchor in mempool
-                self.detect_top_processed_to_anchor_and_notify_mempool_impl(
-                    mc_data.shards.iter().map(|(_, descr)| *descr),
-                    state.state().processed_upto.load()?.externals.as_ref(),
-                )
-                .await?;
+                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)
+                    .await?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
