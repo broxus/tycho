@@ -41,8 +41,50 @@ cargo install --path ./cli
 ```bash
 # --global-config: file path or URL to the network global config
 # --stake: stake value per round
-tycho init --systemd --global-config ~/global-config.json --validator --stake 30000
+tycho init --systemd --global-config https://testnet.tychoprotocol.com/global-config.json --validator --stake 500000
 ```
+
+<details><summary><b>Output</b></summary>
+<p>
+
+```json
+{
+ "node_keys": {
+   "public": "18794f07dfdca1e4a2ffa655bbe5da4d396852d7ea8e55e4f92e60d209d3ae1f",
+   "path": "/home/my/.tycho/node_keys.json",
+   "updated": true
+ },
+ "elections": {
+   "wallet": "-1:eb1c97aa93dbb01ac6000ace8e7f08a8b8f0078ee53d861f2e924abcd7ca2c4c",
+   "public": "344659d1171701530b61f475c0795657bfacaf5a7e850050c5be2c8235d3689d",
+   "stake": "500000",
+   "path": "/home/my/.tycho/elections.json",
+   "updated": true
+ },
+ "node_config": {
+   "path": "/home/my/.tycho/config.json",
+   "updated": true
+ },
+ "global_config": {
+   "path": "/home/my/.tycho/global-config.json",
+   "updated": true
+ },
+ "systemd": {
+   "tycho-elect": {
+     "path": "/home/my/.config/systemd/my/tycho-elect.service",
+     "updated": true
+   },
+   "tycho": {
+     "path": "/home/my/.config/systemd/my/tycho.service",
+     "updated": true
+   }
+ }
+}
+```
+</p>
+</details>
+
+
 
 **Backup keys**
 
@@ -56,25 +98,51 @@ tycho init --systemd --global-config ~/global-config.json --validator --stake 30
 - `metrics.listen_addr` - Prometheus exporter will listen on this address;
 - `rpc` - set it to `null` to disable an RPC endpoint if you want to save some disk space;
 
-## Run validator node
+## How To Run
 
 - Enable `tycho` services:
-  ```
+  ```bash
   systemctl enable tycho --user --now
   systemctl enable tycho-elect --user --now
+
+  # Extend services lifetime
+  sudo loginctl enable-linger
   ```
 
-- Wait until the node is synced;
-  > You can check it in metrics or logs. The control server currently doesn't return the sync status.
-  > It will be added soon ([#395](https://github.com/broxus/tycho/issues/395)).
+- Wait until the node is synced:
+  ```bash
+  # Check the current status
+  tycho node status
+  ```
+
+  <details><summary><b>Output</b></summary>
+  <p>
+
+  ```json
+  {
+    "init_mc_seqno": 0,
+    "init_mc_block_id": "-1:8000000000000000:0:795ea223590f5ffa6a687ba090d37c5db6481b9d55b4bce375b0b48568413bf7:5e409bc128e785d56965294c99db2f8918005054d72c2d6a8c4080ee47ecf203",
+    "latest_mc_seqno": 1341,
+    "latest_mc_block_id": "-1:8000000000000000:1341:b88104daf5f7d6cdb3457722a0928463b671d2ab4a08c2e81603497b64f0e080:9ffc67faa8bdab9ffac05c4bbcdbb65323f193f60689e5bf668261cdfa526dd6",
+    "time_diff": 1,
+    "is_synced": true,
+    "in_current_vset": false,
+    "in_next_vset": false,
+    "is_elected": false
+  }
+  ```
+  </p>
+  </details>
+
+
 
 - Send testnet tokens to the validator wallet. The required amount is `10 + 2 * stake`.
 > [!NOTE]
 > You can find the wallet address in `~/.tycho/elections.json`.
 
-## Resync validator node
+## How To Reset
 
-> In case of major updates or fatal failures.
+In case of major updates or fatal failures.
 
 - Stop node services:
   ```bash
