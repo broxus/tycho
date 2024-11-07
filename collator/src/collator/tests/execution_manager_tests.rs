@@ -225,6 +225,7 @@ fn gen_stub_working_state(
                 }),
                 processed_offset: 0,
             },
+            top_processed_to_anchor: 0,
             ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
         }),
         collation_config: Arc::new(Default::default()),
