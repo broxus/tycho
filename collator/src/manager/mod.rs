@@ -779,16 +779,24 @@ where
                 let session_seqno = session_info.seqno();
                 let dispatcher = self.dispatcher.clone();
                 tokio::spawn(async move {
-                    // TODO: Fail collation instead of panicking?
-                    let status = validator.validate(session_seqno, &block_id).await.unwrap();
+                    let validation_result = validator.validate(session_seqno, &block_id).await;
 
-                    _ = dispatcher
-                        .spawn_task(method_to_async_closure!(
-                            handle_validated_master_block,
-                            block_id,
-                            status
-                        ))
-                        .await;
+                    match validation_result {
+                        Ok(status) => {
+                            _ = dispatcher
+                                .spawn_task(method_to_async_closure!(
+                                    handle_validated_master_block,
+                                    block_id,
+                                    status
+                                ))
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+                                "Block candidate validation failed: {e:?}",
+                            );
+                        }
+                    }
                 });
 
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
