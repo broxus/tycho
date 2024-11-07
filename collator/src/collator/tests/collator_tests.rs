@@ -48,6 +48,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        0,
     )
     .await
     .unwrap();
@@ -81,6 +82,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        0,
     )
     .await
     .unwrap();
@@ -113,6 +115,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        0,
     )
     .await
     .unwrap();
@@ -145,6 +148,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        0,
     )
     .await
     .unwrap();
@@ -176,6 +180,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        0,
     )
     .await
     .unwrap();
@@ -208,6 +213,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        0,
     )
     .await
     .unwrap();

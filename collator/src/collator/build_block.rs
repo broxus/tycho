@@ -21,6 +21,7 @@ use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
 use crate::types::{BlockCandidate, CollationSessionInfo, McData, ShardHashesExt};
+use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
@@ -416,6 +417,10 @@ impl CollatorStdImpl {
                 };
 
                 let shards = extra.shards.as_vec()?;
+                let top_processed_to_anchor = detect_top_processed_to_anchor(
+                    shards.iter().map(|(_, d)| *d),
+                    collation_data.processed_upto.externals.as_ref(),
+                );
 
                 let mc_data = Arc::new(McData {
                     global_id: new_block.as_ref().global_id,
@@ -434,6 +439,7 @@ impl CollatorStdImpl {
                     consensus_info: extra.consensus_info,
 
                     processed_upto: collation_data.processed_upto.clone(),
+                    top_processed_to_anchor,
 
                     ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
                 });

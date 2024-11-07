@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use error::CollatorError;
 use everscale_types::cell::{Cell, HashBytes};
@@ -20,7 +20,7 @@ use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchor, MempoolAnchorId};
+use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
@@ -176,7 +176,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
         self.enqueue_task(method_to_queued_async_closure!(
-            resume_collation,
+            resume_collation_wrapper,
             mc_data,
             reset,
             collation_session,
@@ -186,8 +186,10 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
     }
 
     async fn enqueue_try_collate(&self) -> Result<()> {
-        self.enqueue_task(method_to_queued_async_closure!(wait_state_and_try_collate,))
-            .await
+        self.enqueue_task(method_to_queued_async_closure!(
+            wait_state_and_try_collate_wrapper,
+        ))
+        .await
     }
 
     async fn enqueue_do_collate(
@@ -196,7 +198,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         next_chain_time: u64,
     ) -> Result<()> {
         self.enqueue_task(method_to_queued_async_closure!(
-            wait_state_and_do_collate,
+            wait_state_and_do_collate_wrapper,
             top_shard_blocks_info,
             next_chain_time
         ))
@@ -284,7 +286,7 @@ impl CollatorStdImpl {
         // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
         dispatcher
             .enqueue_task(method_to_queued_async_closure!(
-                init_collator,
+                init_collator_wrapper,
                 prev_blocks_ids,
                 mc_data,
                 working_state_tx
@@ -308,6 +310,17 @@ impl CollatorStdImpl {
             .await?;
         dispatcher_cancel_token.cancel();
         Ok(())
+    }
+
+    async fn init_collator_wrapper(
+        &mut self,
+        prev_blocks_ids: Vec<BlockId>,
+        mc_data: Arc<McData>,
+        working_state_tx: oneshot::Sender<Result<Box<WorkingState>>>,
+    ) -> Result<()> {
+        self.init_collator(prev_blocks_ids, mc_data, working_state_tx)
+            .await
+            .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
 
     // Initialize collator working state then run collation
@@ -465,11 +478,24 @@ impl CollatorStdImpl {
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
+                working_state.mc_data.top_processed_to_anchor,
             )
             .await
         } else {
             Ok(vec![])
         }
+    }
+
+    async fn resume_collation_wrapper(
+        &mut self,
+        mc_data: Arc<McData>,
+        reset: bool,
+        collation_session: Arc<CollationSessionInfo>,
+        new_prev_blocks_ids: Vec<BlockId>,
+    ) -> Result<()> {
+        self.resume_collation(mc_data, reset, collation_session, new_prev_blocks_ids)
+            .await
+            .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %self.next_block_info))]
@@ -885,17 +911,16 @@ impl CollatorStdImpl {
         Ok(info_opt)
     }
 
-    /// 1. Get last imported anchor from cache or last processed from `externals_processed_upto`
+    /// 1. Get last imported anchor id from cache
     /// 2. Await next anchor via mempool adapter
     /// 3. Store anchor in cache and return it
-    ///
-    /// Returns: (`next_anchor`, `has_externals`)
     async fn import_next_anchor(
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
         mempool_start_round: Option<MempoolAnchorId>,
-    ) -> Result<(Arc<MempoolAnchor>, bool), CollatorError> {
+        top_processed_to_anchor: MempoolAnchorId,
+    ) -> Result<ImportNextAnchorResult> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         let _histogram =
@@ -908,50 +933,54 @@ impl CollatorStdImpl {
             .unwrap_or_default();
 
         // when restart from a new genesis then request first next after 0
-        let prev_id = if matches!(mempool_start_round, Some(round_id) if round_id == id) {
+        let prev_anchor_id = if matches!(mempool_start_round, Some(round_id) if round_id == id) {
             0
         } else {
             id
         };
 
-        const TOP_PROCESSED_TO_ANCHOR_STUB: MempoolAnchorId = 0; // FIXME replace
+        let get_anchor_result = mpool_adapter
+            .get_next_anchor(top_processed_to_anchor, prev_anchor_id)
+            .await?;
 
-        let GetAnchorResult::Exist(next_anchor) = mpool_adapter
-            .get_next_anchor(TOP_PROCESSED_TO_ANCHOR_STUB, prev_id)
-            .await?
-        else {
-            return Err(CollatorError::Cancelled(
-                CollationCancelReason::NextAnchorNotFound(id),
-            ));
+        let has_our_externals = match &get_anchor_result {
+            GetAnchorResult::Exist(next_anchor) => {
+                let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
+
+                let has_externals = our_exts_count > 0;
+
+                anchors_cache.insert(next_anchor.clone(), our_exts_count);
+
+                metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
+                    .increment(our_exts_count as _);
+                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                    .increment(our_exts_count as f64);
+
+                let chain_time_elapsed = next_anchor.chain_time.saturating_sub(ct);
+
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    elapsed = timer.elapsed().as_millis(),
+                    chain_time_elapsed,
+                    "imported next anchor (id: {}, chain_time: {}, total_exts: {}, our_exts: {})",
+                    next_anchor.id,
+                    next_anchor.chain_time,
+                    next_anchor.externals.len(),
+                    our_exts_count,
+                );
+
+                has_externals
+            }
+            _ => false,
         };
 
-        let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
-
-        let has_externals = our_exts_count > 0;
-
-        anchors_cache.insert(next_anchor.clone(), our_exts_count);
-
-        metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
-            .increment(our_exts_count as _);
-        metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-            .increment(our_exts_count as f64);
-
-        let chain_time_elapsed = next_anchor.chain_time.saturating_sub(ct);
-
-        tracing::info!(target: tracing_targets::COLLATOR,
-            elapsed = timer.elapsed().as_millis(),
-            chain_time_elapsed,
-            "imported next anchor (id: {}, chain_time: {}, total_exts: {}, our_exts: {})",
-            next_anchor.id,
-            next_anchor.chain_time,
-            next_anchor.externals.len(),
-            our_exts_count,
-        );
-
-        Ok((next_anchor, has_externals))
+        Ok(ImportNextAnchorResult {
+            prev_anchor_id,
+            get_anchor_result,
+            has_our_externals,
+        })
     }
 
-    /// 1. Get `processed_to` anchor from
+    /// 1. Get `processed_to` anchor
     /// 2. Get next anchors until `last_block_chain_time`
     /// 3. Store anchors in cache
     pub(self) async fn import_init_anchors(
@@ -961,6 +990,7 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
+        top_processed_to_anchor: MempoolAnchorId,
     ) -> Result<Vec<AnchorInfo>, CollatorError> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
@@ -1004,13 +1034,11 @@ impl CollatorStdImpl {
 
         let mut our_exts_count_total = 0;
 
-        const TOP_PROCESSED_TO_ANCHOR_STUB: MempoolAnchorId = 0; // FIXME replace
-
         let mut next_anchor = if let Some(anchor) = last_anchor {
             anchor
         } else {
             let GetAnchorResult::Exist(next_anchor) = mpool_adapter
-                .get_anchor_by_id(TOP_PROCESSED_TO_ANCHOR_STUB, processed_to_anchor_id)
+                .get_anchor_by_id(top_processed_to_anchor, processed_to_anchor_id)
                 .await?
             else {
                 return Err(CollatorError::Cancelled(
@@ -1034,7 +1062,7 @@ impl CollatorStdImpl {
 
         while last_block_chain_time > last_imported_anchor_ct {
             let GetAnchorResult::Exist(anchor) = mpool_adapter
-                .get_next_anchor(TOP_PROCESSED_TO_ANCHOR_STUB, prev_anchor_id)
+                .get_next_anchor(top_processed_to_anchor, prev_anchor_id)
                 .await?
             else {
                 return Err(CollatorError::Cancelled(
@@ -1120,6 +1148,12 @@ impl CollatorStdImpl {
         Ok(has_internals)
     }
 
+    async fn wait_state_and_try_collate_wrapper(&mut self) -> Result<()> {
+        self.wait_state_and_try_collate()
+            .await
+            .with_context(|| format!("next_block_id: {}", self.next_block_info))
+    }
+
     async fn wait_state_and_try_collate(&mut self) -> Result<()> {
         let working_state = self.delayed_working_state.wait().await?;
 
@@ -1128,6 +1162,16 @@ impl CollatorStdImpl {
         } else {
             self.try_collate_next_shard_block_impl(working_state).await
         }
+    }
+
+    async fn wait_state_and_do_collate_wrapper(
+        &mut self,
+        top_shard_blocks_info: Vec<TopBlockDescription>,
+        next_chain_time: u64,
+    ) -> Result<()> {
+        self.wait_state_and_do_collate(top_shard_blocks_info, next_chain_time)
+            .await
+            .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
 
     async fn wait_state_and_do_collate(
@@ -1179,7 +1223,7 @@ impl CollatorStdImpl {
             )
             .await?;
         } else {
-            // otherwise import next anchor and return it notify to manager
+            // otherwise import next anchor and return notify to manager
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "there are no unprocessed messages, will import next anchor",
             );
@@ -1189,83 +1233,82 @@ impl CollatorStdImpl {
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
                 self.mempool_config_override.as_ref().map(|c| c.start_round),
-            )
-            .await;
-
-            let result = Self::handle_import_anchor_result(
-                import_anchor_result,
-                &mut working_state,
-                &self.listener,
-                &self.next_block_info,
+                working_state.mc_data.top_processed_to_anchor,
             )
             .await?;
 
-            let (next_anchor, has_externals) = match result {
-                Some(result) => result,
-                None => return Ok(()),
+            match &import_anchor_result.get_anchor_result {
+                GetAnchorResult::NotExist => {
+                    tracing::warn!(target: tracing_targets::COLLATOR,
+                        prev_anchor_id = import_anchor_result.prev_anchor_id,
+                        "next anchor not exist, cancel collation attempts",
+                    );
+                    self.listener
+                        .on_cancelled(
+                            working_state.mc_data.block_id,
+                            working_state.next_block_id_short,
+                            CollationCancelReason::NextAnchorNotFound(
+                                import_anchor_result.prev_anchor_id,
+                            ),
+                        )
+                        .await?;
+                    self.delayed_working_state.delay(working_state);
+                    return Ok(());
+                }
+                GetAnchorResult::Exist(next_anchor) => {
+                    // time elapsed from prev anchor
+                    let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
+                    self.anchor_timer = std::time::Instant::now();
+                    metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
+                        .record(elapsed_from_prev_anchor);
+
+                    working_state.wu_used_from_last_anchor = 0;
+
+                    if import_anchor_result.has_our_externals {
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            "just imported anchor has externals for master",
+                        );
+                    }
+
+                    // this may start master block collation or cause next anchor import
+                    self.listener
+                        .on_skipped_anchor(
+                            working_state.mc_data.block_id,
+                            working_state.next_block_id_short,
+                            next_anchor.chain_time,
+                            false,
+                            working_state.collation_config.clone(),
+                        )
+                        .await?;
+
+                    self.delayed_working_state.delay(working_state);
+                }
+                GetAnchorResult::MempoolPaused => {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        prev_anchor_id = import_anchor_result.prev_anchor_id,
+                        "mempool paused, will collate next master",
+                    );
+                    // just collate next master block with previous last imported anchor
+                    self.do_collate(
+                        working_state,
+                        None,
+                        self.anchors_cache.get_last_imported_anchor_ct().unwrap(),
+                    )
+                    .await?;
+                }
             };
-
-            // time elapsed from prev anchor
-            let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
-            self.anchor_timer = std::time::Instant::now();
-            metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
-                .record(elapsed_from_prev_anchor);
-
-            working_state.wu_used_from_last_anchor = 0;
-
-            if has_externals {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "just imported anchor has externals for master",
-                );
-            }
-            // this may start master block collation or cause next anchor import
-            self.listener
-                .on_skipped_anchor(
-                    working_state.mc_data.block_id,
-                    working_state.next_block_id_short,
-                    next_anchor.chain_time,
-                    false,
-                    working_state.collation_config.clone(),
-                )
-                .await?;
-
-            self.delayed_working_state.delay(working_state);
         }
 
         Ok(())
     }
 
-    async fn handle_import_anchor_result(
-        import_anchor_result: Result<(Arc<MempoolAnchor>, bool), CollatorError>,
-        working_state: &mut WorkingState,
-        listener: &Arc<dyn CollatorEventListener>,
-        next_block_info: &BlockIdShort,
-    ) -> Result<Option<(Arc<MempoolAnchor>, bool)>> {
-        match import_anchor_result {
-            Ok(val) => Ok(Some(val)),
-            Err(e) => match e {
-                CollatorError::Cancelled(cancel_reason) => {
-                    listener
-                        .on_cancelled(
-                            working_state.mc_data.block_id,
-                            working_state.next_block_id_short,
-                            cancel_reason,
-                        )
-                        .await?;
-                    Ok(None)
-                }
-                CollatorError::Anyhow(err) => {
-                    bail!("next_block_info: {}, error: {}", next_block_info, err);
-                }
-            },
-        }
-    }
-
     /// Run collation if there are internals or externals,
     /// otherwise import next anchor.
+    /// Import next anchor if wu used exceeded limit.
     /// If it has externals then run collation,
-    /// otherwise return empty anchor to manager
-    /// that will route next collation steps
+    /// otherwise skip collation and notify collation manager.
+    /// Skip collation and notify collation manager
+    /// if max uncommitted chain length reached.
     #[tracing::instrument(
         parent = None, name = "try_collate_next_shard_block",
         skip_all, fields(next_block_id = %self.next_block_info)
@@ -1284,25 +1327,7 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        // check has unprocessed messages in buffer or queue
-        let has_uprocessed_messages = self
-            .check_has_unprocessed_messages(&mut working_state)
-            .await?;
-        if has_uprocessed_messages {
-            tracing::info!(target: tracing_targets::COLLATOR,
-                "there are unprocessed messages from previous block, will collate next block",
-            );
-        }
-
-        // check pending externals
-        let mut has_externals = self.anchors_cache.has_pending_externals();
-        if has_externals {
-            tracing::info!(target: tracing_targets::COLLATOR,
-                "there are pending externals from previously imported anchors, will collate next block",
-            );
-        }
-
-        // calc uncommitted chain length
+        // check if should force master block collation by uncommitted chain length
         let mut last_committed_seqno = 0;
         for (shard_id, shard_descr) in working_state.mc_data.shards.iter() {
             if *shard_id == self.shard_id {
@@ -1311,152 +1336,191 @@ impl CollatorStdImpl {
         }
         let uncommitted_chain_length =
             working_state.next_block_id_short.seqno - 1 - last_committed_seqno;
-
         let max_uncommitted_chain_length =
             working_state.collation_config.max_uncommitted_chain_length as u32;
-        let wu_used_to_import_next_anchor =
-            working_state.collation_config.wu_used_to_import_next_anchor;
 
-        // check if should force master block collation
         let force_mc_block_by_uncommitted_chain =
             uncommitted_chain_length >= max_uncommitted_chain_length;
 
-        // should import anchor after fixed wu used by shard blocks in uncommitted blocks chain
-        let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
-        let force_import_anchor_by_used_wu =
-            wu_used_from_last_anchor > wu_used_to_import_next_anchor;
-
-        // check if has pending internals or externals
-        let no_pending_msgs = !has_uprocessed_messages && !has_externals;
-
-        // import next anchor if meet one of above conditions
-        let next_anchor_info_opt = if force_mc_block_by_uncommitted_chain {
-            tracing::info!(target: tracing_targets::COLLATOR,
-                "max_uncommitted_chain_length {} reached",
-                max_uncommitted_chain_length,
-            );
-            None
-        } else if no_pending_msgs || force_import_anchor_by_used_wu {
-            if no_pending_msgs {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "there are no pending internals or externals, will import next anchor",
-                );
-            } else if force_import_anchor_by_used_wu {
-                tracing::info!(target: tracing_targets::COLLATOR,
-                    "wu used from last anchor {} reached limit {} on length {}, will import next anchor",
-                    wu_used_from_last_anchor, wu_used_to_import_next_anchor,  uncommitted_chain_length,
-                );
-            }
-
-            working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_wu {
-                wu_used_from_last_anchor.saturating_sub(wu_used_to_import_next_anchor)
+        // check if should collate next shard block, import anchors if required
+        #[derive(Debug)]
+        enum TryCollateCheck {
+            ForceMcBlockByUncommittedChainLength,
+            HasUnprocessedMessages,
+            HasExternals,
+            ImportedAnchorHasNoExternals,
+            MempoolPaused,
+        }
+        let try_collate_check = 'check: {
+            if force_mc_block_by_uncommitted_chain {
+                TryCollateCheck::ForceMcBlockByUncommittedChainLength
             } else {
-                0
-            };
+                // check has unprocessed messages in buffer or queue
+                let has_uprocessed_messages = self
+                    .check_has_unprocessed_messages(&mut working_state)
+                    .await?;
 
-            let mut last_anchor;
-            let mut import_next_anchor_count = 0;
-            loop {
-                let import_anchor_result = Self::import_next_anchor(
-                    self.shard_id,
-                    &mut self.anchors_cache,
-                    self.mpool_adapter.clone(),
-                    self.mempool_config_override.as_ref().map(|c| c.start_round),
-                )
-                .await;
+                // check pending externals
+                let has_externals = self.anchors_cache.has_pending_externals();
 
-                let result = Self::handle_import_anchor_result(
-                    import_anchor_result,
-                    &mut working_state,
-                    &self.listener,
-                    &self.next_block_info,
-                )
-                .await?;
+                // check if should import anchor after fixed wu used by blocks collation
+                let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
+                let wu_used_to_import_next_anchor =
+                    working_state.collation_config.wu_used_to_import_next_anchor;
+                let force_import_anchor_by_used_wu =
+                    wu_used_from_last_anchor > wu_used_to_import_next_anchor;
 
-                let (next_anchor, next_anchor_has_externals) = match result {
-                    Some(result) => result,
-                    None => return Ok(()),
-                };
-
-                import_next_anchor_count += 1;
-
-                // time elapsed from prev anchor
-                let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
-                self.anchor_timer = std::time::Instant::now();
-                metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
-                    .record(elapsed_from_prev_anchor);
-
-                metrics::gauge!("tycho_do_collate_shard_blocks_count_btw_anchors")
-                    .set(self.shard_blocks_count_from_last_anchor);
-                self.shard_blocks_count_from_last_anchor = 0;
-
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "wu_used_from_last_anchor dropped to {}, because no_pending_msgs - {}, force_import_anchor_by_used_wu - {}, ",
-                    working_state.wu_used_from_last_anchor,
-                    no_pending_msgs,
+                // decide if should import anchors
+                match (
+                    has_uprocessed_messages,
+                    has_externals,
                     force_import_anchor_by_used_wu,
+                ) {
+                    (true, _, false) => break 'check TryCollateCheck::HasUnprocessedMessages,
+                    (_, true, false) => break 'check TryCollateCheck::HasExternals,
+                    (false, false, false) => {
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            "there are no pending internals or externals, will import next anchor",
+                        );
+                    }
+                    (_, _, true) => {
+                        tracing::info!(target: tracing_targets::COLLATOR,
+                            "wu used from last anchor {} reached limit {} on length {}, will import next anchor",
+                            wu_used_from_last_anchor, wu_used_to_import_next_anchor,  uncommitted_chain_length,
+                        );
+                    }
+                }
+
+                working_state.wu_used_from_last_anchor = if force_import_anchor_by_used_wu {
+                    wu_used_from_last_anchor.saturating_sub(wu_used_to_import_next_anchor)
+                } else {
+                    0
+                };
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    wu_used_from_last_anchor = working_state.wu_used_from_last_anchor,
+                    force_import_anchor_by_used_wu,
+                    "wu_used_from_last_anchor dropped to",
                 );
 
-                has_externals |= next_anchor_has_externals;
-                if has_externals {
+                let mut imported_anchors_count = 0;
+                let mut imported_anchors_has_externals = false;
+
+                // import anchors until wu_used_from_last_anchor > wu_used_to_import_next_anchor
+                loop {
+                    let import_anchor_result = Self::import_next_anchor(
+                        self.shard_id,
+                        &mut self.anchors_cache,
+                        self.mpool_adapter.clone(),
+                        self.mempool_config_override.as_ref().map(|c| c.start_round),
+                        working_state.mc_data.top_processed_to_anchor,
+                    )
+                    .await?;
+
+                    match &import_anchor_result.get_anchor_result {
+                        GetAnchorResult::NotExist => {
+                            // cancel collation attempts if mempool cannot return required anchor
+                            self.listener
+                                .on_cancelled(
+                                    working_state.mc_data.block_id,
+                                    working_state.next_block_id_short,
+                                    CollationCancelReason::NextAnchorNotFound(
+                                        import_anchor_result.prev_anchor_id,
+                                    ),
+                                )
+                                .await?;
+                            self.delayed_working_state.delay(working_state);
+                            return Ok(());
+                        }
+                        GetAnchorResult::Exist(_) => {
+                            imported_anchors_count += 1;
+
+                            // time elapsed from prev anchor
+                            let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
+                            self.anchor_timer = std::time::Instant::now();
+                            metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
+                                .record(elapsed_from_prev_anchor);
+
+                            metrics::gauge!("tycho_do_collate_shard_blocks_count_btw_anchors")
+                                .set(self.shard_blocks_count_from_last_anchor);
+                            self.shard_blocks_count_from_last_anchor = 0;
+
+                            imported_anchors_has_externals |=
+                                import_anchor_result.has_our_externals;
+
+                            if working_state.wu_used_from_last_anchor
+                                < wu_used_to_import_next_anchor
+                            {
+                                break;
+                            }
+                            working_state.wu_used_from_last_anchor = working_state
+                                .wu_used_from_last_anchor
+                                .saturating_sub(wu_used_to_import_next_anchor);
+                        }
+                        GetAnchorResult::MempoolPaused => {
+                            break 'check TryCollateCheck::MempoolPaused
+                        }
+                    }
+                }
+
+                metrics::gauge!("tycho_do_collate_import_next_anchor_count")
+                    .set(imported_anchors_count);
+
+                if imported_anchors_has_externals {
                     tracing::info!(target: tracing_targets::COLLATOR,
-                        "just imported anchor has externals, will collate next block",
+                        "just imported anchors has externals",
                     );
                 }
-                last_anchor = Some(next_anchor);
-                if working_state.wu_used_from_last_anchor < wu_used_to_import_next_anchor {
-                    break;
+
+                let has_externals = has_externals || imported_anchors_has_externals;
+
+                match (has_uprocessed_messages, has_externals) {
+                    (true, _) => TryCollateCheck::HasUnprocessedMessages,
+                    (false, true) => TryCollateCheck::HasExternals,
+                    (false, false) => TryCollateCheck::ImportedAnchorHasNoExternals,
                 }
-                working_state.wu_used_from_last_anchor = working_state
-                    .wu_used_from_last_anchor
-                    .saturating_sub(wu_used_to_import_next_anchor);
             }
-
-            metrics::gauge!("tycho_do_collate_import_next_anchor_count")
-                .set(import_next_anchor_count);
-            self.shard_blocks_count_from_last_anchor = 0;
-
-            last_anchor
-        } else {
-            None
         };
 
-        // collate block if has internals or externals
-        if (has_uprocessed_messages || has_externals) && !force_mc_block_by_uncommitted_chain {
-            drop(histogram);
-            self.do_collate(
-                working_state,
-                None,
-                self.anchors_cache.get_last_imported_anchor_ct().unwrap(),
-            )
-            .await?;
-        } else {
-            // here just imported anchor has no externals
-            // or we reached max uncommitted chain length
-            let anchor_chain_time = if let Some(next_anchor) = next_anchor_info_opt {
+        // collate next shard block or skip
+        match try_collate_check {
+            TryCollateCheck::HasUnprocessedMessages
+            | TryCollateCheck::HasExternals
+            | TryCollateCheck::MempoolPaused => {
+                let chain_time = self.anchors_cache.get_last_imported_anchor_ct().unwrap();
+
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "just imported anchor has no externals for current shard, will notify collation manager",
+                    reason = ?try_collate_check,
+                    chain_time,
+                    "Will collate next shard block",
                 );
-                next_anchor.chain_time
-            } else {
-                tracing::info!(target: tracing_targets::COLLATOR,
-                    "force_mc_block_by_uncommitted_chain={}, will notify collation manager",
-                    force_mc_block_by_uncommitted_chain,
+
+                drop(histogram);
+                self.do_collate(working_state, None, chain_time).await?;
+            }
+            TryCollateCheck::ImportedAnchorHasNoExternals
+            | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
+                let chain_time = self.anchors_cache.get_last_imported_anchor_ct().unwrap();
+
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    reason = ?try_collate_check,
+                    chain_time,
+                    uncommitted_chain_length,
+                    max_uncommitted_chain_length,
+                    "Will NOT collate next shard block, will notify collation manager",
                 );
-                self.anchors_cache.get_last_imported_anchor_ct().unwrap()
-            };
 
-            self.listener
-                .on_skipped_anchor(
-                    working_state.mc_data.block_id,
-                    working_state.next_block_id_short,
-                    anchor_chain_time,
-                    force_mc_block_by_uncommitted_chain,
-                    working_state.collation_config.clone(),
-                )
-                .await?;
+                self.listener
+                    .on_skipped_anchor(
+                        working_state.mc_data.block_id,
+                        working_state.next_block_id_short,
+                        chain_time,
+                        force_mc_block_by_uncommitted_chain,
+                        working_state.collation_config.clone(),
+                    )
+                    .await?;
 
-            self.delayed_working_state.delay(working_state);
+                self.delayed_working_state.delay(working_state);
+            }
         }
 
         Ok(())
@@ -1511,3 +1575,9 @@ impl DelayedWorkingState {
 }
 
 type LastProcessedAnchorInfo = ((MempoolAnchorId, u64), u64, BlockId);
+
+struct ImportNextAnchorResult {
+    pub prev_anchor_id: MempoolAnchorId,
+    pub get_anchor_result: GetAnchorResult,
+    pub has_our_externals: bool,
+}
