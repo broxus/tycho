@@ -19,6 +19,7 @@ use crate::util::*;
 pub struct RpcStorage {
     db: RpcDb,
     min_tx_lt: AtomicU64,
+    min_tx_lt_guard: tokio::sync::Mutex<()>,
     snapshot: ArcSwapOption<OwnedSnapshot>,
 }
 
@@ -27,6 +28,7 @@ impl RpcStorage {
         let this = Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
+            min_tx_lt_guard: Default::default(),
             snapshot: Default::default(),
         };
 
@@ -36,6 +38,17 @@ impl RpcStorage {
                 .insert(INSTANCE_ID, rand::random::<InstanceId>())
                 .unwrap();
         }
+
+        let min_lt = match state.get(TX_MIN_LT).unwrap() {
+            Some(value) if value.is_empty() => None,
+            Some(value) => Some(u64::from_le_bytes(value.as_ref().try_into().unwrap())),
+            None => None,
+        };
+
+        this.min_tx_lt
+            .store(min_lt.unwrap_or(u64::MAX), Ordering::Release);
+
+        tracing::debug!(?min_lt, "rpc storage initialized");
 
         this
     }
@@ -145,50 +158,6 @@ impl RpcStorage {
             return Ok(None);
         };
         self.db.transactions.get(key).map_err(Into::into)
-    }
-
-    #[tracing::instrument(level = "info", name = "sync_min_tx_lt", skip_all)]
-    pub async fn sync_min_tx_lt(&self) -> Result<()> {
-        let min_lt = match self.db.state.get(TX_MIN_LT)? {
-            Some(value) if value.is_empty() => None,
-            Some(value) => Some(u64::from_le_bytes(value.as_ref().try_into().unwrap())),
-            None => {
-                let span = tracing::Span::current();
-                let db = self.db.clone();
-
-                // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-                tokio::task::spawn_blocking(move || {
-                    let _span = span.enter();
-
-                    tracing::info!("started searching for the minimum transaction LT");
-                    let started_at = Instant::now();
-
-                    let mut min_lt = None::<u64>;
-                    for tx in db.transactions.iterator(rocksdb::IteratorMode::Start) {
-                        let (key, _) = tx?;
-
-                        let lt = u64::from_be_bytes(key[33..41].try_into().unwrap());
-                        match &mut min_lt {
-                            Some(min_lt) => *min_lt = (*min_lt).min(lt),
-                            None => min_lt = Some(lt),
-                        }
-                    }
-
-                    tracing::info!(
-                        elapsed = %humantime::format_duration(started_at.elapsed()),
-                        "finished searching for the minimum transaction LT"
-                    );
-                    Ok::<_, rocksdb::Error>(min_lt)
-                })
-                .await??
-            }
-        };
-
-        tracing::info!(?min_lt);
-
-        self.min_tx_lt
-            .store(min_lt.unwrap_or(u64::MAX), Ordering::Release);
-        Ok(())
     }
 
     #[tracing::instrument(
@@ -580,6 +549,8 @@ impl RpcStorage {
             return Ok(());
         };
 
+        let min_lt = block.load_info()?.start_lt;
+
         let span = tracing::Span::current();
         let db = self.db.clone();
 
@@ -718,9 +689,30 @@ impl RpcStorage {
                     .write_opt(write_batch, db.transactions.write_config())?;
             }
 
-            Ok(())
+            Ok::<_, anyhow::Error>(())
         })
-        .await?
+        .await??;
+
+        // Update min lt after a successful block processing.
+        'min_lt: {
+            // Update the runtime value first. Load is relaxed since we just need
+            // to know that the value was updated.
+            if min_lt < self.min_tx_lt.fetch_min(min_lt, Ordering::Release) {
+                // Acquire the operation guard to ensure that there is only one writer.
+                let _guard = self.min_tx_lt_guard.lock().await;
+
+                // Do nothing if the value was already updated while we were waiting.
+                // Load is Acquire since we need to see the most recent value.
+                if min_lt > self.min_tx_lt.load(Ordering::Acquire) {
+                    break 'min_lt;
+                }
+
+                // Update the value in the database.
+                self.db.state.insert(TX_MIN_LT, min_lt.to_le_bytes())?;
+            }
+        }
+
+        Ok(())
     }
 
     fn update_code_hash(

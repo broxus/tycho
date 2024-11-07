@@ -310,8 +310,6 @@ impl Inner {
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
-            rpc_storage.sync_min_tx_lt().await?;
-
             let node_instance_id = self.storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
 
