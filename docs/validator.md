@@ -29,7 +29,7 @@ sudo apt install build-essential git libssl-dev zlib1g-dev pkg-config clang jq
 ```bash
 git clone https://github.com/broxus/tycho
 cd tycho
-git checkout tags/0.0.0 -b mynode
+git checkout tags/v0.1.0 -b mynode
 cargo install --path ./cli
 ```
 
