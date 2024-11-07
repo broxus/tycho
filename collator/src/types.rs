@@ -13,6 +13,9 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::mempool::MempoolAnchorId;
+use crate::utils::block::detect_top_processed_to_anchor;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct CollatorConfig {
@@ -204,6 +207,10 @@ pub struct McData {
 
     pub processed_upto: ProcessedUptoInfoStuff,
 
+    /// Minimal of top processed to anchors
+    /// from master block and its top shards
+    pub top_processed_to_anchor: MempoolAnchorId,
+
     pub ref_mc_state_handle: RefMcStateHandle,
 }
 
@@ -221,7 +228,14 @@ impl McData {
             0
         };
 
+        let processed_upto: ProcessedUptoInfoStuff = state.processed_upto.load()?.try_into()?;
+
         let shards = extra.shards.as_vec()?;
+        let top_processed_to_anchor = detect_top_processed_to_anchor(
+            shards.iter().map(|(_, d)| *d),
+            processed_upto.externals.as_ref(),
+        );
+
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -238,7 +252,8 @@ impl McData {
             validator_info: extra.validator_info,
             consensus_info: extra.consensus_info,
 
-            processed_upto: state.processed_upto.load()?.try_into()?,
+            processed_upto,
+            top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
         }))
