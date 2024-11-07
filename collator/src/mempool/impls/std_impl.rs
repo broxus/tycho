@@ -292,12 +292,17 @@ impl MempoolAdapterStdImpl {
         }
     }
 
-    async fn expect_running(&self, top_processed_to_anchor: MempoolAnchorId) -> bool {
+    async fn expect_running(
+        &self,
+        top_processed_to_anchor: MempoolAnchorId,
+        anchor_id: MempoolAnchorId,
+    ) -> Option<bool> {
         let config = self.engine_config.lock().await;
-        match &config.engine_handle {
-            Some(handle) => handle.expect_running(&self.top_known_anchor, top_processed_to_anchor),
-            None => false, // not yet init
-        }
+        let expect_running = config
+            .engine_handle
+            .as_ref()?
+            .expect_running(top_processed_to_anchor, anchor_id);
+        Some(expect_running)
     }
 }
 
@@ -392,11 +397,18 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         anchor_id: MempoolAnchorId,
     ) -> Result<GetAnchorResult> {
         // to be reproducible on all nodes regardless already committed data
-        Ok(if self.expect_running(top_processed_to_anchor).await {
-            self.cache.get_anchor_by_id(anchor_id).await
-        } else {
-            GetAnchorResult::MempoolPaused
-        })
+
+        let result = match self
+            .expect_running(top_processed_to_anchor, anchor_id)
+            .await
+        {
+            Some(true) => match self.cache.get_anchor_by_id(anchor_id).await {
+                Some(anchor) => GetAnchorResult::Exist(anchor),
+                None => GetAnchorResult::NotExist,
+            },
+            Some(false) | None => GetAnchorResult::MempoolPaused, // also paused until init
+        };
+        Ok(result)
     }
 
     async fn get_next_anchor(
@@ -405,11 +417,17 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         prev_anchor_id: MempoolAnchorId,
     ) -> Result<GetAnchorResult> {
         // to be reproducible on all nodes regardless already committed data
-        Ok(if self.expect_running(top_processed_to_anchor).await {
-            self.cache.get_next_anchor(prev_anchor_id).await
-        } else {
-            GetAnchorResult::MempoolPaused
-        })
+        let result = match self
+            .expect_running(top_processed_to_anchor, prev_anchor_id)
+            .await
+        {
+            Some(true) => match self.cache.get_next_anchor(prev_anchor_id).await {
+                Some(anchor) => GetAnchorResult::Exist(anchor),
+                None => GetAnchorResult::NotExist,
+            },
+            Some(false) | None => GetAnchorResult::MempoolPaused, // also paused until init
+        };
+        Ok(result)
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {

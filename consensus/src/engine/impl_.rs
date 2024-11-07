@@ -53,16 +53,12 @@ impl EngineHandle {
         }
         self.peer_schedule.set_next_set(set);
     }
-    pub fn expect_running(
-        &self,
-        top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        round: u32,
-    ) -> bool {
+    pub fn expect_running(&self, expected_top_known_anchor: u32, round: u32) -> bool {
         _ = self; // make use of self for correct engine init in adapter
-        let top_known_anchor = top_known_anchor.get();
-        //  exit if ready to produce point: collator synced enough
-        let silent_after = CachedConfig::silent_after(top_known_anchor);
-        round < silent_after.0
+
+        let silent_after = CachedConfig::silent_after(Round(expected_top_known_anchor));
+        // Note: next dag round is included, while engine uses prev to next dag round (ie current)
+        round <= silent_after.0
     }
 }
 
