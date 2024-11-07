@@ -706,7 +706,7 @@ impl CollatorStdImpl {
         is_masterchain: bool,
         shards_max_end_lt: u64,
     ) -> Result<u64> {
-        tracing::trace!(target: tracing_targets::COLLATOR, "calc_start_lt()");
+        tracing::trace!(target: tracing_targets::COLLATOR, "calc_start_lt");
 
         let mut start_lt = if !is_masterchain {
             std::cmp::max(mc_data_gen_lt, prev_gen_lt)
@@ -735,7 +735,7 @@ impl CollatorStdImpl {
         total_validator_fees: &CurrencyCollection,
         collation_data: &mut BlockCollationData,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::COLLATOR, "update_value_flow()");
+        tracing::trace!(target: tracing_targets::COLLATOR, "update_value_flow");
 
         if self.shard_id.is_masterchain() {
             collation_data.value_flow.created.tokens = config.get_block_creation_reward(true)?;
@@ -1077,7 +1077,7 @@ impl CollatorStdImpl {
         // TODO: consider split/merge logic
 
         tracing::trace!(target: tracing_targets::COLLATOR,
-            "import_new_shard_top_blocks_for_masterchain()",
+            "import_new_shard_top_blocks_for_masterchain",
         );
 
         // convert to map for merging
@@ -1230,7 +1230,8 @@ impl CollatorStdImpl {
         let is_masterchain = self.shard_id.is_masterchain();
 
         if !is_masterchain {
-            self.shard_blocks_count_from_last_anchor += 1;
+            self.shard_blocks_count_from_last_anchor =
+                self.shard_blocks_count_from_last_anchor.saturating_add(1);
         }
 
         // prepare block collation data

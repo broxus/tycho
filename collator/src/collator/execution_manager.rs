@@ -612,7 +612,7 @@ impl MessagesExecutor {
             .checked_div(group_horizontal_size as u32)
             .unwrap_or_default();
 
-        tracing::debug!(target: tracing_targets::EXEC_MANAGER,
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER,
             group_horizontal_size, group_max_vert_size,
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
@@ -694,8 +694,6 @@ impl MessagesExecutor {
         mut account_stuff: Box<ShardAccountStuff>,
         in_message: Box<ParsedMessage>,
     ) -> Result<ExecutedOrdinaryTransaction> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute ordinary transaction for special message");
-
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
@@ -725,8 +723,6 @@ impl MessagesExecutor {
         mut account_stuff: Box<ShardAccountStuff>,
         tick_tock: TickTock,
     ) -> Result<ExecutorOutput> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
-
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
@@ -837,7 +833,7 @@ fn execute_ordinary_transaction_impl(
     config: &PreloadedBlockchainConfig,
     params: &ExecuteParams,
 ) -> Result<ExecutedOrdinaryTransaction> {
-    tracing::debug!(
+    tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
         message_hash = %in_message.cell.repr_hash(),
