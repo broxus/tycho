@@ -242,7 +242,12 @@ impl ProofChecker {
 
         let block_storage = self.storage.block_storage();
 
-        // TODO: Check `queue_diff` using data from `virt_block` or `virt_block_info`
+        anyhow::ensure!(
+            &virt_block.out_msg_queue_updates.diff_hash == queue_diff.diff_hash(),
+            "queue diff mismatch (expected: {}, got: {})",
+            virt_block.out_msg_queue_updates.diff_hash,
+            queue_diff.diff_hash(),
+        );
 
         if is_masterchain {
             let block_handles = self.storage.block_handle_storage();
