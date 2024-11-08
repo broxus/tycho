@@ -15,12 +15,13 @@ use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 
-use super::execution_manager::MessagesExecutor;
-use super::types::{ExecuteCollation, ExecuteResult, MessagesBuffer};
+use super::execute::{ExecuteResult, ExecuteState};
+use super::phase::Phase;
 use crate::collator::debug_info::BlockDebugInfo;
-use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg};
+use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::types::{BlockCollationData, MessagesBuffer, PreparedInMsg, PreparedOutMsg};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, CollationSessionInfo, McData, ShardHashesExt};
+use crate::types::{BlockCandidate, CollationSessionInfo, McData};
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizedBlock {
@@ -35,7 +36,7 @@ pub struct FinalizedBlock {
     pub collation_config: Arc<CollationConfig>,
 }
 
-impl ExecuteCollation {
+impl Phase<ExecuteState> {
     pub fn finalize_block(
         mut self,
         collation_session: Arc<CollationSessionInfo>,
@@ -46,9 +47,14 @@ impl ExecuteCollation {
     ) -> Result<(FinalizedBlock, ExecuteResult)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
-        let wu_params_finalize = self.collation_config.work_units_params.finalize.clone();
+        let wu_params_finalize = self
+            .state
+            .collation_config
+            .work_units_params
+            .finalize
+            .clone();
 
-        let shard = self.collation_data.block_id_short.shard;
+        let shard = self.state.collation_data.block_id_short.shard;
 
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
@@ -58,15 +64,15 @@ impl ExecuteCollation {
         let mut global_libraries = executor.executor_params().state_libs.clone();
 
         let is_masterchain = shard.is_masterchain();
-        let config_address = &self.mc_data.config.address;
+        let config_address = &self.state.mc_data.config.address;
 
         // Compute a masterchain block seqno which will reference this block.
         let ref_by_mc_seqno = if is_masterchain {
             // The block itself for the masterchain
-            self.collation_data.block_id_short.seqno
+            self.state.collation_data.block_id_short.seqno
         } else {
             // And the next masterchain block for shards
-            self.mc_data.block_id.seqno + 1
+            self.state.mc_data.block_id.seqno + 1
         };
 
         let mut processed_accounts_res = Ok(Default::default());
@@ -85,7 +91,7 @@ impl ExecuteCollation {
                     "tycho_collator_finalize_build_in_msgs_time",
                     labels,
                 );
-                in_msgs_res = Self::build_in_msgs(&self.collation_data.in_msgs);
+                in_msgs_res = Self::build_in_msgs(&self.state.collation_data.in_msgs);
                 build_in_msgs_elapsed = histogram.finish();
             });
             s.spawn(|_| {
@@ -93,7 +99,7 @@ impl ExecuteCollation {
                     "tycho_collator_finalize_build_out_msgs_time",
                     labels,
                 );
-                out_msgs_res = Self::build_out_msgs(&self.collation_data.out_msgs);
+                out_msgs_res = Self::build_out_msgs(&self.state.collation_data.out_msgs);
                 build_out_msgs_elapsed = histogram.finish();
             });
 
@@ -115,13 +121,13 @@ impl ExecuteCollation {
             histogram_build_account_blocks_and_messages.finish();
 
         let processed_accounts = processed_accounts_res?;
-        self.collation_data.accounts_count = processed_accounts.accounts_len as u64;
+        self.state.collation_data.accounts_count = processed_accounts.accounts_len as u64;
         let in_msgs = in_msgs_res?;
         let out_msgs = out_msgs_res?;
 
         // TODO: update new_config_opt from hard fork
         // calc value flow
-        let mut value_flow = self.collation_data.value_flow.clone();
+        let mut value_flow = self.state.collation_data.value_flow.clone();
 
         value_flow.imported = in_msgs.root_extra().value_imported.clone();
         value_flow.exported = out_msgs.root_extra().clone();
@@ -151,8 +157,9 @@ impl ExecuteCollation {
                 labels,
             );
 
-            let prev_state = &self.prev_shard_data.observable_states()[0];
+            let prev_state = &self.state.prev_shard_data.observable_states()[0];
             let prev_processed_to_anchor = self
+                .state
                 .prev_shard_data
                 .processed_upto()
                 .externals
@@ -167,39 +174,40 @@ impl ExecuteCollation {
                         params,
                     });
             let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
-                &mut self.collation_data,
+                &mut self.state.collation_data,
                 config_params,
                 prev_state,
                 prev_processed_to_anchor,
             )?;
-            self.collation_data
+            self.state
+                .collation_data
                 .update_ref_min_mc_seqno(min_ref_mc_seqno);
 
             build_mc_state_extra_elapsed = histogram.finish();
             (Some(extra), None)
         } else {
             build_mc_state_extra_elapsed = Duration::ZERO;
-            (None, Some(self.mc_data.make_block_ref()))
+            (None, Some(self.state.mc_data.make_block_ref()))
         };
 
         // build block info
         let mut new_block_info = BlockInfo {
             version: 0,
             key_block: matches!(&mc_state_extra, Some(extra) if extra.after_key_block),
-            shard: self.collation_data.block_id_short.shard,
-            seqno: self.collation_data.block_id_short.seqno,
-            gen_utime: self.collation_data.gen_utime,
-            gen_utime_ms: self.collation_data.gen_utime_ms,
-            start_lt: self.collation_data.start_lt,
-            end_lt: self.collation_data.next_lt,
+            shard: self.state.collation_data.block_id_short.shard,
+            seqno: self.state.collation_data.block_id_short.seqno,
+            gen_utime: self.state.collation_data.gen_utime,
+            gen_utime_ms: self.state.collation_data.gen_utime_ms,
+            start_lt: self.state.collation_data.start_lt,
+            end_lt: self.state.collation_data.next_lt,
             gen_validator_list_hash_short: collation_session.collators().short_hash,
             gen_catchain_seqno: collation_session.seqno(),
-            min_ref_mc_seqno: self.collation_data.min_ref_mc_seqno,
-            prev_key_block_seqno: self.mc_data.prev_key_block_seqno,
+            min_ref_mc_seqno: self.state.collation_data.min_ref_mc_seqno,
+            prev_key_block_seqno: self.state.mc_data.prev_key_block_seqno,
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
             ..Default::default()
         };
-        let prev_ref = self.prev_shard_data.get_blocks_ref()?;
+        let prev_ref = self.state.prev_shard_data.get_blocks_ref()?;
         new_block_info.set_prev_ref(&prev_ref);
 
         // TODO: should set when slpit/merge logic implemented
@@ -209,9 +217,9 @@ impl ExecuteCollation {
         // info.want_split = false;
         // info.want_merge = false;
 
-        let capabilities = self.mc_data.config.get_global_version()?.capabilities;
+        let capabilities = self.state.mc_data.config.get_global_version()?.capabilities;
         if capabilities.contains(GlobalCapability::CapReportVersion) {
-            new_block_info.set_gen_software(Some(self.collation_data.global_version));
+            new_block_info.set_gen_software(Some(self.state.collation_data.global_version));
         }
 
         let build_state_update_elapsed;
@@ -224,9 +232,9 @@ impl ExecuteCollation {
                 labels,
             );
 
-            let accounts_count = self.collation_data.accounts_count;
-            let in_msgs_len = self.collation_data.in_msgs.len() as u64;
-            let out_msgs_len = self.collation_data.out_msgs.len() as u64;
+            let accounts_count = self.state.collation_data.accounts_count;
+            let in_msgs_len = self.state.collation_data.in_msgs.len() as u64;
+            let out_msgs_len = self.state.collation_data.out_msgs.len() as u64;
 
             finalize_wu_total = Self::calc_finalize_wu_total(
                 accounts_count,
@@ -245,8 +253,8 @@ impl ExecuteCollation {
 
             // compute total wu used from last anchor
             let wu_used_from_last_anchor = wu_used_from_last_anchor
-                .saturating_add(self.execute_result.prepare_groups_wu_total)
-                .saturating_add(self.execute_result.execute_groups_wu_total)
+                .saturating_add(self.extra.execute_result.prepare_groups_wu_total)
+                .saturating_add(self.extra.execute_result.execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -256,7 +264,7 @@ impl ExecuteCollation {
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
-                global_id: self.mc_data.global_id,
+                global_id: self.state.mc_data.global_id,
                 shard_ident: new_block_info.shard,
                 seqno: new_block_info.seqno,
                 vert_seqno: 0,
@@ -264,13 +272,20 @@ impl ExecuteCollation {
                 gen_utime_ms: new_block_info.gen_utime_ms,
                 gen_lt: new_block_info.end_lt,
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
-                processed_upto: Lazy::new(&self.collation_data.processed_upto.clone().try_into()?)?,
+                processed_upto: Lazy::new(
+                    &self
+                        .state
+                        .collation_data
+                        .processed_upto
+                        .clone()
+                        .try_into()?,
+                )?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
                 overload_history: wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
-                total_validator_fees: self.prev_shard_data.total_validator_fees().clone(),
+                total_validator_fees: self.state.prev_shard_data.total_validator_fees().clone(),
                 libraries: Dict::new(),
                 master_ref,
                 custom: mc_state_extra.as_ref().map(Lazy::new).transpose()?,
@@ -296,7 +311,7 @@ impl ExecuteCollation {
             // calc merkle update
             let merkle_update = create_merkle_update(
                 &shard,
-                self.prev_shard_data.pure_state_root(),
+                self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
                 &usage_tree,
             )?;
@@ -317,24 +332,26 @@ impl ExecuteCollation {
                 in_msg_description: Lazy::new(&in_msgs)?,
                 out_msg_description: Lazy::new(&out_msgs)?,
                 account_blocks: Lazy::new(&processed_accounts.account_blocks)?,
-                rand_seed: self.collation_data.rand_seed,
-                created_by: self.collation_data.created_by,
+                rand_seed: self.state.collation_data.rand_seed,
+                created_by: self.state.collation_data.created_by,
                 ..Default::default()
             };
 
             let new_mc_block_extra = if let Some(mc_state_extra) = &mc_state_extra {
                 let new_mc_block_extra = McBlockExtra {
                     shards: mc_state_extra.shards.clone(),
-                    fees: self.collation_data.shard_fees.clone(),
+                    fees: self.state.collation_data.shard_fees.clone(),
                     // TODO: Signatures for previous blocks
                     prev_block_signatures: Default::default(),
                     mint_msg: self
+                        .state
                         .collation_data
                         .mint_msg
                         .as_ref()
                         .map(Lazy::new)
                         .transpose()?,
                     recover_create_msg: self
+                        .state
                         .collation_data
                         .recover_create_msg
                         .as_ref()
@@ -357,7 +374,7 @@ impl ExecuteCollation {
 
             // construct block
             let block = Block {
-                global_id: self.mc_data.global_id,
+                global_id: self.state.mc_data.global_id,
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
@@ -373,8 +390,8 @@ impl ExecuteCollation {
 
             let data = everscale_types::boc::Boc::encode_rayon(&root);
             let block_id = BlockId {
-                shard: self.collation_data.block_id_short.shard,
-                seqno: self.collation_data.block_id_short.seqno,
+                shard: self.state.collation_data.block_id_short.shard,
+                seqno: self.state.collation_data.block_id_short.seqno,
                 root_hash: *root.repr_hash(),
                 file_hash: Boc::file_hash_blake(&data),
             };
@@ -400,7 +417,7 @@ impl ExecuteCollation {
                 block_info: &new_block_info,
                 prev_ref: &prev_ref,
                 state: &new_observable_state,
-                processed_upto: &self.collation_data.processed_upto,
+                processed_upto: &self.state.collation_data.processed_upto,
                 mc_state_extra: mc_state_extra.as_ref(),
                 merkle_update: &state_update,
                 block_extra: &new_block_extra,
@@ -408,43 +425,46 @@ impl ExecuteCollation {
             },
         );
 
-        let new_mc_data = match mc_state_extra {
-            None => None,
-            Some(extra) => {
-                let prev_key_block_seqno = if extra.after_key_block {
-                    new_block_id.seqno
-                } else if let Some(block_ref) = &extra.last_key_block {
-                    block_ref.seqno
-                } else {
-                    0
-                };
+        let new_mc_data = mc_state_extra.map(|extra| {
+            let prev_key_block_seqno = if extra.after_key_block {
+                new_block_id.seqno
+            } else if let Some(block_ref) = &extra.last_key_block {
+                block_ref.seqno
+            } else {
+                0
+            };
 
-                let shards = extra.shards.as_vec()?;
-                let top_processed_to_anchor = detect_top_processed_to_anchor(
-                    shards.iter().map(|(_, d)| *d),
-                    collation_data.processed_upto.externals.as_ref(),
-                );
+            let shards: Vec<_> = extra
+                .shards
+                .iter()
+                .filter_map(|r| r.ok())
+                .map(|(i, shard_description)| (i, shard_description.into()))
+                .collect();
 
-                let mc_data = Arc::new(McData {
-                    global_id: new_block.as_ref().global_id,
-                    block_id: *new_block.id(),
+            let top_processed_to_anchor = detect_top_processed_to_anchor(
+                shards.iter().map(|(_, d)| *d),
+                self.state.collation_data.processed_upto.externals.as_ref(),
+            );
+
+            Arc::new(McData {
+                global_id: new_block.as_ref().global_id,
+                block_id: *new_block.id(),
 
                 prev_key_block_seqno,
                 gen_lt: new_block_info.end_lt,
-                gen_chain_time: self.collation_data.get_gen_chain_time(),
+                gen_chain_time: self.state.collation_data.get_gen_chain_time(),
                 libraries: global_libraries,
                 total_validator_fees,
 
-                    global_balance: extra.global_balance.clone(),
-                    shards,
-                    config: extra.config,
-                    validator_info: extra.validator_info,
-                    consensus_info: extra.consensus_info,
+                global_balance: extra.global_balance.clone(),
+                shards,
+                config: extra.config,
+                validator_info: extra.validator_info,
+                consensus_info: extra.consensus_info,
 
-                    processed_upto: self.collation_data.processed_upto.clone(),
-                    top_processed_to_anchor,
-
-                ref_mc_state_handle: self.prev_shard_data.ref_mc_state_handle().clone(),
+                processed_upto: self.state.collation_data.processed_upto.clone(),
+                top_processed_to_anchor,
+                ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
             })
         });
 
@@ -455,12 +475,13 @@ impl ExecuteCollation {
             ref_by_mc_seqno,
             block: new_block,
             is_key_block: new_block_info.key_block,
-            prev_blocks_ids: self.prev_shard_data.blocks_ids().clone(),
-            top_shard_blocks_ids: self.collation_data.top_shard_blocks_ids.clone(),
+            prev_blocks_ids: self.state.prev_shard_data.blocks_ids().clone(),
+            top_shard_blocks_ids: self.state.collation_data.top_shard_blocks_ids.clone(),
             collated_data,
             collated_file_hash: HashBytes::ZERO,
-            chain_time: self.collation_data.get_gen_chain_time(),
+            chain_time: self.state.collation_data.get_gen_chain_time(),
             processed_to_anchor_id: self
+                .state
                 .collation_data
                 .processed_upto
                 .externals
@@ -468,11 +489,12 @@ impl ExecuteCollation {
                 .map(|upto| upto.processed_to.0)
                 .unwrap_or_default(),
             value_flow,
-            created_by: self.collation_data.created_by,
+            created_by: self.state.collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
-            consensus_info: new_mc_data
-                .as_ref()
-                .map_or_else(|| self.mc_data.consensus_info, |mcd| mcd.consensus_info),
+            consensus_info: new_mc_data.as_ref().map_or_else(
+                || self.state.mc_data.consensus_info,
+                |mcd| mcd.consensus_info,
+            ),
         });
 
         let total_elapsed = histogram.finish();
@@ -492,17 +514,17 @@ impl ExecuteCollation {
 
         Ok((
             FinalizedBlock {
-                collation_data: self.collation_data,
+                collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
                 new_state_root,
                 new_observable_state,
                 finalize_wu_total,
-                old_mc_data: self.mc_data,
-                msgs_buffer: self.msgs_buffer,
-                collation_config: self.collation_config,
+                old_mc_data: self.state.mc_data,
+                msgs_buffer: self.state.msgs_buffer,
+                collation_config: self.state.collation_config,
             },
-            self.execute_result,
+            self.extra.execute_result,
         ))
     }
 

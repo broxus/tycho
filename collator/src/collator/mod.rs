@@ -32,7 +32,6 @@ use crate::utils::async_queued_dispatcher::{
 };
 use crate::{method_to_queued_async_closure, tracing_targets};
 
-mod build_block;
 mod debug_info;
 mod do_collate;
 mod error;

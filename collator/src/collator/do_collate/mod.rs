@@ -6,7 +6,10 @@ use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
+use execute::ExecuteResult;
+use finalize::FinalizedBlock;
 use humantime::format_duration;
+use phase::prepare_collation;
 use sha2::Digest;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::NewBlockMeta;
@@ -15,15 +18,13 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
-use super::build_block::FinalizedBlock;
 use super::types::{
     AnchorsCache, BlockCollationDataBuilder, CollationResult, ParsedExternals, PrevData,
     ReadNextExternalsMode, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
-    BlockCollationData, ExecuteResult, ParsedMessage, PreparedCollation, ShardDescriptionExt,
-    UpdateQueueDiffResult,
+    BlockCollationData, ParsedMessage, ShardDescriptionExt, UpdateQueueDiffResult,
 };
 use crate::tracing_targets;
 use crate::types::{
@@ -32,8 +33,14 @@ use crate::types::{
 };
 
 #[cfg(test)]
-#[path = "tests/do_collate_tests.rs"]
+#[path = "../tests/do_collate_tests.rs"]
 pub(super) mod tests;
+
+mod execute;
+mod execution_wrapper;
+mod finalize;
+mod phase;
+mod prepare;
 
 impl CollatorStdImpl {
     #[tracing::instrument(
@@ -90,7 +97,7 @@ impl CollatorStdImpl {
         )?;
 
         // prepare to read and execute internals and externals
-        let (mut prepared, mut execution_wrapper) = PreparedCollation::prepare_collation(
+        let (mut prepared_phase, mut execution_wrapper) = prepare_collation(
             self,
             collation_config,
             collation_data,
@@ -110,7 +117,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
-            prepared
+            prepared_phase
                 .execute_special_transactions(&mut execution_wrapper)
                 .await?;
 
@@ -122,7 +129,7 @@ impl CollatorStdImpl {
         let execute_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
 
-        let mut execute_collation = prepared
+        let mut executed_phase = prepared_phase
             .execute(&mut self.anchors_cache, &mut execution_wrapper)
             .await?;
 
@@ -133,7 +140,7 @@ impl CollatorStdImpl {
         if is_masterchain {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
-            execute_collation
+            executed_phase
                 .execute_special_transactions(&mut execution_wrapper)
                 .await?;
 
@@ -150,7 +157,7 @@ impl CollatorStdImpl {
             has_unprocessed_messages,
             diff_messages_len,
             create_queue_diff_elapsed,
-        } = execute_collation
+        } = executed_phase
             .update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter)
             .await?;
 
@@ -159,7 +166,7 @@ impl CollatorStdImpl {
         let (finalized, execute_result) = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
             move || {
-                execute_collation.finalize_block(
+                executed_phase.finalize_block(
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
@@ -225,65 +232,31 @@ impl CollatorStdImpl {
             .set(diff_time as f64 / 1000.0);
 
         self.update_stats(&collation_data);
-        tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
-
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "collated_block_id={}, time_diff={}, \
-            collation_time={}, elapsed_from_prev_block={}, overhead={}, \
-            start_lt={}, end_lt={}, exec_count={}, \
-            exec_ext={}, ext_err={}, exec_int={}, exec_new_int={}, \
-            enqueue_count={}, dequeue_count={}, \
-            new_msgs_created={}, new_msgs_added={}, \
-            in_msgs={}, out_msgs={}, \
-            read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
-            total_execute_msgs_time_mc={}, \
-            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}",
-            block_id, block_time_diff,
-            total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
-            collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
-            collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
-            collation_data.execute_count_int, collation_data.execute_count_new_int,
-            collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created, diff_messages_len,
-            collation_data.in_msgs.len(), collation_data.out_msgs.len(),
-            collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages,
-            collation_data.total_execute_msgs_time_mc,
-            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total
-        );
 
         assert_eq!(
             collation_data.int_enqueue_count,
             collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
         );
 
-        tracing::debug!(
-            target: tracing_targets::COLLATOR,
-            block_time_diff = block_time_diff,
-            from_prev_block = %format_duration(elapsed_from_prev_block),
-            overhead = %format_duration(collation_mngmnt_overhead),
-            total = %format_duration(total_elapsed),
-            prepare = %format_duration(prepare_elapsed),
-            execute_tick = %format_duration(execute_tick_elapsed),
-            execute_tock = %format_duration(execute_tock_elapsed),
-            execute_total = %format_duration(execute_elapsed),
-
-            fill_msgs_total = %format_duration(execute_result.fill_msgs_total_elapsed),
-            init_iterator = %format_duration(execute_result.init_iterator_elapsed),
-            read_existing = %format_duration(execute_result.read_existing_messages_elapsed),
-            read_ext = %format_duration(execute_result.read_ext_messages_elapsed),
-            read_new = %format_duration(execute_result.read_new_messages_elapsed),
-            add_to_groups = %format_duration(execute_result.add_to_message_groups_elapsed),
-
-            exec_msgs_total = %format_duration(execute_result.execute_msgs_total_elapsed),
-            process_txs_total = %format_duration(execute_result.process_txs_total_elapsed),
-
-            create_queue_diff = %format_duration(create_queue_diff_elapsed),
-            apply_queue_diff = %format_duration(apply_queue_diff_elapsed),
-            finalize_block = %format_duration(finalize_block_elapsed),
-            handle_block_candidate = %format_duration(handle_block_candidate_elapsed),
-            "collation timings"
+        self.logs(
+            &execute_result,
+            finalize_wu_total,
+            finalize_block_elapsed,
+            total_elapsed,
+            &collation_data,
+            block_id,
+            block_time_diff,
+            collation_mngmnt_overhead,
+            elapsed_from_prev_block,
+            has_unprocessed_messages,
+            diff_messages_len,
+            prepare_elapsed,
+            execute_elapsed,
+            execute_tick_elapsed,
+            execute_tock_elapsed,
+            create_queue_diff_elapsed,
+            apply_queue_diff_elapsed,
+            handle_block_candidate_elapsed,
         );
 
         Ok(())
@@ -1164,6 +1137,85 @@ impl CollatorStdImpl {
                 / (execute_result.execute_groups_wu_total
                     + finalize_wu_total
                     + execute_result.prepare_groups_wu_total) as f64,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn logs(
+        &self,
+        execute_result: &ExecuteResult,
+        finalize_wu_total: u64,
+        finalize_block_elapsed: Duration,
+        total_elapsed: Duration,
+        collation_data: &BlockCollationData,
+        block_id: BlockId,
+        block_time_diff: i64,
+        collation_mngmnt_overhead: Duration,
+        elapsed_from_prev_block: Duration,
+        has_unprocessed_messages: bool,
+        diff_messages_len: usize,
+        prepare_elapsed: Duration,
+        execute_elapsed: Duration,
+        execute_tick_elapsed: Duration,
+        execute_tock_elapsed: Duration,
+        create_queue_diff_elapsed: Duration,
+        apply_queue_diff_elapsed: Duration,
+        handle_block_candidate_elapsed: Duration,
+    ) {
+        tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
+
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "collated_block_id={}, time_diff={}, \
+            collation_time={}, elapsed_from_prev_block={}, overhead={}, \
+            start_lt={}, end_lt={}, exec_count={}, \
+            exec_ext={}, ext_err={}, exec_int={}, exec_new_int={}, \
+            enqueue_count={}, dequeue_count={}, \
+            new_msgs_created={}, new_msgs_added={}, \
+            in_msgs={}, out_msgs={}, \
+            read_ext_msgs={}, read_int_msgs={}, \
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
+            total_execute_msgs_time_mc={}, \
+            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}",
+            block_id, block_time_diff,
+            total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
+            collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
+            collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
+            collation_data.execute_count_int, collation_data.execute_count_new_int,
+            collation_data.int_enqueue_count, collation_data.int_dequeue_count,
+            collation_data.new_msgs_created, diff_messages_len,
+            collation_data.in_msgs.len(), collation_data.out_msgs.len(),
+            collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages,
+            collation_data.total_execute_msgs_time_mc,
+            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total
+        );
+
+        tracing::debug!(
+            target: tracing_targets::COLLATOR,
+            block_time_diff = block_time_diff,
+            from_prev_block = %format_duration(elapsed_from_prev_block),
+            overhead = %format_duration(collation_mngmnt_overhead),
+            total = %format_duration(total_elapsed),
+            prepare = %format_duration(prepare_elapsed),
+            execute_tick = %format_duration(execute_tick_elapsed),
+            execute_tock = %format_duration(execute_tock_elapsed),
+            execute_total = %format_duration(execute_elapsed),
+
+            fill_msgs_total = %format_duration(execute_result.fill_msgs_total_elapsed),
+            init_iterator = %format_duration(execute_result.init_iterator_elapsed),
+            read_existing = %format_duration(execute_result.read_existing_messages_elapsed),
+            read_ext = %format_duration(execute_result.read_ext_messages_elapsed),
+            read_new = %format_duration(execute_result.read_new_messages_elapsed),
+            add_to_groups = %format_duration(execute_result.add_to_message_groups_elapsed),
+
+            exec_msgs_total = %format_duration(execute_result.execute_msgs_total_elapsed),
+            process_txs_total = %format_duration(execute_result.process_txs_total_elapsed),
+
+            create_queue_diff = %format_duration(create_queue_diff_elapsed),
+            apply_queue_diff = %format_duration(apply_queue_diff_elapsed),
+            finalize_block = %format_duration(finalize_block_elapsed),
+            handle_block_candidate = %format_duration(handle_block_candidate_elapsed),
+            "collation timings"
         );
     }
 }
