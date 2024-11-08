@@ -132,7 +132,7 @@ impl Cache {
                         );
                         return None;
                     }
-                    _ => {
+                    Some(_) => {
                         // Find the index of the previous anchor
                         if let Some(index) = data.anchors.get_index_of(&prev_anchor_id) {
                             // Try to get the next anchor
@@ -147,12 +147,17 @@ impl Cache {
                                 );
                             }
                         } else {
-                            tracing::warn!(
-                                target: tracing_targets::MEMPOOL_ADAPTER,
-                                %prev_anchor_id,
-                                is_paused = Some(data.is_paused).filter(|x| *x),
-                                "Prev anchor is unknown, waiting"
-                            );
+                            let (last_id, _) = data.anchors.last().expect("map is not empty");
+                            if *last_id > prev_anchor_id {
+                                return None; // will not be received
+                            } else {
+                                tracing::warn!(
+                                    target: tracing_targets::MEMPOOL_ADAPTER,
+                                    %prev_anchor_id,
+                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    "Prev anchor is unknown, waiting"
+                                );
+                            }
                         };
                     }
                 }
