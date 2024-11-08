@@ -61,13 +61,13 @@ impl UnappliedConfig {
     fn apply_prev_vset(
         engine: &EngineHandle,
         new_cx: &StateUpdateContext,
-        boilder: &MempoolConfigBuilder,
+        builder: &MempoolConfigBuilder,
     ) -> Result<()> {
         if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
             let round = new_cx.consensus_info.prev_vset_switch_round;
 
             // not needed after genesis
-            let (genesis_round, _) = boilder.get_genesis().context("genesis must be set")?;
+            let (genesis_round, _) = builder.get_genesis().context("genesis must be set")?;
             if round < genesis_round {
                 return Ok(());
             };
