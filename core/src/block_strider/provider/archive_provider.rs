@@ -12,7 +12,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::AbortHandle;
-use tycho_block_util::archive::Archive;
+use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::Storage;
 
@@ -164,54 +164,32 @@ impl ArchiveBlockProvider {
     async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
         let this = self.inner.as_ref();
         let mc_seqno = block_id_relation.mc_block_id.seqno;
+        let block_id = block_id_relation.block_id;
 
-        'archive: loop {
-            let (ref block, ref proof, ref queue_diff) = match self.download_archive(mc_seqno).await
-            {
-                Ok(Some((key, archive_info))) => {
-                    match archive_info
-                        .archive
-                        .get_entry_by_id(&block_id_relation.block_id)
-                    {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            tracing::error!("Failed to find block {} in archive {e:?}", mc_seqno);
+        let (ref block, ref proof, ref queue_diff) = match this.look_for_archive(mc_seqno).await {
+            Some((_, info)) => match info.archive.get_entry_by_id(&block_id) {
+                Ok(entry) => entry,
+                Err(e) => return Some(Err(e.into())),
+            },
+            None => return Some(Err(ArchiveError::OutOfRange.into())),
+        };
 
-                            archive_info.from.punish(PunishReason::Malicious);
-                            this.remove_archive(key).await;
-
-                            continue 'archive;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!("archive block provider finished");
-                    this.clear_known_archives().await;
-                    return None;
-                }
-                Err(e) => {
-                    tracing::error!("failed to reload archive {e:?}");
-                    continue;
-                }
-            };
-
-            if let Err(e) = this
-                .proof_checker
-                .check_proof(CheckProof {
-                    mc_block_id: &block_id_relation.mc_block_id,
-                    block,
-                    proof,
-                    queue_diff,
-                    store_on_success: true,
-                })
-                .await
-            {
-                return Some(Err(e));
-            }
-
-            // NOTE: Always return the block by id even if it's not recent
-            break Some(Ok(block.clone()));
+        if let Err(e) = this
+            .proof_checker
+            .check_proof(CheckProof {
+                mc_block_id: &block_id_relation.mc_block_id,
+                block,
+                proof,
+                queue_diff,
+                store_on_success: true,
+            })
+            .await
+        {
+            return Some(Err(e));
         }
+
+        // NOTE: Always return the block by id even if it's not recent
+        Some(Ok(block.clone()))
     }
 
     async fn download_archive(&self, next_block_seqno: u32) -> Result<Option<(u32, ArchiveInfo)>> {
