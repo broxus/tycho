@@ -295,19 +295,6 @@ impl MempoolAdapterStdImpl {
             parser = task.await.expect("expand anchor history task failed");
         }
     }
-
-    async fn expect_running(
-        &self,
-        top_processed_to_anchor: MempoolAnchorId,
-        anchor_id: MempoolAnchorId,
-    ) -> Option<bool> {
-        let config = self.engine_config.lock().await;
-        let expect_running = config
-            .engine_handle
-            .as_ref()?
-            .expect_running(top_processed_to_anchor, anchor_id);
-        Some(expect_running)
-    }
 }
 
 impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
@@ -410,18 +397,11 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "get_anchor_by_id"
         );
 
-        // to be reproducible on all nodes regardless already committed data
-        let result = match self
-            .expect_running(top_processed_to_anchor, anchor_id)
-            .await
-        {
-            Some(true) => match self.cache.get_anchor_by_id(anchor_id).await {
-                Some(anchor) => GetAnchorResult::Exist(anchor),
-                None => GetAnchorResult::NotExist,
-            },
-            Some(false) => GetAnchorResult::MempoolPaused,
-            None => bail!("mempool engine is not stated yet"),
+        let result = match self.cache.get_anchor_by_id(anchor_id).await {
+            Some(anchor) => GetAnchorResult::Exist(anchor),
+            None => GetAnchorResult::NotExist,
         };
+
         Ok(result)
     }
 
@@ -437,18 +417,11 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "get_next_anchor"
         );
 
-        // to be reproducible on all nodes regardless already committed data
-        let result = match self
-            .expect_running(top_processed_to_anchor, prev_anchor_id)
-            .await
-        {
-            Some(true) => match self.cache.get_next_anchor(prev_anchor_id).await {
-                Some(anchor) => GetAnchorResult::Exist(anchor),
-                None => GetAnchorResult::NotExist,
-            },
-            Some(false) => GetAnchorResult::MempoolPaused,
-            None => bail!("mempool engine is not stated yet"),
+        let result = match self.cache.get_next_anchor(prev_anchor_id).await {
+            Some(anchor) => GetAnchorResult::Exist(anchor),
+            None => GetAnchorResult::NotExist,
         };
+
         Ok(result)
     }
 

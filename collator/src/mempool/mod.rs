@@ -138,14 +138,13 @@ impl MempoolAnchor {
 pub enum GetAnchorResult {
     NotExist,
     Exist(Arc<MempoolAnchor>),
-    MempoolPaused,
 }
 
 impl GetAnchorResult {
     pub fn anchor(&self) -> Option<&MempoolAnchor> {
         match self {
             Self::Exist(arc) => Some(arc),
-            _ => None,
+            Self::NotExist => None,
         }
     }
 }
