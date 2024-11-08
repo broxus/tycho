@@ -95,7 +95,10 @@ impl BlockchainBlockProvider {
                     }
                     None => tracing::warn!(?prev_block_id, "block not found"),
                 },
-                Err(e) => tracing::error!("failed to get block: {e}"),
+                Err(e) => {
+                    tracing::error!("failed to get block: {e}");
+                    return None;
+                }
             }
 
             interval.tick().await;
@@ -129,7 +132,10 @@ impl BlockchainBlockProvider {
                     }
                     None => tracing::warn!(%block_id, "block not found"),
                 },
-                Err(e) => tracing::error!("failed to get block: {e}"),
+                Err(e) => {
+                    tracing::error!("failed to get block: {e}");
+                    return None;
+                }
             }
 
             interval.tick().await;
