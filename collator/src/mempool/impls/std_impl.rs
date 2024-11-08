@@ -95,7 +95,11 @@ impl EngineConfig {
             .into_iter()
             .map(|x| PeerId(x.public_key.0))
             .collect::<Vec<_>>();
-        tracing::info!("New mempool validator subset len {}", result.len());
+        tracing::info!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            len = result.len(),
+            "New mempool validator subset",
+        );
         Ok(result)
     }
 }
@@ -319,8 +323,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            "Processing state update from mc block {}: {:?}",
-            new_cx.mc_block_id.as_short_id(), DebugStateUpdateContext(&new_cx),
+            id = %new_cx.mc_block_id.as_short_id(),
+            new_cx = ?DebugStateUpdateContext(&new_cx),
+            "Processing state update from mc block",
         );
 
         // NOTE: on the first call mempool engine will not be running
@@ -331,9 +336,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         let Some(engine) = config_guard.engine_handle.as_ref() else {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
-                "Will start mempool with state update from mc block {}: {:?}",
-                new_cx.mc_block_id.as_short_id(),
-                DebugStateUpdateContext(&new_cx),
+                id = %new_cx.mc_block_id.as_short_id(),
+                new_cx = ?DebugStateUpdateContext(&new_cx),
+                "Will start mempool with state update from mc block"
             );
 
             if let Some((round, time)) = (config_guard.builder.get_genesis())
@@ -354,7 +359,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
-                    "Using genesis override: round {round} time {time}"
+                    %round,
+                    %time,
+                    "Using genesis override"
                 );
             } else {
                 config_guard.builder.set_genesis(
@@ -374,9 +381,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         }) {
             tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
-                "Skipped old state update from mc block {}: {:?}",
-                new_cx.mc_block_id.as_short_id(),
-                DebugStateUpdateContext(&new_cx),
+                id = %new_cx.mc_block_id.as_short_id(),
+                new_cx = ?DebugStateUpdateContext(&new_cx),
+                "Skipped old state update from mc block",
             );
             return Ok(());
         };
@@ -396,8 +403,14 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         top_processed_to_anchor: MempoolAnchorId,
         anchor_id: MempoolAnchorId,
     ) -> Result<GetAnchorResult> {
-        // to be reproducible on all nodes regardless already committed data
+        tracing::debug!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            %top_processed_to_anchor,
+            %anchor_id,
+            "get_anchor_by_id"
+        );
 
+        // to be reproducible on all nodes regardless already committed data
         let result = match self
             .expect_running(top_processed_to_anchor, anchor_id)
             .await
@@ -417,6 +430,13 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         top_processed_to_anchor: MempoolAnchorId,
         prev_anchor_id: MempoolAnchorId,
     ) -> Result<GetAnchorResult> {
+        tracing::debug!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            %top_processed_to_anchor,
+            %prev_anchor_id,
+            "get_next_anchor"
+        );
+
         // to be reproducible on all nodes regardless already committed data
         let result = match self
             .expect_running(top_processed_to_anchor, prev_anchor_id)
