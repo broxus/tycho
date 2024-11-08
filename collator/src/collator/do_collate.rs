@@ -1633,6 +1633,7 @@ impl CollatorStdImpl {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finalize_collation(
         &mut self,
         collation_config: Arc<CollationConfig>,
