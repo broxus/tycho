@@ -11,7 +11,7 @@ use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
-use scc::TreeIndex;
+use papaya::HashMap;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -86,8 +86,8 @@ impl ValidatorSession {
             shard_ident: info.shard_ident,
             weight_threshold,
             validators: Arc::new(validators),
-            block_signatures: TreeIndex::new(),
-            cached_signatures: TreeIndex::new(),
+            block_signatures: HashMap::new(),
+            cached_signatures: HashMap::new(),
             cancelled: AtomicBool::new(false),
             cancelled_signal: Notify::new(),
         });
@@ -150,18 +150,23 @@ impl ValidatorSession {
             .min_seqno
             .fetch_max(block_seqno, Ordering::Release);
 
-        let state = self.inner.state.as_ref();
-        state.cached_signatures.remove_range(..=block_seqno);
-
-        let guard = scc::ebr::Guard::new();
-        for (_, validation) in state.block_signatures.range(..=block_seqno, &guard) {
-            validation.cancelled.cancel();
+        let cached_signatures = self.inner.state.cached_signatures.pin();
+        for key in cached_signatures.keys() {
+            if *key <= block_seqno {
+                cached_signatures.remove(key);
+            }
         }
-        drop(guard);
 
-        // NOTE: Remove only blocks that are old enough.
-        let until_seqno = block_seqno.saturating_sub(self.inner.config.old_blocks_to_keep);
-        state.block_signatures.remove_range(..=until_seqno);
+        let block_signatures = self.inner.state.block_signatures.pin();
+
+        for key in block_signatures.keys() {
+            if *key <= block_seqno {
+                if let Some(validation) = block_signatures.get(key) {
+                    validation.cancelled.cancel();
+                }
+                block_signatures.remove(key);
+            }
+        }
     }
 
     #[tracing::instrument(
@@ -185,7 +190,8 @@ impl ValidatorSession {
         // Remove cached slot
         let cached = state
             .cached_signatures
-            .peek(&block_id.seqno, &scc::ebr::Guard::new())
+            .pin()
+            .get(&block_id.seqno)
             .map(Arc::clone);
 
         // Prepare block signatures
@@ -196,9 +202,11 @@ impl ValidatorSession {
         .build(block_id, state.weight_threshold);
 
         // Allow only one validation at a time
+
         if state
             .block_signatures
-            .insert(block_id.seqno, block_signatures.clone())
+            .pin()
+            .try_insert(block_id.seqno, block_signatures.clone())
             .is_err()
         {
             // TODO: Panic here?
@@ -216,7 +224,7 @@ impl ValidatorSession {
         // - All new signatures will be stored (and validated) in the block;
         // - There might be some new signatures that were stored in the cache, but we
         //   have not yet processed them. We will use them later.
-        state.cached_signatures.remove(&block_id.seqno);
+        state.cached_signatures.pin().remove(&block_id.seqno);
 
         // Start collecting signatures from other validators
         let mut result = FastHashMap::default();
@@ -403,7 +411,11 @@ impl ValidatorSession {
 
         for seqno in from..to {
             let signatures = CachedSignatures::new(&inner.state.validators);
-            _ = inner.state.cached_signatures.insert(seqno, signatures);
+            _ = inner
+                .state
+                .cached_signatures
+                .pin()
+                .insert(seqno, signatures);
         }
     }
 }
@@ -560,8 +572,8 @@ struct SessionState {
     shard_ident: ShardIdent,
     weight_threshold: u64,
     validators: Arc<FastHashMap<PeerId, BriefValidatorDescr>>,
-    block_signatures: TreeIndex<u32, Arc<BlockSignatures>>,
-    cached_signatures: TreeIndex<u32, Arc<CachedSignatures>>,
+    block_signatures: HashMap<u32, Arc<BlockSignatures>>,
+    cached_signatures: HashMap<u32, Arc<CachedSignatures>>,
     cancelled: AtomicBool,
     cancelled_signal: Notify,
 }
@@ -705,13 +717,11 @@ impl ExchangeSignatures for SessionState {
             return Err(ValidationError::Cancelled);
         }
 
-        let guard = scc::ebr::Guard::new();
-
         // Full signature exchange if we know the block.
         // Otherwise, cache the signature for the block to use it later.
         //
         // NOTE: scc's `peek` does not lock the tree
-        let result = if let Some(signatures) = self.block_signatures.peek(&block_seqno, &guard) {
+        let result = if let Some(signatures) = self.block_signatures.pin().get(&block_seqno) {
             metrics::counter!(METRIC_BLOCK_EXCHANGES_IN_TOTAL).increment(1);
 
             let Some(slot) = signatures.other_signatures.get(peer_id) else {
@@ -725,8 +735,9 @@ impl ExchangeSignatures for SessionState {
 
             proto::Exchange::Complete(signatures.own_signature.clone())
         } else {
+            let cached_signatures = self.cached_signatures.pin();
             // Find the slot for the specified block seqno.
-            let Some(slot) = self.cached_signatures.peek(&block_seqno, &guard) else {
+            let Some(slot) = cached_signatures.get(&block_seqno) else {
                 metrics::counter!(METRIC_MISS_EXCHANGES_IN_TOTAL).increment(1);
                 return Err(ValidationError::NoSlot);
             };
@@ -741,8 +752,6 @@ impl ExchangeSignatures for SessionState {
 
             proto::Exchange::Cached
         };
-
-        drop(guard);
 
         let action = match &result {
             proto::Exchange::Complete(_) => "complete",
