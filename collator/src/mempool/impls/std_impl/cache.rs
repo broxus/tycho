@@ -59,16 +59,20 @@ impl Cache {
                         );
                         return None;
                     }
-                    _ => {
-                        let found = self.anchors.read().get(&anchor_id).cloned();
-                        if found.is_none() {
+                    Some(_) => {
+                        if let Some(found) = anchors.get(&anchor_id) {
+                            return Some(found.clone());
+                        }
+                        let (last_id, _) = anchors.last().expect("map is not empty");
+                        if *last_id > anchor_id {
+                            return None; // will not be received
+                        } else {
                             tracing::warn!(
                                 target: tracing_targets::MEMPOOL_ADAPTER,
                                 %anchor_id,
-                                "Anchor is unknown"
+                                "Anchor is unknown, waiting"
                             );
                         }
-                        return found;
                     }
                 }
             }
@@ -108,7 +112,7 @@ impl Cache {
                         );
                         return None;
                     }
-                    _ => {
+                    Some(_) => {
                         // Find the index of the previous anchor
                         if let Some(index) = anchors.get_index_of(&prev_anchor_id) {
                             // Try to get the next anchor
@@ -122,12 +126,17 @@ impl Cache {
                                 );
                             }
                         } else {
-                            tracing::warn!(
-                                target: tracing_targets::MEMPOOL_ADAPTER,
-                                %prev_anchor_id,
-                                "Prev anchor is unknown, waiting"
-                            );
-                        };
+                            let (last_id, _) = anchors.last().expect("map is not empty");
+                            if *last_id > prev_anchor_id {
+                                return None; // will not be received
+                            } else {
+                                tracing::warn!(
+                                    target: tracing_targets::MEMPOOL_ADAPTER,
+                                    %prev_anchor_id,
+                                    "Prev anchor is unknown, waiting"
+                                );
+                            }
+                        }
                     }
                 }
             }
