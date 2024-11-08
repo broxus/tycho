@@ -68,18 +68,18 @@ pub trait LocalQueue<V>
 where
     V: InternalMessageValue + Send + Sync,
 {
-    async fn iterator(
+    fn iterator(
         &self,
         ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator<V>>>;
-    async fn apply_diff(
+    fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
     ) -> Result<()>;
-    async fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
+    fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
     fn clear_session_state(&self) -> Result<()>;
 }
 
@@ -142,7 +142,7 @@ where
     P: PersistentState<V> + Send + Sync + 'static,
     V: InternalMessageValue + Send + Sync,
 {
-    async fn iterator(
+    fn iterator(
         &self,
         ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
@@ -156,7 +156,7 @@ where
         vec![persistent_state_iterator, session_state_iterator]
     }
 
-    async fn apply_diff(
+    fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
@@ -208,7 +208,7 @@ where
         Ok(())
     }
 
-    async fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
+    fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
         let mut diffs_for_commit = vec![];
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();

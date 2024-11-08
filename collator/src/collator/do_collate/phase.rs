@@ -87,18 +87,16 @@ pub async fn prepare_collation(
     tracing::debug!(target: tracing_targets::COLLATOR,
         "init iterator for current ranges"
     );
-    mq_iterator_adapter
-        .try_init_next_range_iterator(
-            &mut collation_data.processed_upto,
-            mc_top_shards_end_lts.iter().copied(),
-            // We always init first iterator during block collation
-            // with current ranges from processed_upto info
-            // and do not touch next range before we read all existing messages buffer.
-            // In this case the initial iterator range will be equal both
-            // on Refill and on Continue.
-            InitIteratorMode::OmitNextRange,
-        )
-        .await?;
+    mq_iterator_adapter.try_init_next_range_iterator(
+        &mut collation_data.processed_upto,
+        mc_top_shards_end_lts.iter().copied(),
+        // We always init first iterator during block collation
+        // with current ranges from processed_upto info
+        // and do not touch next range before we read all existing messages buffer.
+        // In this case the initial iterator range will be equal both
+        // on Refill and on Continue.
+        InitIteratorMode::OmitNextRange,
+    )?;
 
     // create messages reader
     let mut messages_reader = MessagesReader::new(
@@ -116,16 +114,14 @@ pub async fn prepare_collation(
         );
 
         while msgs_buffer.message_groups_offset() < prev_processed_offset {
-            let msg_group = messages_reader
-                .get_next_message_group(
-                    &mut msgs_buffer,
-                    &mut collator.anchors_cache,
-                    &mut collation_data,
-                    &mut mq_iterator_adapter,
-                    &QueueKey::MIN,
-                    GetNextMessageGroupMode::Refill,
-                )
-                .await?;
+            let msg_group = messages_reader.get_next_message_group(
+                &mut msgs_buffer,
+                &mut collator.anchors_cache,
+                &mut collation_data,
+                &mut mq_iterator_adapter,
+                &QueueKey::MIN,
+                GetNextMessageGroupMode::Refill,
+            )?;
             if msg_group.is_none() {
                 // on restart from a new genesis we will not be able to refill buffer with externals
                 // so we stop refilling when there is no more groups in buffer

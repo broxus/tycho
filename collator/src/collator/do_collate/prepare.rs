@@ -55,18 +55,14 @@ impl Phase<PreparedState> {
         let mut executed_groups_count = 0;
         loop {
             let mut timer = std::time::Instant::now();
-            let msgs_group_opt = self
-                .extra
-                .messages_reader
-                .get_next_message_group(
-                    &mut self.state.msgs_buffer,
-                    anchors_cache,
-                    &mut self.state.collation_data,
-                    &mut executor_wrapper.mq_iterator_adapter,
-                    &executor_wrapper.max_new_message_key_to_current_shard,
-                    GetNextMessageGroupMode::Continue,
-                )
-                .await?;
+            let msgs_group_opt = self.extra.messages_reader.get_next_message_group(
+                &mut self.state.msgs_buffer,
+                anchors_cache,
+                &mut self.state.collation_data,
+                &mut executor_wrapper.mq_iterator_adapter,
+                &executor_wrapper.max_new_message_key_to_current_shard,
+                GetNextMessageGroupMode::Continue,
+            )?;
             fill_msgs_total_elapsed += timer.elapsed();
 
             if let Some(msgs_group) = msgs_group_opt {

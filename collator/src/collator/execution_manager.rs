@@ -114,7 +114,7 @@ impl MessagesReader {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn get_next_message_group(
+    pub fn get_next_message_group(
         &mut self,
         msgs_buffer: &mut MessagesBuffer,
         anchors_cache: &mut AnchorsCache,
@@ -245,8 +245,7 @@ impl MessagesReader {
                         &mut collation_data.processed_upto,
                         self.mc_top_shards_end_lts.iter().copied(),
                         init_iterator_mode,
-                    )
-                    .await?;
+                    )?;
                 if !next_range_iterator_initialized {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "next available ranges for internals are not exist or skipped, \

@@ -129,9 +129,7 @@ impl Phase<ExecuteState> {
                         &labels,
                     );
 
-                    mq_adapter
-                        .apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)
-                        .await?;
+                    mq_adapter.apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)?;
                     let apply_queue_diff_elapsed = histogram.finish();
 
                     Ok(apply_queue_diff_elapsed)

@@ -51,7 +51,7 @@ pub trait StateNodeEventListener: Send + Sync {
 #[async_trait]
 pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return id of last master block that was applied to node local state
-    async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
+    fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff>;
     /// Store shard state root in the storage.
@@ -69,7 +69,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Accept block:
     /// 1. (TODO) Broadcast block to blockchain network
     /// 2. Provide block to the block strider
-    async fn accept_block(&self, block: BlockStuffForSync) -> Result<()>;
+    fn accept_block(&self, block: BlockStuffForSync) -> Result<()>;
     /// Waits for the specified block to be received and returns it
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Waits for the specified block by prev_id to be received and returns it
@@ -156,7 +156,7 @@ impl StateNodeAdapterStdImpl {
 
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
-    async fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
+    fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         let las_applied_mc_block_id = self
             .storage
             .node_state()
@@ -229,7 +229,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(self.storage.block_handle_storage().load_handle(block_id))
     }
 
-    async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
+    fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
         let block_id = *block.block_stuff_aug.id();
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block_id.as_short_id());

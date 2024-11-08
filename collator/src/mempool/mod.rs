@@ -62,7 +62,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// Process top processed to anchor reported by collation manager.
     /// Will manage mempool sync depth.
     /// Mempool should be ready to return this anchor and all next after it.
-    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()>;
+    fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
@@ -84,7 +84,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks
     /// which included in signed master - we do not need them anymore
-    async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
+    fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
 }
 
 // === Types ===

@@ -1028,8 +1028,7 @@ impl CollatorStdImpl {
                 has_unprocessed_messages,
                 finalized.msgs_buffer,
                 tracker,
-            )
-            .await?;
+            )?;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "working state updated prepare spawned",
