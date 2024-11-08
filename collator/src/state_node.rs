@@ -397,7 +397,12 @@ impl StateNodeAdapterStdImpl {
             &block.signatures,
             block.total_signature_weight,
         )
-        .context("failed to prepare block proof")?;
+        .unwrap_or_else(|_| {
+            panic!(
+                "failed to prepare block proof, block id: {}",
+                block.block_stuff_aug.id().as_short_id()
+            )
+        });
 
         let _histogram =
             HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
@@ -528,7 +533,6 @@ impl DelayedStateNotifier {
     }
 }
 
-// TODO: This should possibly panic on error?
 #[expect(
     clippy::disallowed_methods,
     reason = "We are working with a virtual block here, so `load_extra` and other methods are necessary"
