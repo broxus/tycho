@@ -5,7 +5,7 @@ mod parser;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -58,9 +58,20 @@ impl UnappliedConfig {
         Ok(())
     }
 
-    fn apply_prev_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
+    fn apply_prev_vset(
+        engine: &EngineHandle,
+        new_cx: &StateUpdateContext,
+        boilder: &MempoolConfigBuilder,
+    ) -> Result<()> {
         if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
             let round = new_cx.consensus_info.prev_vset_switch_round;
+
+            // not needed after genesis
+            let (genesis_round, _) = boilder.get_genesis().context("genesis must be set")?;
+            if round < genesis_round {
+                return Ok(());
+            };
+
             let whole_set = prev_set
                 .list
                 .iter()
@@ -97,7 +108,12 @@ impl UnappliedConfig {
             .into_iter()
             .map(|x| PeerId(x.public_key.0))
             .collect::<Vec<_>>();
-        tracing::info!("New mempool validator subset len {}", result.len());
+        tracing::info!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            len = result.len(),
+            round = session_update_round,
+            "New mempool validator subset len"
+        );
         Ok(result)
     }
 }
@@ -190,7 +206,7 @@ impl MempoolAdapterStdImpl {
 
         let handle = engine.get_handle();
 
-        UnappliedConfig::apply_prev_vset(&handle, last_state_update)?;
+        UnappliedConfig::apply_prev_vset(&handle, last_state_update, &config_guard.builder)?;
         UnappliedConfig::apply_vset(&handle, last_state_update)?;
 
         tokio::spawn(async move {
