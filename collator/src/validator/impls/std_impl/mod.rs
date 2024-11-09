@@ -7,9 +7,11 @@ use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use serde::{Deserialize, Serialize};
+use session::DebugLogValidatorSesssion;
 use tycho_util::{serde_helpers, FastHashMap};
 
 use self::session::ValidatorSession;
+use crate::tracing_targets;
 use crate::validator::rpc::ExchangeSignaturesBackoff;
 use crate::validator::{AddSession, ValidationStatus, Validator, ValidatorNetworkContext};
 
@@ -98,6 +100,11 @@ impl Validator for ValidatorStdImpl {
 
         match shard_sessions.entry(info.session_id) {
             btree_map::Entry::Vacant(entry) => {
+                tracing::debug!(
+                    target: tracing_targets::VALIDATOR,
+                    session = ?DebugLogValidatorSesssion(&session),
+                    "new validator session added",
+                );
                 entry.insert(session);
                 Ok(())
             }

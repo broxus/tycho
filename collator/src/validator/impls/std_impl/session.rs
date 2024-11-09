@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::IntoFuture;
 use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -121,6 +122,7 @@ impl ValidatorSession {
                 config: config.clone(),
                 client: ValidatorClient::new(net_context.network.clone(), overlay),
                 key_pair,
+                peer_id: *peer_id,
                 own_weight,
                 state,
                 min_seqno: AtomicU32::new(info.start_block_seqno),
@@ -312,6 +314,15 @@ impl ValidatorSession {
         // Prepare our own signature
         let own_signature = Arc::new(self.inner.key_pair.sign_raw(&data));
 
+        tracing::debug!(
+            target: tracing_targets::VALIDATOR,
+            %block_id,
+            my_peer_id = %self.inner.peer_id,
+            ?data,
+            ?own_signature,
+            "own signature created",
+        );
+
         // Pre-allocate the result map which will contain all validators' signatures (only valid ones)
         let validators = self.inner.state.validators.as_ref();
         let mut other_signatures =
@@ -334,9 +345,10 @@ impl ValidatorSession {
         cached: Arc<CachedSignatures>,
     ) -> BlockSignaturesBuilder {
         let data = Block::build_data_for_sign(block_id);
-        let block_seqno = block_id.seqno;
+        let block_id = *block_id;
 
         let key_pair = self.inner.key_pair.clone();
+        let my_peer_id = self.inner.peer_id;
         let validators = self.inner.state.validators.clone();
         let mut total_weight = self.inner.own_weight;
 
@@ -346,6 +358,15 @@ impl ValidatorSession {
 
             // Prepare our own signature
             let own_signature = Arc::new(key_pair.sign_raw(&data));
+
+            tracing::debug!(
+                target: tracing_targets::VALIDATOR,
+                %my_peer_id,
+                %block_id,
+                ?data,
+                ?own_signature,
+                "own signature created",
+            );
 
             // Pre-allocate the result map which will contain all validators' signatures (only valid ones)
             let mut other_signatures = SignatureSlotsMap::with_capacity_and_hasher(
@@ -363,8 +384,12 @@ impl ValidatorSession {
                     if !validator_info.public_key.verify_raw(&data, &signature) {
                         tracing::warn!(
                             target: tracing_targets::VALIDATOR,
+                            %my_peer_id,
                             %peer_id,
-                            block_seqno,
+                            public_key = %validator_info.public_key,
+                            %block_id,
+                            ?data,
+                            cached_signature = ?signature,
                             "cached signature is invalid on reuse: {}",
                             ValidationError::InvalidSignature
                         );
@@ -408,12 +433,30 @@ impl ValidatorSession {
     }
 }
 
+pub struct DebugLogValidatorSesssion<'a>(pub &'a ValidatorSession);
+impl fmt::Debug for DebugLogValidatorSesssion<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ValidatorSession")
+            .field("shard", &self.0.inner.state.shard_ident)
+            .field("session_id", &self.0.inner.session_id)
+            .field("public_key", &self.0.inner.key_pair.public_key)
+            .field("peer_id", &self.0.inner.peer_id)
+            .field("own_weight", &self.0.inner.own_weight)
+            .field("weight_threshold", &self.0.inner.state.weight_threshold)
+            .field("start_block_seqno", &self.0.inner.start_block_seqno)
+            .field("min_seqno", &self.0.inner.min_seqno)
+            .field("validators", &self.0.inner.state.validators)
+            .finish()
+    }
+}
+
 struct Inner {
     start_block_seqno: u32,
     session_id: u32,
     config: ValidatorStdImplConfig,
     client: ValidatorClient,
     key_pair: Arc<KeyPair>,
+    peer_id: PeerId,
     own_weight: u64,
     state: Arc<SessionState>,
     min_seqno: AtomicU32,
@@ -528,6 +571,7 @@ impl Inner {
                 Err(e) => {
                     tracing::warn!(
                         target: tracing_targets::VALIDATOR,
+                        %peer_id,
                         "fetched signature is invalid: {e:?}",
                     );
                 }
@@ -588,6 +632,16 @@ impl SessionState {
             .public_key
             .verify_raw(&data, signature.as_ref())
         {
+            tracing::warn!(
+                target: tracing_targets::VALIDATOR,
+                %peer_id,
+                public_key = %validator_info.public_key,
+                block_id = %block.block_id,
+                ?data,
+                ?signature,
+                "signature is invalid from peer {}",
+                ValidationError::InvalidSignature
+            );
             // TODO: Store that the signature is invalid to avoid further checks on retries
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
             metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
