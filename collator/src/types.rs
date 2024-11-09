@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -383,6 +384,22 @@ impl CollationSessionInfo {
 
     pub fn current_collator_keypair(&self) -> Option<&Arc<KeyPair>> {
         self.current_collator_keypair.as_ref()
+    }
+}
+impl fmt::Debug for CollationSessionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CollationSessionInfo")
+            .field("shard", &self.shard)
+            .field("seqno", &self.seqno)
+            .field("collators", &self.collators)
+            .field(
+                "current_collator_pubkey",
+                &self
+                    .current_collator_keypair
+                    .as_ref()
+                    .map(|kp| kp.public_key),
+            )
+            .finish()
     }
 }
 

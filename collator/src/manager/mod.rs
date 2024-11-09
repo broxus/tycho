@@ -1618,8 +1618,8 @@ where
             ));
 
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                "new_session_info.validators: {:?}",
-                new_session_info.collators(),
+                "new_session_info: {:?}",
+                new_session_info,
             );
 
             let next_block_id_short = calc_next_block_id_short(&prev_blocks_ids);
