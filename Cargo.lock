@@ -3272,7 +3272,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tycho-block-util"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-collator"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3375,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-consensus"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3413,7 +3413,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-control"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3467,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-gen-protos"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "prost-build",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-light-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3496,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-network"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3538,7 +3538,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3567,7 +3567,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulator"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3581,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3623,7 +3623,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "anyhow",
