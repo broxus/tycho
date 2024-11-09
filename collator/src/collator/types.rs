@@ -12,6 +12,7 @@ use everscale_types::models::{
     ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent,
     ShardIdentFull, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
+use tl_proto::TlWrite;
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
@@ -1294,4 +1295,15 @@ pub struct ParsedExternals {
 pub(super) enum ReadNextExternalsMode {
     ToTheEnd,
     ToPreviuosReadTo,
+}
+
+/// Rand seed for block source data.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, TlWrite)]
+pub struct RandSeed {
+    /// next chain time
+    pub next_chain_time: u64,
+    /// Block number in shard.
+    pub seqno: u32,
+    /// workchain id
+    pub workchain: i32,
 }
