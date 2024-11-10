@@ -15,7 +15,9 @@ use tycho_util::FastHashMap;
 
 use super::MessagesReader;
 use crate::collator::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
-use crate::collator::execution_manager::{GetNextMessageGroupMode, InitIteratorMode};
+use crate::collator::execution_manager::{
+    GetNextMessageGroupContext, GetNextMessageGroupMode, InitIteratorMode,
+};
 use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
 use crate::collator::types::{AnchorsCache, MessagesBuffer, PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
@@ -354,12 +356,15 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     while msgs_buffer.message_groups_offset() < prev_processed_offset {
         let msg_group = messages_reader
             .get_next_message_group(
+                GetNextMessageGroupContext {
+                    next_chain_time: collation_data.get_gen_chain_time(),
+                    max_new_message_key_to_current_shard: QueueKey::MIN,
+                    mode: GetNextMessageGroupMode::Continue,
+                },
+                &mut collation_data.processed_upto,
                 &mut msgs_buffer,
                 &mut anchors_cache,
-                &mut collation_data,
                 &mut mq_iterator_adapter,
-                &QueueKey::MIN,
-                GetNextMessageGroupMode::Refill,
             )
             .await
             .unwrap();
@@ -407,12 +412,15 @@ async fn test_refill_msgs_buffer_with_only_externals() {
     loop {
         let msg_group = messages_reader
             .get_next_message_group(
+                GetNextMessageGroupContext {
+                    next_chain_time: collation_data.get_gen_chain_time(),
+                    max_new_message_key_to_current_shard: QueueKey::MIN,
+                    mode: GetNextMessageGroupMode::Continue,
+                },
+                &mut collation_data.processed_upto,
                 &mut msgs_buffer,
                 &mut anchors_cache,
-                &mut collation_data,
                 &mut mq_iterator_adapter,
-                &QueueKey::MIN,
-                GetNextMessageGroupMode::Continue,
             )
             .await
             .unwrap();

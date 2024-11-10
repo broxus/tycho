@@ -18,7 +18,7 @@ use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
 use super::build_block::FinalizedBlock;
-use super::execution_manager::{MessagesExecutor, MessagesReader};
+use super::execution_manager::{GetNextMessageGroupContext, MessagesExecutor, MessagesReader};
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
     AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, CollationResult, MessagesBuffer,
@@ -337,17 +337,18 @@ impl CollatorStdImpl {
             collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
             collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created, diff_messages_len,
+            collation_data.new_msgs_created_count, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
-            collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_unprocessed_messages,
+            collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
+            collation_data.read_new_msgs_from_iterator_count, collation_data.inserted_new_msgs_to_iterator_count, has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
             prepare_groups_wu_total, execute_groups_wu_total, finalize_wu_total
         );
 
         assert_eq!(
             collation_data.int_enqueue_count,
-            collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
+            collation_data.inserted_new_msgs_to_iterator_count
+                - collation_data.execute_count_new_int
         );
 
         tracing::debug!(
@@ -846,7 +847,7 @@ impl CollatorStdImpl {
         let new_messages =
             new_transaction(collation_data, &self.shard_id, executor_output, in_message)?;
 
-        collation_data.new_msgs_created += new_messages.len() as u64;
+        collation_data.new_msgs_created_count += new_messages.len() as u64;
         for new_message in new_messages {
             let MsgInfo::Int(int_msg_info) = new_message.info else {
                 continue;
@@ -861,7 +862,7 @@ impl CollatorStdImpl {
                     std::cmp::max(*max_new_message_key_to_current_shard, new_message_key);
             }
 
-            collation_data.inserted_new_msgs_to_iterator += 1;
+            collation_data.inserted_new_msgs_to_iterator_count += 1;
 
             let enqueued_message = EnqueuedMessage::from((int_msg_info, new_message.cell));
 
@@ -1398,12 +1399,15 @@ impl CollatorStdImpl {
             while msgs_buffer.message_groups_offset() < prev_processed_offset {
                 let msg_group = messages_reader
                     .get_next_message_group(
+                        GetNextMessageGroupContext {
+                            next_chain_time: collation_data.get_gen_chain_time(),
+                            max_new_message_key_to_current_shard: QueueKey::MIN,
+                            mode: GetNextMessageGroupMode::Refill,
+                        },
+                        &mut collation_data.processed_upto,
                         msgs_buffer,
                         &mut self.anchors_cache,
-                        collation_data,
                         &mut mq_iterator_adapter,
-                        &QueueKey::MIN,
-                        GetNextMessageGroupMode::Refill,
                     )
                     .await?;
                 if msg_group.is_none() {
@@ -1414,8 +1418,8 @@ impl CollatorStdImpl {
             }
 
             // next time we should read next message group like we did not make refill before
-            // so we need to reset flags that control from where to read messages
-            messages_reader.reset_read_flags();
+            // so we need to reset reader state that control from where to read messages
+            messages_reader.reset_read_state();
         }
 
         Ok(PrepareCollation {
@@ -1448,12 +1452,15 @@ impl CollatorStdImpl {
             let mut timer = std::time::Instant::now();
             let msgs_group_opt = messages_reader
                 .get_next_message_group(
+                    GetNextMessageGroupContext {
+                        next_chain_time: collation_data.get_gen_chain_time(),
+                        max_new_message_key_to_current_shard: *max_new_message_key_to_current_shard,
+                        mode: GetNextMessageGroupMode::Continue,
+                    },
+                    &mut collation_data.processed_upto,
                     msgs_buffer,
                     &mut self.anchors_cache,
-                    collation_data,
                     mq_iterator_adapter,
-                    max_new_message_key_to_current_shard,
-                    GetNextMessageGroupMode::Continue,
                 )
                 .await?;
             fill_msgs_total_elapsed += timer.elapsed();
@@ -1466,7 +1473,7 @@ impl CollatorStdImpl {
                 executed_groups_count += 1;
                 collation_data.tx_count += group_result.items.len() as u64;
                 collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
-                collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
+                collation_data.ext_msgs_skipped_count += group_result.ext_msgs_skipped;
                 execute_groups_wu_vm_only = execute_groups_wu_vm_only
                     .saturating_add(group_result.total_exec_wu)
                     .saturating_add(group_result.ext_msgs_error_count.saturating_mul(
@@ -1504,6 +1511,14 @@ impl CollatorStdImpl {
 
         collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_millis();
 
+        // update counters
+        collation_data.read_int_msgs_from_iterator_count =
+            messages_reader.read_int_msgs_from_iterator_count();
+        collation_data.read_ext_msgs_count = messages_reader.read_ext_msgs_count();
+        collation_data.read_new_msgs_from_iterator_count =
+            messages_reader.read_new_msgs_from_iterator_count();
+
+        // metrics
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
             .set(executed_groups_count as f64);
 
@@ -1743,28 +1758,28 @@ impl CollatorStdImpl {
             .increment(collation_data.execute_count_all);
         // external messages
         metrics::counter!("tycho_do_collate_msgs_read_count_ext", &labels)
-            .increment(collation_data.read_ext_msgs);
+            .increment(collation_data.read_ext_msgs_count);
         metrics::counter!("tycho_do_collate_msgs_exec_count_ext", &labels)
             .increment(collation_data.execute_count_ext);
         metrics::counter!("tycho_do_collate_msgs_error_count_ext", &labels)
             .increment(collation_data.ext_msgs_error_count);
         metrics::counter!("tycho_do_collate_msgs_skipped_count_ext", &labels)
-            .increment(collation_data.ext_msgs_skipped);
+            .increment(collation_data.ext_msgs_skipped_count);
         // existing internals messages
         metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
-            .increment(collation_data.read_int_msgs_from_iterator);
+            .increment(collation_data.read_int_msgs_from_iterator_count);
         metrics::counter!("tycho_do_collate_msgs_exec_count_int", &labels)
             .increment(collation_data.execute_count_int);
         // new internals messages
         metrics::counter!("tycho_do_collate_new_msgs_created_count", &labels)
-            .increment(collation_data.new_msgs_created);
+            .increment(collation_data.new_msgs_created_count);
         metrics::counter!(
             "tycho_do_collate_new_msgs_inserted_to_iterator_count",
             &labels
         )
-        .increment(collation_data.inserted_new_msgs_to_iterator);
+        .increment(collation_data.inserted_new_msgs_to_iterator_count);
         metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
-            .increment(collation_data.read_new_msgs_from_iterator);
+            .increment(collation_data.read_new_msgs_from_iterator_count);
         metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
             .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
@@ -2077,17 +2092,17 @@ fn calc_prepare_groups_wu_total(
     (fixed_part as u64)
         .saturating_add(
             collation_data
-                .read_ext_msgs
+                .read_ext_msgs_count
                 .saturating_mul(read_ext_msgs as u64),
         )
         .saturating_add(
             collation_data
-                .read_int_msgs_from_iterator
+                .read_int_msgs_from_iterator_count
                 .saturating_mul(read_int_msgs as u64),
         )
         .saturating_add(
             collation_data
-                .read_new_msgs_from_iterator
+                .read_new_msgs_from_iterator_count
                 .saturating_mul(read_new_msgs as u64),
         )
 }
@@ -2107,7 +2122,7 @@ fn calc_process_txs_wu(
         .saturating_mul(serialize_enqueue as u64)
         .saturating_add((collation_data.int_dequeue_count).saturating_mul(serialize_dequeue as u64))
         .saturating_add(
-            (collation_data.inserted_new_msgs_to_iterator)
+            (collation_data.inserted_new_msgs_to_iterator_count)
                 .saturating_mul(insert_new_msgs_to_iterator as u64),
         )
 }

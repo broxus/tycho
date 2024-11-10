@@ -19,8 +19,8 @@ use tycho_util::FastHashMap;
 
 use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
-    AccountId, AnchorsCache, BlockCollationData, Dequeued, MessageGroup, MessagesBuffer,
-    ParsedMessage, ShardAccountStuff,
+    AccountId, AnchorsCache, Dequeued, MessageGroup, MessagesBuffer, ParsedMessage,
+    ShardAccountStuff,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
@@ -58,11 +58,21 @@ pub(super) struct MessagesReader {
 
     /// end lt list from top shards of mc block
     mc_top_shards_end_lts: Vec<(ShardIdent, u64)>,
+
+    read_int_msgs_from_iterator_count: u64,
+    read_ext_msgs_count: u64,
+    read_new_msgs_from_iterator_count: u64,
 }
 
 pub(super) enum GetNextMessageGroupMode {
     Continue,
     Refill,
+}
+
+pub(super) struct GetNextMessageGroupContext {
+    pub next_chain_time: u64,
+    pub max_new_message_key_to_current_shard: QueueKey,
+    pub mode: GetNextMessageGroupMode,
 }
 
 impl MessagesReader {
@@ -85,12 +95,20 @@ impl MessagesReader {
             add_to_message_groups_total_elapsed: Duration::ZERO,
             last_read_to_anchor_chain_time: None,
             mc_top_shards_end_lts,
+
+            read_int_msgs_from_iterator_count: 0,
+            read_ext_msgs_count: 0,
+            read_new_msgs_from_iterator_count: 0,
         }
     }
 
-    pub fn reset_read_flags(&mut self) {
+    pub fn reset_read_state(&mut self) {
         self.read_ext_messages = false;
         self.read_new_messages = false;
+
+        self.read_int_msgs_from_iterator_count = 0;
+        self.read_ext_msgs_count = 0;
+        self.read_new_msgs_from_iterator_count = 0;
     }
 
     pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
@@ -113,21 +131,32 @@ impl MessagesReader {
         self.add_to_message_groups_total_elapsed
     }
 
+    pub fn read_int_msgs_from_iterator_count(&self) -> u64 {
+        self.read_int_msgs_from_iterator_count
+    }
+
+    pub fn read_ext_msgs_count(&self) -> u64 {
+        self.read_ext_msgs_count
+    }
+
+    pub fn read_new_msgs_from_iterator_count(&self) -> u64 {
+        self.read_new_msgs_from_iterator_count
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn get_next_message_group(
         &mut self,
+        cx: GetNextMessageGroupContext,
+        processed_upto: &mut ProcessedUptoInfoStuff,
         msgs_buffer: &mut MessagesBuffer,
         anchors_cache: &mut AnchorsCache,
-        collation_data: &mut BlockCollationData,
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
-        max_new_message_key_to_current_shard: &QueueKey,
-        mode: GetNextMessageGroupMode,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
 
         let mut group_opt = None;
 
-        let init_iterator_mode = match mode {
+        let init_iterator_mode = match cx.mode {
             GetNextMessageGroupMode::Continue => InitIteratorMode::UseNextRange,
             GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
         };
@@ -144,11 +173,11 @@ impl MessagesReader {
                 );
 
                 // set all read externals as processed
-                if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+                if let Some(externals) = processed_upto.externals.as_mut() {
                     if externals.processed_to != externals.read_to {
                         externals.processed_to = externals.read_to;
                         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+                            processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
                         );
                     }
                 }
@@ -204,7 +233,7 @@ impl MessagesReader {
                     break;
                 }
             }
-            collation_data.read_int_msgs_from_iterator += existing_internals_read_count;
+            self.read_int_msgs_from_iterator_count += existing_internals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "existing_internals_read_count={}, buffer int={}, ext={}",
@@ -230,8 +259,7 @@ impl MessagesReader {
                 );
 
                 // set all read existing internals as processed
-                let updated_processed_to =
-                    set_int_upto_all_processed(&mut collation_data.processed_upto);
+                let updated_processed_to = set_int_upto_all_processed(processed_upto);
 
                 // commit processed messages to iterator
                 mq_iterator_adapter
@@ -242,7 +270,7 @@ impl MessagesReader {
 
                 let next_range_iterator_initialized = mq_iterator_adapter
                     .try_init_next_range_iterator(
-                        &mut collation_data.processed_upto,
+                        processed_upto,
                         self.mc_top_shards_end_lts.iter().copied(),
                         init_iterator_mode,
                     )
@@ -262,9 +290,7 @@ impl MessagesReader {
             let timer = std::time::Instant::now();
             let mut add_to_groups_elapsed = Duration::ZERO;
 
-            let next_chain_time = collation_data.get_gen_chain_time();
-
-            let read_next_externals_mode = match mode {
+            let read_next_externals_mode = match cx.mode {
                 GetNextMessageGroupMode::Continue => ReadNextExternalsMode::ToTheEnd,
                 GetNextMessageGroupMode::Refill => ReadNextExternalsMode::ToPreviuosReadTo,
             };
@@ -280,8 +306,8 @@ impl MessagesReader {
                     &self.shard_id,
                     anchors_cache,
                     3,
-                    next_chain_time,
-                    &mut collation_data.processed_upto.externals,
+                    cx.next_chain_time,
+                    &mut processed_upto.externals,
                     msgs_buffer.current_ext_reader_position,
                     read_next_externals_mode,
                 )?;
@@ -319,7 +345,7 @@ impl MessagesReader {
                     break;
                 }
             }
-            collation_data.read_ext_msgs += externals_read_count;
+            self.read_ext_msgs_count += externals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "externals_read_count={}, buffer int={}, ext={}",
@@ -339,11 +365,11 @@ impl MessagesReader {
                 );
 
                 // set all read externals as processed
-                if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+                if let Some(externals) = processed_upto.externals.as_mut() {
                     if externals.processed_to != externals.read_to {
                         externals.processed_to = externals.read_to;
                         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                        collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+                        processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
                         );
                     }
                 }
@@ -364,7 +390,7 @@ impl MessagesReader {
             // first new messages epoch is from existing internals and externals
             // then we read next epoch of new messages only when the previous epoch processed
             mq_iterator_adapter
-                .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
+                .try_update_new_messages_read_to(&cx.max_new_message_key_to_current_shard)?;
 
             let mut add_to_groups_elapsed = Duration::ZERO;
 
@@ -401,7 +427,7 @@ impl MessagesReader {
                     break;
                 }
             }
-            collation_data.read_new_msgs_from_iterator += new_internals_read_count;
+            self.read_new_msgs_from_iterator_count += new_internals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "new_internals_read_count={}, buffer int={}, ext={}",
@@ -424,7 +450,7 @@ impl MessagesReader {
                 && msgs_buffer.message_groups.max_message_key() > &QueueKey::MIN
             {
                 update_internals_processed_upto(
-                    &mut collation_data.processed_upto,
+                    processed_upto,
                     self.shard_id,
                     Some(ProcessedUptoUpdate::Force(
                         *msgs_buffer.message_groups.max_message_key(),
@@ -445,10 +471,10 @@ impl MessagesReader {
         }
 
         // store actual offset of current interator range
-        if collation_data.processed_upto.processed_offset != msgs_buffer.message_groups.offset() {
-            collation_data.processed_upto.processed_offset = msgs_buffer.message_groups.offset();
+        if processed_upto.processed_offset != msgs_buffer.message_groups.offset() {
+            processed_upto.processed_offset = msgs_buffer.message_groups.offset();
             tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
-                collation_data.processed_upto.processed_offset,
+                processed_upto.processed_offset,
             );
         }
 
