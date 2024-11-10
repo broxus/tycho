@@ -359,7 +359,7 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 GetNextMessageGroupContext {
                     next_chain_time: collation_data.get_gen_chain_time(),
                     max_new_message_key_to_current_shard: QueueKey::MIN,
-                    mode: GetNextMessageGroupMode::Continue,
+                    mode: GetNextMessageGroupMode::Refill,
                 },
                 &mut collation_data.processed_upto,
                 &mut msgs_buffer,
