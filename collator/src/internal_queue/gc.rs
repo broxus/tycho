@@ -82,7 +82,7 @@ fn gc_task<V: InternalMessageValue>(
                 tracing::error!(target: tracing_targets::MQ, "failed to delete messages: {e:?}");
             }
 
-            let labels = [("shard", shard.to_string())];
+            let labels = [("workchain", shard.workchain().to_string())];
             metrics::gauge!("tycho_internal_queue_processed_upto", &labels)
                 .set(current_last_key.lt as f64);
 
