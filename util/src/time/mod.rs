@@ -1,3 +1,5 @@
+mod p2;
+
 use std::time::Duration;
 
 use rand::Rng;
