@@ -42,8 +42,16 @@ echo "key: $KEY"
 
 source "${script_dir}/common.sh"
 
-zerostate=$(cat "$root_dir/.temp/zerostate.json")
-validators=$(echo "$zerostate" | jq "{ list: .validators }")
+validators_file="${script_dir}/../.temp/validators.json"
+
+if [ -f "$validators_file" ]; then
+    validators=$(cat $validators_file)
+else
+    curr_set=$($tycho_bin tool bc get-param 34 --rpc ${RPC})
+    validators=$(echo "$curr_set" | jq "{ list: [.param.list[].public_key] }")
+    echo $validators > $validators_file
+fi
+
 validators_length=$(echo "$validators" | jq ".list | length")
 
 echo "validators: $validators"
@@ -68,16 +76,15 @@ do
     pkey=$(echo "$vset_pkeys" | jq -r ".list[$idx]")
     validator_entry='{
         "weight": 1,
-        "adnl_addr": null,
         "mc_seqno_since": 0
     }'
-    validator_entry=$(echo "$validator_entry" | jq ".public_key = \"${pkey}\"")
+    validator_entry=$(echo "$validator_entry" | jq ".public_key = \"${pkey}\" | .adnl_addr = \"${pkey}\"")
     vset=$(echo "$vset" | jq ".list += [${validator_entry}]")
 done
 
 now=$(date +%s)
-utime_since=$((now + 30))
-utime_until=$((now + 30))
+utime_since=$((now + 100))
+utime_until=$((now + 100))
 
 vset=$(echo "$vset" | jq ".main = ${N} | .total_weight = ${N} | .utime_since = ${utime_since} | .utime_until = ${utime_until}")
 
