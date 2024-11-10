@@ -42,34 +42,36 @@ impl EngineConfig {
             round,
             new_cx.shuffle_validators,
         )?;
+        tracing::info!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            len = subset.len(),
+            vset_len = whole_set.len(),
+            %round,
+            "New current validator subset"
+        );
         engine.set_next_peers(&whole_set, Some((round, &subset)));
+        Ok(())
+    }
 
+    fn apply_next_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) {
         if let Some((_, next)) = &new_cx.next_validator_set {
             // NOTE: do not try to calculate subset from next set
             //  because it is impossible without known future session_update_round
             let whole_set = (next.list.iter())
                 .map(|descr| PeerId(descr.public_key.0))
                 .collect::<Vec<_>>();
+            tracing::info!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                vset_len = whole_set.len(),
+                "New net validator set"
+            );
             engine.set_next_peers(&whole_set, None);
         }
-
-        Ok(())
     }
 
-    fn apply_prev_vset(
-        engine: &EngineHandle,
-        new_cx: &StateUpdateContext,
-        builder: &MempoolConfigBuilder,
-    ) -> Result<()> {
+    fn apply_prev_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
         if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
             let round = new_cx.consensus_info.prev_vset_switch_round;
-
-            // not needed after genesis
-            let (genesis_round, _) = builder.get_genesis().context("genesis must be set")?;
-            if round < genesis_round {
-                return Ok(());
-            };
-
             let whole_set = prev_set
                 .list
                 .iter()
@@ -81,8 +83,14 @@ impl EngineConfig {
                 round,
                 new_cx.consensus_info.prev_shuffle_mc_validators,
             )?;
-            // Note: place first known vset right after Genesis, as if it was from zerostate
-            engine.set_next_peers(&whole_set, Some((0, &subset)));
+            tracing::info!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                len = subset.len(),
+                vset_len = whole_set.len(),
+                %round,
+                "New prev validator subset"
+            );
+            engine.set_next_peers(&whole_set, Some((round, &subset)));
         }
 
         Ok(())
@@ -106,12 +114,6 @@ impl EngineConfig {
             .into_iter()
             .map(|x| PeerId(x.public_key.0))
             .collect::<Vec<_>>();
-        tracing::info!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            len = result.len(),
-            round = session_update_round,
-            "New mempool validator subset len"
-        );
         Ok(result)
     }
 }
@@ -179,6 +181,10 @@ impl MempoolAdapterStdImpl {
             .state_update_ctx
             .as_ref()
             .ok_or(anyhow!("last state update context is not set"))?;
+        let (genesis_round, _) = config_guard
+            .builder
+            .get_genesis()
+            .context("genesis must be set")?;
         let mempool_config = config_guard.builder.build()?;
         let consensus_config = (config_guard.builder.get_consensus_config().cloned())
             .ok_or(anyhow!("consensus config is not set"))?;
@@ -201,8 +207,36 @@ impl MempoolAdapterStdImpl {
 
         let handle = engine.get_handle();
 
-        EngineConfig::apply_prev_vset(&handle, last_state_update, &config_guard.builder)?;
-        EngineConfig::apply_vset(&handle, last_state_update)?;
+        // actual oldest sync round will be not less than this
+        let estimated_sync_bottom = last_state_update
+            .mc_processed_to_anchor_id
+            .saturating_sub(consensus_config.max_consensus_lag_rounds as u32)
+            .saturating_sub(consensus_config.deduplicate_rounds as u32)
+            .saturating_sub(consensus_config.commit_history_rounds as u32)
+            .max(genesis_round);
+        if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
+            if last_state_update.prev_validator_set.is_some() {
+                tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
+            }
+            EngineConfig::apply_vset(&handle, last_state_update)?;
+            EngineConfig::apply_next_vset(&handle, last_state_update);
+        } else if estimated_sync_bottom >= last_state_update.consensus_info.prev_vset_switch_round {
+            EngineConfig::apply_prev_vset(&handle, last_state_update)?;
+            EngineConfig::apply_vset(&handle, last_state_update)?;
+            if last_state_update.next_validator_set.is_some() {
+                tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, "cannot use next vset");
+            }
+        } else {
+            bail!(
+                "cannot start from outdated peer sets (too short mempool epoch(s)): \
+                 estimated sync bottom {estimated_sync_bottom} \
+                 is older than prev vset switch round {}; \
+                 genesis round {genesis_round}, masterchain processed to anchor {} in block {}",
+                last_state_update.consensus_info.prev_vset_switch_round,
+                last_state_update.mc_processed_to_anchor_id,
+                last_state_update.mc_block_id,
+            )
+        };
 
         tokio::spawn(async move {
             scopeguard::defer!(tracing::warn!(
@@ -388,6 +422,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         };
 
         EngineConfig::apply_vset(engine, &new_cx)?;
+        EngineConfig::apply_next_vset(engine, &new_cx);
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
     }
