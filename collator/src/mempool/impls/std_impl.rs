@@ -192,6 +192,10 @@ impl MempoolAdapterStdImpl {
         // TODO support config change; payload size is bound to mempool rounds
         self.input_buffer.apply_config(&consensus_config);
 
+        // Note: mempool is always run from applied mc block
+        self.top_known_anchor
+            .set_max_raw(last_state_update.mc_processed_to_anchor_id);
+
         let engine = Engine::new(
             self.key_pair.clone(),
             &self.network,

@@ -10,7 +10,9 @@ use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::{DBPinnableSlice, ReadOptions, WaitForCompactOptions, WriteBatch};
+use weedb::rocksdb::{
+    DBPinnableSlice, IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch,
+};
 
 use crate::dag::DagFront;
 use crate::effects::AltFormat;
@@ -44,7 +46,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>>;
 
-    fn load_last_broadcasts(&self) -> Result<Option<(Point, Option<Point>)>>;
+    fn load_last_broadcasts(&self, bottom: Round) -> Result<Option<(Point, Option<Point>)>>;
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
@@ -162,9 +164,9 @@ impl MempoolStore {
             .expect("DB get point status")
     }
 
-    pub fn load_last_broadcasts(&self) -> Option<(Point, Option<Point>)> {
+    pub fn load_last_broadcasts(&self, bottom: Round) -> Option<(Point, Option<Point>)> {
         self.0
-            .load_last_broadcasts()
+            .load_last_broadcasts(bottom)
             .expect("DB load last broadcasts")
     }
 
@@ -449,14 +451,19 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(result)
     }
 
-    fn load_last_broadcasts(&self) -> Result<Option<(Point, Option<Point>)>> {
+    fn load_last_broadcasts(&self, bottom: Round) -> Result<Option<(Point, Option<Point>)>> {
         let mut last_broadcast_key = None;
-        let iter = self
-            .db
-            .points_status
-            .iterator(weedb::rocksdb::IteratorMode::End);
 
-        for item in iter {
+        let mut opts = ReadOptions::default();
+        let mut buf = [0; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_prefix(bottom.0, &mut buf);
+        opts.set_iterate_lower_bound(buf);
+
+        let status_cf = self.db.points_status.cf();
+
+        let rev_iter = (self.db.rocksdb()).iterator_cf_opt(&status_cf, opts, IteratorMode::End);
+
+        for item in rev_iter {
             let (key, status) = item.context("iter over statuses")?;
             if PointStatus::is_own_broadcast(&status) {
                 last_broadcast_key = Some(key);
@@ -531,7 +538,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn load_last_broadcasts(&self) -> Result<Option<(Point, Option<Point>)>> {
+    fn load_last_broadcasts(&self, _: Round) -> Result<Option<(Point, Option<Point>)>> {
         anyhow::bail!("should not be used in tests")
     }
 

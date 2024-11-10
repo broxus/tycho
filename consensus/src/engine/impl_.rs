@@ -74,6 +74,7 @@ impl Engine {
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(Genesis::round());
+        top_known_anchor.set_max(Genesis::round());
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
@@ -169,15 +170,19 @@ impl Engine {
         let broadcast_points = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
             let peer_schedule = self.round_task.state.peer_schedule.clone();
+            // TKA is set in adapter from last signed block, so no need to repeat older broadcasts
+            let top_known_anchor = self.round_task.state.top_known_anchor.get();
             move || {
-                store.load_last_broadcasts().and_then(|(last, prev)| {
-                    peer_schedule
-                        .atomic()
-                        .local_keys(last.round()) // against db cloning
-                        .map(|keys| (PeerId::from(keys.public_key), keys))
-                        .filter(|(local_id, _)| local_id == last.data().author)
-                        .map(|(_, keys)| (last, keys, prev))
-                })
+                store
+                    .load_last_broadcasts(top_known_anchor)
+                    .and_then(|(last, prev)| {
+                        peer_schedule
+                            .atomic()
+                            .local_keys(last.round()) // against db cloning
+                            .map(|keys| (PeerId::from(keys.public_key), keys))
+                            .filter(|(local_id, _)| local_id == last.data().author)
+                            .map(|(_, keys)| (last, keys, prev))
+                    })
             }
         })
         .await
@@ -186,7 +191,7 @@ impl Engine {
         // even if have some history in DB above broadcast rounds, we replay the last broadcasts
         let top_round = match &broadcast_points {
             Some((last_broadcast, _, _)) => last_broadcast.round(),
-            None => Genesis::round().next(), // will reproduce the first point after genesis,
+            None => (Genesis::round().next()).max(self.round_task.state.top_known_anchor.get()),
         };
         self.consensus_round.set_max(top_round);
 
@@ -221,11 +226,13 @@ impl Engine {
                 Some((last, incl_state))
             }
             None => {
-                // dag top is genesis round
-                self.round_task.collector.init(
-                    top_round,
-                    std::iter::once(future::ready(genesis_incl_state).boxed()).collect(),
-                );
+                if top_round == Genesis::round().next() {
+                    // dag top is genesis round
+                    self.round_task.collector.init(
+                        top_round,
+                        std::iter::once(future::ready(genesis_incl_state).boxed()).collect(),
+                    );
+                }
                 None
             }
         }
