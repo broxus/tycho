@@ -935,7 +935,7 @@ impl CollatorStdImpl {
 
         // do not import anchor if mempool may be paused
         // needs to process more anchors in collator first
-        if id - top_processed_to_anchor > max_consensus_lag_rounds / 2 {
+        if id.saturating_sub(top_processed_to_anchor) > max_consensus_lag_rounds / 2 {
             return Ok(ImportNextAnchor::Skipped);
         }
 
