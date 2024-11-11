@@ -6,7 +6,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_block_util::block::{BlockIdExt, BlockStuff};
 use tycho_core::block_strider::{
-    BlockProvider, BlockProviderExt, BlockchainBlockProvider, StorageBlockProvider,
+    BlockProvider, BlockProviderExt, BlockchainBlockProvider, RetryConfig, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
@@ -129,9 +129,10 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         ))
         .build();
     let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default()).retry(
-        10,
-        Duration::from_millis(100),
-        Duration::from_millis(100),
+        RetryConfig {
+            limit: 10,
+            polling_interval: Duration::from_millis(100),
+        },
     );
 
     let archive_data = utils::read_file("archive_1.bin")?;

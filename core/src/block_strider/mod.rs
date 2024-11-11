@@ -18,7 +18,7 @@ use tycho_util::FastHashMap;
 pub use self::provider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
-    EmptyBlockProvider, OptionalBlockStuff, ProofChecker, StorageBlockProvider,
+    EmptyBlockProvider, OptionalBlockStuff, ProofChecker, RetryConfig, StorageBlockProvider,
 };
 pub use self::starter::{FileZerostateProvider, Starter, StarterConfig, ZerostateProvider};
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};

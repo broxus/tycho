@@ -437,7 +437,7 @@ impl ProofChecker {
 pub struct RetryConfig {
     /// Retry limit.
     ///
-    /// Default: 10.
+    /// Default: 1.
     pub limit: usize,
 
     /// Polling interval for downloading archive.

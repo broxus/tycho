@@ -86,18 +86,28 @@ impl ArchiveBlockProvider {
 
         'main: loop {
             let (block_id, archive_key, archive_info) = 'download: loop {
+                // Looking for block in the archives cache
+                if let Some((key, info)) = this.look_for_archive(next_block_seqno).await {
+                    if let Some(mc_block_id) = info.archive.mc_block_ids.get(&next_block_seqno) {
+                        break 'download (*mc_block_id, key, info);
+                    }
+                }
+
                 match self.download_archive(next_block_seqno).await {
-                    Ok(Some((id, archive_info))) => {
+                    Ok(Some(archive_info)) => {
                         if let Some(mc_block_id) =
                             archive_info.archive.mc_block_ids.get(&next_block_seqno)
                         {
                             tracing::debug!(%mc_block_id, "block found in the last known archive");
-                            break 'download (*mc_block_id, id, archive_info);
+                            break 'download (*mc_block_id, next_block_seqno, archive_info);
                         }
                     }
                     Ok(None) => {
                         tracing::info!("archive block provider finished");
+
+                        // Clear archives cache
                         this.clear_known_archives().await;
+
                         break 'main None;
                     }
                     Err(e) => {
@@ -116,7 +126,7 @@ impl ArchiveBlockProvider {
                         archive.mc_block_ids.last_key_value(),
                     ) {
                         (Some((first_seqno, _)), Some((last_seqno, _))) => {
-                            if (*last_seqno - first_seqno) != archive.mc_block_ids.len() as u32 {
+                            if (last_seqno - first_seqno + 1) != archive.mc_block_ids.len() as u32 {
                                 tracing::error!("Archive does not contain some mc blocks");
                                 break 'checks;
                             }
@@ -160,28 +170,41 @@ impl ArchiveBlockProvider {
                 };
             };
 
-            self.inner.remove_archive(archive_key).await;
+            this.remove_archive(archive_key).await;
             archive_info.from.punish(PunishReason::Malicious);
         }
     }
 
     async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
         let this = self.inner.as_ref();
-        let mc_seqno = block_id_relation.mc_block_id.seqno;
-        let block_id = block_id_relation.block_id;
 
-        let (ref block, ref proof, ref queue_diff) = match this.look_for_archive(mc_seqno).await {
-            Some((_, info)) => match info.archive.get_entry_by_id(&block_id) {
-                Ok(entry) => entry,
-                Err(e) => return Some(Err(e.into())),
-            },
-            None => return Some(Err(ArchiveError::OutOfRange.into())),
+        let block_id = block_id_relation.block_id;
+        let mc_block_id = block_id_relation.mc_block_id;
+
+        let mut entry = None;
+
+        let guard = this.known_archives.lock().await;
+        for (_, slot) in guard.iter() {
+            if let ArchiveSlot::Downloaded(info) = slot {
+                if let Ok(res) = info.archive.get_entry_by_id(&block_id) {
+                    entry = Some(res);
+                }
+            }
+        }
+        drop(guard);
+
+        let (ref block, ref proof, ref queue_diff) = match entry {
+            Some(entry) => entry,
+            None => {
+                tracing::error!("archive out of range");
+                return Some(Err(ArchiveError::OutOfRange.into()));
+            }
         };
 
         if let Err(e) = this
             .proof_checker
             .check_proof(CheckProof {
-                mc_block_id: &block_id_relation.mc_block_id,
+                mc_block_id: &mc_block_id,
                 block,
                 proof,
                 queue_diff,
@@ -196,31 +219,36 @@ impl ArchiveBlockProvider {
         Some(Ok(block.clone()))
     }
 
-    async fn download_archive(&self, next_block_seqno: u32) -> Result<Option<(u32, ArchiveInfo)>> {
+    async fn download_archive(&self, archive_key: u32) -> Result<Option<ArchiveInfo>> {
+        let this = self.inner.as_ref();
+
         loop {
-            let mut guard = self.inner.known_archives.lock().await;
-            let pending = match guard.get_mut(&next_block_seqno) {
+            let mut guard = this.known_archives.lock().await;
+            let pending = match guard.get_mut(&archive_key) {
                 Some(archive_slot) => match archive_slot {
-                    ArchiveSlot::Pending(ref mut next) => Some((next_block_seqno, next)),
+                    ArchiveSlot::Pending(ref mut next) => {
+                        // Waiting for pending archive
+                        let pr_archive_info = match next.wait_for_archive().await? {
+                            Some(archive_info) => archive_info,
+                            None => return Ok(None), // TooNew Archive
+                        };
+                        Some(pr_archive_info)
+                    }
                     ArchiveSlot::Downloaded(info) => {
-                        return Ok(Some((next_block_seqno, info.clone())));
+                        return Ok(Some(info.clone()));
                     }
                 },
                 None => None,
             };
+            drop(guard);
 
             match pending {
-                Some((key, next)) => {
-                    let pr_archive_info = match next.wait_for_archive().await? {
-                        Some(archive_info) => archive_info,
-                        None => return Ok(None), // TooNew Archive
-                    };
-
-                    let archive = match self.inner.construct_archive(pr_archive_info.data).await {
+                Some(pr_archive_info) => {
+                    let archive = match this.construct_archive(pr_archive_info.data).await {
                         Ok(archive) => Arc::new(archive),
                         Err(e) => {
                             tracing::error!(
-                                seqno = next_block_seqno,
+                                seqno = archive_key,
                                 "failed to construct archive {e:?}"
                             );
 
@@ -229,17 +257,21 @@ impl ArchiveBlockProvider {
                         }
                     };
 
-                    self.inner
-                        .update_pending_archive(
-                            key,
-                            archive.clone(),
-                            pr_archive_info.neighbour.clone(),
-                        )
-                        .await;
+                    this.update_pending_archive(
+                        archive_key,
+                        archive.clone(),
+                        pr_archive_info.neighbour.clone(),
+                    )
+                    .await;
 
                     if let Some((seqno, _)) = archive.mc_block_ids.last_key_value() {
-                        let next = self.make_next_archive_task(seqno + 1);
-                        self.inner.add_pending_archive(seqno + 1, next).await?;
+                        let next_seqno = seqno + 1;
+
+                        // Start downloading next archive if not started yet
+                        if !this.is_archive_exist(next_seqno).await {
+                            let next = self.make_next_archive_task(next_seqno);
+                            this.add_pending_archive(next_seqno, next).await?;
+                        }
                     }
 
                     let archive_info = ArchiveInfo {
@@ -247,13 +279,11 @@ impl ArchiveBlockProvider {
                         from: pr_archive_info.neighbour,
                     };
 
-                    return Ok(Some((key, archive_info)));
+                    return Ok(Some(archive_info));
                 }
                 None => {
-                    let next = self.make_next_archive_task(next_block_seqno);
-                    self.inner
-                        .add_pending_archive(next_block_seqno, next)
-                        .await?;
+                    let next = self.make_next_archive_task(archive_key);
+                    this.add_pending_archive(archive_key, next).await?;
                 }
             }
         }
@@ -362,29 +392,32 @@ impl Inner {
                 vacant.insert(ArchiveSlot::Pending(next));
             }
             Entry::Occupied(_) => {
-                anyhow::bail!("Failed to add pending archive with existing key {key}")
+                tracing::warn!("Archive already exist in archives cache for {key}");
             }
         }
+
         Ok(())
+    }
+
+    async fn is_archive_exist(&self, key: u32) -> bool {
+        let guard = self.known_archives.lock().await;
+        guard.get(&key).is_some()
     }
 
     async fn update_pending_archive(&self, key: u32, archive: Arc<Archive>, source: Neighbour) {
         let mut guard = self.known_archives.lock().await;
-        let entry = guard.entry(key);
-        let new_value = ArchiveSlot::Downloaded(ArchiveInfo {
-            from: source,
-            archive,
-        });
-        match entry {
+        match guard.entry(key) {
             Entry::Occupied(mut occupied) => {
+                let new_value = ArchiveSlot::Downloaded(ArchiveInfo {
+                    from: source,
+                    archive,
+                });
                 occupied.insert(new_value);
             }
-            Entry::Vacant(vacant) => {
-                vacant.insert(new_value); // TODO: maybe error?
+            Entry::Vacant(_) => {
+                tracing::warn!("Nothing to update in archives cache with key {key}");
             }
         }
-
-        guard.remove(&key);
     }
 
     async fn remove_archive(&self, key: u32) {
@@ -497,6 +530,13 @@ impl std::io::Write for ArchiveWriter {
         }
     }
 
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::File(writer) => writer.flush(),
+            Self::Bytes(writer) => writer.flush(),
+        }
+    }
+
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
             Self::File(writer) => writer.write_all(buf),
@@ -508,13 +548,6 @@ impl std::io::Write for ArchiveWriter {
         match self {
             Self::File(writer) => writer.write_fmt(fmt),
             Self::Bytes(writer) => writer.write_fmt(fmt),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::File(writer) => writer.flush(),
-            Self::Bytes(writer) => writer.flush(),
         }
     }
 }
