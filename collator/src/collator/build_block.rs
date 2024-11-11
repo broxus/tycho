@@ -805,7 +805,7 @@ impl CollatorStdImpl {
                         }
                     }
 
-                    shard_accounts.set(
+                    shard_accounts.set_any(
                         &updated_account.account_addr,
                         &DepthBalanceInfo {
                             split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
@@ -843,7 +843,7 @@ impl CollatorStdImpl {
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
-            shard_accounts,
+            shard_accounts: shard_accounts.build()?,
             new_config_params,
             accounts_len,
         })
