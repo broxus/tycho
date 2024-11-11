@@ -1391,8 +1391,9 @@ impl CollatorStdImpl {
             HasExternals,
             ImportedAnchorHasNoExternals,
             AnchorImportSkipped,
+            ForceEmptyShardBlock,
         }
-        let try_collate_check = 'check: {
+        let mut try_collate_check = 'check: {
             if force_mc_block_by_uncommitted_chain {
                 TryCollateCheck::ForceMcBlockByUncommittedChainLength
             } else {
@@ -1547,21 +1548,41 @@ impl CollatorStdImpl {
             }
         };
 
+        let (last_imported_anchor_id, last_imported_chain_time) = self
+            .anchors_cache
+            .get_last_imported_anchor_id_and_ct()
+            .unwrap();
+        let prev_block_chain_time = working_state.prev_shard_data_ref().gen_chain_time();
+
+        // when no messages for processing
+        // then force empty shard block collation if related timeout elapsed
+        if matches!(
+            try_collate_check,
+            TryCollateCheck::ImportedAnchorHasNoExternals
+        ) {
+            let empty_sc_block_interval_ms =
+                working_state.collation_config.empty_sc_block_interval_ms as u64;
+            let ct_elapsed_from_prev_block =
+                last_imported_chain_time.saturating_sub(prev_block_chain_time);
+            if empty_sc_block_interval_ms > 0
+                && ct_elapsed_from_prev_block >= empty_sc_block_interval_ms
+            {
+                try_collate_check = TryCollateCheck::ForceEmptyShardBlock;
+            }
+        }
+
         // collate next shard block or skip
         match try_collate_check {
             TryCollateCheck::HasUnprocessedMessages
             | TryCollateCheck::HasExternals
-            | TryCollateCheck::AnchorImportSkipped => {
-                let (last_imported_anchor_id, last_imported_chain_time) = self
-                    .anchors_cache
-                    .get_last_imported_anchor_id_and_ct()
-                    .unwrap();
-
+            | TryCollateCheck::AnchorImportSkipped
+            | TryCollateCheck::ForceEmptyShardBlock => {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     reason = ?try_collate_check,
                     top_processed_to_anchor,
                     last_imported_anchor_id,
                     last_imported_chain_time,
+                    prev_block_chain_time,
                     "will collate next shard block",
                 );
 
@@ -1571,17 +1592,13 @@ impl CollatorStdImpl {
             }
             TryCollateCheck::ImportedAnchorHasNoExternals
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
-                let (last_imported_anchor_id, last_imported_chain_time) = self
-                    .anchors_cache
-                    .get_last_imported_anchor_id_and_ct()
-                    .unwrap();
-
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     reason = ?try_collate_check,
                     force_mc_block = force_mc_block_by_uncommitted_chain,
                     top_processed_to_anchor,
                     last_imported_anchor_id,
                     last_imported_chain_time,
+                    prev_block_chain_time,
                     uncommitted_chain_length,
                     max_uncommitted_chain_length,
                     "will NOT collate next shard block, will notify collation manager",

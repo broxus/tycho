@@ -170,10 +170,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 // when current iterator exists or existing ranges fully read
                 // then try to calc new ranges from current states
                 // add masterchain default range if not exist
-                let mc_shard_id = ShardIdent::new_full(-1);
-
                 let mut ranges_updated = self.try_update_ranges_for_shard(
-                    mc_shard_id,
+                    ShardIdent::MASTERCHAIN,
                     self.mc_state_gen_lt,
                     &mut current_range.ranges_from,
                     &mut current_range.ranges_to,
