@@ -161,7 +161,7 @@ impl MessagesReader {
             GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
         };
 
-        let shards_iter: Vec<_> = if self.shard_id.is_masterchain() {
+        let shards: Vec<_> = if self.shard_id.is_masterchain() {
             collation_data
                 .shards()?
                 .iter()
@@ -186,7 +186,7 @@ impl MessagesReader {
             mq_iterator_adapter
                 .try_init_next_range_iterator(
                     &mut collation_data.processed_upto,
-                    shards_iter.clone().into_iter(),
+                    shards.clone().into_iter(),
                     working_state.mc_data.gen_lt,
                     working_state.prev_shard_data_ref().gen_lt(),
                     // We always init first iterator during block collation
