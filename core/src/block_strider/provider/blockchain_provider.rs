@@ -22,6 +22,11 @@ use crate::overlay_client::{Neighbour, PunishReason};
 #[serde(default)]
 #[non_exhaustive]
 pub struct BlockchainBlockProviderConfig {
+    /// Retry limit.
+    ///
+    /// Default: 10.
+    pub retry_limit: usize,
+
     /// Polling interval for `get_next_block` method.
     ///
     /// Default: 1 second.
@@ -38,6 +43,7 @@ pub struct BlockchainBlockProviderConfig {
 impl Default for BlockchainBlockProviderConfig {
     fn default() -> Self {
         Self {
+            retry_limit: 10,
             get_next_block_polling_interval: Duration::from_secs(1),
             get_block_polling_interval: Duration::from_secs(1),
         }

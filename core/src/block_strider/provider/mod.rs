@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapAny;
@@ -37,10 +38,6 @@ pub trait BlockProvider: Send + Sync + 'static {
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a>;
 }
 
-pub trait RetryLimit {
-    fn is_limit_exceeded(&self) -> bool;
-}
-
 impl<T: BlockProvider> BlockProvider for Box<T> {
     type GetNextBlockFut<'a> = T::GetNextBlockFut<'a>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
@@ -72,7 +69,12 @@ pub trait BlockProviderExt: Sized {
 
     fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T>;
 
-    fn retry(self, limit: usize) -> RetryBlockProvider<Self>;
+    fn retry(
+        self,
+        limit: usize,
+        get_block_polling_interval: Duration,
+        get_next_block_polling_interval: Duration,
+    ) -> RetryBlockProvider<Self>;
 }
 
 impl<B: BlockProvider> BlockProviderExt for B {
@@ -92,11 +94,18 @@ impl<B: BlockProvider> BlockProviderExt for B {
         }
     }
 
-    fn retry(self, limit: usize) -> RetryBlockProvider<Self> {
+    fn retry(
+        self,
+        limit: usize,
+        get_block_polling_interval: Duration,
+        get_next_block_polling_interval: Duration,
+    ) -> RetryBlockProvider<Self> {
         RetryBlockProvider {
             inner: self,
             limit,
-            counter: AtomicUsize::new(0),
+            get_block_polling_interval,
+            get_next_block_polling_interval,
+            attempts: AtomicUsize::new(0),
         }
     }
 }
@@ -130,11 +139,6 @@ pub struct CycleBlockProvider<T1, T2> {
     is_right: AtomicBool,
 }
 
-impl<T1, T2> CycleBlockProvider<T1, T2> {
-    pub const LEFT_LIMIT: usize = 1;
-    pub const RIGHT_LIMIT: usize = 10;
-}
-
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
@@ -163,63 +167,52 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
     }
 }
 
-macro_rules! cycle_provider_handler {
-    ($self:expr, $method:ident, $param:expr) => {{
-        let is_right = $self.is_right.load(Ordering::Acquire);
-
-        let res = if !is_right {
-            let res = $self.left.$method($param).await;
-            if res.is_some() {
-                return res;
-            }
-            if $self.left.is_limit_exceeded() {
-                $self.is_right.store(true, Ordering::Release);
-                $self.right.$method($param).await
-            } else {
-                res
-            }
-        } else {
-            let res = $self.right.$method($param).await;
-            if res.is_some() {
-                return res;
-            }
-            if $self.right.is_limit_exceeded() {
-                $self.is_right.store(false, Ordering::Release);
-                $self.left.$method($param).await
-            } else {
-                res
-            }
-        };
-
-        res
-    }};
-}
-
-impl<T1: BlockProvider + RetryLimit, T2: BlockProvider + RetryLimit> BlockProvider
-    for CycleBlockProvider<T1, T2>
-{
+impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async { cycle_provider_handler!(self, get_next_block, prev_block_id) })
+        Box::pin(async {
+            let is_right = self.is_right.load(Ordering::Acquire);
+
+            let res = if !is_right {
+                self.left.get_next_block(prev_block_id).await
+            } else {
+                self.right.get_next_block(prev_block_id).await
+            };
+
+            if res.is_some() {
+                return res;
+            }
+
+            let is_right = !is_right;
+            self.is_right.store(is_right, Ordering::Release);
+
+            if !is_right {
+                self.left.get_next_block(prev_block_id).await
+            } else {
+                self.right.get_next_block(prev_block_id).await
+            }
+        })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
-        Box::pin(async move { cycle_provider_handler!(self, get_block, block_id_relation) })
+        Box::pin(async {
+            if self.is_right.load(Ordering::Acquire) {
+                self.right.get_block(block_id_relation).await
+            } else {
+                self.left.get_block(block_id_relation).await
+            }
+        })
     }
 }
 
 pub struct RetryBlockProvider<T> {
     inner: T,
     limit: usize,
-    counter: AtomicUsize,
-}
-
-impl<T> RetryLimit for RetryBlockProvider<T> {
-    fn is_limit_exceeded(&self) -> bool {
-        self.counter.load(Ordering::Acquire) >= self.limit
-    }
+    get_block_polling_interval: Duration,
+    get_next_block_polling_interval: Duration,
+    attempts: AtomicUsize,
 }
 
 impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
@@ -228,25 +221,49 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
-            let res = self.inner.get_next_block(prev_block_id).await;
-            if res.is_some() {
-                self.counter.store(0, Ordering::Release);
-            } else {
-                self.counter.fetch_add(1, Ordering::Release);
+            // TODO: Backoff?
+            let mut interval = tokio::time::interval(self.get_next_block_polling_interval);
+
+            loop {
+                let res = self.inner.get_next_block(prev_block_id).await;
+                if res.is_some() {
+                    self.attempts.store(0, Ordering::Release);
+                    break res;
+                } else {
+                    self.attempts.fetch_add(1, Ordering::Release);
+                }
+
+                if self.attempts.load(Ordering::Acquire) >= self.limit {
+                    self.attempts.store(0, Ordering::Release);
+                    break res;
+                }
+
+                interval.tick().await;
             }
-            res
         })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
         Box::pin(async move {
-            let res = self.inner.get_block(block_id_relation).await;
-            if res.is_some() {
-                self.counter.store(0, Ordering::Release);
-            } else {
-                self.counter.fetch_add(1, Ordering::Release);
+            // TODO: Backoff?
+            let mut interval = tokio::time::interval(self.get_block_polling_interval);
+
+            loop {
+                let res = self.inner.get_block(block_id_relation).await;
+                if res.is_some() {
+                    self.attempts.store(0, Ordering::Release);
+                    break res;
+                } else {
+                    self.attempts.fetch_add(1, Ordering::Release);
+                }
+
+                if self.attempts.load(Ordering::Acquire) >= self.limit {
+                    self.attempts.store(0, Ordering::Release);
+                    break res;
+                }
+
+                interval.tick().await;
             }
-            res
         })
     }
 }
@@ -454,7 +471,7 @@ mod test {
 
     use everscale_types::boc::Boc;
     use everscale_types::models::Block;
-    use tycho_block_util::block::BlockStuff;
+    use tycho_block_util::block::{BlockIdExt, BlockStuff};
 
     use super::*;
 
@@ -534,6 +551,8 @@ mod test {
         const LEFT_LIMIT: usize = 10;
         const RIGHT_LIMIT: usize = 1;
 
+        const POLLING_INTERVAL_MS: u64 = 100;
+
         let left_provider = Arc::new(MockBlockProvider {
             has_block: AtomicBool::new(true),
         });
@@ -541,8 +560,16 @@ mod test {
             has_block: AtomicBool::new(false),
         });
 
-        let left = left_provider.clone().retry(10);
-        let right = right_provider.clone().retry(1);
+        let left = left_provider.clone().retry(
+            LEFT_LIMIT,
+            Duration::from_millis(POLLING_INTERVAL_MS),
+            Duration::from_millis(POLLING_INTERVAL_MS),
+        );
+        let right = right_provider.clone().retry(
+            RIGHT_LIMIT,
+            Duration::from_millis(POLLING_INTERVAL_MS),
+            Duration::from_millis(POLLING_INTERVAL_MS),
+        );
 
         let cycle_provider = left.cycle(right);
 
@@ -558,15 +585,11 @@ mod test {
         left_provider.has_block.store(false, Ordering::Release);
         right_provider.has_block.store(true, Ordering::Release);
 
-        let mut cnt = 0;
         while cycle_provider
             .get_next_block(&get_default_block_id())
             .await
             .is_none()
-        {
-            cnt += 1;
-        }
-        assert_eq!(cnt, LEFT_LIMIT - 1);
+        {}
 
         cycle_provider
             .get_next_block(&get_default_block_id())
@@ -580,15 +603,11 @@ mod test {
         left_provider.has_block.store(true, Ordering::Release);
         right_provider.has_block.store(false, Ordering::Release);
 
-        let mut cnt = 0;
         while cycle_provider
             .get_next_block(&get_default_block_id())
             .await
             .is_none()
-        {
-            cnt += 1;
-        }
-        assert_eq!(cnt, RIGHT_LIMIT - 1);
+        {}
 
         cycle_provider
             .get_next_block(&get_default_block_id())
@@ -596,6 +615,21 @@ mod test {
             .unwrap()
             .unwrap();
         assert!(!cycle_provider.is_right.load(Ordering::Acquire));
+
+        cycle_provider
+            .get_block(&get_default_block_id().relative_to_self())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cycle_provider.is_right.load(Ordering::Acquire));
+
+        left_provider.has_block.store(false, Ordering::Release);
+        right_provider.has_block.store(true, Ordering::Release);
+
+        let block = cycle_provider
+            .get_block(&get_default_block_id().relative_to_self())
+            .await;
+        assert!(block.is_none());
     }
 
     fn get_empty_block() -> BlockStuffAug {

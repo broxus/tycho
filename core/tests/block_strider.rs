@@ -5,7 +5,9 @@ use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_block_util::block::{BlockIdExt, BlockStuff};
-use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider, StorageBlockProvider};
+use tycho_core::block_strider::{
+    BlockProvider, BlockProviderExt, BlockchainBlockProvider, StorageBlockProvider,
+};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
@@ -126,7 +128,11 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
             PublicOverlayClientConfig::default(),
         ))
         .build();
-    let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
+    let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default()).retry(
+        10,
+        Duration::from_millis(100),
+        Duration::from_millis(100),
+    );
 
     let archive_data = utils::read_file("archive_1.bin")?;
     let archive = utils::parse_archive(&archive_data)?;

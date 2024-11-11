@@ -15,6 +15,7 @@ use tokio::task::AbortHandle;
 use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::Storage;
+use tycho_util::serde_helpers;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};
@@ -24,12 +25,25 @@ use crate::overlay_client::{Neighbour, PunishReason};
 #[serde(default)]
 pub struct ArchiveBlockProviderConfig {
     pub max_archive_to_memory_size: ByteSize,
+
+    /// Retry limit.
+    ///
+    /// Default: 10.
+    pub retry_limit: usize,
+
+    /// Polling interval for downloading archive.
+    ///
+    /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
+    pub polling_interval: Duration,
 }
 
 impl Default for ArchiveBlockProviderConfig {
     fn default() -> Self {
         Self {
             max_archive_to_memory_size: ByteSize::mb(100),
+            retry_limit: 10,
+            polling_interval: Duration::from_secs(1),
         }
     }
 }
