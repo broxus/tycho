@@ -178,8 +178,6 @@ impl ShardStateStorage {
         let mut states_read_options = self.db.shard_states.new_read_config();
         states_read_options.set_snapshot(&snapshot);
 
-        let cells_write_options = self.db.cells.write_config();
-
         let mut alloc = bumpalo::Bump::new();
 
         // Create iterator
@@ -200,7 +198,7 @@ impl ShardStateStorage {
             };
 
             let block_id = BlockId::from_slice(key);
-            let root_hash = HashBytes::wrap(value.try_into().expect("invalid value"));
+            let root_hash = HashBytes::from_slice(value);
 
             // Skip blocks from zero state and top blocks
             if block_id.seqno == 0
@@ -211,16 +209,30 @@ impl ShardStateStorage {
             }
 
             alloc.reset();
-            let mut batch = rocksdb::WriteBatch::default();
+
             {
                 let _guard = self.gc_lock.lock().await;
-                let total = self
-                    .cell_storage
-                    .remove_cell(&mut batch, &alloc, root_hash)?;
-                batch.delete_cf(&shard_states_cf.bound(), key);
-                raw.write_opt(batch, cells_write_options)?;
+
+                let db = self.db.clone();
+                let cell_storage = self.cell_storage.clone();
+                let key = key.to_vec();
+                let mut batch = rocksdb::WriteBatch::default();
+
+                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                    let stats = cell_storage.remove_cell(&mut batch, &alloc, &root_hash)?;
+
+                    batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
+                    db.raw()
+                        .rocksdb()
+                        .write_opt(batch, db.cells.write_config())?;
+
+                    Ok::<_, anyhow::Error>((stats, alloc))
+                })
+                .await??;
 
                 removed_cells += total;
+                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
+
                 tracing::debug!(removed_cells = total, %block_id);
             }
 
