@@ -8,8 +8,6 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
-use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::NewBlockMeta;
 use tycho_util::futures::JoinTask;
@@ -21,19 +19,14 @@ use super::build_block::FinalizedBlock;
 use super::execution_manager::{GetNextMessageGroupContext, MessagesExecutor, MessagesReader};
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
-    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, CollationResult, MessagesBuffer,
-    ParsedExternals, PrepareCollation, PrevData, ReadNextExternalsMode, SpecialOrigin,
-    WorkingState,
+    AnchorsCache, BlockCollationDataBuilder, CollationResult, ParsedExternals, PrevData,
+    ReadNextExternalsMode, WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::collator::execution_manager::GetNextMessageGroupMode;
-use crate::collator::mq_iterator_adapter::InitIteratorMode;
 use crate::collator::types::{
-    BlockCollationData, ExecuteResult, ParsedMessage, PreparedInMsg, PreparedOutMsg,
-    ShardDescriptionExt, UpdateQueueDiffResult,
+    BlockCollationData, ExecuteResult, ParsedMessage, PreparedCollation, ShardDescriptionExt,
+    UpdateQueueDiffResult,
 };
-use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, DisplayBlockIdsIntoIter, DisplayBlockIdsIter,
@@ -59,7 +52,7 @@ impl CollatorStdImpl {
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
         next_chain_time: u64,
     ) -> Result<()> {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_total_time", &labels);
 
@@ -73,7 +66,7 @@ impl CollatorStdImpl {
             wu_used_from_last_anchor,
             prev_shard_data,
             usage_tree,
-            mut msgs_buffer,
+            msgs_buffer,
             ..
         } = *working_state;
 
@@ -90,7 +83,7 @@ impl CollatorStdImpl {
             )),
         );
 
-        let mut collation_data = self.create_collation_data(
+        let collation_data = self.create_collation_data(
             next_block_id_short,
             next_chain_time,
             &mc_data,
@@ -99,25 +92,17 @@ impl CollatorStdImpl {
         )?;
 
         // prepare to read and execute internals and externals
-        let PrepareCollation {
-            messages_reader,
-            mut executor,
-            mut mq_iterator_adapter,
-        } = self
-            .prepare_collation(
-                &collation_config,
-                &mut collation_data,
-                &mut msgs_buffer,
-                &mc_data,
-                &prev_shard_data,
-            )
-            .await?;
+        let (mut prepared, mut execution_wrapper) = PreparedCollation::prepare_collation(
+            self,
+            collation_config,
+            collation_data,
+            msgs_buffer,
+            mc_data,
+            prev_shard_data,
+        )
+        .await?;
 
         let prepare_elapsed = prepare_histogram.finish();
-
-        // holds the max LT_HASH of a new created messages to current shard
-        // it needs to define the read range for new messages when we get next message group
-        let mut max_new_message_key_to_current_shard = QueueKey::MIN;
 
         let is_masterchain = self.shard_id.is_masterchain();
 
@@ -127,24 +112,9 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
-            self.create_ticktock_transactions(
-                &mc_data.config,
-                TickTock::Tick,
-                &mut collation_data,
-                &mut executor,
-                &mut max_new_message_key_to_current_shard,
-                mq_iterator_adapter.iterator(),
-            )
-            .await?;
-
-            self.create_special_transactions(
-                &mc_data.config,
-                &mut collation_data,
-                &mut executor,
-                &mut max_new_message_key_to_current_shard,
-                mq_iterator_adapter.iterator(),
-            )
-            .await?;
+            prepared
+                .execute_special_transactions(&mut execution_wrapper)
+                .await?;
 
             execute_tick_elapsed = histogram.finish();
         } else {
@@ -154,59 +124,27 @@ impl CollatorStdImpl {
         let execute_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
 
-        let ExecuteResult {
-            execute_groups_wu_vm_only,
-            fill_msgs_total_elapsed,
-            execute_msgs_total_elapsed,
-            process_txs_total_elapsed,
-            init_iterator_elapsed,
-            read_existing_messages_elapsed,
-            read_ext_messages_elapsed,
-            read_new_messages_elapsed,
-            add_to_message_groups_elapsed,
-
-            last_read_to_anchor_chain_time,
-        } = self
-            .execute(
-                &collation_config,
-                &mut collation_data,
-                &mut msgs_buffer,
-                messages_reader,
-                &mut executor,
-                &mut max_new_message_key_to_current_shard,
-                &mut mq_iterator_adapter,
-            )
+        let mut execute_collation = prepared
+            .execute(&mut self.anchors_cache, &mut execution_wrapper)
             .await?;
 
         let execute_elapsed = execute_histogram.finish();
-
-        let prepare_groups_wu_total = calc_prepare_groups_wu_total(
-            &collation_data,
-            &collation_config.work_units_params.prepare,
-        );
 
         // execute tock transaction
         let execute_tock_elapsed;
         if is_masterchain {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
-            self.create_ticktock_transactions(
-                &mc_data.config,
-                TickTock::Tock,
-                &mut collation_data,
-                &mut executor,
-                &mut max_new_message_key_to_current_shard,
-                mq_iterator_adapter.iterator(),
-            )
-            .await?;
+            execute_collation
+                .execute_special_transactions(&mut execution_wrapper)
+                .await?;
+
             execute_tock_elapsed = histogram.finish();
         } else {
             execute_tock_elapsed = Duration::ZERO;
         }
 
-        let process_txs_wu =
-            calc_process_txs_wu(&collation_data, &collation_config.work_units_params.execute);
-        let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
+        let (executor, mq_iterator_adapter, shard_id, mq_adapter) = execution_wrapper.destruct();
 
         let UpdateQueueDiffResult {
             queue_diff,
@@ -214,38 +152,21 @@ impl CollatorStdImpl {
             has_unprocessed_messages,
             diff_messages_len,
             create_queue_diff_elapsed,
-        } = self
-            .update_queue_diff(
-                mq_iterator_adapter,
-                &mut collation_data,
-                &mut msgs_buffer,
-                prev_shard_data
-                    .prev_queue_diff_hashes()
-                    .first()
-                    .cloned()
-                    .unwrap_or_default(),
-            )
+        } = execute_collation
+            .update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter)
             .await?;
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
-        let finalized = tycho_util::sync::rayon_run({
+        let (finalized, execute_result) = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
-            let finalize_params = collation_config.work_units_params.finalize.clone();
-            let old_mc_data = mc_data.clone();
             move || {
-                Self::finalize_block(
-                    collation_data,
+                execute_collation.finalize_block(
                     collation_session,
-                    executor,
-                    old_mc_data,
-                    prev_shard_data,
                     wu_used_from_last_anchor,
                     usage_tree,
                     queue_diff,
-                    finalize_params,
-                    prepare_groups_wu_total,
-                    execute_groups_wu_total,
+                    executor,
                 )
             }
         })
@@ -263,14 +184,7 @@ impl CollatorStdImpl {
             handle_block_candidate_elapsed,
             collation_data,
         } = self
-            .finalize_collation(
-                collation_config,
-                mc_data,
-                msgs_buffer,
-                has_unprocessed_messages,
-                finalized,
-                tracker,
-            )
+            .finalize_collation(has_unprocessed_messages, finalized, tracker)
             .await?;
 
         let total_elapsed = total_collation_histogram.finish();
@@ -281,14 +195,8 @@ impl CollatorStdImpl {
         self.collation_data_metrics(&collation_data);
 
         self.wu_metrics(
-            prepare_groups_wu_total,
-            execute_groups_wu_total,
+            &execute_result,
             finalize_wu_total,
-            execute_groups_wu_vm_only,
-            process_txs_wu,
-            fill_msgs_total_elapsed,
-            execute_msgs_total_elapsed,
-            process_txs_total_elapsed,
             finalize_block_elapsed,
             total_elapsed,
         );
@@ -311,8 +219,10 @@ impl CollatorStdImpl {
         };
 
         // block time diff from min ext chain time
-        let diff_time =
-            now_millis() as i64 - last_read_to_anchor_chain_time.unwrap_or(next_chain_time) as i64;
+        let diff_time = now_millis() as i64
+            - execute_result
+                .last_read_to_anchor_chain_time
+                .unwrap_or(next_chain_time) as i64;
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 
@@ -342,7 +252,7 @@ impl CollatorStdImpl {
             collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
             collation_data.read_new_msgs_from_iterator_count, collation_data.inserted_new_msgs_to_iterator_count, has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
-            prepare_groups_wu_total, execute_groups_wu_total, finalize_wu_total
+            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total
         );
 
         assert_eq!(
@@ -362,15 +272,15 @@ impl CollatorStdImpl {
             execute_tock = %format_duration(execute_tock_elapsed),
             execute_total = %format_duration(execute_elapsed),
 
-            fill_msgs_total = %format_duration(fill_msgs_total_elapsed),
-            init_iterator = %format_duration(init_iterator_elapsed),
-            read_existing = %format_duration(read_existing_messages_elapsed),
-            read_ext = %format_duration(read_ext_messages_elapsed),
-            read_new = %format_duration(read_new_messages_elapsed),
-            add_to_groups = %format_duration(add_to_message_groups_elapsed),
+            fill_msgs_total = %format_duration(execute_result.fill_msgs_total_elapsed),
+            init_iterator = %format_duration(execute_result.init_iterator_elapsed),
+            read_existing = %format_duration(execute_result.read_existing_messages_elapsed),
+            read_ext = %format_duration(execute_result.read_ext_messages_elapsed),
+            read_new = %format_duration(execute_result.read_new_messages_elapsed),
+            add_to_groups = %format_duration(execute_result.add_to_message_groups_elapsed),
 
-            exec_msgs_total = %format_duration(execute_msgs_total_elapsed),
-            process_txs_total = %format_duration(process_txs_total_elapsed),
+            exec_msgs_total = %format_duration(execute_result.execute_msgs_total_elapsed),
+            process_txs_total = %format_duration(execute_result.process_txs_total_elapsed),
 
             create_queue_diff = %format_duration(create_queue_diff_elapsed),
             apply_queue_diff = %format_duration(apply_queue_diff_elapsed),
@@ -1651,9 +1561,6 @@ impl CollatorStdImpl {
     #[allow(clippy::too_many_arguments)]
     async fn finalize_collation(
         &mut self,
-        collation_config: Arc<CollationConfig>,
-        mc_data: Arc<McData>,
-        msgs_buffer: MessagesBuffer,
         has_unprocessed_messages: bool,
         finalized: FinalizedBlock,
         tracker: MinRefMcStateTracker,
@@ -1693,7 +1600,7 @@ impl CollatorStdImpl {
 
             let collation_config = match &finalized.mc_data {
                 Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
-                None => collation_config,
+                None => finalized.collation_config,
             };
 
             // return collation result
@@ -1701,14 +1608,14 @@ impl CollatorStdImpl {
                 .on_block_candidate(BlockCollationResult {
                     collation_session_id: self.collation_session.id(),
                     candidate: finalized.block_candidate,
-                    prev_mc_block_id: mc_data.block_id,
+                    prev_mc_block_id: finalized.old_mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
                     has_unprocessed_messages,
                 })
                 .await?;
 
-            let new_mc_data = finalized.mc_data.unwrap_or(mc_data);
+            let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
 
             // spawn update PrevData and working state
             self.prepare_working_state_update(
@@ -1720,7 +1627,7 @@ impl CollatorStdImpl {
                 new_mc_data,
                 collation_config,
                 has_unprocessed_messages,
-                msgs_buffer,
+                finalized.msgs_buffer,
                 tracker,
             )
             .await?;
@@ -1787,43 +1694,42 @@ impl CollatorStdImpl {
             .set(collation_data.block_id_short.seqno);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn wu_metrics(
         &self,
-        prepare_groups_wu_total: u64,
-        execute_groups_wu_total: u64,
+        execute_result: &ExecuteResult,
         finalize_wu_total: u64,
-        execute_groups_wu_vm_only: u64,
-        process_txs_wu: u64,
-        fill_msgs_total_elapsed: Duration,
-        execute_msgs_total_elapsed: Duration,
-        process_txs_total_elapsed: Duration,
         finalize_block_elapsed: Duration,
         total_elapsed: Duration,
     ) {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
-            .set(prepare_groups_wu_total as f64);
+            .set(execute_result.prepare_groups_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
-            .set(execute_groups_wu_total as f64);
+            .set(execute_result.execute_groups_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
-            execute_groups_wu_total as f64
+            execute_result.execute_groups_wu_total as f64
                 + finalize_wu_total as f64
-                + prepare_groups_wu_total as f64,
+                + execute_result.prepare_groups_wu_total as f64,
         );
 
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
-            .set(fill_msgs_total_elapsed.as_nanos() as f64 / prepare_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
-            (execute_msgs_total_elapsed.as_nanos() as f64
-                + process_txs_total_elapsed.as_nanos() as f64)
-                / execute_groups_wu_total as f64,
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels).set(
+            execute_result.fill_msgs_total_elapsed.as_nanos() as f64
+                / execute_result.prepare_groups_wu_total as f64,
         );
-        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels)
-            .set(execute_msgs_total_elapsed.as_nanos() as f64 / execute_groups_wu_vm_only as f64);
-        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels)
-            .set(process_txs_total_elapsed.as_nanos() as f64 / process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
+            (execute_result.execute_msgs_total_elapsed.as_nanos() as f64
+                + execute_result.process_txs_total_elapsed.as_nanos() as f64)
+                / execute_result.execute_groups_wu_total as f64,
+        );
+        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels).set(
+            execute_result.execute_msgs_total_elapsed.as_nanos() as f64
+                / execute_result.execute_groups_wu_vm_only as f64,
+        );
+        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels).set(
+            execute_result.process_txs_total_elapsed.as_nanos() as f64
+                / execute_result.process_txs_wu as f64,
+        );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
             .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
 
