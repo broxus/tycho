@@ -237,6 +237,14 @@ impl McData {
             processed_upto.externals.as_ref(),
         );
 
+        let processed_upto: ProcessedUptoInfoStuff = state.processed_upto.load()?.try_into()?;
+
+        let shards = extra.shards.as_vec()?;
+        let top_processed_to_anchor = detect_top_processed_to_anchor(
+            shards.iter().map(|(_, d)| *d),
+            processed_upto.externals.as_ref(),
+        );
+
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
