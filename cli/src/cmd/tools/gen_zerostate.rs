@@ -640,6 +640,8 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
         shuffle_mc_validators: true,
 
         mc_block_min_interval_ms: 2500,
+        empty_sc_block_interval_ms: 60_000,
+
         max_uncommitted_chain_length: 31,
 
         msgs_exec_params: MsgsExecutionParams {
