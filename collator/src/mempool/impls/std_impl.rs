@@ -307,19 +307,6 @@ impl MempoolAdapterStdImpl {
             parser = task.await.expect("expand anchor history task failed");
         }
     }
-
-    async fn expect_running(
-        &self,
-        top_processed_to_anchor: MempoolAnchorId,
-        anchor_id: MempoolAnchorId,
-    ) -> Option<bool> {
-        let config = self.engine_config.lock().await;
-        let expect_running = config
-            .engine_handle
-            .as_ref()?
-            .expect_running(top_processed_to_anchor, anchor_id);
-        Some(expect_running)
-    }
 }
 
 impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {

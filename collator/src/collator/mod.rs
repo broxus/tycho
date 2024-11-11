@@ -32,7 +32,6 @@ use crate::utils::async_queued_dispatcher::{
 };
 use crate::{method_to_queued_async_closure, tracing_targets};
 
-mod build_block;
 mod debug_info;
 mod do_collate;
 mod error;
@@ -1040,8 +1039,6 @@ impl CollatorStdImpl {
         }
 
         let mut our_exts_count_total = 0;
-
-        const TOP_PROCESSED_TO_ANCHOR_STUB: MempoolAnchorId = 0; // FIXME replace
 
         let mut next_anchor = if let Some(anchor) = last_anchor {
             anchor

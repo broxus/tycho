@@ -215,43 +215,6 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         self.init_iterator_total_elapsed += timer.elapsed();
 
         Ok(result)
-
-    }
-
-    fn try_update_shardchain_ranges(
-        &mut self,
-        shards: &mut dyn Iterator<Item = (&ShardIdent, &ShardDescriptionShort)>,
-        ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
-        ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
-        prev_shard_data: &PrevData,
-    ) -> bool {
-        let mut ranges_updated = false;
-
-        // add default shard range if not exist
-        ranges_from.entry(shard_id).or_insert_with(|| {
-            ranges_updated = true;
-            QueueKey::MIN
-        });
-        let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
-            ranges_updated = true;
-            QueueKey::max_for_lt(0)
-        });
-
-        // try update shard read_to
-        let new_sc_read_to_lt = if is_current_shard() {
-            // get new read_to LT from prev state
-            self.prev_state_gen_lt
-        } else {
-            // get new read_to LT from mc top shard end lt
-            shard_end_lt
-        };
-        if sc_read_to.lt < new_sc_read_to_lt {
-            sc_read_to.lt = new_sc_read_to_lt;
-            sc_read_to.hash = HashBytes([255; 32]);
-            ranges_updated = true;
-        }
-
-        ranges_updated
     }
 
     fn try_update_ranges_for_shard<F>(
@@ -292,7 +255,6 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         }
 
         ranges_updated
-        
     }
 
     pub fn next_existing_message(&mut self) -> Result<Option<IterItem<V>>> {
