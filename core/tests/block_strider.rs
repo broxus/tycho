@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_block_util::block::{BlockIdExt, BlockStuff};
@@ -144,6 +145,14 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     }
 
     tmp_dir.close()?;
+
+    let block = provider
+        .get_block(&BlockId::default().relative_to_self())
+        .await;
+    assert!(block.is_none());
+
+    let next_block = provider.get_next_block(&BlockId::default()).await;
+    assert!(next_block.is_none());
 
     tracing::info!("done!");
     Ok(())
