@@ -444,7 +444,9 @@ impl Node {
                     .chain(archive_block_provider.clone())
                     .chain(collator.new_sync_point(CollatorSyncContext::Recent))
                     .chain((
-                        blockchain_block_provider.cycle(archive_block_provider),
+                        blockchain_block_provider
+                            .retry(10)
+                            .cycle(archive_block_provider.retry(1)),
                         storage_block_provider,
                         collator_block_provider,
                     )),
