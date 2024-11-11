@@ -205,7 +205,7 @@ pub struct RetryBlockProvider<T> {
 
 impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = T::GetBlockFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
@@ -232,7 +232,7 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
-        Box::pin(async move { self.inner.get_block(block_id_relation).await })
+        self.inner.get_block(block_id_relation)
     }
 }
 
