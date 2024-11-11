@@ -1041,6 +1041,8 @@ impl CollatorStdImpl {
 
         let mut our_exts_count_total = 0;
 
+        const TOP_PROCESSED_TO_ANCHOR_STUB: MempoolAnchorId = 0; // FIXME replace
+
         let mut next_anchor = if let Some(anchor) = last_anchor {
             anchor
         } else {
