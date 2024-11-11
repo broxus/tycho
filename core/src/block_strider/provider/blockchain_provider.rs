@@ -93,10 +93,7 @@ impl BlockchainBlockProvider {
                             return parsed;
                         }
                     }
-                    None => {
-                        tracing::warn!(?prev_block_id, "block not found");
-                        return None;
-                    }
+                    None => return None,
                 },
                 Err(e) => tracing::error!("failed to get next block: {e}"),
             }
@@ -130,10 +127,7 @@ impl BlockchainBlockProvider {
                             return parsed;
                         }
                     }
-                    None => {
-                        tracing::warn!(%block_id, "block not found");
-                        return None;
-                    }
+                    None => return None,
                 },
                 Err(e) => tracing::error!("failed to get block: {e}"),
             }
