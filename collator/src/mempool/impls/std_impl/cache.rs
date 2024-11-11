@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
-use crate::mempool::{GetAnchorResult, MempoolAnchor, MempoolAnchorId};
+use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
 #[derive(Default)]
@@ -45,7 +45,7 @@ impl Cache {
         self.anchor_added.notify_waiters();
     }
 
-    pub async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> GetAnchorResult {
+    pub async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Option<Arc<MempoolAnchor>> {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -54,17 +54,14 @@ impl Cache {
                 let data = &self.data.read();
 
                 match data.anchors.first() {
+                    // Continue to wait for the first anchor
                     None => {
                         tracing::info!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
                             is_paused = Some(data.is_paused).filter(|x| *x),
-                            waiting = Some(data.is_paused).filter(|x| !x),
-                            "Anchor cache is empty"
+                            "Anchor cache is empty, waiting"
                         );
-                        if data.is_paused {
-                            return GetAnchorResult::MempoolPaused;
-                        } // else: continue to wait for the first anchor
                     }
                     // Trying to get anchor that is too old
                     Some((first_id, _)) if anchor_id < *first_id => {
@@ -75,7 +72,7 @@ impl Cache {
                             is_paused = Some(data.is_paused).filter(|x| *x),
                             "Requested anchor is too old"
                         );
-                        return GetAnchorResult::NotExist;
+                        return None;
                     }
                     Some(_) => {
                         if let Some(found) = data.anchors.get(&anchor_id) {
@@ -98,7 +95,10 @@ impl Cache {
         }
     }
 
-    pub async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> GetAnchorResult {
+    pub async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+    ) -> Option<Arc<MempoolAnchor>> {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -113,17 +113,11 @@ impl Cache {
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %prev_anchor_id,
                             is_paused = Some(data.is_paused).filter(|x| *x),
-                            waiting = Some(data.is_paused).filter(|x| !x),
-                            "Anchor cache is empty"
+                            "Anchor cache is empty, waiting"
                         );
-                        if data.is_paused {
-                            return GetAnchorResult::MempoolPaused;
-                        } // else: continue to wait for the first anchor
                     }
                     // Return the first anchor on node start
-                    Some((_, first)) if prev_anchor_id == 0 => {
-                        return GetAnchorResult::Exist(first.clone())
-                    }
+                    Some((_, first)) if prev_anchor_id == 0 => return Some(first.clone()),
                     // Trying to get anchor that is too old
                     Some((first_id, _)) if prev_anchor_id < *first_id => {
                         tracing::warn!(
@@ -133,25 +127,21 @@ impl Cache {
                             is_paused = Some(data.is_paused).filter(|x| *x),
                             "Requested anchor is too old"
                         );
-                        return GetAnchorResult::NotExist;
+                        return None;
                     }
                     Some(_) => {
                         // Find the index of the previous anchor
                         if let Some(index) = data.anchors.get_index_of(&prev_anchor_id) {
                             // Try to get the next anchor
                             if let Some((_, value)) = data.anchors.get_index(index + 1) {
-                                return GetAnchorResult::Exist(value.clone());
+                                return Some(value.clone());
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
                                     is_paused = Some(data.is_paused).filter(|x| *x),
-                                    waiting = Some(data.is_paused).filter(|x| !x),
-                                    "Next anchor is unknown"
+                                    "Next anchor is unknown, waiting"
                                 );
-                                if data.is_paused {
-                                    return GetAnchorResult::MempoolPaused;
-                                } // else: continue to wait for the next anchor
                             }
                         } else {
                             let (last_id, _) = data.anchors.last().expect("map is not empty");
