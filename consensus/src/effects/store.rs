@@ -184,14 +184,27 @@ impl MempoolStore {
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
     ) {
         fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
-            Round(
-                // do not clean history that it can be requested by other peers
+            assert!(
+                committed < consensus,
+                "failed expectation: committed {} < consensus {}",
+                committed.0,
+                consensus.0
+            );
+            // collator needs TKA after restart
+            let least_to_keep = if consensus < DagFront::max_history_bottom(top_known_anchor) {
+                // collator is syncing blocks: need reproducible TKA on restart;
+                // safe to clean uncommitted
+                DagFront::default_back_bottom(top_known_anchor)
+            } else if top_known_anchor <= committed {
+                // collator is collating: keep until commit finished & reproducible TKA on restart
                 DagFront::max_history_bottom(consensus)
-                    // do not clean history until commit is finished
                     .min(DagFront::default_back_bottom(committed))
-                    // clean broadcasts if node is not in active v_subset
-                    .max(DagFront::max_history_bottom(top_known_anchor))
-                    .0
+            } else {
+                // tie: collator syncs and does not need committed, but commit may be not finished
+                DagFront::default_back_bottom(committed)
+            };
+            Round(
+                (least_to_keep.0)
                     .saturating_div(CachedConfig::clean_rocks_period())
                     .saturating_mul(CachedConfig::clean_rocks_period()),
             )
@@ -200,19 +213,17 @@ impl MempoolStore {
         tokio::spawn(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
-            let mut top_known = top_known_anchor.next().await;
+            let mut top_known = top_known_anchor.get();
             let mut prev_least_to_keep = least_to_keep(consensus, committed, top_known);
             loop {
                 tokio::select! {
-                    new_consensus = consensus_round.next() => {
-                        consensus = new_consensus;
-                        metrics::gauge!("tycho_mempool_consensus_current_round")
-                            .set(consensus.0);
-                    },
+                    biased;
+                    new_consensus = consensus_round.next() => consensus = new_consensus,
                     new_committed = committed_round.next() => committed = new_committed,
                     new_top_known = top_known_anchor.next() => top_known = new_top_known,
                 }
 
+                metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_top_known")
                     .set((consensus.0 as f64) - (top_known.0 as f64));
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
@@ -231,9 +242,25 @@ impl MempoolStore {
                         MempoolStorage::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
 
                         match inner.clean(&up_to_exclusive) {
-                            Ok(()) => {}
+                            Ok(Some((first, last))) => {
+                                metrics::gauge!("tycho_mempool_rounds_db_cleaned_lower").set(first);
+                                metrics::gauge!("tycho_mempool_rounds_db_cleaned_upper").set(last);
+                                tracing::info!(
+                                    "mempool DB cleaned for rounds [{first}..{last}] before {}",
+                                    new_least_to_keep.0
+                                );
+                            }
+                            Ok(None) => {
+                                tracing::info!(
+                                    "mempool DB is already clean before {}",
+                                    new_least_to_keep.0
+                                );
+                            }
                             Err(e) => {
-                                tracing::error!("delete range of mempool data failed: {e}");
+                                tracing::error!(
+                                    "delete range of mempool data before round {} failed: {e}",
+                                    new_least_to_keep.0
+                                );
                             }
                         }
                     });
@@ -494,7 +521,14 @@ impl MempoolStoreImpl for MempoolStorage {
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
-            self.clean(&[u8::MAX; Self::KEY_LEN])?;
+            match self.clean(&[u8::MAX; Self::KEY_LEN])? {
+                Some((first, last)) => {
+                    tracing::info!("mempool DB cleaned on init, rounds: [{first}..{last}]");
+                }
+                None => {
+                    tracing::info!("mempool DB was empty on init");
+                }
+            };
             // no reads/writes yet possible, and should finish prior other ops
             let mut opt = WaitForCompactOptions::default();
             opt.set_flush(true);
