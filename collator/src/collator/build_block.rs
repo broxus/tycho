@@ -14,7 +14,6 @@ use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
 
 use super::execution_manager::MessagesExecutor;
 use super::CollatorStdImpl;
