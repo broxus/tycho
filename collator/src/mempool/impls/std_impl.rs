@@ -308,8 +308,8 @@ impl MempoolAdapterStdImpl {
         }
     }
 
-    fn expect_running(&self, top_processed_to_anchor: MempoolAnchorId) -> bool {
-        let config = self.engine_config.lock();
+    async fn expect_running(&self, top_processed_to_anchor: MempoolAnchorId) -> bool {
+        let config = self.engine_config.lock().await;
         match &config.engine_handle {
             Some(handle) => handle.expect_running(&self.top_known_anchor, top_processed_to_anchor),
             None => false, // not yet init
