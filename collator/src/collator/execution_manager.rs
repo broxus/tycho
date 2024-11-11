@@ -161,21 +161,6 @@ impl MessagesReader {
             GetNextMessageGroupMode::Refill => InitIteratorMode::OmitNextRange,
         };
 
-        let shards: Vec<_> = if self.shard_id.is_masterchain() {
-            collation_data
-                .shards()?
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt))
-                .collect()
-        } else {
-            working_state
-                .mc_data
-                .shards
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt))
-                .collect()
-        };
-
         // here iterator may not exist (on the first method call during collation)
         // so init iterator for current not fully processed ranges or next available
         if mq_iterator_adapter.iterator_is_none() {
@@ -186,9 +171,7 @@ impl MessagesReader {
             mq_iterator_adapter
                 .try_init_next_range_iterator(
                     &mut collation_data.processed_upto,
-                    shards.clone().into_iter(),
-                    working_state.mc_data.gen_lt,
-                    working_state.prev_shard_data_ref().gen_lt(),
+                    self.shards_description_end_lt.iter().copied(),
                     // We always init first iterator during block collation
                     // with current ranges from processed_upto info
                     // and do not touch next range before we read all existing messages buffer.

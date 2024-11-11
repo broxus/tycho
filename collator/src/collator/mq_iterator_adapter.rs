@@ -255,9 +255,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     }
 
     fn try_update_ranges_for_shard<F>(
+        &self,
         shard_id: ShardIdent,
         shard_description_end_lt: u64,
-        prev_shard_data_gen_lt: u64,
         ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
         ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
         is_current_shard: F,
@@ -280,7 +280,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         // try update shardchain read_to
         let new_sc_read_to_lt = if is_current_shard() {
             // get new read_to LT from PrevData
-            prev_shard_data_gen_lt
+            self.prev_shard_data_gen_lt
         } else {
             // get new LT from ShardDescription
             shard_description_end_lt
