@@ -49,15 +49,9 @@ impl ExecutorWrapper {
     ) -> (
         MessagesExecutor,
         QueueIteratorAdapter<EnqueuedMessage>,
-        ShardIdent,
         Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     ) {
-        (
-            self.executor,
-            self.mq_iterator_adapter,
-            self.shard_id,
-            self.mq_adapter,
-        )
+        (self.executor, self.mq_iterator_adapter, self.mq_adapter)
     }
 
     pub fn process_transaction(
@@ -99,7 +93,7 @@ impl ExecutorWrapper {
     }
 
     /// Create special transactions for the collator
-    pub async fn create_special_transactions(
+    pub fn create_special_transactions(
         &mut self,
         config: &BlockchainConfig,
         collator_data: &mut BlockCollationData,
@@ -114,8 +108,7 @@ impl ExecutorWrapper {
                 collator_data.value_flow.recovered.clone(),
                 SpecialOrigin::Recover,
                 collator_data,
-            )
-            .await?;
+            )?;
         }
 
         if !collator_data.value_flow.minted.other.is_empty() {
@@ -124,14 +117,13 @@ impl ExecutorWrapper {
                 collator_data.value_flow.minted.clone(),
                 SpecialOrigin::Mint,
                 collator_data,
-            )
-            .await?;
+            )?;
         }
 
         Ok(())
     }
 
-    async fn create_special_transaction(
+    fn create_special_transaction(
         &mut self,
         account_id: &HashBytes,
         amount: CurrencyCollection,
@@ -181,8 +173,7 @@ impl ExecutorWrapper {
 
         let executed = self
             .executor
-            .execute_ordinary_transaction(account_stuff, in_message)
-            .await?;
+            .execute_ordinary_transaction(account_stuff, in_message)?;
 
         let executor_output = executed.result?;
 
@@ -191,7 +182,7 @@ impl ExecutorWrapper {
         Ok(())
     }
 
-    pub async fn create_ticktock_transactions(
+    pub fn create_ticktock_transactions(
         &mut self,
         config: &BlockchainConfig,
         tick_tock: TickTock,
@@ -206,16 +197,14 @@ impl ExecutorWrapper {
         // TODO: Execute in parallel since these are unique accounts
 
         for account_id in config.get_fundamental_addresses()?.keys() {
-            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data)
-                .await?;
+            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data)?;
         }
 
-        self.create_ticktock_transaction(&config.address, tick_tock, collation_data)
-            .await?;
+        self.create_ticktock_transaction(&config.address, tick_tock, collation_data)?;
         Ok(())
     }
 
-    async fn create_ticktock_transaction(
+    fn create_ticktock_transaction(
         &mut self,
         account_id: &HashBytes,
         tick_tock: TickTock,
@@ -240,8 +229,7 @@ impl ExecutorWrapper {
 
         let executor_output = self
             .executor
-            .execute_ticktock_transaction(account_stuff, tick_tock)
-            .await?;
+            .execute_ticktock_transaction(account_stuff, tick_tock)?;
 
         self.process_transaction(executor_output, None, collation_data)?;
 

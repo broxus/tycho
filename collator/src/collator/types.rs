@@ -11,18 +11,18 @@ use everscale_types::models::{
     BlockRef, CollationConfig, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate,
     ImportFees, InMsg, IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
     ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent,
-    ShardIdentFull, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    ShardIdentFull, ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
+use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::{QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
-use tycho_util::futures::JoinTask;
 use tycho_util::FastHashMap;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
-use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
+use crate::types::{BlockCandidate, McData, ProcessedUptoInfoStuff, ProofFunds};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -555,6 +555,7 @@ impl AnchorInfo {
 
 pub(super) type AccountId = HashBytes;
 
+#[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
@@ -1103,11 +1104,12 @@ impl MessageGroup {
     }
 }
 
-impl IntoIterator for MessageGroup {
+impl IntoParallelIterator for MessageGroup {
     type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
+    type Iter = rayon::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.inner.into_par_iter()
     }
 }
 
@@ -1295,13 +1297,58 @@ pub(super) enum ReadNextExternalsMode {
 
 pub struct UpdateQueueDiffResult {
     pub queue_diff: SerializedQueueDiff,
-    pub update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>>,
     pub has_unprocessed_messages: bool,
     pub diff_messages_len: usize,
     pub create_queue_diff_elapsed: Duration,
 }
 
-pub struct CollationResult {
+pub struct FinalizedCollationResult {
     pub handle_block_candidate_elapsed: Duration,
+}
+
+pub struct ExecuteResult {
+    pub execute_groups_wu_vm_only: u64,
+    pub process_txs_wu: u64,
+    pub execute_groups_wu_total: u64,
+    pub prepare_groups_wu_total: u64,
+    pub fill_msgs_total_elapsed: Duration,
+    pub execute_msgs_total_elapsed: Duration,
+    pub process_txs_total_elapsed: Duration,
+    pub init_iterator_elapsed: Duration,
+    pub read_existing_messages_elapsed: Duration,
+    pub read_ext_messages_elapsed: Duration,
+    pub read_new_messages_elapsed: Duration,
+    pub add_to_message_groups_elapsed: Duration,
+    pub last_read_to_anchor_chain_time: Option<u64>,
+}
+
+pub struct FinalizedBlock {
     pub collation_data: Box<BlockCollationData>,
+    pub block_candidate: Box<BlockCandidate>,
+    pub mc_data: Option<Arc<McData>>,
+    pub old_mc_data: Arc<McData>,
+    pub new_state_root: Cell,
+    pub new_observable_state: Box<ShardStateUnsplit>,
+    pub finalize_wu_total: u64,
+    pub msgs_buffer: MessagesBuffer,
+    pub collation_config: Arc<CollationConfig>,
+}
+
+pub struct CollationResult {
+    pub final_result: FinalResult,
+    pub finalized: FinalizedBlock,
+    pub anchors_cache: AnchorsCache,
+    pub execute_result: ExecuteResult,
+}
+
+pub struct FinalResult {
+    pub prepare_elapsed: Duration,
+    pub finalize_block_elapsed: Duration,
+    pub has_unprocessed_messages: bool,
+    pub diff_messages_len: usize,
+    pub execute_elapsed: Duration,
+    pub execute_tick_elapsed: Duration,
+    pub execute_tock_elapsed: Duration,
+    pub create_queue_diff_elapsed: Duration,
+    pub apply_queue_diff_elapsed: Duration,
 }

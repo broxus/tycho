@@ -218,7 +218,7 @@ pub struct CollatorStdImpl {
     shard_id: ShardIdent,
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
-    anchors_cache: AnchorsCache,
+    anchors_cache: Option<AnchorsCache>,
     stats: CollatorStats,
     timer: std::time::Instant,
     anchor_timer: std::time::Instant,
@@ -449,11 +449,14 @@ impl CollatorStdImpl {
                         .load_extra()
                         .map_err(|e| CollatorError::Anyhow(e.into()))?
                         .created_by;
-                    self.anchors_cache.set_last_imported_anchor_info(
-                        mempool_config.start_round,
-                        prev_chain_time,
-                        created_by,
-                    );
+                    self.anchors_cache
+                        .as_mut()
+                        .unwrap()
+                        .set_last_imported_anchor_info(
+                            mempool_config.start_round,
+                            prev_chain_time,
+                            created_by,
+                        );
                 }
 
                 import_init_anchors
@@ -475,7 +478,7 @@ impl CollatorStdImpl {
                 processed_to_msgs_offset,
                 prev_shard_data.gen_chain_time(),
                 self.shard_id,
-                &mut self.anchors_cache,
+                self.anchors_cache.as_mut().unwrap(),
                 self.mpool_adapter.clone(),
                 working_state.mc_data.top_processed_to_anchor,
             )
@@ -1203,6 +1206,8 @@ impl CollatorStdImpl {
 
         let (last_imported_anchor_id, last_imported_chain_time) = self
             .anchors_cache
+            .as_ref()
+            .unwrap()
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
 
@@ -1231,7 +1236,7 @@ impl CollatorStdImpl {
 
             let import_anchor_result = Self::import_next_anchor(
                 self.shard_id,
-                &mut self.anchors_cache,
+                self.anchors_cache.as_mut().unwrap(),
                 self.mpool_adapter.clone(),
                 self.mempool_config_override.as_ref().map(|c| c.start_round),
                 working_state.mc_data.top_processed_to_anchor,
@@ -1377,7 +1382,7 @@ impl CollatorStdImpl {
                     self.check_has_unprocessed_messages(&mut working_state)?;
 
                 // check pending externals
-                let has_externals = self.anchors_cache.has_pending_externals();
+                let has_externals = self.anchors_cache.as_mut().unwrap().has_pending_externals();
 
                 // check if should import anchor after fixed wu used by blocks collation
                 let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
@@ -1389,6 +1394,8 @@ impl CollatorStdImpl {
                 // decide if should import anchors
                 let (last_imported_anchor_id, last_imported_chain_time) = self
                     .anchors_cache
+                    .as_ref()
+                    .unwrap()
                     .get_last_imported_anchor_id_and_ct()
                     .unwrap_or_default();
                 match (
@@ -1435,7 +1442,7 @@ impl CollatorStdImpl {
                 loop {
                     let import_anchor_result = Self::import_next_anchor(
                         self.shard_id,
-                        &mut self.anchors_cache,
+                        self.anchors_cache.as_mut().unwrap(),
                         self.mpool_adapter.clone(),
                         self.mempool_config_override.as_ref().map(|c| c.start_round),
                         working_state.mc_data.top_processed_to_anchor,
@@ -1520,6 +1527,8 @@ impl CollatorStdImpl {
             | TryCollateCheck::MempoolPaused => {
                 let (last_imported_anchor_id, last_imported_chain_time) = self
                     .anchors_cache
+                    .as_ref()
+                    .unwrap()
                     .get_last_imported_anchor_id_and_ct()
                     .unwrap();
 
@@ -1539,6 +1548,8 @@ impl CollatorStdImpl {
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
                 let (last_imported_anchor_id, last_imported_chain_time) = self
                     .anchors_cache
+                    .as_ref()
+                    .unwrap()
                     .get_last_imported_anchor_id_and_ct()
                     .unwrap();
 

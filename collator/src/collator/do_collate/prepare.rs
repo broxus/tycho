@@ -1,248 +1,175 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::{TickTock, WorkUnitsParamsExecute, WorkUnitsParamsPrepare};
+use ton_executor::{ExecuteParams, PreloadedBlockchainConfig};
+use tycho_block_util::queue::QueueKey;
 
-use super::execute::{ExecuteResult, ExecuteState};
+use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
-use super::BlockCollationData;
-use crate::collator::execution_manager::{GetNextMessageGroupMode, MessagesReader};
-use crate::collator::types::{AnchorsCache, BlockLimitsLevel};
+use crate::collator::do_collate::phase::ActualState;
+use crate::collator::execution_manager::{
+    GetNextMessageGroupMode, MessagesExecutor, MessagesReader,
+};
+use crate::collator::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
+use crate::collator::types::AnchorsCache;
+use crate::internal_queue::types::EnqueuedMessage;
+use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
+use crate::types::CollatorConfig;
 
-pub struct PreparedState {
-    pub messages_reader: MessagesReader,
+pub struct PrepareState {
+    config: Arc<CollatorConfig>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    anchors_cache: AnchorsCache,
 }
 
-impl PhaseState for PreparedState {}
+impl PhaseState for PrepareState {}
 
-impl Phase<PreparedState> {
-    pub async fn execute_special_transactions(
-        &mut self,
-        executor_wrapper: &mut ExecutorWrapper,
-    ) -> Result<()> {
-        executor_wrapper
-            .create_ticktock_transactions(
-                &self.state.mc_data.config,
-                TickTock::Tick,
-                &mut self.state.collation_data,
-            )
-            .await?;
-
-        executor_wrapper
-            .create_special_transactions(&self.state.mc_data.config, &mut self.state.collation_data)
-            .await?;
-
-        Ok(())
+impl Phase<PrepareState> {
+    pub fn new(
+        config: Arc<CollatorConfig>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        anchors_cache: AnchorsCache,
+        state: Box<ActualState>,
+    ) -> Self {
+        Self {
+            state,
+            extra: PrepareState {
+                config,
+                mq_adapter,
+                anchors_cache,
+            },
+        }
     }
 
-    pub async fn execute(
-        mut self,
-        anchors_cache: &mut AnchorsCache,
-        executor_wrapper: &mut ExecutorWrapper,
-    ) -> Result<Phase<ExecuteState>> {
-        let labels = [(
-            "workchain",
-            executor_wrapper.shard_id.workchain().to_string(),
-        )];
+    pub fn run(mut self) -> Result<Phase<ExecuteState>> {
+        // init executor
+        let executor = MessagesExecutor::new(
+            self.state.shard_id,
+            self.state.collation_data.next_lt,
+            Arc::new(PreloadedBlockchainConfig::with_config(
+                self.state.mc_data.config.clone(),
+                self.state.mc_data.global_id,
+            )?),
+            Arc::new(ExecuteParams {
+                state_libs: self.state.mc_data.libraries.clone(),
+                // generated unix time
+                block_unixtime: self.state.collation_data.gen_utime,
+                // block's start logical time
+                block_lt: self.state.collation_data.start_lt,
+                // block random seed
+                seed_block: self.state.collation_data.rand_seed,
+                block_version: self.extra.config.supported_block_version,
+                ..ExecuteParams::default()
+            }),
+            self.state.prev_shard_data.observable_accounts().clone(),
+            self.state
+                .collation_config
+                .work_units_params
+                .execute
+                .clone(),
+        );
 
-        let mut fill_msgs_total_elapsed = Duration::ZERO;
-        let mut execute_msgs_total_elapsed = Duration::ZERO;
-        let mut process_txs_total_elapsed = Duration::ZERO;
-        let mut execute_groups_wu_vm_only = 0u64;
+        // if this is a masterchain, we must take top shard blocks end lt
+        let mc_top_shards_end_lts: Vec<_> = if self.state.shard_id.is_masterchain() {
+            self.state
+                .collation_data
+                .shards()?
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        } else {
+            self.state
+                .mc_data
+                .shards
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt))
+                .collect()
+        };
 
-        let mut executed_groups_count = 0;
-        loop {
-            let mut timer = std::time::Instant::now();
-            let msgs_group_opt = self.extra.messages_reader.get_next_message_group(
-                &mut self.state.msgs_buffer,
-                anchors_cache,
-                &mut self.state.collation_data,
-                &mut executor_wrapper.mq_iterator_adapter,
-                &executor_wrapper.max_new_message_key_to_current_shard,
-                GetNextMessageGroupMode::Continue,
-            )?;
-            fill_msgs_total_elapsed += timer.elapsed();
+        // create iterator adapter
+        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
+            self.state.shard_id,
+            self.extra.mq_adapter.clone(),
+            self.state
+                .msgs_buffer
+                .current_iterator_positions
+                .take()
+                .unwrap(),
+            self.state.mc_data.gen_lt,
+            self.state.prev_shard_data.gen_lt(),
+        );
 
-            if let Some(msgs_group) = msgs_group_opt {
-                // Execute messages group
-                timer = std::time::Instant::now();
-                let group_result = executor_wrapper.executor.execute_group(msgs_group).await?;
-                execute_msgs_total_elapsed += timer.elapsed();
-                executed_groups_count += 1;
-                self.state.collation_data.tx_count += group_result.items.len() as u64;
-                self.state.collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
-                self.state.collation_data.ext_msgs_skipped += group_result.ext_msgs_skipped;
-                execute_groups_wu_vm_only = execute_groups_wu_vm_only
-                    .saturating_add(group_result.total_exec_wu)
-                    .saturating_add(
-                        group_result.ext_msgs_error_count.saturating_mul(
-                            self.state
-                                .collation_config
-                                .work_units_params
-                                .execute
-                                .execute_err as u64,
-                        ),
-                    );
+        // we need to init iterator anyway because we need it to add new messages to queue
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "init iterator for current ranges"
+        );
+        mq_iterator_adapter.try_init_next_range_iterator(
+            &mut self.state.collation_data.processed_upto,
+            mc_top_shards_end_lts.iter().copied(),
+            // We always init first iterator during block collation
+            // with current ranges from processed_upto info
+            // and do not touch next range before we read all existing messages buffer.
+            // In this case the initial iterator range will be equal both
+            // on Refill and on Continue.
+            InitIteratorMode::OmitNextRange,
+        )?;
 
-                // Process transactions
-                timer = std::time::Instant::now();
-                for item in group_result.items {
-                    executor_wrapper.process_transaction(
-                        item.executor_output,
-                        Some(item.in_message),
-                        &mut self.state.collation_data,
-                    )?;
-                }
-                process_txs_total_elapsed += timer.elapsed();
+        // create messages reader
+        let mut messages_reader = MessagesReader::new(
+            self.state.shard_id,
+            self.state.collation_config.msgs_exec_params.buffer_limit as _,
+            mc_top_shards_end_lts,
+        );
 
-                if self
-                    .state
-                    .collation_data
-                    .block_limit
-                    .reached(BlockLimitsLevel::Hard)
-                {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "block limits reached: {:?}", self.state.collation_data.block_limit,
-                    );
-                    metrics::counter!("tycho_do_collate_blocks_with_limits_reached_count", &labels)
-                        .increment(1);
+        // refill messages buffer and skip groups upto offset (on node restart)
+        let prev_processed_offset = self.state.collation_data.processed_upto.processed_offset;
+        if !self.state.msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                prev_processed_offset,
+                "refill messages buffer and skip groups upto",
+            );
+
+            while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
+                let msg_group = messages_reader.get_next_message_group(
+                    &mut self.state.msgs_buffer,
+                    &mut self.extra.anchors_cache,
+                    &mut self.state.collation_data,
+                    &mut mq_iterator_adapter,
+                    &QueueKey::MIN,
+                    GetNextMessageGroupMode::Refill,
+                )?;
+                if msg_group.is_none() {
+                    // on restart from a new genesis we will not be able to refill buffer with externals
+                    // so we stop refilling when there is no more groups in buffer
                     break;
                 }
-            } else if executor_wrapper
-                .mq_iterator_adapter
-                .no_pending_existing_internals()
-                && executor_wrapper
-                    .mq_iterator_adapter
-                    .no_pending_new_messages()
-            {
-                break;
             }
+
+            // next time we should read next message group like we did not make refill before
+            // so we need to reset flags that control from where to read messages
+            messages_reader.reset_read_flags();
         }
 
-        self.state.collation_data.total_execute_msgs_time_mc =
-            execute_msgs_total_elapsed.as_millis();
-
-        metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
-            .set(executed_groups_count as f64);
-
-        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
-            .record(fill_msgs_total_elapsed);
-
-        let init_iterator_elapsed = executor_wrapper
-            .mq_iterator_adapter
-            .init_iterator_total_elapsed();
-        metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
-            .record(init_iterator_elapsed);
-        let read_existing_messages_elapsed = self
-            .extra
-            .messages_reader
-            .read_existing_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
-            .record(read_existing_messages_elapsed);
-        let read_new_messages_elapsed =
-            self.extra.messages_reader.read_new_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
-            .record(read_new_messages_elapsed);
-        let read_ext_messages_elapsed =
-            self.extra.messages_reader.read_ext_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
-            .record(read_ext_messages_elapsed);
-        let add_to_message_groups_elapsed = self
-            .extra
-            .messages_reader
-            .add_to_message_groups_total_elapsed();
-        metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
-            .record(add_to_message_groups_elapsed);
-
-        metrics::histogram!("tycho_do_collate_exec_msgs_total_time", &labels)
-            .record(execute_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
-            .record(process_txs_total_elapsed);
-
-        let last_read_to_anchor_chain_time =
-            self.extra.messages_reader.last_read_to_anchor_chain_time();
-
-        let process_txs_wu = calc_process_txs_wu(
-            &self.state.collation_data,
-            &self.state.collation_config.work_units_params.execute,
-        );
-        let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
-
-        let prepare_groups_wu_total = calc_prepare_groups_wu_total(
-            &self.state.collation_data,
-            &self.state.collation_config.work_units_params.prepare,
-        );
+        // holds the max LT_HASH of a new created messages to current shard
+        // it needs to define the read range for new messages when we get next message group
+        let max_new_message_key_to_current_shard = QueueKey::MIN;
 
         Ok(Phase::<ExecuteState> {
             extra: ExecuteState {
-                execute_result: ExecuteResult {
-                    execute_groups_wu_vm_only,
-                    process_txs_wu,
-                    execute_groups_wu_total,
-                    prepare_groups_wu_total,
-                    fill_msgs_total_elapsed,
-                    execute_msgs_total_elapsed,
-                    process_txs_total_elapsed,
-                    init_iterator_elapsed,
-                    read_existing_messages_elapsed,
-                    read_ext_messages_elapsed,
-                    read_new_messages_elapsed,
-                    add_to_message_groups_elapsed,
-                    last_read_to_anchor_chain_time,
-                },
+                messages_reader,
+                execute_result: None,
+                anchors_cache: self.extra.anchors_cache,
+                executor: ExecutorWrapper::new(
+                    executor,
+                    max_new_message_key_to_current_shard,
+                    mq_iterator_adapter,
+                    self.state.shard_id,
+                    self.extra.mq_adapter.clone(),
+                ),
             },
             state: self.state,
         })
     }
-}
-
-fn calc_process_txs_wu(
-    collation_data: &BlockCollationData,
-    wu_params_execute: &WorkUnitsParamsExecute,
-) -> u64 {
-    let &WorkUnitsParamsExecute {
-        serialize_enqueue,
-        serialize_dequeue,
-        insert_new_msgs_to_iterator,
-        ..
-    } = wu_params_execute;
-
-    (collation_data.int_enqueue_count)
-        .saturating_mul(serialize_enqueue as u64)
-        .saturating_add((collation_data.int_dequeue_count).saturating_mul(serialize_dequeue as u64))
-        .saturating_add(
-            (collation_data.inserted_new_msgs_to_iterator)
-                .saturating_mul(insert_new_msgs_to_iterator as u64),
-        )
-}
-
-fn calc_prepare_groups_wu_total(
-    collation_data: &BlockCollationData,
-    wu_params_prepare: &WorkUnitsParamsPrepare,
-) -> u64 {
-    let &WorkUnitsParamsPrepare {
-        fixed_part,
-        read_ext_msgs,
-        read_int_msgs,
-        read_new_msgs,
-    } = wu_params_prepare;
-
-    (fixed_part as u64)
-        .saturating_add(
-            collation_data
-                .read_ext_msgs
-                .saturating_mul(read_ext_msgs as u64),
-        )
-        .saturating_add(
-            collation_data
-                .read_int_msgs_from_iterator
-                .saturating_mul(read_int_msgs as u64),
-        )
-        .saturating_add(
-            collation_data
-                .read_new_msgs_from_iterator
-                .saturating_mul(read_new_msgs as u64),
-        )
 }
