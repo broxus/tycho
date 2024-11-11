@@ -1564,6 +1564,14 @@ def mempool_rounds() -> RowPanel:
             "tycho_mempool_rounds_consensus_ahead_storage_round",
             "Consensus ahead of storage: history to keep",
         ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_db_cleaned_lower",
+            "DB: lower deleted round",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_db_cleaned_upper",
+            "DB: upper deleted round",
+        ),
     ]
     return create_row("Mempool rounds", metrics)
 

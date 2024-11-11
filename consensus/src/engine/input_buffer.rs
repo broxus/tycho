@@ -45,7 +45,10 @@ impl InputBufferInner for InputBufferData {
     fn push(&mut self, ext_in_msg: Bytes) {
         if self.payload_buffer_bytes == 0 || self.payload_batch_bytes == 0 {
             // TODO log debounce https://github.com/broxus/tycho/issues/406
-            tracing::trace!("cannot send msg by config");
+            tracing::trace!("cannot enqueue msg until config is init");
+            metrics::counter!("tycho_mempool_evicted_externals_count").increment(1);
+            metrics::counter!("tycho_mempool_evicted_externals_size")
+                .increment(ext_in_msg.len() as _);
             return; // ignore until config applied
         }
         self.add(ext_in_msg);

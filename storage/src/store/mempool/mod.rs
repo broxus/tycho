@@ -1,7 +1,7 @@
 pub mod point_status;
 
 use tycho_util::metrics::HistogramGuard;
-use weedb::rocksdb::{IteratorMode, WriteBatch};
+use weedb::rocksdb::{IteratorMode, ReadOptions, WriteBatch};
 
 use crate::MempoolDb;
 
@@ -47,8 +47,12 @@ impl MempoolStorage {
         }
     }
 
-    /// delete all stored data up to provided value (exclusive)
-    pub fn clean(&self, up_to_exclusive: &[u8; Self::KEY_LEN]) -> anyhow::Result<()> {
+    /// delete all stored data up to provided value (exclusive);
+    /// returns range of logically deleted keys
+    pub fn clean(
+        &self,
+        up_to_exclusive: &[u8; Self::KEY_LEN],
+    ) -> anyhow::Result<Option<(u32, u32)>> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_time");
         let zero = [0_u8; Self::KEY_LEN];
         let none = None::<[u8; Self::KEY_LEN]>;
@@ -57,6 +61,39 @@ impl MempoolStorage {
         let info_cf = self.db.tables().points_info.cf();
         let points_cf = self.db.tables().points.cf();
         let rocksdb = self.db.rocksdb();
+
+        let mut opt = ReadOptions::default();
+        opt.set_iterate_upper_bound(up_to_exclusive);
+        let mut iter = rocksdb.raw_iterator_cf_opt(&status_cf, opt);
+        iter.status()?;
+        iter.seek_to_first();
+        iter.status()?;
+        let first = iter.key().map(|first_key| {
+            MempoolStorage::parse_round(first_key).unwrap_or_else(|| {
+                tracing::error!(
+                    "mempool lower clean bound will be shown as 0: {}",
+                    Self::format_key(first_key)
+                );
+                0
+            })
+        });
+        iter.status()?;
+        iter.seek_to_last();
+        iter.status()?;
+        let last = iter
+            .key()
+            .map(|last_key| {
+                MempoolStorage::parse_round(last_key).unwrap_or_else(|| {
+                    tracing::error!(
+                        "mempool upper clean bound will be shown as 0: {}",
+                        Self::format_key(last_key)
+                    );
+                    0
+                })
+            })
+            .or(first);
+        iter.status()?;
+        drop(iter);
 
         // in case we'll return to `db.delete_file_in_range_cf()`:
         // * at first delete status, as their absense prevents incorrect access to points data
@@ -73,7 +110,7 @@ impl MempoolStorage {
         rocksdb.compact_range_cf(&info_cf, none, Some(up_to_exclusive));
         rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
 
-        Ok(())
+        Ok(first.zip(last))
     }
 
     /// returns `true` if only one value existed and was equal to provided arg
