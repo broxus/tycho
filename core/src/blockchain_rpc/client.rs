@@ -9,6 +9,7 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use parking_lot::Mutex;
 use scopeguard::ScopeGuard;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
@@ -43,7 +44,19 @@ impl BlockchainRpcClientBuilder<PublicOverlayClient> {
             inner: Arc::new(Inner {
                 overlay_client: self.mandatory_fields,
                 broadcast_listener: self.broadcast_listener,
-                broadcast_timeout: self.broadcast_timeout,
+                broadcast_timeout_upper_bound: self.broadcast_timeout,
+                // todo: do we need to move this to config?
+                broadcast_timeout_lower_bound: Duration::from_millis(100),
+                response_tracker: Mutex::new(
+                    // 5 windows, 60 seconds each, 0.75 quantile
+                    tycho_util::time::RollingP2Estimator::new_with_config(
+                        0.75, // should be enough to filter most of the outliers
+                        Duration::from_secs(60),
+                        5,
+                        tycho_util::time::RealClock,
+                    )
+                    .expect("correct quantile"),
+                ),
             }),
         }
     }
@@ -132,19 +145,36 @@ impl BlockchainRpcClient {
 
         let targets = client.get_broadcast_targets();
         let request = Request::from_tl(ExternalMessage { data: message });
-
         let mut futures = FuturesUnordered::new();
+
+        // we wait for all the responses to come back but cap them at `broadcast_timeout_upper_bound`
+        // all peers timeouts are calculated based on p90 of the previous responses time weighted average
+        // This will make broadcast timeout to be adaptive based on the network conditions
         for validator in targets.as_ref() {
             let client = client.clone();
             let validator = validator.clone();
             let request = request.clone();
-            futures.push(JoinTask::new(async move {
-                client.send_to_validator(validator, request).await
+            let this = self.clone();
+            // we are not using `JoinTask` here because we want to measure the time taken by the broadcast
+            futures.push(tokio::spawn(async move {
+                let start = Instant::now();
+                let res = tokio::time::timeout(
+                    this.inner.broadcast_timeout_upper_bound,
+                    client.send_to_validator(validator, request),
+                )
+                .await;
+                this.inner
+                    .response_tracker
+                    .lock()
+                    .append(start.elapsed().as_millis() as i64);
+                res
             }));
         }
 
-        tokio::time::timeout(self.inner.broadcast_timeout, async {
-            while let Some(res) = futures.next().await {
+        let timeout = self.broadcast_timeout();
+        tokio::time::timeout(timeout, async {
+            // inner task timeout won't happen because outer task timeout is always <= inner task timeout
+            while let Some(Ok(res)) = futures.next().await {
                 if let Err(e) = res {
                     tracing::warn!("failed to broadcast external message: {e}");
                 } else {
@@ -160,6 +190,27 @@ impl BlockchainRpcClient {
         }
 
         delivered_to
+    }
+
+    fn broadcast_timeout(&self) -> Duration {
+        if let Some(prev_time) = self
+            .inner
+            .response_tracker
+            .lock()
+            .exponentially_weighted_average()
+            .map(|x| Duration::from_millis(x as _))
+        {
+            metrics::gauge!("tycho_broadcast_timeout", "kind"=>"calculated")
+                .set(prev_time.as_secs_f64());
+            let value = prev_time.clamp(
+                self.inner.broadcast_timeout_lower_bound,
+                self.inner.broadcast_timeout_upper_bound,
+            );
+            metrics::gauge!("tycho_broadcast_timeout", "kind"=>"clamped").set(value.as_secs_f64());
+            value
+        } else {
+            self.inner.broadcast_timeout_upper_bound
+        }
     }
 
     pub async fn get_next_key_block_ids(
@@ -522,7 +573,9 @@ impl BlockchainRpcClient {
 struct Inner {
     overlay_client: PublicOverlayClient,
     broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
-    broadcast_timeout: Duration,
+    broadcast_timeout_upper_bound: Duration,
+    broadcast_timeout_lower_bound: Duration,
+    response_tracker: Mutex<tycho_util::time::RollingP2Estimator>,
 }
 
 #[derive(Clone)]

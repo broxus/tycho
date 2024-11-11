@@ -534,6 +534,14 @@ def core_blockchain_rpc() -> RowPanel:
         create_heatmap_panel(
             "tycho_core_overlay_client_validator_ping_time", "Time to ping validator"
         ),
+        create_gauge_panel(
+            expr=[
+                "tycho_broadcast_timeout",
+            ],
+            title="Broadcast Timeout",
+            unit_format=UNITS.SECONDS,
+            legend_format="{{instance}} - {{kind}}",
+        ),
     ]
     metrics += [
         create_heatmap_panel(
@@ -988,7 +996,7 @@ def block_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_shard_blocks_count_btw_anchors",
             "Number of Shard Blocks before import next anchor",
-        ),        
+        ),
         create_gauge_panel(
             "tycho_do_collate_import_next_anchor_count",
             "Number of imported anchors per tick",
@@ -1164,7 +1172,7 @@ def collator_time_metrics() -> RowPanel:
             "tycho_do_collate_from_prev_block_time",
             "Time elapsed from prev block",
             labels=['workchain=~"$workchain"'],
-        ),        
+        ),
         create_heatmap_panel(
             "tycho_do_collate_from_prev_anchor_time",
             "Time elapsed from prev anchor",
