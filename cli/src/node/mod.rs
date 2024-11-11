@@ -437,9 +437,6 @@ impl Node {
             self.archive_block_provider_config.clone(),
         );
 
-        let abp_config = &self.archive_block_provider_config;
-        let bbp_config = &self.blockchain_block_provider_config;
-
         let block_strider = BlockStrider::builder()
             .with_provider(
                 collator
@@ -448,16 +445,11 @@ impl Node {
                     .chain(collator.new_sync_point(CollatorSyncContext::Recent))
                     .chain((
                         blockchain_block_provider
-                            .retry(
-                                bbp_config.retry_limit,
-                                bbp_config.get_block_polling_interval,
-                                bbp_config.get_next_block_polling_interval,
-                            )
-                            .cycle(archive_block_provider.retry(
-                                abp_config.retry_limit,
-                                abp_config.polling_interval,
-                                abp_config.polling_interval,
-                            )),
+                            .retry(self.blockchain_block_provider_config.retry_config)
+                            .cycle(
+                                archive_block_provider
+                                    .retry(self.archive_block_provider_config.retry_config),
+                            ),
                         storage_block_provider,
                         collator_block_provider,
                     )),

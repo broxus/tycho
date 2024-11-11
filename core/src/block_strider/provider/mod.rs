@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwapAny;
 use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
+use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{
     check_with_master_state, check_with_prev_key_block_proof, BlockIdRelation, BlockProofStuff,
     BlockProofStuffAug, BlockStuff, BlockStuffAug,
@@ -16,6 +17,7 @@ use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{MaybeExistingHandle, NewBlockMeta, Storage};
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::serde_helpers;
 
 pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
@@ -69,12 +71,7 @@ pub trait BlockProviderExt: Sized {
 
     fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T>;
 
-    fn retry(
-        self,
-        limit: usize,
-        get_block_polling_interval: Duration,
-        get_next_block_polling_interval: Duration,
-    ) -> RetryBlockProvider<Self>;
+    fn retry(self, config: RetryConfig) -> RetryBlockProvider<Self>;
 }
 
 impl<B: BlockProvider> BlockProviderExt for B {
@@ -94,17 +91,10 @@ impl<B: BlockProvider> BlockProviderExt for B {
         }
     }
 
-    fn retry(
-        self,
-        limit: usize,
-        get_block_polling_interval: Duration,
-        get_next_block_polling_interval: Duration,
-    ) -> RetryBlockProvider<Self> {
+    fn retry(self, config: RetryConfig) -> RetryBlockProvider<Self> {
         RetryBlockProvider {
             inner: self,
-            limit,
-            get_block_polling_interval,
-            get_next_block_polling_interval,
+            config,
             attempts: AtomicUsize::new(0),
         }
     }
@@ -209,9 +199,7 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
 
 pub struct RetryBlockProvider<T> {
     inner: T,
-    limit: usize,
-    get_block_polling_interval: Duration,
-    get_next_block_polling_interval: Duration,
+    config: RetryConfig,
     attempts: AtomicUsize,
 }
 
@@ -222,7 +210,7 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
             // TODO: Backoff?
-            let mut interval = tokio::time::interval(self.get_next_block_polling_interval);
+            let mut interval = tokio::time::interval(self.config.polling_interval);
 
             loop {
                 let res = self.inner.get_next_block(prev_block_id).await;
@@ -233,7 +221,7 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
                     self.attempts.fetch_add(1, Ordering::Release);
                 }
 
-                if self.attempts.load(Ordering::Acquire) >= self.limit {
+                if self.attempts.load(Ordering::Acquire) >= self.config.limit {
                     self.attempts.store(0, Ordering::Release);
                     break res;
                 }
@@ -244,27 +232,7 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
-        Box::pin(async move {
-            // TODO: Backoff?
-            let mut interval = tokio::time::interval(self.get_block_polling_interval);
-
-            loop {
-                let res = self.inner.get_block(block_id_relation).await;
-                if res.is_some() {
-                    self.attempts.store(0, Ordering::Release);
-                    break res;
-                } else {
-                    self.attempts.fetch_add(1, Ordering::Release);
-                }
-
-                if self.attempts.load(Ordering::Acquire) >= self.limit {
-                    self.attempts.store(0, Ordering::Release);
-                    break res;
-                }
-
-                interval.tick().await;
-            }
-        })
+        Box::pin(async move { self.inner.get_block(block_id_relation).await })
     }
 }
 
@@ -464,6 +432,30 @@ impl ProofChecker {
     }
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetryConfig {
+    /// Retry limit.
+    ///
+    /// Default: 10.
+    pub limit: usize,
+
+    /// Polling interval for downloading archive.
+    ///
+    /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
+    pub polling_interval: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            limit: 1,
+            polling_interval: Duration::from_secs(1),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -560,17 +552,18 @@ mod test {
             has_block: AtomicBool::new(false),
         });
 
-        let left = left_provider.clone().retry(
-            LEFT_LIMIT,
-            Duration::from_millis(POLLING_INTERVAL_MS),
-            Duration::from_millis(POLLING_INTERVAL_MS),
-        );
-        let right = right_provider.clone().retry(
-            RIGHT_LIMIT,
-            Duration::from_millis(POLLING_INTERVAL_MS),
-            Duration::from_millis(POLLING_INTERVAL_MS),
-        );
+        let left_config = RetryConfig {
+            limit: LEFT_LIMIT,
+            polling_interval: Duration::from_millis(POLLING_INTERVAL_MS),
+        };
 
+        let right_config = RetryConfig {
+            limit: RIGHT_LIMIT,
+            polling_interval: Duration::from_millis(POLLING_INTERVAL_MS),
+        };
+
+        let left = left_provider.clone().retry(left_config);
+        let right = right_provider.clone().retry(right_config);
         let cycle_provider = left.cycle(right);
 
         assert!(!cycle_provider.is_right.load(Ordering::Acquire));

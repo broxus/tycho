@@ -11,7 +11,7 @@ use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 use tycho_util::sync::rayon_run;
 
-use crate::block_strider::provider::{CheckProof, OptionalBlockStuff, ProofChecker};
+use crate::block_strider::provider::{CheckProof, OptionalBlockStuff, ProofChecker, RetryConfig};
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
@@ -22,11 +22,6 @@ use crate::overlay_client::{Neighbour, PunishReason};
 #[serde(default)]
 #[non_exhaustive]
 pub struct BlockchainBlockProviderConfig {
-    /// Retry limit.
-    ///
-    /// Default: 10.
-    pub retry_limit: usize,
-
     /// Polling interval for `get_next_block` method.
     ///
     /// Default: 1 second.
@@ -38,14 +33,20 @@ pub struct BlockchainBlockProviderConfig {
     /// Default: 1 second.
     #[serde(with = "serde_helpers::humantime")]
     pub get_block_polling_interval: Duration,
+
+    /// Retry getting next block config.
+    pub retry_config: RetryConfig,
 }
 
 impl Default for BlockchainBlockProviderConfig {
     fn default() -> Self {
         Self {
-            retry_limit: 10,
             get_next_block_polling_interval: Duration::from_secs(1),
             get_block_polling_interval: Duration::from_secs(1),
+            retry_config: RetryConfig {
+                limit: 10,
+                polling_interval: Duration::from_secs(1),
+            },
         }
     }
 }
