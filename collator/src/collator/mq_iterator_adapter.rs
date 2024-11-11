@@ -12,7 +12,7 @@ use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff, ShardDescriptionShort};
+use crate::types::{DisplayIter, DisplayTuple, ProcessedUptoInfoStuff};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitIteratorMode {
@@ -215,19 +215,16 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         self.init_iterator_total_elapsed += timer.elapsed();
 
         Ok(result)
+
     }
 
-    fn try_update_ranges_for_shard<F>(
-        &self,
-        shard_id: ShardIdent,
-        shard_end_lt: u64,
+    fn try_update_shardchain_ranges(
+        &mut self,
+        shards: &mut dyn Iterator<Item = (&ShardIdent, &ShardDescriptionShort)>,
         ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
         ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
-        is_current_shard: F,
-    ) -> bool
-    where
-        F: Fn() -> bool,
-    {
+        prev_shard_data: &PrevData,
+    ) -> bool {
         let mut ranges_updated = false;
 
         // add default shard range if not exist
@@ -257,39 +254,41 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         ranges_updated
     }
 
-    fn try_update_shardchain_ranges(
-        &mut self,
-        shards: &mut dyn Iterator<Item = (&ShardIdent, &ShardDescriptionShort)>,
+    fn try_update_ranges_for_shard<F>(
+        shard_id: ShardIdent,
+        shard_description_end_lt: u64,
+        prev_shard_data_gen_lt: u64,
         ranges_from: &mut FastHashMap<ShardIdent, QueueKey>,
         ranges_to: &mut FastHashMap<ShardIdent, QueueKey>,
-        prev_shard_data: &PrevData,
-    ) -> bool {
+        is_current_shard: F,
+    ) -> bool
+    where
+        F: Fn() -> bool,
+    {
         let mut ranges_updated = false;
         // try update shardchains ranges
-        for (shard_id, shard_descr) in shards {
-            // add default shardchain range if not exist
-            ranges_from.entry(*shard_id).or_insert_with(|| {
-                ranges_updated = true;
-                QueueKey::MIN
-            });
-            let sc_read_to = ranges_to.entry(*shard_id).or_insert_with(|| {
-                ranges_updated = true;
-                QueueKey::max_for_lt(0)
-            });
+        // add default shardchain range if not exist
+        ranges_from.entry(shard_id).or_insert_with(|| {
+            ranges_updated = true;
+            QueueKey::MIN
+        });
+        let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
+            ranges_updated = true;
+            QueueKey::max_for_lt(0)
+        });
 
-            // try update shardchain read_to
-            let new_sc_read_to_lt = if self.shard_id == *shard_id {
-                // get new read_to LT from PrevData
-                prev_shard_data.gen_lt()
-            } else {
-                // get new read_to LT from ShardDescription
-                shard_descr.end_lt
-            };
-            if sc_read_to.lt < new_sc_read_to_lt {
-                sc_read_to.lt = new_sc_read_to_lt;
-                sc_read_to.hash = HashBytes([255; 32]);
-                ranges_updated = true;
-            }
+        // try update shardchain read_to
+        let new_sc_read_to_lt = if is_current_shard() {
+            // get new read_to LT from PrevData
+            prev_shard_data_gen_lt
+        } else {
+            // get new LT from ShardDescription
+            shard_description_end_lt
+        };
+        if sc_read_to.lt < new_sc_read_to_lt {
+            sc_read_to.lt = new_sc_read_to_lt;
+            sc_read_to.hash = HashBytes([255; 32]);
+            ranges_updated = true;
         }
         ranges_updated
         
