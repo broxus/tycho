@@ -63,11 +63,6 @@ struct CmdRun {
     /// List of zerostate files to import.
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
-
-    /// Last know applied master block seqno to recover from
-    #[allow(clippy::option_option)]
-    #[clap(long)]
-    pub from_mc_block_seqno: Option<Option<u32>>,
 }
 
 impl CmdRun {
@@ -156,9 +151,7 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        let from_mc_block_seqno = self.from_mc_block_seqno.unwrap_or_default();
-
-        node.run(&init_block_id, from_mc_block_seqno).await?;
+        node.run(&init_block_id).await?;
 
         Ok(())
     }

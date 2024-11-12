@@ -112,9 +112,6 @@ where
 
     /// Mempool config override for a new genesis
     mempool_config_override: Option<MempoolGlobalConfig>,
-    /// Last know applied master block seqno
-    /// to restart from a new genesis
-    from_mc_block_seqno: Option<u32>,
 }
 
 #[async_trait]
@@ -268,7 +265,6 @@ where
         validator: V,
         collator_factory: CF,
         mempool_config_override: Option<MempoolGlobalConfig>,
-        from_mc_block_seqno: Option<u32>,
     ) -> RunningCollationManager<CF, V>
     where
         STF: StateNodeAdapterFactory,
@@ -319,7 +315,6 @@ where
             validator_set_cache: Default::default(),
 
             mempool_config_override,
-            from_mc_block_seqno,
         };
         arc_dispatcher.run(Arc::new(processor), tasks_receiver);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
@@ -916,18 +911,6 @@ where
         let block_id = *state.block_id();
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
-
-        if block_id.is_masterchain() {
-            if let Some(from_mc_block_seqno) = self.from_mc_block_seqno {
-                if block_id.seqno < from_mc_block_seqno {
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        "restart with a new genesis: skip block, should wait for specified last applied with seqno {}",
-                        from_mc_block_seqno,
-                    );
-                    return Ok(());
-                }
-            }
-        }
 
         self.ready_to_sync.notified().await;
 
