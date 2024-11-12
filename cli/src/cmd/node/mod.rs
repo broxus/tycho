@@ -116,8 +116,21 @@ impl CmdRun {
                 GlobalConfig::from_file(args.global_config_path(self.global_config.as_ref()))
                     .context("failed to load global config")?;
 
-            let keys = NodeKeys::from_file(args.node_keys_path(self.keys.as_ref()))
-                .context("failed to load node keys")?;
+            let node_keys_path = args.node_keys_path(self.keys.as_ref());
+            let node_keys = if node_keys_path.exists() {
+                NodeKeys::from_file(node_keys_path).context("failed to load node keys")?
+            } else {
+                let keys = rand::random::<NodeKeys>();
+                tracing::warn!(
+                    node_keys_path = %node_keys_path.display(),
+                    public_key = %keys.public_key(),
+                    "generated new node keys",
+                );
+
+                keys.save_to_file(node_keys_path)
+                    .context("failed to save new node keys")?;
+                keys
+            };
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
@@ -126,7 +139,7 @@ impl CmdRun {
 
             Node::new(
                 socket_addr,
-                keys,
+                node_keys,
                 node_config,
                 global_config,
                 control_socket,
