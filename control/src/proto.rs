@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
-use everscale_types::models::{BlockId, BlockIdShort, BlockchainConfig, ShardAccount, StdAddr};
+use everscale_types::models::{
+    BlockId, BlockIdShort, BlockchainConfig, GlobalVersion, ShardAccount, StdAddr,
+};
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
@@ -100,6 +102,13 @@ pub struct NodeInfoResponse {
     pub local_addr: SocketAddr,
     pub adnl_id: HashBytes,
     pub validator_public_key: Option<HashBytes>,
+    #[serde(default)]
+    pub collator: Option<CollatorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollatorInfo {
+    pub global_version: GlobalVersion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

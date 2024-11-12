@@ -138,6 +138,12 @@ impl CmdGetInfo {
                 "local_addr": info.local_addr.to_string(),
                 "adnl_id": info.adnl_id,
                 "validator_public_key": info.validator_public_key,
+                "collator": info.collator.map(|c| {
+                    serde_json::json!({
+                        "supported_block_version": c.global_version.version,
+                        "supported_capabilities": c.global_version.capabilities,
+                    })
+                })
             }))
         })
     }

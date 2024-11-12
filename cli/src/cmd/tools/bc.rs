@@ -18,7 +18,7 @@ use tycho_util::time::now_sec;
 use crate::util::jrpc_client::{AccountStateResponse, JrpcClient};
 use crate::util::{parse_public_key, parse_secret_key, print_json};
 
-/// Generate an account state
+/// Blockchain stuff
 #[derive(clap::Parser)]
 pub struct Cmd {
     #[clap(subcommand)]
@@ -38,7 +38,6 @@ impl Cmd {
     }
 }
 
-/// Blockchain stuff
 #[derive(clap::Parser)]
 enum SubCmd {
     GetParam(GetParamCmd),
