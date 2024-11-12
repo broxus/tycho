@@ -528,6 +528,7 @@ impl CollatorStdImpl {
 
             // update mc_data if newer
             if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
+                working_state.collation_config = Arc::new(mc_data.config.get_collation_config()?);
                 working_state.mc_data = mc_data;
 
                 if working_state.has_unprocessed_messages == Some(false) {
