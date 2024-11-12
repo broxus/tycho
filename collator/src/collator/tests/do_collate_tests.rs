@@ -12,11 +12,13 @@ use crate::test_utils::try_init_test_tracing;
 use crate::types::supported_capabilities;
 
 pub(crate) fn fill_test_anchors_cache(anchors_cache: &mut AnchorsCache, shard_id: ShardIdent) {
+    let mut prev_anchor_id = 0;
     for anchor_id in 1..=40 {
         if anchor_id % 4 != 0 {
             continue;
         }
-        let anchor = Arc::new(make_stub_anchor(anchor_id));
+        let anchor = Arc::new(make_stub_anchor(anchor_id, prev_anchor_id));
+        prev_anchor_id = anchor_id;
         let our_exts_count = anchor.count_externals_for(&shard_id, 0);
         let has_externals = our_exts_count > 0;
         if has_externals {

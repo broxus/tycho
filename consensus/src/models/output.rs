@@ -2,6 +2,8 @@ use crate::models::{PointInfo, Round};
 
 pub struct AnchorData {
     pub anchor: PointInfo,
+    // first anchor after Genesis is not linked to previous one
+    pub prev_anchor: Option<Round>,
     pub history: Vec<PointInfo>,
 }
 

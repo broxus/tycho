@@ -106,6 +106,8 @@ impl ExternalMessage {
 #[derive(Debug)]
 pub struct MempoolAnchor {
     pub id: MempoolAnchorId,
+    // None for first after Genesis
+    pub prev_id: Option<MempoolAnchorId>,
     pub author: PeerId,
     pub chain_time: u64,
     pub externals: Vec<Arc<ExternalMessage>>,

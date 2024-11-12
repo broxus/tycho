@@ -79,6 +79,7 @@ impl MempoolAdapterStubImpl {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
+        let mut prev_anchor_id = 0;
         for anchor_id in 1.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
@@ -86,7 +87,8 @@ impl MempoolAdapterStubImpl {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let mut anchor = make_stub_anchor(anchor_id);
+            let mut anchor = make_stub_anchor(anchor_id, prev_anchor_id);
+            prev_anchor_id = anchor_id;
 
             if let Some(now) = now {
                 anchor.chain_time += now;
@@ -118,6 +120,7 @@ impl MempoolAdapterStubImpl {
         let mut iter = paths.into_iter();
 
         let mut last_chain_time = 0;
+        let mut prev_anchor_id = 0;
         for anchor_id in 1.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
@@ -127,12 +130,16 @@ impl MempoolAdapterStubImpl {
 
             let anchor = 'anchor: {
                 if let Some(path) = iter.next() {
-                    match make_anchor_from_file(anchor_id, &path) {
-                        Ok(anchor) => break 'anchor anchor,
+                    match make_anchor_from_file(anchor_id, prev_anchor_id, &path) {
+                        Ok(anchor) => {
+                            prev_anchor_id = anchor_id;
+                            break 'anchor anchor;
+                        }
                         Err(e) => {
                             tracing::error!(
                                 target: tracing_targets::MEMPOOL_ADAPTER,
                                 anchor_id,
+                                prev_anchor_id,
                                 path = %path.display(),
                                 "failed to make anchor from file: {e:?}"
                             );
@@ -140,7 +147,7 @@ impl MempoolAdapterStubImpl {
                     }
                 }
 
-                make_empty_anchor(anchor_id, last_chain_time + 1336)
+                make_empty_anchor(anchor_id, prev_anchor_id, last_chain_time + 1336)
             };
 
             last_chain_time = anchor.chain_time;
@@ -352,16 +359,21 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
     }
 }
 
-pub(crate) fn make_empty_anchor(id: MempoolAnchorId, chain_time: u64) -> Arc<MempoolAnchor> {
+pub(crate) fn make_empty_anchor(
+    id: MempoolAnchorId,
+    prev_id: MempoolAnchorId,
+    chain_time: u64,
+) -> Arc<MempoolAnchor> {
     Arc::new(MempoolAnchor {
         id,
+        prev_id: Some(prev_id),
         author: PeerId(Default::default()),
         chain_time,
         externals: vec![],
     })
 }
 
-pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> MempoolAnchor {
+pub(crate) fn make_stub_anchor(id: MempoolAnchorId, prev_id: MempoolAnchorId) -> MempoolAnchor {
     let chain_time = id as u64 * 1736 % 1000000000;
 
     let externals_count = (chain_time % 10) as u32;
@@ -399,6 +411,7 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> MempoolAnchor {
 
     MempoolAnchor {
         id,
+        prev_id: Some(prev_id),
         author: PeerId(Default::default()),
         chain_time,
         externals,
@@ -407,6 +420,7 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> MempoolAnchor {
 
 pub(crate) fn make_anchor_from_file(
     id: MempoolAnchorId,
+    prev_id: MempoolAnchorId,
     path: &Path,
 ) -> Result<Arc<MempoolAnchor>> {
     let data = std::fs::read_to_string(path)?;
@@ -430,6 +444,7 @@ pub(crate) fn make_anchor_from_file(
 
     Ok(Arc::new(MempoolAnchor {
         id,
+        prev_id: Some(prev_id),
         author: PeerId(Default::default()),
         chain_time,
         externals,
