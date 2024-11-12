@@ -279,7 +279,8 @@ impl MempoolAdapterStdImpl {
         let mut parser = Parser::new(config.deduplicate_rounds);
         let mut first_after_gap = None;
         while let Some(commit) = anchor_rx.recv().await {
-            let (anchor, history) = match commit {
+            let committed = match commit {
+                MempoolOutput::NextAnchor(committed) => committed,
                 MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
                     parser = Parser::new(config.deduplicate_rounds);
@@ -303,7 +304,6 @@ impl MempoolAdapterStdImpl {
                     cache.set_paused(true);
                     continue;
                 }
-                MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             };
 
             let task = tokio::task::spawn_blocking({
@@ -311,12 +311,13 @@ impl MempoolAdapterStdImpl {
                 let store = store.clone();
 
                 move || {
-                    let author = anchor.data().author;
-                    let chain_time = anchor.data().time.as_u64();
-                    let anchor_id: MempoolAnchorId = anchor.round().0;
+                    let author = committed.anchor.data().author;
+                    let chain_time = committed.anchor.data().time.as_u64();
+                    let anchor_id: MempoolAnchorId = committed.anchor.round().0;
                     metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
-                    let payloads = store.expand_anchor_history(&anchor, &history);
+                    let payloads =
+                        store.expand_anchor_history(&committed.anchor, &committed.history);
 
                     let is_executable = first_after_gap
                         .as_ref()
@@ -328,6 +329,7 @@ impl MempoolAdapterStdImpl {
                     if is_executable {
                         anchors.push(Arc::new(MempoolAnchor {
                             id: anchor_id,
+                            prev_id: committed.prev_anchor.map(|round| round.0),
                             chain_time,
                             author,
                             externals: unique_messages,
@@ -468,7 +470,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "get_next_anchor"
         );
 
-        let result = match self.cache.get_next_anchor(prev_anchor_id).await {
+        let result = match self.cache.get_next_anchor(prev_anchor_id).await? {
             Some(anchor) => GetAnchorResult::Exist(anchor),
             None => GetAnchorResult::NotExist,
         };

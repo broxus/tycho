@@ -11,7 +11,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::commit::back::DagBack;
 use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::CachedConfig;
+use crate::engine::{CachedConfig, Genesis};
 use crate::models::{AnchorData, AnchorStageRole, Round};
 
 pub struct Committer {
@@ -199,6 +199,9 @@ impl Committer {
                 })
                 .collect::<Vec<_>>();
             ordered.push(AnchorData {
+                prev_anchor: Some(next.anchor.anchor_round(AnchorStageRole::Proof))
+                    .filter(|r| *r > Genesis::round())
+                    .map(|r| r.prev()),
                 anchor: next.anchor,
                 history: committed,
             });
