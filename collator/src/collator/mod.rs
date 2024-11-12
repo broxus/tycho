@@ -364,15 +364,21 @@ impl CollatorStdImpl {
         {
             let timer = std::time::Instant::now();
 
+            tracing::info!(target: tracing_targets::COLLATOR,
+                processed_to_anchor_id,
+                processed_to_msgs_offset,
+                prev_chain_time,
+                "will check and import init anchors on init",
+            );
+
             // anchors importing can stuck if mempool paused
             // so allow to cancel collation here
             let cancel_collation = self.cancel_collation.clone();
             let collation_cancelled = cancel_collation.notified();
             let import_fut = self.check_and_import_init_anchors(
-                false,
                 &working_state,
                 processed_to_anchor_id,
-                processed_to_msgs_offset as _,
+                processed_to_msgs_offset,
                 prev_chain_time,
                 prev_block_id,
             );
@@ -409,7 +415,7 @@ impl CollatorStdImpl {
             };
 
             if !anchors_info.is_empty() {
-                tracing::debug!(target: tracing_targets::COLLATOR,
+                tracing::info!(target: tracing_targets::COLLATOR,
                     elapsed = timer.elapsed().as_millis(),
                     "imported anchors on init: {:?}",
                     anchors_info.as_slice()
@@ -434,40 +440,36 @@ impl CollatorStdImpl {
 
     async fn check_and_import_init_anchors(
         &mut self,
-        is_resume: bool,
         working_state: &WorkingState,
         processed_to_anchor_id: MempoolAnchorId,
-        processed_to_msgs_offset: usize,
+        processed_to_msgs_offset: u64,
         prev_chain_time: u64,
         prev_block_id: BlockId,
     ) -> Result<Vec<AnchorInfo>, CollatorError> {
         let import_init_anchors = match &self.mempool_config_override {
-            // TODO: This may not work with shard blocks when we do not specify `from_mc_block_seqno` on restart from a new genesis
-            //      because there may be cases when processed to anchor in shard is before anchor in master
-            //      and we may cancel shard collation init incorrectly.
-            //      We can produce incorrect shard block and then ignore it.
-            //      Or we can try to specify last imported anchor id as a start round.
-            //      Currently we do not cancel shard collator init because from block should be correct.
+            // There may be cases when processed to anchor in shard is before anchor in master.
+            // We can produce incorrect shard block, then ignore it, take correct from bc and try to collate next one.
             Some(mempool_config) if mempool_config.start_round > 0 => {
                 let import_init_anchors = if processed_to_anchor_id <= mempool_config.start_round {
-                    if processed_to_anchor_id < mempool_config.start_round
-                        && self.shard_id.is_masterchain()
-                    {
+                    if processed_to_anchor_id == mempool_config.start_round {
+                        // when we start from new genesis we unable to import anchor on the start round
+                        // because mempool actually is starting from the next round
+                        // so we should not try to import init anchors
+                        false
+                    } else if self.shard_id.is_masterchain() {
                         // if last processed_to anchor is before the start round for master,
                         // then cancel collation because we need to receive more blocks from bc
                         return Err(CollatorError::Cancelled(
                             CollationCancelReason::AnchorNotFound(processed_to_anchor_id),
                         ));
                     } else {
-                        // otherwise will not import init anchors
+                        // last processed_to anchor in shard can be before last procssed in master
+                        // it is normal, so we should not cancel collation buy we unable to import init anchors
                         false
                     }
-                } else if is_resume {
-                    // on resume when last processed anchor is after start round then will import init anchors
-                    true
                 } else {
-                    // and on init will not import init anchors
-                    false
+                    // when last processed_to anchor is after genesis start round then we can import init anchors
+                    true
                 };
 
                 if !import_init_anchors {
@@ -619,15 +621,21 @@ impl CollatorStdImpl {
             {
                 let timer = std::time::Instant::now();
 
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    processed_to_anchor_id,
+                    processed_to_msgs_offset,
+                    prev_chain_time,
+                    "will check and import init anchors on resume",
+                );
+
                 // anchors importing can stuck if mempool paused
                 // so allow to cancel collation here
                 let cancel_collation = self.cancel_collation.clone();
                 let collation_cancelled = cancel_collation.notified();
                 let import_fut = self.check_and_import_init_anchors(
-                    true,
                     &working_state,
                     processed_to_anchor_id,
-                    processed_to_msgs_offset as _,
+                    processed_to_msgs_offset,
                     prev_chain_time,
                     prev_block_id,
                 );
@@ -972,7 +980,6 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
-        mempool_start_round: Option<MempoolAnchorId>,
         top_processed_to_anchor: MempoolAnchorId,
         max_consensus_lag_rounds: u32,
     ) -> Result<ImportNextAnchor> {
@@ -983,22 +990,15 @@ impl CollatorStdImpl {
 
         let timer = std::time::Instant::now();
 
-        let (id, ct) = anchors_cache
+        let (prev_anchor_id, ct) = anchors_cache
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
 
         // do not import anchor if mempool may be paused
         // needs to process more anchors in collator first
-        if id.saturating_sub(top_processed_to_anchor) > max_consensus_lag_rounds / 2 {
+        if prev_anchor_id.saturating_sub(top_processed_to_anchor) > max_consensus_lag_rounds / 2 {
             return Ok(ImportNextAnchor::Skipped);
         }
-
-        // when restart from a new genesis then request first next after 0
-        let prev_anchor_id = if matches!(mempool_start_round, Some(round_id) if round_id == id) {
-            0
-        } else {
-            id
-        };
 
         let get_anchor_result = mpool_adapter
             .get_next_anchor(top_processed_to_anchor, prev_anchor_id)
@@ -1046,7 +1046,7 @@ impl CollatorStdImpl {
     /// 3. Store anchors in cache
     pub(self) async fn import_init_anchors(
         processed_to_anchor_id: MempoolAnchorId,
-        processed_to_msgs_offset: usize,
+        processed_to_msgs_offset: u64,
         last_block_chain_time: u64,
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
@@ -1108,7 +1108,7 @@ impl CollatorStdImpl {
             };
 
             let our_exts_count =
-                next_anchor.count_externals_for(&shard_id, processed_to_msgs_offset);
+                next_anchor.count_externals_for(&shard_id, processed_to_msgs_offset as _);
             our_exts_count_total += our_exts_count;
 
             anchors_cache.insert(next_anchor.clone(), our_exts_count);
@@ -1305,7 +1305,6 @@ impl CollatorStdImpl {
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
-                self.mempool_config_override.as_ref().map(|c| c.start_round),
                 working_state.mc_data.top_processed_to_anchor,
                 working_state
                     .mc_data
@@ -1538,7 +1537,6 @@ impl CollatorStdImpl {
                         self.shard_id,
                         &mut self.anchors_cache,
                         self.mpool_adapter.clone(),
-                        self.mempool_config_override.as_ref().map(|c| c.start_round),
                         working_state.mc_data.top_processed_to_anchor,
                         max_consensus_lag_rounds,
                     );

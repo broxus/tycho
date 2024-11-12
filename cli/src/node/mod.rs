@@ -251,11 +251,7 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    pub async fn run(
-        self,
-        last_block_id: &BlockId,
-        last_mc_block_seqno: Option<u32>,
-    ) -> Result<()> {
+    pub async fn run(self, last_block_id: &BlockId) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage
@@ -356,7 +352,6 @@ impl Node {
             validator.clone(),
             CollatorStdImplFactory,
             self.mempool_config_override.clone(),
-            last_mc_block_seqno,
         );
         let collator = CollatorStateSubscriber {
             adapter: collation_manager.state_node_adapter().clone(),

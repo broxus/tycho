@@ -121,7 +121,6 @@ async fn test_collation_process_on_stubs() {
         ),
         CollatorStdImplFactory,
         None,
-        None,
     );
 
     let state_node_adapter = StrangeBlockProvider {
