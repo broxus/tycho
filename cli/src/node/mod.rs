@@ -378,7 +378,10 @@ impl Node {
                 .with_gc_subscriber(gc_subscriber.clone())
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                .with_validator_keypair(self.keypair.clone());
+                .with_validator_keypair(self.keypair.clone())
+                .with_collator(Arc::new(CollatorControl {
+                    config: self.collator_config.clone(),
+                }));
 
             #[cfg(feature = "jemalloc")]
             if let Some(profiler) = JemallocMemoryProfiler::connect() {
@@ -528,6 +531,20 @@ impl BlockProvider for CollatorBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         self.adapter.wait_for_block(&block_id_relation.block_id)
+    }
+}
+
+struct CollatorControl {
+    config: CollatorConfig,
+}
+
+#[async_trait::async_trait]
+impl tycho_control::Collator for CollatorControl {
+    async fn get_global_version(&self) -> GlobalVersion {
+        GlobalVersion {
+            version: self.config.supported_block_version,
+            capabilities: self.config.supported_capabilities,
+        }
     }
 }
 

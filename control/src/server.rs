@@ -28,6 +28,7 @@ use tycho_network::Network;
 use tycho_storage::{ArchiveId, BlockHandle, Storage};
 use tycho_util::FastHashMap;
 
+use crate::collator::Collator;
 use crate::error::{ServerError, ServerResult};
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
 use crate::proto::{self, ArchiveInfo, ControlServer as _};
@@ -147,6 +148,7 @@ pub struct ControlServerBuilder<
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
+    collator: Option<Arc<dyn Collator>>,
 }
 
 impl ControlServerBuilder {
@@ -184,6 +186,13 @@ impl ControlServerBuilder {
                 .validator_keypair
                 .as_ref()
                 .map(|k| HashBytes(k.public_key.to_bytes())),
+            collator: match self.collator {
+                None => None,
+                Some(collator) => {
+                    let global_version = collator.get_global_version().await;
+                    Some(proto::CollatorInfo { global_version })
+                }
+            },
         };
 
         Ok(ControlServer {
@@ -209,6 +218,7 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
             mandatory_fields: (network.clone(), t2, t3, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
+            collator: self.collator,
         }
     }
 }
@@ -220,6 +230,7 @@ impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
             mandatory_fields: (t1, storage, t3, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
+            collator: self.collator,
         }
     }
 }
@@ -234,6 +245,7 @@ impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
             mandatory_fields: (t1, t2, gc_subscriber, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
+            collator: self.collator,
         }
     }
 }
@@ -248,6 +260,7 @@ impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
             mandatory_fields: (t1, t2, t3, client),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
+            collator: self.collator,
         }
     }
 }
@@ -255,6 +268,11 @@ impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
 impl<T> ControlServerBuilder<T> {
     pub fn with_memory_profiler(mut self, memory_profiler: Arc<dyn MemoryProfiler>) -> Self {
         self.memory_profiler = Some(memory_profiler);
+        self
+    }
+
+    pub fn with_collator(mut self, collator: Arc<dyn Collator>) -> Self {
+        self.collator = Some(collator);
         self
     }
 
@@ -276,6 +294,7 @@ impl ControlServer {
             mandatory_fields: ((), (), (), ()),
             memory_profiler: None,
             validator_keypair: None,
+            collator: None,
         }
     }
 }
