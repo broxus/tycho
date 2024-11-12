@@ -35,7 +35,6 @@ from grafanalib.core import (
 
 # todo: do something with this metrics
 # tycho_core_last_mc_block_applied
-# tycho_core_last_mc_block_utime
 # tycho_core_last_sc_block_applied
 # tycho_core_last_sc_block_seqno
 # tycho_core_last_sc_block_utime
@@ -63,7 +62,7 @@ def generate_legend_format(labels: List[str]) -> str:
 
 
 def create_gauge_panel(
-    expr: Union[str, List[Union[str, Expr]]],
+    expr: Union[str, List[Union[str, Expr]], Expr],
     title: str,
     unit_format=UNITS.NUMBER_FORMAT,
     labels=[],
@@ -406,6 +405,20 @@ def blockchain_stats() -> RowPanel:
 
 def core_bc() -> RowPanel:
     metrics = [
+        timeseries_panel(
+            targets=[
+                target(
+                    expr_operator(
+                        'timestamp(up{instance=~"$instance"})',
+                        "-",
+                        Expr("tycho_core_last_mc_block_utime"),
+                    ),
+                    legend_format="{{instance}}",
+                )
+            ],
+            unit=UNITS.SECONDS,
+            title="Mc block processing lag",
+        ),
         create_gauge_panel(
             "tycho_last_applied_block_seqno",
             "Last applied block seqno",
