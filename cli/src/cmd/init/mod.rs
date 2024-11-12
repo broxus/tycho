@@ -345,9 +345,7 @@ fn prepare_node_keys<P: AsRef<Path>>(path: P) -> Result<(bool, ed25519::PublicKe
         Ok((false, ed25519::PublicKey::from(&keys.as_secret())))
     } else {
         let keys = rand::random::<NodeKeys>();
-
-        let data = serde_json::to_string_pretty(&keys)?;
-        std::fs::write(path, data)?;
+        keys.save_to_file(path)?;
 
         Ok((true, ed25519::PublicKey::from(&keys.as_secret())))
     }

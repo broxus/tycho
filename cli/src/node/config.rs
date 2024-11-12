@@ -35,6 +35,12 @@ impl NodeKeys {
         tycho_util::serde_helpers::load_json_from_file(path)
     }
 
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let data = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, data)?;
+        Ok(())
+    }
+
     pub fn as_secret(&self) -> ed25519::SecretKey {
         ed25519::SecretKey::from_bytes(self.secret.0)
     }
