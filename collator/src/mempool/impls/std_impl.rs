@@ -365,7 +365,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(())
     }
 
-    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
+    fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
         self.top_known_anchor.set_max_raw(anchor_id);
         Ok(())
     }
@@ -410,7 +410,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(result)
     }
 
-    async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
+    fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
         self.cache.clear(before_anchor_id);
         Ok(())
     }

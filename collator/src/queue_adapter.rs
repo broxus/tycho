@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
@@ -19,7 +18,6 @@ pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>,
 }
 
-#[async_trait]
 pub trait MessageQueueAdapter<V>: Send + Sync
 where
     V: InternalMessageValue + Send + Sync,
@@ -41,7 +39,7 @@ where
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
 
-    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
+    fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
@@ -65,7 +63,6 @@ impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
     }
 }
 
-#[async_trait]
 impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdImpl<V> {
     #[instrument(skip_all, fields(%for_shard_id))]
     fn create_iterator(
@@ -116,10 +113,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
+    fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
         let time = std::time::Instant::now();
 
-        self.queue.commit_diff(&mc_top_blocks).await?;
+        self.queue.commit_diff(&mc_top_blocks)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             mc_top_blocks = %DisplayIter(mc_top_blocks.iter().map(DisplayTupleRef)),

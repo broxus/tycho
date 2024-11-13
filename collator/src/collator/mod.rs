@@ -748,7 +748,7 @@ impl CollatorStdImpl {
 
     /// Build working state update that would be applied before next collation
     #[allow(clippy::too_many_arguments)]
-    async fn prepare_working_state_update(
+    fn prepare_working_state_update(
         &mut self,
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
@@ -1150,10 +1150,7 @@ impl CollatorStdImpl {
         Ok(anchors_info)
     }
 
-    async fn check_has_unprocessed_messages(
-        &mut self,
-        working_state: &mut WorkingState,
-    ) -> Result<bool> {
+    fn check_has_unprocessed_messages(&mut self, working_state: &mut WorkingState) -> Result<bool> {
         if let Some(has_messages) = working_state.has_unprocessed_messages {
             return Ok(has_messages);
         }
@@ -1271,9 +1268,7 @@ impl CollatorStdImpl {
             .unwrap_or_default();
 
         // check has unprocessed messages in buffer or queue
-        let has_unprocessed_messages = self
-            .check_has_unprocessed_messages(&mut working_state)
-            .await?;
+        let has_unprocessed_messages = self.check_has_unprocessed_messages(&mut working_state)?;
         if has_unprocessed_messages {
             // collate if has unprocessed messages
             tracing::info!(target: tracing_targets::COLLATOR,
@@ -1471,9 +1466,8 @@ impl CollatorStdImpl {
                 TryCollateCheck::ForceMcBlockByUncommittedChainLength
             } else {
                 // check has unprocessed messages in buffer or queue
-                let has_uprocessed_messages = self
-                    .check_has_unprocessed_messages(&mut working_state)
-                    .await?;
+                let has_uprocessed_messages =
+                    self.check_has_unprocessed_messages(&mut working_state)?;
 
                 // check pending externals
                 let has_externals = self.anchors_cache.has_pending_externals();

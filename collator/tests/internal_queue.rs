@@ -84,7 +84,7 @@ impl InternalMessageValue for StoredObject {
     }
 }
 
-async fn create_stored_object(key: u64, dest_str: &str) -> anyhow::Result<Arc<StoredObject>> {
+fn create_stored_object(key: u64, dest_str: &str) -> anyhow::Result<Arc<StoredObject>> {
     let dest = IntAddr::Std(StdAddr::from_str(dest_str)?);
     Ok(Arc::new(StoredObject { key, dest }))
 }
@@ -115,28 +115,23 @@ async fn test_queue() -> anyhow::Result<()> {
         create_stored_object(
             1,
             "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             2,
             "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             3,
             "0:7d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             4,
             "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             5,
             "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
     ];
 
     for stored_object in &stored_objects {
@@ -148,7 +143,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let top_blocks = vec![(block, true)];
 
-    queue.commit_diff(&top_blocks).await?;
+    queue.commit_diff(&top_blocks)?;
 
     let block2 = BlockIdShort {
         shard: ShardIdent::new_full(1),
@@ -161,28 +156,23 @@ async fn test_queue() -> anyhow::Result<()> {
         create_stored_object(
             1,
             "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             2,
             "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             3,
             "0:7d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             4,
             "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
         create_stored_object(
             5,
             "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
+        )?,
     ];
 
     for stored_object in &stored_objects2 {
@@ -193,7 +183,7 @@ async fn test_queue() -> anyhow::Result<()> {
     let top_blocks = vec![(block2, true)];
 
     queue.apply_diff(diff, block2, &HashBytes::from([0; 32]))?;
-    queue.commit_diff(&top_blocks).await?;
+    queue.commit_diff(&top_blocks)?;
 
     let mut ranges = FastHashMap::default();
     ranges.insert(
@@ -253,13 +243,10 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     };
     let mut diff = QueueDiffWithMessages::new();
 
-    let stored_objects = vec![
-        create_stored_object(
-            1,
-            "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )
-        .await?,
-    ];
+    let stored_objects = vec![create_stored_object(
+        1,
+        "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+    )?];
 
     for stored_object in &stored_objects {
         diff.messages

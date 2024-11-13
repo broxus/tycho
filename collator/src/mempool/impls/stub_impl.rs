@@ -177,7 +177,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
+    fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
         Ok(())
     }
 
@@ -352,7 +352,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         }
     }
 
-    async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
+    fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
         let mut anchors_cache = self.anchors_cache.write();
         anchors_cache.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
         Ok(())
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(result.anchor().unwrap().id, 6);
 
         // test clear anchors cache
-        adapter.clear_anchors_cache(6).await?;
+        adapter.clear_anchors_cache(6)?;
         let result = adapter.get_anchor_by_id(STUB, 3).await?;
         assert!(result.anchor().is_none());
         let result = adapter.get_anchor_by_id(STUB, 4).await?;

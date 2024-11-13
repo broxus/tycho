@@ -61,7 +61,7 @@ async fn test_add_and_get_block() {
         top_shard_blocks_ids: Vec::new(),
         consensus_info: Default::default(),
     };
-    adapter.accept_block(block).await.unwrap();
+    adapter.accept_block(block).unwrap();
 
     // Test getting the next block (which should be the one just added)
     let next_block = adapter.wait_for_block(&block_id).await;
@@ -99,7 +99,7 @@ async fn test_storage_accessors() {
     let adapter =
         StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical);
 
-    let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
+    let last_mc_block_id = adapter.load_last_applied_mc_block_id().unwrap();
 
     storage
         .shard_state_storage()
@@ -136,7 +136,7 @@ async fn test_add_and_get_next_block() {
         top_shard_blocks_ids: Vec::new(),
         consensus_info: Default::default(),
     };
-    adapter.accept_block(block).await.unwrap();
+    adapter.accept_block(block).unwrap();
 
     let next_block = adapter.wait_for_block_next(prev_block_id).await;
     assert!(
@@ -211,7 +211,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     top_shard_blocks_ids: Vec::new(),
                     consensus_info: Default::default(),
                 };
-                let accept_result = adapter.accept_block(block).await;
+                let accept_result = adapter.accept_block(block);
                 assert!(accept_result.is_ok(), "Block {} should be accepted", i);
             }
         })
