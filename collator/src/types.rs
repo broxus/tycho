@@ -23,6 +23,7 @@ pub struct CollatorConfig {
     pub supported_block_version: u32,
     pub supported_capabilities: GlobalCapabilities,
     pub min_mc_block_delta_from_bc_to_sync: u32,
+    pub check_value_flow: bool,
 }
 
 impl Default for CollatorConfig {
@@ -31,6 +32,7 @@ impl Default for CollatorConfig {
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
             min_mc_block_delta_from_bc_to_sync: 3,
+            check_value_flow: false,
         }
     }
 }
