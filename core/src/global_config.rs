@@ -59,5 +59,5 @@ pub struct MempoolGlobalConfig {
     pub start_round: u32,
     pub genesis_time_millis: u64,
     #[serde(flatten)]
-    pub consensus_config: ConsensusConfig,
+    pub consensus_config: Option<ConsensusConfig>,
 }

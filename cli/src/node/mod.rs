@@ -275,12 +275,14 @@ impl Node {
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
         if let Some(global) = self.mempool_config_override.as_ref() {
             mempool_adapter
-                .override_config(|config| {
-                    config.set_consensus_config(&global.consensus_config);
+                .set_config(|config| {
+                    if let Some(consensus_config) = &global.consensus_config {
+                        config.set_consensus_config(consensus_config);
+                    } // else: will be set from mc state after sync
                     config.set_genesis(global.start_round, global.genesis_time_millis);
                 })
                 .await;
-        }
+        };
 
         // Create RPC
         let (rpc_block_subscriber, rpc_state_subscriber) = if let Some(config) = &self.rpc_config {

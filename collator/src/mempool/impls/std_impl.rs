@@ -70,13 +70,14 @@ impl MempoolAdapterStdImpl {
         }
     }
 
-    /// **Warning:** only to apply changes from `GlobalConfig` json after mempool crash
-    pub async fn override_config<F>(&self, fun: F)
+    /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state
+    /// only if applied mc state has greater time and round
+    pub async fn set_config<F, R>(&self, fun: F) -> R
     where
-        F: FnOnce(&mut MempoolConfigBuilder),
+        F: FnOnce(&mut MempoolConfigBuilder) -> R,
     {
         let mut config_guard = self.config.lock().await;
-        fun(&mut config_guard.builder);
+        fun(&mut config_guard.builder)
     }
 
     /// Runs mempool engine
@@ -308,8 +309,29 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     target: tracing_targets::MEMPOOL_ADAPTER,
                     %round,
                     %time,
-                    "Using genesis override"
+                    "Using genesis override from global config"
                 );
+                match config_guard.builder.get_consensus_config() {
+                    Some(cc) if cc == &new_cx.consensus_config => {
+                        tracing::warn!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "consensus config from global config is the same as in mc block"
+                        );
+                    }
+                    Some(_) => {
+                        tracing::warn!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "consensus config from global config overrides one from mc block"
+                        );
+                    }
+                    None => {
+                        (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
+                        tracing::warn!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "no consensus config in global config, using one from mc block"
+                        );
+                    }
+                }
             } else {
                 config_guard.builder.set_genesis(
                     new_cx.consensus_info.genesis_round,
