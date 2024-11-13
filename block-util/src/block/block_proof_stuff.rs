@@ -487,9 +487,9 @@ pub fn check_with_master_state(
 ) -> Result<()> {
     if virt_block_info.key_block {
         pre_check_key_block_proof(virt_block)?;
+    } else {
+        proof.check_consensus_info(&master_state.state_extra()?.consensus_info)?;
     }
-
-    proof.check_consensus_info(&master_state.state_extra()?.consensus_info)?;
 
     let subset = proof.process_given_state(master_state, virt_block_info)?;
     proof.check_signatures(&subset)
