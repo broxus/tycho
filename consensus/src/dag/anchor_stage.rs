@@ -3,10 +3,12 @@ use std::sync::atomic::AtomicBool;
 use rand::{Rng, SeedableRng};
 use tycho_network::PeerId;
 
-use crate::dag::WAVE_ROUNDS;
 use crate::engine::Genesis;
 use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Round};
+
+/// Commit leader is changed every 4 rounds
+const WAVE_ROUNDS: u32 = 4;
 
 #[derive(Debug)]
 pub struct AnchorStage {
@@ -41,19 +43,63 @@ impl AnchorStage {
         if !current_peers.contains(&leader) {
             return None;
         };
-        #[allow(clippy::match_same_arms)]
-        let role = match round.0 % WAVE_ROUNDS {
-            0 => None, // anchor candidate (surprisingly, nothing special about this point)
-            1 => Some(AnchorStageRole::Proof),
-            2 => Some(AnchorStageRole::Trigger),
-            3 => None, // leaderless support round (that actually follows every leader point chain)
-            _ => unreachable!(),
-        };
-        role.map(|role| Self {
+
+        let role = Self::role(round)?;
+        Some(Self {
             role,
             leader,
             // genesis is a corner case, exclude it from commit chain with explicit "true"
             is_used: AtomicBool::new(round == Genesis::round()),
         })
+    }
+
+    fn role(round: Round) -> Option<AnchorStageRole> {
+        #[allow(clippy::match_same_arms)]
+        match round.0 % WAVE_ROUNDS {
+            0 => None, // anchor candidate (surprisingly, nothing special about this point)
+            1 => Some(AnchorStageRole::Proof),
+            2 => Some(AnchorStageRole::Trigger),
+            3 => None, // leaderless support round (that actually follows every leader point chain)
+            _ => unreachable!(),
+        }
+    }
+}
+
+pub fn align_genesis(start_round: u32) -> Round {
+    Round(((start_round + 2) / WAVE_ROUNDS) * WAVE_ROUNDS + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{ensure, Result};
+
+    use super::*;
+
+    #[test]
+    pub fn test_genesis_aligned() -> Result<()> {
+        for start_round in 0..10 {
+            let genesis_round = align_genesis(start_round).0;
+            ensure!(
+                genesis_round >= start_round,
+                "genesis round must not be less than start round after alignment, \
+                 start_round={start_round}, genesis_round={genesis_round}",
+            );
+            ensure!(
+                genesis_round < start_round + WAVE_ROUNDS,
+                "aligned genesis increased too much, \
+                start_round={start_round}, genesis_round={genesis_round}",
+            );
+            anyhow::ensure!(
+                genesis_round > Round::BOTTOM.0,
+                "aligned genesis {genesis_round:?} is too low and will make code panic"
+            );
+
+            let role = AnchorStage::role(Round(genesis_round));
+            anyhow::ensure!(
+                role == Some(AnchorStageRole::Proof),
+                "genesis must be aligned to Proof anchor stage; round={genesis_round}",
+            );
+        }
+        Ok(())
     }
 }

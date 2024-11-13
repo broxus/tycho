@@ -71,7 +71,7 @@ impl MempoolAdapterStdImpl {
     }
 
     /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state
-    /// only if applied mc state has greater time and round
+    /// only if applied mc state has greater time and GEQ round
     pub async fn set_config<F, R>(&self, fun: F) -> R
     where
         F: FnOnce(&mut MempoolConfigBuilder) -> R,
@@ -90,7 +90,7 @@ impl MempoolAdapterStdImpl {
             .state_update_ctx
             .as_ref()
             .ok_or(anyhow!("last state update context is not set"))?;
-        let (genesis_round, _) = config_guard
+        let genesis = config_guard
             .builder
             .get_genesis()
             .context("genesis must be set")?;
@@ -126,7 +126,7 @@ impl MempoolAdapterStdImpl {
             .saturating_sub(consensus_config.max_consensus_lag_rounds as u32)
             .saturating_sub(consensus_config.deduplicate_rounds as u32)
             .saturating_sub(consensus_config.commit_history_rounds as u32)
-            .max(genesis_round);
+            .max(genesis.start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
@@ -144,8 +144,9 @@ impl MempoolAdapterStdImpl {
                 "cannot start from outdated peer sets (too short mempool epoch(s)): \
                  estimated sync bottom {estimated_sync_bottom} \
                  is older than prev vset switch round {}; \
-                 genesis round {genesis_round}, masterchain processed to anchor {} in block {}",
+                 start round {}, masterchain processed to anchor {} in block {}",
                 last_state_update.consensus_info.prev_vset_switch_round,
+                genesis.start_round,
                 last_state_update.mc_processed_to_anchor_id,
                 last_state_update.mc_block_id,
             )
@@ -289,26 +290,27 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 "Will start mempool with state update from mc block"
             );
 
-            if let Some((round, time)) = (config_guard.builder.get_genesis())
-                .filter(|(_, time)| *time > new_cx.consensus_info.genesis_millis)
-            {
+            if let Some(genesis) = (config_guard.builder.get_genesis()).filter(|genesis| {
+                genesis.start_round >= new_cx.consensus_info.genesis_round
+                    && genesis.time_millis > new_cx.consensus_info.genesis_millis
+            }) {
                 // Note: assume that global config is applied to mempool adapter
                 //   before collator is run in synchronous code, so this method is called later
 
+                // genesis does not have externals, so only strictly greater time and round
+                // will be saved into next block, so genesis can have values GEQ than in prev block
                 anyhow::ensure!(
-                    round >= new_cx.mc_processed_to_anchor_id && time >= new_cx.mc_block_chain_time,
-                    "new genesis round {} and time {} should be >= \
+                    genesis.start_round >= new_cx.mc_processed_to_anchor_id
+                        && genesis.time_millis >= new_cx.mc_block_chain_time,
+                    "new {genesis:?} should be >= \
                     master block processed_to_anchor_id {} and gen chain_time {}",
-                    round,
-                    time,
                     new_cx.mc_processed_to_anchor_id,
                     new_cx.mc_block_chain_time,
                 );
 
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
-                    %round,
-                    %time,
+                    ?genesis,
                     "Using genesis override from global config"
                 );
                 match config_guard.builder.get_consensus_config() {
@@ -338,7 +340,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     new_cx.consensus_info.genesis_millis,
                 );
                 (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
-            }
+            };
 
             config_guard.state_update_ctx = Some(new_cx);
             config_guard.engine_handle = Some(self.run(&config_guard)?);
