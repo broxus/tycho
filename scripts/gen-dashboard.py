@@ -777,6 +777,9 @@ def storage() -> RowPanel:
             "tycho_storage_state_update_time", "Time to write state update to rocksdb"
         ),
         create_heatmap_panel(
+            "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
+        ),
+        create_heatmap_panel(
             "tycho_storage_state_store_time", "Time to store state with cell traversal"
         ),
         create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),

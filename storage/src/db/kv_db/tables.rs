@@ -1,7 +1,7 @@
 use bytesize::ByteSize;
 use weedb::rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DBCompressionType, DataBlockIndexType, MergeOperands,
-    Options, ReadOptions,
+    Options, ReadOptions, SliceTransform,
 };
 use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
@@ -225,28 +225,88 @@ impl ColumnFamily for Cells {
 }
 
 impl ColumnFamilyOptions<Caches> for Cells {
-    fn options(opts: &mut Options, caches: &mut Caches) {
+    fn options(opts: &mut Options, block_cache: &mut Caches) {
         opts.set_level_compaction_dynamic_level_bytes(true);
 
         opts.set_merge_operator_associative("cell_merge", refcount::merge_operator);
         opts.set_compaction_filter("cell_compaction", refcount::compaction_filter);
 
-        optimize_for_level_compaction(opts, ByteSize::gib(1u64));
+        // optimize for bulk inserts and single writer
+        opts.set_max_write_buffer_number(6); // 6 * 512MB = 3GB for write buffers
+        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
+        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
+
+        // try to do more merges in memory
+        opts.set_max_successive_merges(100);
 
         let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
 
+        // todo: some how make block cache separate for cells,
+        // using 3/4 of all available cache space
+        block_factory.set_block_cache(&block_cache.block_cache);
+
+        // 10 bits per key, stored at the end of the sst
         block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_block_size(16 * 1024);
+        block_factory.set_optimize_filters_for_memory(true);
+        block_factory.set_whole_key_filtering(true);
+
+        // to match fs block size
+        block_factory.set_block_size(4096);
         block_factory.set_format_version(5);
 
+        // we have 4096 / 256 = 16 keys per block, so binary search is enough
+        block_factory.set_data_block_index_type(DataBlockIndexType::BinarySearch);
+
+        block_factory.set_index_type(BlockBasedIndexType::HashSearch);
+        block_factory.set_pin_l0_filter_and_index_blocks_in_cache(true);
+
         opts.set_block_based_table_factory(&block_factory);
+
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+        opts.set_memtable_prefix_bloom_ratio(0.1);
+
+        opts.set_compression_type(DBCompressionType::None);
+
+        opts.set_level_zero_file_num_compaction_trigger(8); // flush L0 as soon as possible
+        opts.set_target_file_size_base(512 * 1024 * 1024); // smaller files for more efficient GC
+        opts.set_max_background_jobs(16);
+        opts.set_max_subcompactions(4);
+
+        opts.set_max_bytes_for_level_base(4 * 1024 * 1024 * 1024); // 4GB per level
+        opts.set_max_bytes_for_level_multiplier(8.0);
+
+        // 512MB per file; less files - less compactions
+        opts.set_target_file_size_base(512 * 1024 * 1024);
+        // L1: 4GB
+        // L2: ~32GB
+        // L3: ~256GB
+        // L4: ~2TB
+        opts.set_num_levels(5);
+
         opts.set_optimize_filters_for_hits(true);
-        // option is set for cf
-        opts.set_compression_type(DBCompressionType::Lz4);
+
+        // we have our own cache and don't want `kcompactd` goes brrr scenario
+        opts.set_use_direct_reads(true);
+        opts.set_use_direct_io_for_flush_and_compaction(true);
+
+        opts.add_compact_on_deletion_collector_factory(
+            100, // N: examine 100 consecutive entries
+            // Small enough window to detect local delete patterns
+            // Large enough to avoid spurious compactions
+            45, // D: trigger on 45 deletions in window
+            // Balance between the space reclaim and compaction frequency
+            // ~45% deletion density trigger
+            0.5, /* deletion_ratio: trigger if 50% of a total file is deleted
+                  * Backup trigger for overall file health
+                  * Higher than window trigger to prefer local optimization */
+        );
+
+        // single writer optimizations
+        opts.set_enable_write_thread_adaptive_yield(false);
+        opts.set_allow_concurrent_memtable_write(false);
+        opts.set_enable_pipelined_write(true);
+        opts.set_inplace_update_support(true);
+        opts.set_unordered_write(true); // we don't use snapshots
     }
 }
 
