@@ -32,7 +32,6 @@ use crate::utils::async_queued_dispatcher::{
 };
 use crate::{method_to_queued_async_closure, tracing_targets};
 
-mod build_block;
 mod debug_info;
 mod do_collate;
 mod error;
@@ -223,7 +222,7 @@ pub struct CollatorStdImpl {
     shard_id: ShardIdent,
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
-    anchors_cache: AnchorsCache,
+    anchors_cache: Option<AnchorsCache>,
     stats: CollatorStats,
     timer: std::time::Instant,
     anchor_timer: std::time::Instant,
@@ -275,7 +274,7 @@ impl CollatorStdImpl {
                 }
             }),
             store_new_state_tasks: Default::default(),
-            anchors_cache: Default::default(),
+            anchors_cache: Some(Default::default()),
             stats: Default::default(),
             timer: std::time::Instant::now(),
             anchor_timer: std::time::Instant::now(),
@@ -483,11 +482,14 @@ impl CollatorStdImpl {
                         .load_extra()
                         .map_err(|e| CollatorError::Anyhow(e.into()))?
                         .created_by;
-                    self.anchors_cache.set_last_imported_anchor_info(
-                        mempool_config.start_round,
-                        prev_chain_time,
-                        created_by,
-                    );
+                    self.anchors_cache
+                        .as_mut()
+                        .unwrap()
+                        .set_last_imported_anchor_info(
+                            mempool_config.start_round,
+                            prev_chain_time,
+                            created_by,
+                        );
                 }
 
                 import_init_anchors
@@ -509,7 +511,7 @@ impl CollatorStdImpl {
                 processed_to_msgs_offset,
                 prev_shard_data.gen_chain_time(),
                 self.shard_id,
-                &mut self.anchors_cache,
+                self.anchors_cache.as_mut().unwrap(),
                 self.mpool_adapter.clone(),
                 working_state.mc_data.top_processed_to_anchor,
             )
@@ -1186,17 +1188,15 @@ impl CollatorStdImpl {
         );
 
         let mut current_processed_upto = prev_shard_data.processed_upto().clone();
-        mq_iterator_adapter
-            .try_init_next_range_iterator(
-                &mut current_processed_upto,
-                working_state
-                    .mc_data
-                    .shards
-                    .iter()
-                    .map(|(k, v)| (*k, v.end_lt)),
-                InitIteratorMode::UseNextRange,
-            )
-            .await?;
+        mq_iterator_adapter.try_init_next_range_iterator(
+            &mut current_processed_upto,
+            working_state
+                .mc_data
+                .shards
+                .iter()
+                .map(|(k, v)| (*k, v.end_lt)),
+            InitIteratorMode::UseNextRange,
+        )?;
 
         let has_internals = if !mq_iterator_adapter.no_pending_existing_internals() {
             mq_iterator_adapter.iterator().next(true)?.is_some()
@@ -1270,6 +1270,8 @@ impl CollatorStdImpl {
 
         let (last_imported_anchor_id, last_imported_chain_time) = self
             .anchors_cache
+            .as_ref()
+            .unwrap()
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
 
@@ -1303,7 +1305,7 @@ impl CollatorStdImpl {
             let collation_cancelled = self.cancel_collation.notified();
             let import_fut = Self::import_next_anchor(
                 self.shard_id,
-                &mut self.anchors_cache,
+                self.anchors_cache.as_mut().unwrap(),
                 self.mpool_adapter.clone(),
                 working_state.mc_data.top_processed_to_anchor,
                 working_state
@@ -1479,7 +1481,7 @@ impl CollatorStdImpl {
                     .await?;
 
                 // check pending externals
-                let has_externals = self.anchors_cache.has_pending_externals();
+                let has_externals = self.anchors_cache.as_mut().unwrap().has_pending_externals();
 
                 // check if should import anchor after fixed wu used by blocks collation
                 let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
@@ -1491,6 +1493,8 @@ impl CollatorStdImpl {
                 // decide if should import anchors
                 let (last_imported_anchor_id, last_imported_chain_time) = self
                     .anchors_cache
+                    .as_ref()
+                    .unwrap()
                     .get_last_imported_anchor_id_and_ct()
                     .unwrap_or_default();
                 match (
@@ -1535,7 +1539,7 @@ impl CollatorStdImpl {
                     let collation_cancelled = self.cancel_collation.notified();
                     let import_fut = Self::import_next_anchor(
                         self.shard_id,
-                        &mut self.anchors_cache,
+                        self.anchors_cache.as_mut().unwrap(),
                         self.mpool_adapter.clone(),
                         working_state.mc_data.top_processed_to_anchor,
                         max_consensus_lag_rounds,
@@ -1648,6 +1652,8 @@ impl CollatorStdImpl {
 
         let (last_imported_anchor_id, last_imported_chain_time) = self
             .anchors_cache
+            .as_ref()
+            .unwrap()
             .get_last_imported_anchor_id_and_ct()
             .unwrap();
         let prev_block_chain_time = working_state.prev_shard_data_ref().gen_chain_time();

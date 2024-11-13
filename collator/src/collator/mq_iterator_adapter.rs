@@ -115,7 +115,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     }
 
     #[tracing::instrument(skip_all, fields(mode = ?mode))]
-    pub async fn try_init_next_range_iterator<I>(
+    pub fn try_init_next_range_iterator<I>(
         &mut self,
         processed_upto: &mut ProcessedUptoInfoStuff,
         mc_top_shards_end_lts: I,
@@ -146,7 +146,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 let NewIterator {
                     iterator,
                     ranges_fully_read,
-                } = self.get_new_iterator(current_range, false).await?;
+                } = self.get_new_iterator(current_range, false)?;
 
                 self.no_pending_existing_internals = ranges_fully_read;
 
@@ -156,8 +156,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             }
             (true, true, InitIteratorMode::OmitNextRange) => {
                 // on refill we do not need to use next range at all
-                let NewIterator { iterator, .. } =
-                    self.get_new_iterator(current_range, true).await?;
+                let NewIterator { iterator, .. } = self.get_new_iterator(current_range, true)?;
 
                 self.no_pending_existing_internals = true;
 
@@ -193,7 +192,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                     self.no_pending_existing_internals = false;
 
                     let NewIterator { iterator, .. } =
-                        self.update_iterator(current_range, processed_upto).await?;
+                        self.update_iterator(current_range, processed_upto)?;
 
                     // replace current iterator
                     if let Some(mut prev_iterator) = self.iterator_opt.replace(iterator) {
@@ -345,7 +344,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         }
     }
 
-    async fn get_new_iterator(
+    fn get_new_iterator(
         &mut self,
         current_range: CurrentRange,
         mut ranges_fully_read: bool,
@@ -388,10 +387,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             ranges_from.clone()
         };
 
-        let mut new_ranges_iterator = self
-            .mq_adapter
-            .create_iterator(self.shard_id, ranges_from, ranges_to)
-            .await?;
+        let mut new_ranges_iterator =
+            self.mq_adapter
+                .create_iterator(self.shard_id, ranges_from, ranges_to)?;
         // set processed messages in iterator by original ranges_from
         new_ranges_iterator.commit(current_ranges_from.into_iter().collect())?;
         Ok(NewIterator {
@@ -400,7 +398,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         })
     }
 
-    async fn update_iterator(
+    fn update_iterator(
         &mut self,
         current_range: CurrentRange,
         processed_upto: &mut ProcessedUptoInfoStuff,
@@ -426,10 +424,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             );
         }
         // and init iterator
-        let mut new_ranges_iterator = self
-            .mq_adapter
-            .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)
-            .await?;
+        let mut new_ranges_iterator =
+            self.mq_adapter
+                .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)?;
         // set processed messages in iterator by ranges_from
         new_ranges_iterator.commit(ranges_from.into_iter().collect())?;
         // we created iterator for new ranges - clear current position

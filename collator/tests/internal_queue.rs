@@ -144,9 +144,7 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    queue
-        .apply_diff(diff, block, &HashBytes::from([1; 32]))
-        .await?;
+    queue.apply_diff(diff, block, &HashBytes::from([1; 32]))?;
 
     let top_blocks = vec![(block, true)];
 
@@ -194,9 +192,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let top_blocks = vec![(block2, true)];
 
-    queue
-        .apply_diff(diff, block2, &HashBytes::from([0; 32]))
-        .await?;
+    queue.apply_diff(diff, block2, &HashBytes::from([0; 32]))?;
     queue.commit_diff(&top_blocks).await?;
 
     let mut ranges = FastHashMap::default();
@@ -214,7 +210,7 @@ async fn test_queue() -> anyhow::Result<()> {
         ),
     );
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(-1)).await;
+    let iterators = queue.iterator(&ranges, ShardIdent::new_full(-1));
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     iterator_manager.next().ok();
@@ -270,9 +266,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    queue
-        .apply_diff(diff, block, &HashBytes::from([1; 32]))
-        .await?;
+    queue.apply_diff(diff, block, &HashBytes::from([1; 32]))?;
 
     let mut ranges = FastHashMap::default();
     ranges.insert(
@@ -289,14 +283,14 @@ async fn test_queue_clear() -> anyhow::Result<()> {
         ),
     );
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1)).await;
+    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1));
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next().ok().is_some());
 
     queue.clear_session_state()?;
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1)).await;
+    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1));
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next()?.is_none());

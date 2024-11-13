@@ -84,7 +84,7 @@ struct MessageQueueAdapterTestImpl<V: InternalMessageValue> {
 #[async_trait]
 #[allow(clippy::unimplemented)]
 impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueAdapterTestImpl<V> {
-    async fn create_iterator(
+    fn create_iterator(
         &self,
         _for_shard_id: ShardIdent,
         _shards_from: FastHashMap<ShardIdent, QueueKey>,
@@ -93,7 +93,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         Ok(Box::new(QueueIteratorTestImpl::default()))
     }
 
-    async fn apply_diff(
+    fn apply_diff(
         &self,
         _diff: QueueDiffWithMessages<V>,
         _block_id_short: BlockIdShort,
@@ -241,8 +241,8 @@ fn gen_stub_working_state(
     Box::new(working_state)
 }
 
-#[tokio::test]
-async fn test_refill_msgs_buffer_with_only_externals() {
+#[test]
+fn test_refill_msgs_buffer_with_only_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
     let mc_shard_id = ShardIdent::new_full(-1);
@@ -348,7 +348,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
             mc_top_shards_end_lts.iter().copied(),
             InitIteratorMode::OmitNextRange,
         )
-        .await
         .unwrap();
 
     let mut messages_reader = MessagesReader::new(shard_id, 20, mc_top_shards_end_lts);
@@ -366,7 +365,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 &mut anchors_cache,
                 &mut mq_iterator_adapter,
             )
-            .await
             .unwrap();
         if msg_group.is_none() {
             break;
@@ -422,7 +420,6 @@ async fn test_refill_msgs_buffer_with_only_externals() {
                 &mut anchors_cache,
                 &mut mq_iterator_adapter,
             )
-            .await
             .unwrap();
         if msg_group.is_none() {
             break;
