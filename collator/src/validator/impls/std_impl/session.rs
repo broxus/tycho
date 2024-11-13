@@ -183,22 +183,20 @@ impl ValidatorSession {
 
         let state = &self.inner.state;
 
-        let entry = state.block_signatures.entry(block_id.seqno);
-        if let tycho_util::DashMapEntry::Occupied(_) = entry {
-            anyhow::bail!(
+        // first check for prevent slow operations
+        if state.block_signatures.contains_key(&block_id.seqno) {
+            panic!(
                 "block validation is already in progress. \
                  session_id={}, block_id={:?}",
-                self.inner.session_id,
-                block_id
+                self.inner.session_id, block_id
             );
         }
 
         let cached = state
             .cached_signatures
-            .remove(&block_id.seqno)
-            .map(|(_, value)| value);
+            .get(&block_id.seqno)
+            .map(|entry| entry.clone());
 
-        // Prepare block signatures
         let block_signatures = {
             match &cached {
                 Some(cached) => self.reuse_signatures(block_id, cached.clone()).await,
@@ -207,7 +205,22 @@ impl ValidatorSession {
             .build(block_id, state.weight_threshold)
         };
 
-        entry.or_insert(block_signatures.clone());
+        // second check for prevent data races
+        match state.block_signatures.entry(block_id.seqno) {
+            tycho_util::DashMapEntry::Occupied(_) => {
+                panic!(
+                    "block validation is already in progress. \
+                 session_id={}, block_id={:?}",
+                    self.inner.session_id, block_id
+                );
+            }
+            tycho_util::DashMapEntry::Vacant(signatures) => {
+                signatures.insert(block_signatures.clone());
+                // NOTE: To eliminate the gap inside exchange routine, we can remove cached signatures
+                // only after we have inserted the block.
+                state.cached_signatures.remove(&block_id.seqno);
+            }
+        }
 
         // At this point the following is true:
         // - All new signatures will be stored (and validated) in the block;
@@ -294,7 +307,6 @@ impl ValidatorSession {
             debug_assert!(prev.is_none(), "duplicate signature in result");
             total_weight += validator_info.weight;
         }
-
         tracing::info!(target: tracing_targets::VALIDATOR, "finished");
         Ok(ValidationStatus::Complete(ValidationComplete {
             signatures: result,
@@ -797,7 +809,6 @@ impl ExchangeSignatures for SessionState {
             action,
             "exchanged signatures"
         );
-
         Ok(result)
     }
 }
