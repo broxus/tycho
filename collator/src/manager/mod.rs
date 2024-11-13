@@ -498,7 +498,8 @@ where
         );
         match cancel_reason {
             CollationCancelReason::AnchorNotFound(_)
-            | CollationCancelReason::NextAnchorNotFound(_) => {
+            | CollationCancelReason::NextAnchorNotFound(_)
+            | CollationCancelReason::ExternalCancel => {
                 // mark collator as cancelled
                 self.set_collator_state(&next_block_id_short.shard, |ac| {
                     ac.state = CollatorState::Cancelled;
@@ -982,15 +983,61 @@ where
                         last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                         last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
                         "check_should_sync: should sync to last applied mc block \
-                        when all collators were cancelled, or waiting, or ther are no collators",
+                        when all collators were cancelled, or waiting, or there are no collators",
                     );
                     true
+                } else if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+                    let should_sync = match store_res.last_collated_mc_block_id {
+                        None => {
+                            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                                "check_should_sync: should sync to last applied mc block from bc: \
+                                last applied ({}) and last collated not exist",
+                                applied_range_end,
+                            );
+                            true
+                        }
+                        Some(last_collated_mc_block_id) => {
+                            let applied_range_end_delta =
+                                applied_range_end.saturating_sub(last_collated_mc_block_id.seqno);
+                            if applied_range_end_delta
+                                < self.config.min_mc_block_delta_from_bc_to_sync
+                            {
+                                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                    "check_should_sync: should wait for next collated own mc block: \
+                                    last applied ({}) ahead last collated ({}) on {} < {}",
+                                    applied_range_end, last_collated_mc_block_id.seqno,
+                                    applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
+                                );
+                                false
+                            } else {
+                                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                                    "check_should_sync: should sync to last applied mc block from bc: \
+                                    last applied ({}) ahead last collated ({}) on {} >= {}",
+                                    applied_range_end, last_collated_mc_block_id.seqno,
+                                    applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
+                                );
+                                true
+                            }
+                        }
+                    };
+
+                    // we cannot sync right now because some collators are active
+                    // so we try to gracefully cancel collation in active collators
+                    if should_sync {
+                        for active_collator in self.active_collators.iter().filter(|ac| {
+                            ac.state == CollatorState::Active
+                                || ac.state == CollatorState::CancelPending
+                        }) {
+                            active_collator.cancel_collation.notify_waiters();
+                        }
+                    }
+
+                    // and finish processing without syncing
+                    false
                 } else {
+                    // should collate next own mc block because no applied ahead
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                        last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
-                        "check_should_sync: should wait for next collated own mc block \
-                        because collation is active",
+                        "check_should_sync: should collate next own mc block after because nothing applied ahead",
                     );
                     false
                 }
@@ -1640,6 +1687,8 @@ where
                         new_session_info.id(),
                     );
 
+                    let cancel_collation_notify = Arc::new(Notify::new());
+
                     let collator = self
                         .collator_factory
                         .start(CollatorContext {
@@ -1653,12 +1702,14 @@ where
                             prev_blocks_ids,
                             mc_data: mc_data.clone(),
                             mempool_config_override: self.mempool_config_override.clone(),
+                            cancel_collation: cancel_collation_notify.clone(),
                         })
                         .await;
 
                     entry.insert(ActiveCollator {
                         collator: Arc::new(collator),
                         state: CollatorState::Active,
+                        cancel_collation: cancel_collation_notify,
                     });
                 }
             }

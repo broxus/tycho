@@ -4,6 +4,7 @@ use crate::mempool::MempoolAnchorId;
 pub enum CollationCancelReason {
     AnchorNotFound(MempoolAnchorId),
     NextAnchorNotFound(MempoolAnchorId),
+    ExternalCancel,
 }
 
 #[derive(thiserror::Error, Debug)]
