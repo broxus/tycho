@@ -8,7 +8,7 @@ use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::*;
 use futures_util::future::Future;
 use mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
@@ -60,6 +60,9 @@ pub struct CollatorContext {
     pub mc_data: Arc<McData>,
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,
+
+    /// For graceful collation cancellation
+    pub cancel_collation: Arc<Notify>,
 }
 
 #[async_trait]
@@ -154,6 +157,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.prev_blocks_ids,
             cx.mc_data,
             cx.mempool_config_override,
+            cx.cancel_collation,
         )
         .await
     }
@@ -227,6 +231,9 @@ pub struct CollatorStdImpl {
 
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,
+
+    /// For graceful collation cancellation
+    pub cancel_collation: Arc<Notify>,
 }
 
 impl CollatorStdImpl {
@@ -242,6 +249,7 @@ impl CollatorStdImpl {
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
         mempool_config_override: Option<MempoolGlobalConfig>,
+        cancel_collation: Arc<Notify>,
     ) -> AsyncQueuedDispatcher<Self> {
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
@@ -273,6 +281,7 @@ impl CollatorStdImpl {
             anchor_timer: std::time::Instant::now(),
             shard_blocks_count_from_last_anchor: 0,
             mempool_config_override,
+            cancel_collation,
         };
 
         // create dispatcher for own async tasks queue
@@ -354,7 +363,12 @@ impl CollatorStdImpl {
         )) = processed_to_anchor_info_opt
         {
             let timer = std::time::Instant::now();
-            let anchors_info = match self
+
+            // anchors importing can stuck if mempool paused
+            // so allow to cancel collation here
+            let cancel_collation = self.cancel_collation.clone();
+            let import_init_anchors_res = tokio::select! {
+                res = self
                 .check_and_import_init_anchors(
                     false,
                     &working_state,
@@ -362,9 +376,23 @@ impl CollatorStdImpl {
                     processed_to_msgs_offset as _,
                     prev_chain_time,
                     prev_block_id,
-                )
-                .await
-            {
+                ) => res,
+                _ = cancel_collation.notified() => {
+                    tracing::info!(target: tracing_targets::COLLATOR,
+                        "collation was cancelled by manager on init",
+                    );
+                    self.listener
+                        .on_cancelled(
+                            working_state.mc_data.block_id,
+                            working_state.next_block_id_short,
+                            CollationCancelReason::ExternalCancel,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+            let anchors_info = match import_init_anchors_res {
                 Err(CollatorError::Cancelled(reason)) => {
                     self.listener
                         .on_cancelled(
@@ -377,6 +405,7 @@ impl CollatorStdImpl {
                 }
                 res => res?,
             };
+
             if !anchors_info.is_empty() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     elapsed = timer.elapsed().as_millis(),
@@ -587,7 +616,12 @@ impl CollatorStdImpl {
             )) = processed_to_anchor_info_opt
             {
                 let timer = std::time::Instant::now();
-                let anchors_info = match self
+
+                // anchors importing can stuck if mempool paused
+                // so allow to cancel collation here
+                let cancel_collation_notify = self.cancel_collation.clone();
+                let import_init_anchors_res = tokio::select! {
+                    res = self
                     .check_and_import_init_anchors(
                         true,
                         &working_state,
@@ -595,9 +629,23 @@ impl CollatorStdImpl {
                         processed_to_msgs_offset as _,
                         prev_chain_time,
                         prev_block_id,
-                    )
-                    .await
-                {
+                    ) => res,
+                    _ = cancel_collation_notify.notified() => {
+                        tracing::info!(target: tracing_targets::COLLATOR,
+                            "collation was cancelled by manager on resume",
+                        );
+                        self.listener
+                            .on_cancelled(
+                                working_state.mc_data.block_id,
+                                working_state.next_block_id_short,
+                                CollationCancelReason::ExternalCancel,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                };
+
+                let anchors_info = match import_init_anchors_res {
                     Err(CollatorError::Cancelled(reason)) => {
                         self.listener
                             .on_cancelled(
@@ -610,6 +658,7 @@ impl CollatorStdImpl {
                     }
                     res => res?,
                 };
+
                 if !anchors_info.is_empty() {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         elapsed = timer.elapsed().as_millis(),
@@ -1245,19 +1294,40 @@ impl CollatorStdImpl {
                 "there are no unprocessed messages, will import next anchor",
             );
 
-            let import_anchor_result = Self::import_next_anchor(
-                self.shard_id,
-                &mut self.anchors_cache,
-                self.mpool_adapter.clone(),
-                self.mempool_config_override.as_ref().map(|c| c.start_round),
-                working_state.mc_data.top_processed_to_anchor,
-                working_state
-                    .mc_data
-                    .config
-                    .get_consensus_config()?
-                    .max_consensus_lag_rounds as u32,
-            )
-            .await?;
+            // next anchor importing can stuck if mempool paused
+            // so allow to cancel collation here
+            let cancel_collation = self.cancel_collation.clone();
+            let import_anchor_result = tokio::select! {
+                res = Self::import_next_anchor(
+                    self.shard_id,
+                    &mut self.anchors_cache,
+                    self.mpool_adapter.clone(),
+                    self.mempool_config_override.as_ref().map(|c| c.start_round),
+                    working_state.mc_data.top_processed_to_anchor,
+                    working_state
+                        .mc_data
+                        .config
+                        .get_consensus_config()?
+                        .max_consensus_lag_rounds as u32,
+                ) => res?,
+                _ = cancel_collation.notified() => {
+                    tracing::info!(target: tracing_targets::COLLATOR,
+                        top_processed_to_anchor,
+                        last_imported_anchor_id,
+                        last_imported_chain_time,
+                        "collation was cancelled by manager on try_collate_next_master_block",
+                    );
+                    self.listener
+                        .on_cancelled(
+                            working_state.mc_data.block_id,
+                            working_state.next_block_id_short,
+                            CollationCancelReason::ExternalCancel,
+                        )
+                        .await?;
+                    self.delayed_working_state.delay(working_state);
+                    return Ok(());
+                }
+            };
 
             match import_anchor_result {
                 ImportNextAnchor::Result {
@@ -1453,17 +1523,39 @@ impl CollatorStdImpl {
                 let mut imported_anchors_count = 0;
                 let mut imported_anchors_has_externals = false;
 
+                let cancel_collation = self.cancel_collation.clone();
+
                 // import anchors until wu_used_from_last_anchor > wu_used_to_import_next_anchor
                 loop {
-                    let import_anchor_result = Self::import_next_anchor(
-                        self.shard_id,
-                        &mut self.anchors_cache,
-                        self.mpool_adapter.clone(),
-                        self.mempool_config_override.as_ref().map(|c| c.start_round),
-                        working_state.mc_data.top_processed_to_anchor,
-                        max_consensus_lag_rounds,
-                    )
-                    .await?;
+                    // next anchor importing can stuck if mempool paused
+                    // so allow to cancel collation here
+                    let import_anchor_result = tokio::select! {
+                        res = Self::import_next_anchor(
+                            self.shard_id,
+                            &mut self.anchors_cache,
+                            self.mpool_adapter.clone(),
+                            self.mempool_config_override.as_ref().map(|c| c.start_round),
+                            working_state.mc_data.top_processed_to_anchor,
+                            max_consensus_lag_rounds,
+                        ) => res?,
+                        _ = cancel_collation.notified() => {
+                            tracing::info!(target: tracing_targets::COLLATOR,
+                                top_processed_to_anchor,
+                                last_imported_anchor_id,
+                                last_imported_chain_time,
+                                "collation was cancelled by manager on try_collate_next_shard_block",
+                            );
+                            self.listener
+                                .on_cancelled(
+                                    working_state.mc_data.block_id,
+                                    working_state.next_block_id_short,
+                                    CollationCancelReason::ExternalCancel,
+                                )
+                                .await?;
+                            self.delayed_working_state.delay(working_state);
+                            return Ok(());
+                        }
+                    };
 
                     match import_anchor_result {
                         ImportNextAnchor::Result {

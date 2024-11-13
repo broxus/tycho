@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
+use tokio::sync::Notify;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
@@ -27,6 +28,9 @@ pub(super) enum CollatorState {
 pub(super) struct ActiveCollator<C> {
     pub collator: C,
     pub state: CollatorState,
+
+    /// For graceful collation cancellation
+    pub cancel_collation: Arc<Notify>,
 }
 
 #[derive(Default)]
