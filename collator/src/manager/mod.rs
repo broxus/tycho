@@ -471,13 +471,11 @@ where
 
         let queue_diff_with_msgs =
             QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
-        mq_adapter
-            .apply_diff(
-                queue_diff_with_msgs,
-                queue_diff.block_id().as_short_id(),
-                queue_diff.diff_hash(),
-            )
-            .await
+        mq_adapter.apply_diff(
+            queue_diff_with_msgs,
+            queue_diff.block_id().as_short_id(),
+            queue_diff.diff_hash(),
+        )
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
@@ -1235,8 +1233,7 @@ where
         // apply required previous queue diffs
         while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
             self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash)
-                .await?;
+                .apply_diff(diff, block_id.as_short_id(), &diff_hash)?;
         }
 
         // sync all applied blocks

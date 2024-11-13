@@ -25,14 +25,14 @@ where
     V: InternalMessageValue + Send + Sync,
 {
     /// Create iterator for specified shard and return it
-    async fn create_iterator(
+    fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
         shards_from: FastHashMap<ShardIdent, QueueKey>,
         shards_to: FastHashMap<ShardIdent, QueueKey>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(
+    fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
@@ -68,7 +68,7 @@ impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
 #[async_trait]
 impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdImpl<V> {
     #[instrument(skip_all, fields(%for_shard_id))]
-    async fn create_iterator(
+    fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
         shards_from: FastHashMap<ShardIdent, QueueKey>,
@@ -77,7 +77,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
-        let states_iterators = self.queue.iterator(&ranges, for_shard_id).await;
+        let states_iterators = self.queue.iterator(&ranges, for_shard_id);
 
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
 
@@ -96,7 +96,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all, fields(%block_id_short))]
-    async fn apply_diff(
+    fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
@@ -105,7 +105,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_upto = diff.processed_upto.clone();
-        self.queue.apply_diff(diff, block_id_short, hash).await?;
+        self.queue.apply_diff(diff, block_id_short, hash)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             new_messages_len = len,
