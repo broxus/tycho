@@ -216,21 +216,24 @@ impl Mempool {
         let mut anchor_consumer = AnchorConsumer::default();
         anchor_consumer.add(*local_id, committed_rx);
 
-        match self.config_override.as_ref() {
+        // FIXME load genesis data from McStateExtra instead of using default
+        let global_config = self.config_override.unwrap_or(MempoolGlobalConfig {
+            start_round: 0,
+            genesis_time_millis: 0,
+            consensus_config: None,
+        });
+
+        self.config_builder
+            .set_genesis(global_config.start_round, global_config.genesis_time_millis);
+
+        let consensus_config = match &global_config.consensus_config {
+            Some(consensus_config) => consensus_config,
             None => {
                 let config = zerostate.config_params()?;
-                self.config_builder
-                    .set_consensus_config(&config.params.get_consensus_config()?);
-                // FIXME load genesis data from McStateExtra
-                self.config_builder.set_genesis(0, 0);
-            }
-            Some(global) => {
-                self.config_builder
-                    .set_consensus_config(&global.consensus_config);
-                self.config_builder
-                    .set_genesis(global.start_round, global.genesis_time_millis);
+                &config.params.get_consensus_config()?
             }
         };
+        self.config_builder.set_consensus_config(consensus_config);
 
         let engine = Engine::new(
             self.keypair.clone(),
