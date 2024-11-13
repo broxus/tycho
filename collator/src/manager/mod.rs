@@ -141,18 +141,19 @@ where
         metrics_report_last_applied_block_and_anchor(state, &processed_upto);
 
         let state_cloned = state.clone();
-        self.spawn_task(method_to_async_closure!(
-            detect_top_processed_to_anchor_and_notify_mempool,
-            state_cloned,
-            processed_upto
-        ))
+
+        self.spawn_task(move |worker| {
+            Box::pin(async move {
+                worker
+                    .detect_top_processed_to_anchor_and_notify_mempool(state_cloned, processed_upto)
+            })
+        })
         .await?;
 
         let state_cloned = state.clone();
-        self.spawn_task(method_to_async_closure!(
-            cancel_validation_sessions_until_block,
-            state_cloned
-        ))
+        self.spawn_task(move |worker| {
+            Box::pin(async move { worker.cancel_validation_sessions_until_block(state_cloned) })
+        })
         .await?;
 
         Ok(())
@@ -245,8 +246,10 @@ where
     }
 
     async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
-        self.spawn_task(method_to_async_closure!(handle_collator_stopped, stop_key))
-            .await
+        self.spawn_task(move |worker| {
+            Box::pin(async move { worker.handle_collator_stopped(stop_key) })
+        })
+        .await
     }
 }
 
@@ -344,7 +347,7 @@ where
     /// Tries to determine top anchor that was processed to
     /// by info from received state and notify mempool
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    async fn detect_top_processed_to_anchor_and_notify_mempool(
+    fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
         state: ShardStateStuff,
         processed_upto: ProcessedUptoInfo,
@@ -362,10 +365,9 @@ where
                 .map(|(_, descr)| descr),
             processed_upto.externals.as_ref(),
         )
-        .await
     }
 
-    async fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
+    fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
         &self,
         mc_top_shards: I,
         mc_ext_processed_upto: Option<&ExternalsProcessedUpto>,
@@ -383,13 +385,12 @@ where
 
         );
 
-        self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)
-            .await?;
+        self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)?;
 
         Ok(())
     }
 
-    async fn notify_top_processed_to_anchor_to_mempool(
+    fn notify_top_processed_to_anchor_to_mempool(
         &self,
         top_processed_to_anchor: MempoolAnchorId,
     ) -> Result<()> {
@@ -399,26 +400,23 @@ where
         );
 
         self.mpool_adapter
-            .handle_top_processed_to_anchor(top_processed_to_anchor)
-            .await?;
+            .handle_top_processed_to_anchor(top_processed_to_anchor)?;
 
-        // clean anchors cache in mempool
         self.mpool_adapter
-            .clear_anchors_cache(top_processed_to_anchor)
-            .await?;
+            .clear_anchors_cache(top_processed_to_anchor)?;
 
         Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    async fn cancel_validation_sessions_until_block(&self, state: ShardStateStuff) -> Result<()> {
+    fn cancel_validation_sessions_until_block(&self, state: ShardStateStuff) -> Result<()> {
         self.validator
             .cancel_validation(&state.block_id().as_short_id())?;
         Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(block_id = %block_id))]
-    async fn commit_block_queue_diff(
+    fn commit_block_queue_diff(
         &self,
         block_id: &BlockId,
         top_shard_blocks_info: &[(BlockId, bool)],
@@ -435,7 +433,7 @@ where
             .collect();
         top_blocks.push((block_id.as_short_id(), true));
 
-        if let Err(err) = self.mq_adapter.commit_diff(top_blocks).await {
+        if let Err(err) = self.mq_adapter.commit_diff(top_blocks) {
             bail!(
                 "Error committing message queue diff of block ({}): {:?}",
                 block_id,
@@ -450,7 +448,7 @@ where
         Ok(())
     }
 
-    async fn apply_block_queue_diff_from_entry_stuff(
+    fn apply_block_queue_diff_from_entry_stuff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_entry: &BlockCacheEntry,
     ) -> Result<()> {
@@ -777,10 +775,9 @@ where
                     .mc_data
                     .as_ref()
                     .expect("should not be None for master block");
-                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)
-                    .await?;
+                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
 
-                self.commit_valid_master_block(&block_id).await?;
+                self.commit_valid_master_block(&block_id)?;
             } else {
                 let validator = self.validator.clone();
                 let session_seqno = session_info.seqno();
@@ -805,10 +802,6 @@ where
                         }
                     }
                 });
-
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "Block candidate validation spawned",
-                );
             }
         }
 
@@ -1047,14 +1040,13 @@ where
                 self.detect_top_processed_to_anchor_and_notify_mempool_impl(
                     state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
                     state.state().processed_upto.load()?.externals.as_ref(),
-                )
-                .await?;
+                )?;
 
                 // NOTE: here master block subgraph could be already extracted,
                 //      sent to sync, and removed from cache, because validation task
                 //      could be finished after `store_received()` but before this point.
 
-                self.commit_valid_master_block(&block_id).await?;
+                self.commit_valid_master_block(&block_id)?;
             }
         }
 
@@ -1259,20 +1251,17 @@ where
                 Self::apply_block_queue_diff_from_entry_stuff(
                     self.mq_adapter.clone(),
                     sc_block_entry,
-                )
-                .await?;
+                )?;
             }
             let mc_block_entry = &subgraph.master_block;
-            Self::apply_block_queue_diff_from_entry_stuff(self.mq_adapter.clone(), mc_block_entry)
-                .await?;
+            Self::apply_block_queue_diff_from_entry_stuff(self.mq_adapter.clone(), mc_block_entry)?;
 
             // if it is last one then commit diffs, notify mempool and refresh collation sessions
             if is_last {
                 self.commit_block_queue_diff(
                     &mc_block_entry.block_id,
                     &mc_block_entry.top_shard_blocks_info,
-                )
-                .await?;
+                )?;
 
                 let state = mc_block_entry.cached_state()?;
 
@@ -1294,8 +1283,7 @@ where
                 let mc_data = McData::load_from_state(state)?;
 
                 // handle top processed to anchor in mempool
-                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)
-                    .await?;
+                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1755,7 +1743,7 @@ where
         for session_info in to_finish_sessions {
             self.collation_sessions_to_finish
                 .insert(session_info.id(), session_info.clone());
-            self.finish_collation_session(session_info).await?;
+            self.finish_collation_session(session_info)?;
         }
 
         if !to_stop_collators.is_empty() {
@@ -1781,7 +1769,7 @@ where
     }
 
     /// Execute collation session finalization routines
-    pub async fn finish_collation_session(
+    pub fn finish_collation_session(
         &self,
         collation_session: Arc<CollationSessionInfo>,
     ) -> Result<()> {
@@ -1794,10 +1782,7 @@ where
     }
 
     /// Remove stopped collator from cache
-    pub async fn handle_collator_stopped(
-        &self,
-        collation_session_id: CollationSessionId,
-    ) -> Result<()> {
+    pub fn handle_collator_stopped(&self, collation_session_id: CollationSessionId) -> Result<()> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "handle_collator_stopped: {:?}", collation_session_id,
         );
@@ -2054,7 +2039,7 @@ where
         self.ready_to_sync.notified().await;
 
         // process valid block
-        self.commit_valid_master_block(&block_id).await?;
+        self.commit_valid_master_block(&block_id)?;
 
         self.ready_to_sync.notify_one();
 
@@ -2068,7 +2053,7 @@ where
     /// 3. Send to sync
     /// 4. Commit queue diff
     /// 5. Clean up from cache
-    async fn commit_valid_master_block(&self, block_id: &BlockId) -> Result<()> {
+    fn commit_valid_master_block(&self, block_id: &BlockId) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start to commit validated and valid master block ({})...",
@@ -2100,10 +2085,10 @@ where
                     let histogram =
                         HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
 
-                    self.send_block_to_sync(master_block.data).await?;
+                    self.send_block_to_sync(master_block.data)?;
 
                     for shard_block in shard_blocks {
-                        self.send_block_to_sync(shard_block.data).await?;
+                        self.send_block_to_sync(shard_block.data)?;
                     }
 
                     sync_elapsed = histogram.finish();
@@ -2119,8 +2104,7 @@ where
                 self.commit_block_queue_diff(
                     &master_block.block_id,
                     &master_block.top_shard_blocks_info,
-                )
-                .await?;
+                )?;
             }
             McBlockSubgraphExtract::AlreadyExtracted => {
                 tracing::debug!(
@@ -2141,7 +2125,7 @@ where
         Ok(())
     }
 
-    async fn send_block_to_sync(&self, data: BlockCacheEntryData) -> Result<()> {
+    fn send_block_to_sync(&self, data: BlockCacheEntryData) -> Result<()> {
         let candidate_stuff = match data {
             BlockCacheEntryData::Collated {
                 candidate_stuff,
@@ -2154,9 +2138,7 @@ where
 
         let block_id = *candidate_stuff.candidate.block.id();
         let block_stuff_for_sync = candidate_stuff.into();
-        self.state_node_adapter
-            .accept_block(block_stuff_for_sync)
-            .await?;
+        self.state_node_adapter.accept_block(block_stuff_for_sync)?;
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Block was successfully sent to sync ({})",
@@ -2167,7 +2149,7 @@ where
 
     /// Try find master block and execute post validation routines
     #[expect(unused)]
-    async fn commit_valid_shard_block(&self, block_id: &BlockId) -> Result<()> {
+    fn commit_valid_shard_block(&self, block_id: &BlockId) -> Result<()> {
         match self.blocks_cache.find_containing_mc_block(block_id) {
             Some((mc_block_id, true)) => {
                 tracing::debug!(
@@ -2176,7 +2158,7 @@ where
                     mc_block_id.as_short_id(),
                     block_id.as_short_id(),
                 );
-                self.commit_valid_master_block(&mc_block_id).await
+                self.commit_valid_master_block(&mc_block_id)
             }
             Some((mc_block_id, false)) => {
                 tracing::debug!(

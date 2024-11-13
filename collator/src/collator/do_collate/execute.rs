@@ -24,12 +24,9 @@ impl PhaseState for ExecuteState {}
 
 impl Phase<ExecuteState> {
     pub fn execute_special_transactions(&mut self) -> Result<()> {
-        self.extra.executor.create_special_transactions(
-            &self.state.mc_data.config,
-            &mut self.state.collation_data,
-        )?;
-
-        Ok(())
+        self.extra
+            .executor
+            .create_special_transactions(&self.state.mc_data.config, &mut self.state.collation_data)
     }
 
     pub fn execute_tick_transaction(&mut self) -> Result<()> {
@@ -37,9 +34,7 @@ impl Phase<ExecuteState> {
             &self.state.mc_data.config,
             TickTock::Tick,
             &mut self.state.collation_data,
-        )?;
-
-        Ok(())
+        )
     }
 
     pub fn execute_tock_transaction(&mut self) -> Result<()> {
@@ -47,9 +42,7 @@ impl Phase<ExecuteState> {
             &self.state.mc_data.config,
             TickTock::Tock,
             &mut self.state.collation_data,
-        )?;
-
-        Ok(())
+        )
     }
 
     pub fn run(&mut self) -> Result<()> {
