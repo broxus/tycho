@@ -14,7 +14,7 @@ pub struct QueueStateReader<'a> {
 }
 
 impl<'a> QueueStateReader<'a> {
-    pub fn begin_from_mapped(data: &'a [u8], top_update: &OutMsgQueueUpdates) -> Result<Self> {
+    pub fn  begin_from_mapped(data: &'a [u8], top_update: &OutMsgQueueUpdates) -> Result<Self> {
         let mut offset = 0;
         let state = QueueStateRef::<'a>::read_from(data, &mut offset)?;
         // TODO: Does this check really needed?
@@ -24,6 +24,11 @@ impl<'a> QueueStateReader<'a> {
             // NOTE: It is also checked by the TL
             anyhow::bail!("no queue diffs in state");
         };
+
+        anyhow::ensure!(
+            state.header.queue_diffs.len() == top_update.tail_len,
+            "queue diff count mismatch"
+        );
 
         anyhow::ensure!(
             top_queue_diff.hash == top_update.diff_hash,

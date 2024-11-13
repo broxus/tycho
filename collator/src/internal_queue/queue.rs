@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
@@ -167,15 +167,15 @@ where
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = shard_diffs.get(&block_id_short.seqno);
+
         if let Some(shard_diff) = shard_diff {
-            if &shard_diff.hash != hash {
-                bail!(
-                    "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
-                    block_id_short, shard_diff.hash,  hash,
-                )
-            } else {
-                return Ok(());
-            }
+            anyhow::ensure!(
+                shard_diff.hash == hash,
+                "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
+                block_id_short, shard_diff.hash, hash,
+            );
+
+            return Ok(());
         }
 
         let last_applied_seqno = shard_diffs.last_key_value().map(|(key, _)| *key);
@@ -186,14 +186,12 @@ where
                 return Ok(());
             }
 
-            // Check if the diff is sequential
-            if block_id_short.seqno != last_applied_seqno + 1 {
-                bail!(
-                    "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
-                    block_id_short.seqno,
-                    last_applied_seqno
-                );
-            }
+            anyhow::ensure!(
+                block_id_short.seqno == last_applied_seqno + 1,
+                "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
+                block_id_short.seqno,
+                last_applied_seqno
+            );
         }
 
         // Add messages to session_state if there are any

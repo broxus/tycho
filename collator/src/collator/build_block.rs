@@ -361,6 +361,7 @@ impl CollatorStdImpl {
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
+                    tail_len: 0,
                 },
                 extra: Lazy::new(&new_block_extra)?,
             };
