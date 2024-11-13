@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Context, Result};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -185,6 +185,7 @@ impl CollatorStdImpl {
                 config_params,
                 prev_state,
                 prev_processed_to_anchor,
+                collator_config,
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
 
@@ -569,18 +570,20 @@ impl CollatorStdImpl {
         config_params: Option<BlockchainConfig>,
         prev_state: &ShardStateStuff,
         prev_processed_to_anchor: u32,
+        collator_config: Arc<CollatorConfig>,
     ) -> Result<(McStateExtra, u32)> {
         // 1. update config params and detect key block
         let prev_state_extra = prev_state.state_extra()?;
         let prev_config = &prev_state_extra.config;
         let (config, mut is_key_block) = if let Some(new_config) = config_params {
-            if !new_config.validate_params(true, None)? {
-                bail!(
-                    "configuration smart contract {} contains an invalid configuration in its data",
-                    new_config.address
-                );
-            }
             let is_key_block = &new_config != prev_config;
+
+            if is_key_block && collator_config.validate_config {
+                new_config
+                    .validate_params()
+                    .context("invalid blockchain config")?;
+            }
+
             (new_config, is_key_block)
         } else {
             (prev_config.clone(), false)
