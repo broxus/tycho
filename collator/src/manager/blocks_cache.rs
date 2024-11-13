@@ -157,10 +157,9 @@ impl BlocksCache {
                 .map(|(id, _)| id)
                 .cloned()
                 .collect::<Vec<_>>();
-            let (queue_diff_stuff, _) = mc_block_entry.queue_diff_and_msgs()?;
             all_processed_to.insert(
                 mc_block_entry.block_id,
-                Some(queue_diff_stuff.as_ref().processed_upto.clone()),
+                Some(mc_block_entry.int_processed_to().clone()),
             );
         }
 
@@ -170,18 +169,14 @@ impl BlocksCache {
             }
 
             // try to find in cache
-            let mut queue_diff_stuff_opt = None;
+            let mut int_processed_to_opt = None;
             if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    let (queue_diff_stuff, _) = sc_block_entry.queue_diff_and_msgs()?;
-                    queue_diff_stuff_opt = Some(queue_diff_stuff.clone());
+                    int_processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
                 }
             }
 
-            all_processed_to.insert(
-                top_sc_block_id,
-                queue_diff_stuff_opt.map(|qds| qds.as_ref().processed_upto.clone()),
-            );
+            all_processed_to.insert(top_sc_block_id, int_processed_to_opt);
         }
 
         Ok(all_processed_to)
