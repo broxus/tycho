@@ -83,7 +83,6 @@ impl StorageBuilder {
             opts.increase_parallelism(threads as i32);
 
             opts.set_allow_concurrent_memtable_write(false);
-            opts.set_enable_write_thread_adaptive_yield(true);
 
             // debug
             // NOTE: could slower everything a bit in some cloud environments.
