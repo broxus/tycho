@@ -30,6 +30,12 @@ pub enum CacheError {
         found_id: MempoolAnchorId,
         is_paused: bool,
     },
+    #[error("cache was not cleaned properly: it must contain prev anchor {self:?}")]
+    FirstAnchorRemoved {
+        prev_anchor_id: MempoolAnchorId,
+        first_id: MempoolAnchorId,
+        is_paused: bool,
+    },
 }
 
 #[derive(Default)]
@@ -141,21 +147,36 @@ impl Cache {
                             "Anchor cache is empty, waiting"
                         );
                     }
-                    // Return the first anchor on node start
-                    Some((_, first)) if first.prev_id.map_or(true, |id| id == prev_anchor_id) => {
-                        return Ok(Some(first.clone()))
-                    }
-                    // Trying to get anchor that is too old
                     Some((first_id, first)) if prev_anchor_id < *first_id => {
-                        tracing::warn!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            %prev_anchor_id,
-                            %first_id,
-                            first_prev_id = first.prev_id,
-                            is_paused = Some(data.is_paused).filter(|x| *x),
-                            "Requested anchor is too old"
-                        );
-                        return Ok(None);
+                        return match first.prev_id {
+                            None => {
+                                // Return the first anchor after genesis
+                                Ok(Some(first.clone()))
+                            }
+                            Some(id) if id == prev_anchor_id => {
+                                // First anchor in cache is exactly next to requested
+                                // Ok(Some(first.clone()));
+                                // interesting if we can ever get this error
+                                Err(CacheError::FirstAnchorRemoved {
+                                    prev_anchor_id,
+                                    first_id: first.id,
+                                    is_paused: data.is_paused,
+                                })
+                            }
+                            Some(_) => {
+                                // Trying to get anchor that is too old
+                                tracing::warn!(
+                                    target: tracing_targets::MEMPOOL_ADAPTER,
+                                    %prev_anchor_id,
+                                    %first_id,
+                                    first_prev_id = first.prev_id,
+                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    "Requested anchor is too old"
+
+                                );
+                                Ok(None)
+                            }
+                        };
                     }
                     Some(_) => {
                         // Find the index of the previous anchor
