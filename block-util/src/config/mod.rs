@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_types::error::Error;
 use everscale_types::models::{
-    BlockchainConfig, ConfigParam32, ConfigParam33, ConfigParam34, ConfigParam35, ConfigParam36,
-    ConfigParam37, KnownConfigParam,
+    BlockchainConfig, ConfigParam0, ConfigParam32, ConfigParam33, ConfigParam34, ConfigParam35,
+    ConfigParam36, ConfigParam37, KnownConfigParam,
 };
 use everscale_types::prelude::*;
 
@@ -25,11 +25,7 @@ pub fn build_elections_data_to_sign(
 
 pub trait BlockchainConfigExt {
     /// Check that config is valid.
-    fn validate_params(
-        &self,
-        relax_par0: bool,
-        mandatory_params: Option<Dict<u32, ()>>,
-    ) -> Result<bool>;
+    fn validate_params(&self) -> Result<()>;
 
     /// Returns a cell with the previous validator set.
     ///
@@ -66,15 +62,24 @@ pub trait BlockchainConfigExt {
 }
 
 impl BlockchainConfigExt for BlockchainConfig {
-    fn validate_params(
-        &self,
-        _relax_par0: bool,
-        _mandatory_params: Option<Dict<u32, ()>>,
-    ) -> Result<bool> {
-        // TODO: refer to https://github.com/everx-labs/ever-block/blob/master/src/config_params.rs#L452
-        // STUB: currently should not be invoked in prototype
-        // todo!()
-        Ok(true)
+    fn validate_params(&self) -> Result<()> {
+        let Some(config_address) = self.params.get::<ConfigParam0>()? else {
+            anyhow::bail!("config address is absent");
+        };
+        anyhow::ensure!(config_address == self.address, "config address mismatch");
+
+        let params = self.get_mandatory_params()?;
+        for id in params.keys() {
+            let id = id?;
+            if !self
+                .contains_raw(id)
+                .with_context(|| format!("failed to get config param {id}"))?
+            {
+                anyhow::bail!("mandatory config param {id} is absent");
+            }
+        }
+
+        Ok(())
     }
 
     fn get_raw_cell(&self, id: u32) -> Result<Option<Cell>, Error> {
