@@ -593,7 +593,7 @@ impl CollatorStdImpl {
         let mut consensus_info = prev_state_extra.consensus_info;
 
         if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
-            if mp_cfg_override.start_round > consensus_info.genesis_round
+            if mp_cfg_override.start_round >= consensus_info.genesis_round
                 && mp_cfg_override.genesis_time_millis > consensus_info.genesis_millis
             {
                 consensus_info.genesis_round = mp_cfg_override.start_round;

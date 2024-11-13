@@ -1117,7 +1117,7 @@ where
             let last_consesus_info = self
                 .blocks_cache
                 .get_consensus_info_for_mc_block(&last_applied_mc_block_key)?;
-            if mp_cfg_override.start_round > last_consesus_info.genesis_round
+            if mp_cfg_override.start_round >= last_consesus_info.genesis_round
                 && mp_cfg_override.genesis_time_millis > last_consesus_info.genesis_millis
             {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
