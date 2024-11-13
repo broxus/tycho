@@ -231,6 +231,7 @@ impl CollatorStdImpl {
         let finalize_block_timer = std::time::Instant::now();
         let finalized = tycho_util::sync::rayon_run({
             let collation_session = self.collation_session.clone();
+            let collator_config = self.config.clone();
             let finalize_params = collation_config.work_units_params.finalize.clone();
             let old_mc_data = mc_data.clone();
             move || {
@@ -246,6 +247,7 @@ impl CollatorStdImpl {
                     finalize_params,
                     prepare_groups_wu_total,
                     execute_groups_wu_total,
+                    collator_config,
                 )
             }
         })
@@ -1939,7 +1941,7 @@ fn process_in_message(
     let in_msg_hash = *in_msg.cell.repr_hash();
     let in_msg = match (in_msg.info, in_msg.special_origin) {
         // Messages with special origin are always immediate
-        (_, Some(_)) => {
+        (_, Some(special_origin)) => {
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&MsgEnvelope {
                     cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
@@ -1951,6 +1953,15 @@ fn process_in_message(
                 fwd_fee: Default::default(),
             });
 
+            let msg = in_msg.clone();
+            match special_origin {
+                SpecialOrigin::Recover => {
+                    collation_data.recover_create_msg = Some(msg);
+                }
+                SpecialOrigin::Mint => {
+                    collation_data.mint_msg = Some(msg);
+                }
+            }
             import_fees = in_msg.compute_fees()?;
             Lazy::new(&in_msg)?
         }

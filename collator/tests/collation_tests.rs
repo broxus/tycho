@@ -87,6 +87,7 @@ async fn test_collation_process_on_stubs() {
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
         min_mc_block_delta_from_bc_to_sync: 3,
+        check_value_flow: false,
     };
 
     tracing::info!("Trying to start CollationManager");
