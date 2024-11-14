@@ -81,6 +81,9 @@ pub struct NodeStatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
+    pub version: String,
+    pub build: String,
+
     // TODO: Somehow expose tycho_network::Address?
     pub public_addr: String,
     pub local_addr: SocketAddr,
