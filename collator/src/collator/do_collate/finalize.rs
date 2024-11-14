@@ -104,7 +104,10 @@ impl Phase<FinalizeState> {
         let update_queue_task = {
             let block_id_short = self.state.collation_data.block_id_short;
             let labels = labels.clone();
+            let span = tracing::Span::current();
             move || {
+                let _span = span.enter();
+
                 // apply queue diff
                 let histogram = HistogramGuard::begin_with_labels(
                     "tycho_do_collate_apply_queue_diff_time",
