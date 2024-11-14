@@ -178,14 +178,10 @@ impl ControlServerBuilder {
             }))
         };
 
-        let info = proto::NodeInfoResponse {
+        let node_info = proto::NodeInfo {
             public_addr: network.remote_addr().to_string(),
             local_addr: network.local_addr(),
             adnl_id: HashBytes(network.peer_id().to_bytes()),
-            validator_public_key: self
-                .validator_keypair
-                .as_ref()
-                .map(|k| HashBytes(k.public_key.to_bytes())),
             collator: match self.collator {
                 None => None,
                 Some(collator) => {
@@ -197,7 +193,7 @@ impl ControlServerBuilder {
 
         Ok(ControlServer {
             inner: Arc::new(Inner {
-                info_response: info,
+                node_info,
                 config_response: ArcSwapOption::new(config_response),
                 gc_subscriber,
                 storage,
@@ -324,10 +320,13 @@ impl proto::ControlServer for ControlServer {
             });
 
         let status_at = tycho_util::time::now_sec();
+        let node_info = self.inner.node_info.clone();
 
-        let validator_status = match self.inner.info_response.validator_public_key {
+        let validator_status = match &self.inner.validator_keypair {
             None => None,
-            Some(public_key) => {
+            Some(keypair) => {
+                let public_key = HashBytes(keypair.public_key.to_bytes());
+
                 let parse_config = |res: proto::BlockchainConfigResponse| {
                     let res = res.parse()?;
                     let elector_address = res.config.get_elector_address()?;
@@ -414,14 +413,11 @@ impl proto::ControlServer for ControlServer {
 
         Ok(proto::NodeStatusResponse {
             status_at,
+            node_info,
             init_block_id,
             last_applied_block,
             validator_status,
         })
-    }
-
-    async fn get_node_info(self, _: tarpc::context::Context) -> proto::NodeInfoResponse {
-        self.inner.info_response.clone()
     }
 
     async fn trigger_archives_gc(self, _: Context, req: proto::TriggerGcRequest) {
@@ -715,7 +711,7 @@ impl StateSubscriber for ControlServer {
 }
 
 struct Inner {
-    info_response: proto::NodeInfoResponse,
+    node_info: proto::NodeInfo,
     config_response: ArcSwapOption<proto::BlockchainConfigResponse>,
     gc_subscriber: GcSubscriber,
     storage: Storage,

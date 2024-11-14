@@ -42,13 +42,6 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
-    pub async fn get_node_info(&self) -> ClientResult<NodeInfoResponse> {
-        self.inner
-            .get_node_info(current_context())
-            .await
-            .map_err(Into::into)
-    }
-
     pub async fn trigger_archives_gc(&self, req: TriggerGcRequest) -> ClientResult<()> {
         self.inner
             .trigger_archives_gc(current_context(), req)
