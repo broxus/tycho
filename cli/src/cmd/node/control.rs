@@ -88,6 +88,8 @@ impl CmdStatus {
             };
 
             print_json(serde_json::json!({
+                "tycho_version": status.node_info.version,
+                "tycho_build": status.node_info.build,
                 "public_addr": status.node_info.public_addr,
                 "local_addr": status.node_info.local_addr.to_string(),
                 "adnl_id": status.node_info.adnl_id,

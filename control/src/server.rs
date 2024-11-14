@@ -34,6 +34,12 @@ use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
 use crate::proto::{self, ArchiveInfo, ControlServer as _};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlServerVersion {
+    pub version: String,
+    pub build: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ControlServerConfig {
     /// Whether to recreate the socket file if it already exists.
@@ -152,7 +158,7 @@ pub struct ControlServerBuilder<
 }
 
 impl ControlServerBuilder {
-    pub async fn build(self) -> Result<ControlServer> {
+    pub async fn build(self, version: ControlServerVersion) -> Result<ControlServer> {
         let (network, storage, gc_subscriber, blockchain_rpc_client) = self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
@@ -179,6 +185,8 @@ impl ControlServerBuilder {
         };
 
         let node_info = proto::NodeInfo {
+            version: version.version,
+            build: version.build,
             public_addr: network.remote_addr().to_string(),
             local_addr: network.local_addr(),
             adnl_id: HashBytes(network.peer_id().to_bytes()),

@@ -21,7 +21,7 @@ use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
-use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
+use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
@@ -383,7 +383,12 @@ impl Node {
                 builder = builder.with_memory_profiler(Arc::new(profiler));
             }
 
-            builder.build().await?
+            builder
+                .build(ControlServerVersion {
+                    version: crate::TYCHO_VERSION.to_owned(),
+                    build: crate::TYCHO_BUILD.to_owned(),
+                })
+                .await?
         };
 
         // Spawn control server endpoint
