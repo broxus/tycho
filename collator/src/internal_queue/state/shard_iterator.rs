@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
-use tycho_storage::model::ShardsInternalMessagesKey;
+use tycho_storage::model::{ShardsInternalMessagesKey, ValueType};
 use tycho_storage::owned_iterator::OwnedIterator;
+use crate::internal_queue::state::shard_iterator::IterResultValue::Message;
 
 use crate::types::ShortAddr;
 
@@ -28,8 +29,13 @@ impl From<(QueueKey, QueueKey, ShardIdent)> for Range {
 }
 
 pub enum IterResult<'a> {
-    Value(&'a [u8]),
+    Value(IterResultValue<'a >),
     Skip(Option<ShardsInternalMessagesKey>),
+}
+
+pub enum IterResultValue<'a> {
+    Message(&'a [u8]),
+    DiffEnd(QueueKey)
 }
 
 pub struct ShardIterator {
@@ -75,24 +81,35 @@ impl ShardIterator {
                 return Ok(Some(IterResult::Skip(None)));
             }
 
+            // TODO !!! check range
             if !self.range.contains(&key) {
                 return Ok(None);
             }
 
             let value = self.iterator.value().context("Failed to get value")?;
-            let dest_workchain = value[0] as i8;
-            let dest_prefix = u64::from_be_bytes(
-                value[1..9]
-                    .try_into()
-                    .context("Failed to deserialize destination prefix")?,
-            );
-            let short_addr = ShortAddr::new(dest_workchain as i32, dest_prefix);
+            let value_type = value[0].try_into()?;
 
-            return if self.receiver.contains_address(&short_addr) {
-                Ok(Some(IterResult::Value(&value[9..])))
-            } else {
-                Ok(Some(IterResult::Skip(Some(key))))
-            };
+            return match value_type {
+                ValueType::Message => {
+                    let dest_workchain = value[1] as i8;
+                    let dest_prefix = u64::from_be_bytes(
+                        value[2..10]
+                            .try_into()
+                            .context("Failed to deserialize destination prefix")?,
+                    );
+                    let short_addr = ShortAddr::new(dest_workchain as i32, dest_prefix);
+
+                    if self.receiver.contains_address(&short_addr) {
+                        Ok(Some(IterResult::Value(Message(&value[10..]))))
+                    } else {
+                        Ok(Some(IterResult::Skip(Some(key))))
+                    }
+                }
+                ValueType::DiffEnd => {
+                    println!("DIFF END FOUND");
+                    Ok(Some(IterResult::Value(IterResultValue::DiffEnd(key.internal_message_key))))
+                }
+            }
         }
         Ok(None)
     }

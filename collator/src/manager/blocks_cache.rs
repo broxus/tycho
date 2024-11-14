@@ -774,7 +774,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                         ctx.state,
                         ctx.prev_ids,
                         ctx.queue_diff,
-                        ctx.out_msgs,
+                        ctx.out_msgs
                     )?;
 
                     let new_data = self.data.on_insert_received(&new_entry)?;

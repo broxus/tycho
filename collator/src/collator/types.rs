@@ -400,6 +400,8 @@ pub(super) struct BlockCollationData {
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
+
+    pub int_queue_diff_tail_len: usize,
 }
 
 impl BlockCollationData {

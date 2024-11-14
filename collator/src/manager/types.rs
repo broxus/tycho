@@ -130,6 +130,8 @@ pub(super) enum BlockCacheEntryData {
 
         /// Additional shard block cache info
         additional_shard_block_cache_info: Option<AdditionalShardBlockCacheInfo>,
+
+        // TODO !!! end lt
     },
 }
 
@@ -195,6 +197,8 @@ pub(super) struct BlockCacheEntry {
 
     /// Id of master block that includes current shard block in his subgraph
     pub containing_mc_block: Option<BlockCacheKey>,
+
+    pub end_lt: u64,
 }
 
 impl BlockCacheEntry {
@@ -230,6 +234,7 @@ impl BlockCacheEntry {
             prev_blocks_ids,
             top_shard_blocks_info,
             containing_mc_block: None,
+            end_lt: 0,
         })
     }
 
@@ -240,6 +245,7 @@ impl BlockCacheEntry {
         out_msgs: Lazy<OutMsgDescr>,
     ) -> Result<Self> {
         let block_id = *state.block_id();
+        let end_lt = queue_diff.diff().end_lt;
 
         let mut top_shard_blocks_info = vec![];
         let cached_state = if block_id.is_masterchain() {
@@ -267,6 +273,7 @@ impl BlockCacheEntry {
             prev_blocks_ids,
             top_shard_blocks_info,
             containing_mc_block: None,
+            end_lt,
         })
     }
 

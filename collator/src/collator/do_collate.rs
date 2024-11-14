@@ -1304,6 +1304,9 @@ impl CollatorStdImpl {
 
         // compute created / minted / recovered / from_prev_block
         let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
+
+        let prev_block_info = prev_shard_data.processed_upto()
+
         self.update_value_flow(
             &mc_data.config,
             &mc_data.global_balance,
@@ -1577,10 +1580,12 @@ impl CollatorStdImpl {
         let histogram_create_queue_diff =
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
 
-        let (has_pending_internals_in_iterator, diff_with_messages) = mq_iterator_adapter.release(
+        let (has_pending_internals_in_iterator, mut diff_with_messages) = mq_iterator_adapter.release(
             !msgs_buffer.has_pending_messages(),
             &mut msgs_buffer.current_iterator_positions,
         )?;
+
+        diff_with_messages.end_lt = collation_data.next_lt;
 
         let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
 

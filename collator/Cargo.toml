@@ -20,6 +20,8 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true, features = ["rand", "blake3", "rayon"] }
+#everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["rand", "blake3", "rayon"], rev = "5563b69b2ff8dcd72a9b25537080c820d4bb4fb8"}
+
 futures-util = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }

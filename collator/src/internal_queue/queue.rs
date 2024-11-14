@@ -109,18 +109,8 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 
 struct ShortQueueDiff {
     pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
-    pub last_key: Option<QueueKey>,
     pub hash: HashBytes,
-}
-
-impl<V: InternalMessageValue> From<(QueueDiffWithMessages<V>, HashBytes)> for ShortQueueDiff {
-    fn from(value: (QueueDiffWithMessages<V>, HashBytes)) -> Self {
-        Self {
-            processed_upto: value.0.processed_upto,
-            last_key: value.0.messages.last_key_value().map(|(key, _)| *key),
-            hash: value.1,
-        }
-    }
+    pub end_key: QueueKey,
 }
 
 pub struct QueueImpl<S, P, V>
@@ -160,8 +150,10 @@ where
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        hash: &HashBytes,
+        hash: &HashBytes
     ) -> Result<()> {
+        // Create the end diff key for creating end diff record
+        let end_diff_key = QueueKey::max_for_lt(diff.end_lt);
         // Get or insert the shard diffs for the given block_id_short.shard
         let mut shard_diffs = self.diffs.entry(block_id_short.shard).or_default();
 
@@ -196,14 +188,19 @@ where
             }
         }
 
-        // Add messages to session_state if there are any
-        if !diff.messages.is_empty() {
-            self.session_state
-                .add_messages(block_id_short.shard, &diff.messages)?;
-        }
+        // Add messages to session_state with end diff message
+        self.session_state
+            .add_messages_with_end_diff(block_id_short.shard, &diff.messages, end_diff_key)?;
+
+
+        let short_queue_diff = ShortQueueDiff {
+            processed_upto: diff.processed_upto.clone(),
+            hash: hash.clone(),
+            end_key: end_diff_key,
+        };
 
         // Insert the diff into the shard diffs
-        shard_diffs.insert(block_id_short.seqno, (diff, *hash).into());
+        shard_diffs.insert(block_id_short.seqno, short_queue_diff);
 
         Ok(())
     }
@@ -223,7 +220,7 @@ where
                     .for_each(|(block_seqno, shard_diff)| {
                         // find last key to commit for each shard
                         diffs_for_commit.push(*block_id_short);
-                        let last_key = shard_diff.last_key.unwrap_or_default();
+                        let last_key = shard_diff.end_key;
 
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
@@ -234,6 +231,7 @@ where
                         }
 
                         // find min processed_upto for each shard for GC
+                        // TODO !!! update gc with end diff?
                         if *block_seqno == block_id_short.seqno && *top_shard_block_changed {
                             for processed_upto in shard_diff.processed_upto.iter() {
                                 let last_key = gc_ranges
@@ -254,6 +252,8 @@ where
                 }
             }
         }
+
+        println!("shards_to_commit: {:?}", shards_to_commit);
 
         self.session_state.commit_messages(&shards_to_commit)?;
 

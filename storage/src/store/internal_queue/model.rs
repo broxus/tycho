@@ -1,3 +1,4 @@
+use anyhow::bail;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
@@ -9,6 +10,25 @@ pub struct ShardsInternalMessagesKey {
     pub shard_ident: ShardIdent,
     pub internal_message_key: QueueKey,
 }
+
+#[repr(u8)]
+pub enum ValueType {
+    Message = 0,
+    DiffEnd = 1,
+}
+
+impl TryFrom<u8> for ValueType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ValueType::Message),
+            1 => Ok(ValueType::DiffEnd),
+            _ => bail!("Invalid value for ValueType"),
+        }
+    }
+}
+
 
 impl ShardsInternalMessagesKey {
     pub fn new(shard_ident: ShardIdent, internal_message_key: QueueKey) -> Self {

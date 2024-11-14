@@ -9,7 +9,7 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::state_iterator::{IterRange, MessageExt};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages, QueueFullDiff};
+use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages, QueueFullDiff, QueueItem};
 
 pub trait QueueIterator<V: InternalMessageValue>: Send {
     /// Get next message
@@ -38,7 +38,7 @@ pub struct QueueIteratorImpl<V: InternalMessageValue> {
     messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
     new_messages: BTreeMap<QueueKey, Arc<V>>,
     iterators_manager: StatesIteratorsManager<V>,
-    last_processed_message: FastHashMap<ShardIdent, QueueKey>,
+    last_processed_messages: FastHashMap<ShardIdent, QueueKey>,
 }
 
 impl<V: InternalMessageValue> QueueIteratorImpl<V> {
@@ -53,7 +53,7 @@ impl<V: InternalMessageValue> QueueIteratorImpl<V> {
             messages_for_current_shard,
             new_messages: Default::default(),
             iterators_manager,
-            last_processed_message: Default::default(),
+            last_processed_messages: Default::default(),
         })
     }
 }
@@ -109,7 +109,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
     fn process_new_messages(&mut self) -> Result<Option<IterItem<V>>> {
         if let Some(next_message) = self.messages_for_current_shard.pop() {
             // remove message from new_messages
-            self.new_messages.remove(&next_message.0.message.key());
+            self.new_messages.remove(&next_message.0.item.key());
 
             return Ok(Some(IterItem {
                 item: next_message.0,
@@ -128,7 +128,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         let mut diff = QueueDiffWithMessages::new();
 
         // fill processed_upto
-        for (shard_id, message_key) in self.last_processed_message.iter() {
+        for (shard_id, message_key) in self.last_processed_messages.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
             diff.processed_upto.insert(*shard_id, *message_key);
         }
@@ -160,7 +160,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         // actually we update last processed message via commit()
         // during the execution, so we can just use value as is
 
-        for (shard_id, message_key) in self.last_processed_message.iter() {
+        for (shard_id, message_key) in self.last_processed_messages.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
             diff.processed_upto.insert(*shard_id, *message_key);
         }
@@ -173,7 +173,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
     // Function to update the commit position
     fn commit(&mut self, messages: Vec<(ShardIdent, QueueKey)>) -> Result<()> {
         for (source_shard, message_key) in messages {
-            self.last_processed_message
+            self.last_processed_messages
                 .entry(source_shard)
                 .and_modify(|e| {
                     if &message_key > e {
@@ -189,9 +189,9 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         let message = Arc::new(message);
         self.new_messages.insert(message.key(), message.clone());
         if self.for_shard.contains_address(message.destination()) {
-            let message_with_source = MessageExt::new(self.for_shard, message);
+            let message_ext = MessageExt::new(self.for_shard, QueueItem::InternalMessage(message));
             self.messages_for_current_shard
-                .push(Reverse(message_with_source));
+                .push(Reverse(message_ext));
         };
         Ok(())
     }

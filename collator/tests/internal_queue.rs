@@ -221,7 +221,7 @@ async fn test_queue() -> anyhow::Result<()> {
     let loaded_stored_object = iterator_manager.next();
 
     let loaded_stored_object = loaded_stored_object.unwrap().unwrap();
-    assert_eq!(stored_objects[3], loaded_stored_object.message);
+    assert_eq!(stored_objects[3], loaded_stored_object.item);
 
     let current_position = iterator_manager.current_position();
     let mut expected_position = FastHashMap::default();

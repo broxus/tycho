@@ -138,6 +138,7 @@ impl QueueDiffStuff {
                     min_message: Default::default(),
                     max_message: Default::default(),
                     messages: Default::default(),
+                    end_lt: 0,
                 },
             }),
         }

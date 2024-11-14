@@ -470,12 +470,12 @@ where
         };
 
         let queue_diff_with_msgs =
-            QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
+            QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?, block_entry.end_lt)?;
         mq_adapter
             .apply_diff(
                 queue_diff_with_msgs,
                 queue_diff.block_id().as_short_id(),
-                queue_diff.diff_hash(),
+                queue_diff.diff_hash()
             )
             .await
     }
@@ -1214,9 +1214,10 @@ where
                         .await?
                         .unwrap();
                     let out_msgs = block_stuff.load_extra()?.out_msg_description.load()?;
+                    let end_lt = block_stuff.load_info()?.end_lt;
 
                     let queue_diff_with_messages =
-                        QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs)?;
+                        QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs, end_lt)?;
                     prev_queue_diffs.push((
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
@@ -1235,7 +1236,7 @@ where
         // apply required previous queue diffs
         while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
             self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash)
+                .apply_diff(diff, block_id.as_short_id(), &diff_hash, )
                 .await?;
         }
 

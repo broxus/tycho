@@ -24,7 +24,7 @@ use super::types::{
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{EnqueuedMessage, QueueItem};
 use crate::tracing_targets;
 use crate::types::{
     DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
@@ -62,6 +62,7 @@ pub(super) struct MessagesReader {
     read_int_msgs_from_iterator_count: u64,
     read_ext_msgs_count: u64,
     read_new_msgs_from_iterator_count: u64,
+    read_end_diff_count: u64,
 }
 
 pub(super) enum GetNextMessageGroupMode {
@@ -99,6 +100,7 @@ impl MessagesReader {
             read_int_msgs_from_iterator_count: 0,
             read_ext_msgs_count: 0,
             read_new_msgs_from_iterator_count: 0,
+            read_end_diff_count: 0,
         }
     }
 
@@ -199,46 +201,60 @@ impl MessagesReader {
             // until the first group fully loaded
             // or max messages buffer limit reached
             let mut existing_internals_read_count = 0;
+            let mut end_diff_count = 0;
             while let Some(int_msg) = mq_iterator_adapter.next_existing_message()? {
                 assert!(!int_msg.is_new);
 
-                existing_internals_read_count += 1;
+                match int_msg.item.item {
+                    QueueItem::InternalMessage(message) => {
+                        existing_internals_read_count += 1;
 
-                let timer_add_to_groups = std::time::Instant::now();
-                msgs_buffer
-                    .message_groups
-                    .add_message(Box::new(ParsedMessage {
-                        info: MsgInfo::Int(int_msg.item.message.info.clone()),
-                        dst_in_current_shard: true,
-                        cell: int_msg.item.message.cell.clone(),
-                        special_origin: None,
-                        dequeued: Some(Dequeued {
-                            same_shard: int_msg.item.source == self.shard_id,
-                        }),
-                    }));
-                add_to_groups_elapsed += timer_add_to_groups.elapsed();
+                        let timer_add_to_groups = std::time::Instant::now();
+                        msgs_buffer
+                            .message_groups
+                            .add_message(Box::new(ParsedMessage {
+                                info: MsgInfo::Int(message.info.clone()),
+                                dst_in_current_shard: true,
+                                cell: message.cell.clone(),
+                                special_origin: None,
+                                dequeued: Some(Dequeued {
+                                    same_shard: int_msg.item.source == self.shard_id,
+                                }),
+                            }));
+                        add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
-                if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
+                            tracing::debug!(target: tracing_targets::COLLATOR,
                         "message_groups buffer filled on {}/{}, stop reading existing internals",
                         msgs_buffer.message_groups.messages_count(), self.messages_buffer_limit,
                     );
-                    break;
-                }
+                            break;
+                        }
 
-                if msgs_buffer.message_groups.first_group_is_full() {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        if msgs_buffer.message_groups.first_group_is_full() {
+                            tracing::debug!(target: tracing_targets::COLLATOR,
                         "first message group is full, stop reading existing internals",
                     );
-                    break;
+                            break;
+                        }
+                    }
+                    QueueItem::DiffEnd(key) => {
+                        println!("FOUND END DIFF MESSAGE. key: {:?}", key);
+                        end_diff_count += 1;
+                        // TODO 123
+                    }
                 }
+
             }
             self.read_int_msgs_from_iterator_count += existing_internals_read_count;
+            self.read_end_diff_count += end_diff_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "existing_internals_read_count={}, buffer int={}, ext={}",
+                "existing_internals_read_count={}, buffer int={}, ext={} end_diff={}",
                 existing_internals_read_count,
-                msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
+                msgs_buffer.message_groups.int_messages_count(),
+                msgs_buffer.message_groups.ext_messages_count(),
+                end_diff_count,
             );
 
             group_opt = msgs_buffer.message_groups.extract_first_group();
@@ -395,37 +411,44 @@ impl MessagesReader {
             let mut add_to_groups_elapsed = Duration::ZERO;
 
             let mut new_internals_read_count = 0;
+            // TODO !!!
             while let Some(int_msg) = mq_iterator_adapter.next_new_message()? {
                 assert!(int_msg.is_new);
 
-                new_internals_read_count += 1;
+                match int_msg.item.item {
+                    QueueItem::InternalMessage(int_msg) => {
+                        new_internals_read_count += 1;
 
-                let timer_add_to_groups = std::time::Instant::now();
-                msgs_buffer
-                    .message_groups
-                    .add_message(Box::new(ParsedMessage {
-                        info: MsgInfo::Int(int_msg.item.message.info.clone()),
-                        dst_in_current_shard: true,
-                        cell: int_msg.item.message.cell.clone(),
-                        special_origin: None,
-                        dequeued: None,
-                    }));
-                add_to_groups_elapsed += timer_add_to_groups.elapsed();
+                        let timer_add_to_groups = std::time::Instant::now();
+                        msgs_buffer
+                            .message_groups
+                            .add_message(Box::new(ParsedMessage {
+                                info: MsgInfo::Int(int_msg.info.clone()),
+                                dst_in_current_shard: true,
+                                cell: int_msg.cell.clone(),
+                                special_origin: None,
+                                dequeued: None,
+                            }));
+                        add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
-                if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        if msgs_buffer.message_groups.messages_count() >= self.messages_buffer_limit {
+                            tracing::debug!(target: tracing_targets::COLLATOR,
                         "message_groups buffer filled on {}/{}, stop reading new internals",
                         msgs_buffer.message_groups.messages_count(), self.messages_buffer_limit,
                     );
-                    break;
-                }
+                            break;
+                        }
 
-                if msgs_buffer.message_groups.len() > 1 {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        if msgs_buffer.message_groups.len() > 1 {
+                            tracing::debug!(target: tracing_targets::COLLATOR,
                         "next new message does not fit first group, stop reading new internals",
                     );
-                    break;
+                            break;
+                        }
+                    }
+                    QueueItem::DiffEnd(_) => {}
                 }
+
             }
             self.read_new_msgs_from_iterator_count += new_internals_read_count;
 

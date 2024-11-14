@@ -111,6 +111,6 @@ impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
     fn delete_messages(&self, shard: ShardIdent, until: &QueueKey) -> anyhow::Result<()> {
         self.storage
             .internal_queue_storage()
-            .delete_messages(shard, &QueueKey::MIN, until)
+            .delete_range(shard, &QueueKey::MIN, until)
     }
 }

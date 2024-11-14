@@ -10,10 +10,29 @@ use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
 
 use super::state::state_iterator::MessageExt;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QueueItem<V>
+where V: InternalMessageValue
+{
+    InternalMessage(Arc<V>),
+    DiffEnd(QueueKey)
+}
+
+impl <V:InternalMessageValue>QueueItem<V> {
+    pub fn key(&self) -> QueueKey {
+        match self {
+            QueueItem::InternalMessage(msg) => msg.key(),
+            QueueItem::DiffEnd(key) => *key,
+        }
+    }
+}
+
+
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
     pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub end_lt: u64,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -21,6 +40,7 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
         Self {
             messages: BTreeMap::new(),
             processed_upto: BTreeMap::new(),
+            end_lt: 0,
         }
     }
 }
@@ -29,6 +49,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
     pub fn from_queue_diff(
         queue_diff_stuff: &QueueDiffStuff,
         out_msg_description: &OutMsgDescr,
+        end_lt: u64,
     ) -> Result<Self> {
         let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
         let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
@@ -52,6 +73,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         Ok(Self {
             messages,
             processed_upto,
+            end_lt
         })
     }
 }

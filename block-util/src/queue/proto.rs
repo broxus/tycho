@@ -28,7 +28,7 @@ pub struct QueueDiff {
     /// Max message queue key.
     pub max_message: QueueKey,
     /// List of message hashes (sorted ASC).
-    pub messages: Vec<HashBytes>,
+    pub messages: Vec<HashBytes>
 }
 
 impl QueueDiff {
@@ -94,6 +94,7 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             min_message: QueueKey::read_from(data, offset)?,
             max_message: QueueKey::read_from(data, offset)?,
             messages: messages_list::read(data, offset)?,
+            end_lt: u64::read_from(data, offset)?,
         };
 
         if result.max_message < result.min_message {

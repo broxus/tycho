@@ -298,7 +298,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         } else {
             match self.iterator_opt.as_mut().unwrap().next_new()? {
                 Some(int_msg) => {
-                    let message_key = int_msg.item.message.key();
+                    let message_key = int_msg.item.item.key();
 
                     self.no_pending_new_messages = message_key == self.new_messages_read_to;
 

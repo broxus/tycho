@@ -9,8 +9,8 @@ use tycho_block_util::queue::QueueKey;
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_util::FastHashMap;
 
-use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::state::shard_iterator::{IterResult, IterResultValue, ShardIterator};
+use crate::internal_queue::types::{InternalMessageValue, QueueItem};
 
 pub struct ShardIteratorWithRange {
     pub iter: OwnedIterator,
@@ -31,18 +31,18 @@ impl ShardIteratorWithRange {
 #[derive(Debug, Clone)]
 pub struct MessageExt<V: InternalMessageValue> {
     pub source: ShardIdent,
-    pub message: Arc<V>,
+    pub item: QueueItem<V>,
 }
 
 impl<V: InternalMessageValue> MessageExt<V> {
-    pub fn new(source: ShardIdent, message: Arc<V>) -> Self {
-        MessageExt { source, message }
+    pub fn new(source: ShardIdent, item: QueueItem<V>) -> Self {
+        MessageExt { source, item }
     }
 }
 
 impl<V: InternalMessageValue> PartialEq for MessageExt<V> {
     fn eq(&self, other: &Self) -> bool {
-        self.message == other.message
+        self.item == other.item
     }
 }
 
@@ -50,13 +50,13 @@ impl<V: InternalMessageValue> Eq for MessageExt<V> {}
 
 impl<V: InternalMessageValue> PartialOrd for MessageExt<V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.message.cmp(&other.message))
+        Some(self.item.cmp(&other.item))
     }
 }
 
 impl<V: InternalMessageValue> Ord for MessageExt<V> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.message.cmp(&other.message)
+        self.item.cmp(&other.item)
     }
 }
 
@@ -118,9 +118,7 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
             loop {
                 match iter.current()? {
                     Some(IterResult::Value(value)) => {
-                        let message =
-                            V::deserialize(value).context("Failed to deserialize message")?;
-                        let message_ext = MessageExt::new(shard_ident, Arc::new(message));
+                        let message_ext = (shard_ident, value).try_into()?;
                         self.message_queue.push(Reverse(message_ext));
                         self.in_queue.insert(shard_ident);
                         iter.shift();
@@ -150,12 +148,33 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
     }
 }
 
+impl <V:InternalMessageValue>TryFrom<(ShardIdent, IterResultValue<'_>)> for MessageExt<V> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: (ShardIdent, IterResultValue<'_>)) -> std::result::Result<Self, Self::Error> {
+        let (shard_ident, value) = value;
+        match value {
+            IterResultValue::Message(message) => {
+                let deserialized_message = V::deserialize(message).context("Failed to deserialize message")?;
+                let queue_value = QueueItem::InternalMessage(Arc::new(deserialized_message));
+                Ok(Self::new(shard_ident, queue_value))
+            }
+            IterResultValue::DiffEnd(key) => {
+                let queue_value = QueueItem::DiffEnd(key);
+                Ok(Self::new(shard_ident, queue_value))
+            }
+        }
+
+    }
+}
+
+
 impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
     fn next(&mut self) -> Result<Option<MessageExt<V>>> {
         self.refill_queue()?;
 
         if let Some(Reverse(message)) = self.message_queue.pop() {
-            let message_key = message.message.key();
+            let message_key = message.item.key();
             self.current_position.insert(message.source, message_key);
 
             self.in_queue.remove(&message.source);

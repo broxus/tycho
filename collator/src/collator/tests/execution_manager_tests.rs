@@ -95,9 +95,10 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
 
     async fn apply_diff(
         &self,
-        _diff: QueueDiffWithMessages<V>,
-        _block_id_short: BlockIdShort,
-        _diff_hash: &HashBytes,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+        diff_hash: &HashBytes,
+        i: u64,
     ) -> Result<()> {
         unimplemented!()
     }

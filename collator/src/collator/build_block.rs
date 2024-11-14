@@ -376,6 +376,7 @@ impl CollatorStdImpl {
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
+                    tail_len: 0,
                 },
                 extra: Lazy::new(&new_block_extra)?,
             };
@@ -486,6 +487,7 @@ impl CollatorStdImpl {
             consensus_info: new_mc_data
                 .as_ref()
                 .map_or_else(|| mc_data.consensus_info, |mcd| mcd.consensus_info),
+            end_lt: new_block_info.end_lt,
         });
 
         let total_elapsed = histogram.finish();

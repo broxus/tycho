@@ -41,6 +41,7 @@ mod mq_iterator_adapter;
 mod types;
 
 pub use error::CollationCancelReason;
+use tycho_block_util::queue::QueueKey;
 
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
@@ -732,6 +733,8 @@ impl CollatorStdImpl {
             prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
             "loading prev states...",
         );
+
+        // TODO !!! check load tail len
         let prev_states =
             Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await?;
 
@@ -761,6 +764,8 @@ impl CollatorStdImpl {
         has_unprocessed_messages: bool,
         msgs_buffer: MessagesBuffer,
         tracker: MinRefMcStateTracker,
+        end_queue_diff_key: QueueKey
+        /// TODO !!! add end lt
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
@@ -832,6 +837,8 @@ impl CollatorStdImpl {
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<(Vec<ShardStateStuff>, Vec<HashBytes>)> {
         // otherwise await prev states by prev block ids
+
+        // TODO !!! add load tail len
         let load_state_fut: JoinTask<Result<Vec<ShardStateStuff>>> = JoinTask::new({
             let state_node_adapter = state_node_adapter.clone();
             let prev_blocks_ids = prev_blocks_ids.clone();

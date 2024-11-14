@@ -64,8 +64,12 @@ pub trait SessionStateFactory<V: InternalMessageValue> {
 
 #[trait_variant::make(SessionState: Send)]
 pub trait LocalSessionState<V: InternalMessageValue> {
-    fn add_messages(&self, source: ShardIdent, messages: &BTreeMap<QueueKey, Arc<V>>)
-        -> Result<()>;
+    fn add_messages_with_end_diff(
+        &self,
+        source: ShardIdent,
+        messages: &BTreeMap<QueueKey, Arc<V>>,
+        end_diff_key: QueueKey,
+    ) -> Result<()>;
 
     fn iterator(
         &self,
@@ -92,10 +96,11 @@ impl SessionStateStdImpl {
 
 impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
     /// write new messages to storage
-    fn add_messages(
+    fn add_messages_with_end_diff(
         &self,
         source: ShardIdent,
         messages: &BTreeMap<QueueKey, Arc<V>>,
+        end_diff_key: QueueKey,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
 
@@ -112,6 +117,10 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
                     &message.serialize()?,
                 )?;
         }
+
+        self.storage
+            .internal_queue_storage()
+            .insert_end_diff_session(&mut batch, tycho_storage::model::ShardsInternalMessagesKey::new(source, end_diff_key));
 
         self.storage.internal_queue_storage().write_batch(batch)?;
 
