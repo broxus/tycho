@@ -661,7 +661,6 @@ impl MessagesExecutor {
         config: &Arc<PreloadedBlockchainConfig>,
         params: &Arc<ExecuteParams>,
     ) -> Result<ExecutedTransactions> {
-        // TODO check externals is not exist accounts needed ?
         let shard_account_stuff = accounts_cache.get_account_stuff(&account_id)?;
         Self::execute_messages(shard_account_stuff, msgs, min_next_lt, config, params)
     }

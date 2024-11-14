@@ -114,7 +114,10 @@ impl CollatorStdImpl {
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
             let mq_adapter = self.mq_adapter.clone();
+            let span = tracing::Span::current();
             move || {
+                let _span = span.enter();
+
                 Self::run(
                     config,
                     mq_adapter,
@@ -271,8 +274,11 @@ impl CollatorStdImpl {
 
         let finalize_block_timer = std::time::Instant::now();
 
+        let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
             || {
+                let _span = span.enter();
+
                 finalize_phase.finalize_block(
                     collation_session,
                     wu_used_from_last_anchor,
@@ -282,14 +288,14 @@ impl CollatorStdImpl {
                     executor,
                 )
             },
+            // wait update queue task before returning collation result
+            // to be sure that queue was updated before block commit and next block collation
             update_queue_task,
         );
         // build block candidate and new state
         let (finalized, execute_result) = finalize_phase_result?;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
-        // resolve update queue task before returning colaltion result
-        // to be sure that queue was updated before block commit and next block collation
         let apply_queue_diff_elapsed = update_queue_task_result?;
 
         assert_eq!(
