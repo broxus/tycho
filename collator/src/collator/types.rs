@@ -496,13 +496,19 @@ pub struct PreparedOutMsg {
 }
 
 impl BlockCollationData {
-    pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
+    pub fn shards(&self) -> Option<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards.as_ref()
+    }
+
+    pub fn get_shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_ref()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
     }
 
-    pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
+    pub fn get_shards_mut(
+        &mut self,
+    ) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_mut()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))

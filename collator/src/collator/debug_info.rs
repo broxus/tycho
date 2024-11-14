@@ -1,8 +1,9 @@
 use everscale_types::merkle::MerkleUpdate;
 use everscale_types::models::{
     BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, GlobalVersion, McBlockExtra,
-    McStateExtra, PrevBlockRef, ShardFeeCreated, ShardStateUnsplit,
+    McStateExtra, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent, ShardStateUnsplit,
 };
+use tycho_util::FastHashMap;
 
 use crate::types::{DebugDisplay, ProcessedUptoInfoStuff};
 
@@ -13,6 +14,7 @@ pub struct BlockDebugInfo<'a> {
     pub state: &'a ShardStateUnsplit,
     pub processed_upto: &'a ProcessedUptoInfoStuff,
     pub mc_state_extra: Option<&'a McStateExtra>,
+    pub mc_top_shards: Option<&'a FastHashMap<ShardIdent, Box<ShardDescription>>>,
     pub merkle_update: &'a MerkleUpdate,
     pub block_extra: &'a BlockExtra,
     pub mc_block_extra: Option<&'a McBlockExtra>,
@@ -29,6 +31,10 @@ impl std::fmt::Debug for BlockDebugInfo<'_> {
 
         if let Some(mc_state_extra) = self.mc_state_extra {
             s.field("mc_state_extra", &DebugMcStateExtra(mc_state_extra));
+        }
+
+        if let Some(mc_top_shards) = self.mc_top_shards {
+            s.field("mc_top_shards", &DebugTopShards(mc_top_shards));
         }
 
         s.field("processed_upto", self.processed_upto)
@@ -245,6 +251,44 @@ impl std::fmt::Debug for DebugShardFeeCreated<'_> {
         f.debug_struct("ShardFeeCreated")
             .field("fees.tokens", &DebugDisplay(self.0.fees.tokens))
             .field("create.tokens", &DebugDisplay(self.0.create.tokens))
+            .finish()
+    }
+}
+
+pub struct DebugTopShards<'a>(pub &'a FastHashMap<ShardIdent, Box<ShardDescription>>);
+impl std::fmt::Debug for DebugTopShards<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("McTopShards");
+
+        for (shard_id, shard) in self.0.iter() {
+            s.field("shard_id", &DebugDisplay(shard_id))
+                .field("shard_descr", &DebugShardDescription(shard));
+        }
+
+        s.finish()
+    }
+}
+
+pub struct DebugShardDescription<'a>(pub &'a ShardDescription);
+
+impl std::fmt::Debug for DebugShardDescription<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardDescription")
+            .field("seqno", &self.0.seqno)
+            .field("reg_mc_seqno", &self.0.reg_mc_seqno)
+            .field("start_lt", &self.0.start_lt)
+            .field("end_lt", &self.0.end_lt)
+            .field("root_hash", &self.0.root_hash)
+            .field("file_hash", &self.0.file_hash)
+            .field(
+                "ext_processed_to_anchor_id",
+                &self.0.ext_processed_to_anchor_id,
+            )
+            .field("top_sc_block_updated", &self.0.top_sc_block_updated)
+            .field("min_ref_mc_seqno", &self.0.min_ref_mc_seqno)
+            .field("gen_utime", &self.0.gen_utime)
+            .field("fees_collected", &self.0.fees_collected.tokens)
+            .field("funds_created", &self.0.funds_created.tokens)
             .finish()
     }
 }

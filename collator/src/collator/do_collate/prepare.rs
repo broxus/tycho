@@ -75,7 +75,7 @@ impl Phase<PrepareState> {
         let mc_top_shards_end_lts: Vec<_> = if self.state.shard_id.is_masterchain() {
             self.state
                 .collation_data
-                .shards()?
+                .get_shards()?
                 .iter()
                 .map(|(k, v)| (*k, v.end_lt))
                 .collect()
