@@ -528,6 +528,7 @@ impl Phase<FinalizeState> {
                 prev_ref: &prev_ref,
                 state: &new_observable_state,
                 processed_upto: &self.state.collation_data.processed_upto,
+                mc_top_shards: self.state.collation_data.shards(),
                 mc_state_extra: mc_state_extra.as_ref(),
                 merkle_update: &state_update,
                 block_extra: &new_block_extra,
@@ -748,7 +749,7 @@ impl Phase<FinalizeState> {
 
         // 3. save new shard_hashes
         let shards_iter = collation_data
-            .shards()?
+            .get_shards()?
             .iter()
             .map(|(k, v)| (k, v.as_ref()));
         let shards = ShardHashes::from_shards(shards_iter)?;
@@ -911,7 +912,7 @@ impl Phase<FinalizeState> {
 
         // STUB: just do nothing for now: no split/merge, no session rotation
         let mut min_ref_mc_seqno = u32::MAX;
-        for shard_descr in collation_data.shards_mut()?.values_mut() {
+        for shard_descr in collation_data.get_shards_mut()?.values_mut() {
             min_ref_mc_seqno = std::cmp::min(min_ref_mc_seqno, shard_descr.min_ref_mc_seqno);
         }
 
