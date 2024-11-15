@@ -170,7 +170,7 @@ impl EndpointConfig {
         }
     }
 
-    pub fn make_client_config_for_peer_id(&self, peer_id: &PeerId) -> Result<quinn::ClientConfig> {
+    pub fn make_client_config_for_peer_id(&self, peer_id: &PeerId) -> quinn::ClientConfig {
         let mut client_config =
             rustls::ClientConfig::builder_with_provider(self.crypto_provider.clone())
                 .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
@@ -180,11 +180,12 @@ impl EndpointConfig {
                 .with_client_cert_resolver(self.cert_resolver.clone());
 
         client_config.enable_early_data = self.enable_early_data;
-        let quinn_config = QuicClientConfig::try_from(client_config)?;
+        let quinn_config =
+            QuicClientConfig::try_from(client_config).expect("cipher suite is always provided");
 
         let mut client = quinn::ClientConfig::new(Arc::new(quinn_config));
         client.transport_config(self.transport_config.clone());
-        Ok(client)
+        client
     }
 }
 

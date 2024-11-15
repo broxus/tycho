@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::network::config::EndpointConfig;
-use crate::network::connection::{parse_peer_identity, Connection};
+use crate::network::connection::{extract_peer_id, parse_peer_identity, Connection};
 use crate::types::{Direction, PeerId};
 
 pub(crate) struct Endpoint {
@@ -77,20 +77,19 @@ impl Endpoint {
         &self,
         address: &SocketAddr,
         peer_id: &PeerId,
-    ) -> Result<Connecting> {
-        let config = self.config.make_client_config_for_peer_id(peer_id)?;
+    ) -> Result<Connecting, quinn::ConnectError> {
+        let config = self.config.make_client_config_for_peer_id(peer_id);
         self.connect_with_client_config(config, address)
     }
 
     /// Connect to a remote endpoint using a custom configuration.
-    fn connect_with_client_config(
+    pub fn connect_with_client_config(
         &self,
         config: quinn::ClientConfig,
         address: &SocketAddr,
-    ) -> Result<Connecting> {
+    ) -> Result<Connecting, quinn::ConnectError> {
         self.inner
             .connect_with(config, *address, "tycho")
-            .map_err(Into::into)
             .map(Connecting::new_outbound)
     }
 
@@ -162,11 +161,11 @@ impl Connecting {
         match self.inner.into_0rtt() {
             Ok((c, accepted)) => match c.peer_identity() {
                 Some(identity) => match parse_peer_identity(identity) {
-                    Ok(peer_id) => Into0RttResult::Established(
+                    Some(peer_id) => Into0RttResult::Established(
                         Connection::with_peer_id(c, self.origin, peer_id),
                         accepted,
                     ),
-                    Err(e) => Into0RttResult::InvalidConnection(e),
+                    None => Into0RttResult::InvalidCertificate,
                 },
                 None => Into0RttResult::WithoutIdentity(ConnectingFallback {
                     inner: Some(c),
@@ -183,13 +182,15 @@ impl Connecting {
 }
 
 impl Future for Connecting {
-    type Output = Result<Connection>;
+    type Output = Result<Connection, ConnectionInitError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner).poll(cx).map(|res| {
-            res.map_err(anyhow::Error::from)
-                .and_then(|c| Connection::new(c, self.origin))
-                .map_err(|e| anyhow::anyhow!("failed establishing {} connection: {e}", self.origin))
+        Pin::new(&mut self.inner).poll(cx).map(|res| match res {
+            Ok(c) => match extract_peer_id(&c) {
+                Some(peer_id) => Ok(Connection::with_peer_id(c, self.origin, peer_id)),
+                None => Err(ConnectionInitError::InvalidCertificate),
+            },
+            Err(e) => Err(ConnectionInitError::ConnectionFailed(e)),
         })
     }
 }
@@ -210,7 +211,7 @@ impl Drop for ConnectingFallback {
 }
 
 impl Future for ConnectingFallback {
-    type Output = Result<Connection>;
+    type Output = Result<Connection, ConnectionInitError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.accepted).poll(cx).map(|_| {
@@ -220,8 +221,11 @@ impl Future for ConnectingFallback {
                 .expect("future must not be polled after completion");
 
             match c.close_reason() {
-                Some(e) => Err(e.into()),
-                None => Connection::new(c, self.origin),
+                Some(e) => Err(ConnectionInitError::ConnectionFailed(e)),
+                None => match extract_peer_id(&c) {
+                    Some(peer_id) => Ok(Connection::with_peer_id(c, self.origin, peer_id)),
+                    None => Err(ConnectionInitError::InvalidCertificate),
+                },
             }
         })
     }
@@ -230,6 +234,14 @@ impl Future for ConnectingFallback {
 pub(crate) enum Into0RttResult {
     Established(Connection, quinn::ZeroRttAccepted),
     WithoutIdentity(ConnectingFallback),
-    InvalidConnection(anyhow::Error),
+    InvalidCertificate,
     Unavailable(#[allow(unused)] Connecting),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum ConnectionInitError {
+    #[error(transparent)]
+    ConnectionFailed(quinn::ConnectionError),
+    #[error("invalid certificate")]
+    InvalidCertificate,
 }

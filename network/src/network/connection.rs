@@ -3,7 +3,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use quinn::{ConnectionError, SendDatagramError};
 use webpki::types::CertificateDer;
@@ -18,11 +17,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(inner: quinn::Connection, origin: Direction) -> Result<Self> {
-        let peer_id = extract_peer_id(&inner)?;
-        Ok(Self::with_peer_id(inner, origin, peer_id))
-    }
-
     pub fn with_peer_id(inner: quinn::Connection, origin: Direction, peer_id: PeerId) -> Self {
         Self {
             request_meta: Arc::new(InboundRequestMeta {
@@ -184,20 +178,16 @@ impl tokio::io::AsyncRead for RecvStream {
     }
 }
 
-pub(crate) fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
-    parse_peer_identity(
-        connection
-            .peer_identity()
-            .context("No identity found in the connection")?,
-    )
+pub(crate) fn extract_peer_id(connection: &quinn::Connection) -> Option<PeerId> {
+    connection.peer_identity().and_then(parse_peer_identity)
 }
 
-pub(crate) fn parse_peer_identity(identity: Box<dyn std::any::Any>) -> Result<PeerId> {
+pub(crate) fn parse_peer_identity(identity: Box<dyn std::any::Any>) -> Option<PeerId> {
     let certificate = identity
         .downcast::<Vec<CertificateDer<'static>>>()
-        .ok()
-        .and_then(|certificates| certificates.into_iter().next())
-        .context("No certificate found in the connection")?;
+        .ok()?
+        .into_iter()
+        .next()?;
 
-    peer_id_from_certificate(&certificate).map_err(Into::into)
+    peer_id_from_certificate(&certificate).ok()
 }

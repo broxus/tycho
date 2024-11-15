@@ -13,9 +13,10 @@ use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::network::config::NetworkConfig;
 use crate::network::connection::Connection;
-use crate::network::endpoint::{Connecting, Endpoint, Into0RttResult};
+use crate::network::endpoint::{Connecting, ConnectionInitError, Endpoint, Into0RttResult};
 use crate::network::request_handler::InboundRequestHandler;
-use crate::network::wire::handshake;
+use crate::network::wire::{handshake, HandshakeError};
+use crate::network::ConnectionError;
 use crate::types::{
     Address, BoxCloneService, Direction, DisconnectReason, PeerAffinity, PeerEvent, PeerId,
     PeerInfo, Response, ServiceRequest,
@@ -67,8 +68,8 @@ pub(crate) struct ConnectionManager {
     service: BoxCloneService<ServiceRequest, Response>,
 }
 
-type CallbackTx = oneshot::Sender<Result<Connection, Arc<anyhow::Error>>>;
-type CallbackRx = oneshot::Receiver<Result<Connection, Arc<anyhow::Error>>>;
+type CallbackTx = oneshot::Sender<Result<Connection, ConnectionError>>;
+type CallbackRx = oneshot::Receiver<Result<Connection, ConnectionError>>;
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
@@ -326,9 +327,8 @@ impl ConnectionManager {
                 });
                 metrics::gauge!(METRIC_CONNECTIONS_PARTIAL).increment(1);
             }
-            Into0RttResult::InvalidConnection(e) => {
-                // TODO: Lower log level to trace/debug?
-                tracing::warn!(%remote_addr, "invalid incoming connection: {e}");
+            Into0RttResult::InvalidCertificate => {
+                tracing::trace!(%remote_addr, "invalid incoming connection");
             }
             Into0RttResult::Unavailable(_) => unreachable!(
                 "BUG: For incoming connections, a 0.5-RTT connection must \
@@ -361,12 +361,11 @@ impl ConnectionManager {
 
             let started_at = Instant::now();
 
-            let connecting_result = tokio::time::timeout_at(timeout_at.into(), fut)
-                .await
-                .map_err(Into::into)
-                .and_then(std::convert::identity)
-                .map_err(Arc::new)
-                .map(|_| connection.disarm());
+            let connecting_result = match tokio::time::timeout_at(timeout_at.into(), fut).await {
+                Ok(Ok(())) => Ok(connection.disarm()),
+                Ok(Err(e)) => Err(FullConnectionError::HandshakeFailed(e)),
+                Err(_) => Err(FullConnectionError::Timeout),
+            };
 
             metrics::histogram!(METRIC_CONNECTION_IN_TIME).record(started_at.elapsed());
 
@@ -515,7 +514,7 @@ impl ConnectionManager {
                     local_id = %self.endpoint.peer_id(),
                     peer_id = %res.target_peer_id,
                     remote_addr = %res.target_address,
-                    "connection failed: {e}"
+                    "connection failed: {e:?}"
                 );
 
                 metrics::counter!(match res.origin {
@@ -524,22 +523,22 @@ impl ConnectionManager {
                 })
                 .increment(1);
 
+                let brief_error = e.as_brief();
+
                 // Delay sending the error to callbacks as the target peer might be
                 // in the process of connecting to us.
-                if let Some(quinn::ConnectionError::ApplicationClosed(closed)) = e.downcast_ref() {
-                    if closed.error_code.into_inner() == 0 && !callbacks.is_empty() {
-                        self.delayed_callbacks.push(
-                            &res.target_peer_id,
-                            e,
-                            callbacks,
-                            &self.config.connection_error_delay,
-                        );
-                        return;
-                    }
+                if e.was_closed() && !callbacks.is_empty() {
+                    self.delayed_callbacks.push(
+                        &res.target_peer_id,
+                        brief_error,
+                        callbacks,
+                        &self.config.connection_error_delay,
+                    );
+                    return;
                 }
 
                 for callback in callbacks {
-                    _ = callback.send(Err(e.clone()));
+                    _ = callback.send(Err(brief_error));
                 }
             }
         }
@@ -590,21 +589,28 @@ impl ConnectionManager {
             config: Arc<NetworkConfig>,
         ) -> ConnectingOutput {
             let fut = async {
-                let address = address.resolve().await?;
-                let connecting = endpoint.connect_with_expected_id(&address, &peer_id)?;
+                let address = address
+                    .resolve()
+                    .await
+                    .map_err(FullConnectionError::InvalidAddress)?;
+
+                let connecting = endpoint
+                    .connect_with_expected_id(&address, &peer_id)
+                    .map_err(|e| FullConnectionError::InvalidAddress(std::io::Error::other(e)))?;
+
                 let connection = ConnectionClosedOnDrop::new(connecting.await?);
-                handshake(&connection).await?;
-                Ok(connection)
+                match handshake(&connection).await {
+                    Ok(()) => Ok(connection),
+                    Err(e) => Err(FullConnectionError::HandshakeFailed(e)),
+                }
             };
 
             let started_at = Instant::now();
 
-            let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
-                .await
-                .map_err(Into::into)
-                .and_then(std::convert::identity)
-                .map_err(Arc::new)
-                .map(ConnectionClosedOnDrop::disarm);
+            let connecting_result = match tokio::time::timeout(config.connect_timeout, fut).await {
+                Ok(res) => res.map(ConnectionClosedOnDrop::disarm),
+                Err(_) => Err(FullConnectionError::Timeout),
+            };
 
             metrics::histogram!(METRIC_CONNECTION_OUT_TIME).record(started_at.elapsed());
 
@@ -693,7 +699,7 @@ struct PartialConnection {
 struct ConnectingOutput {
     seqno: u32,
     drop_result: bool,
-    connecting_result: ManuallyDrop<Result<Connection, Arc<anyhow::Error>>>,
+    connecting_result: ManuallyDrop<Result<Connection, FullConnectionError>>,
     target_address: Address,
     target_peer_id: PeerId,
     origin: Direction,
@@ -757,7 +763,7 @@ impl DelayedCallbacksQueue {
     fn push(
         &mut self,
         peer_id: &PeerId,
-        error: Arc<anyhow::Error>,
+        error: ConnectionError,
         callbacks: Vec<CallbackTx>,
         delay: &Duration,
     ) {
@@ -847,7 +853,7 @@ impl DelayedCallbacksQueue {
 
 struct DelayedCallbacks {
     delay_key: delay_queue::Key,
-    error: Arc<anyhow::Error>,
+    error: ConnectionError,
     callbacks: Vec<CallbackTx>,
     expires_at: Instant,
 }
@@ -862,7 +868,7 @@ impl DelayedCallbacks {
 
     fn execute_with_error(self) -> delay_queue::Key {
         for callback in self.callbacks {
-            _ = callback.send(Err(self.error.clone()));
+            _ = callback.send(Err(self.error));
         }
         self.delay_key
     }
@@ -895,6 +901,69 @@ impl DialBackoffState {
                 max,
                 step.saturating_mul(self.attempts.try_into().unwrap_or(u32::MAX)),
             );
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum FullConnectionError {
+    #[error("invalid address")]
+    InvalidAddress(#[source] std::io::Error),
+    #[error(transparent)]
+    ConnectionFailed(quinn::ConnectionError),
+    #[error("invalid certificate")]
+    InvalidCertificate,
+    #[error("handshake failed")]
+    HandshakeFailed(#[source] HandshakeError),
+    #[error("connection timeout")]
+    Timeout,
+}
+
+impl FullConnectionError {
+    fn as_brief(&self) -> ConnectionError {
+        fn is_crypto_error(error: &quinn::ConnectionError) -> bool {
+            const QUIC_CRYPTO_FLAG: u64 = 0x100;
+
+            matches!(
+                error,
+                quinn::ConnectionError::TransportError(e)
+                if u64::from(e.code) & QUIC_CRYPTO_FLAG != 0
+            )
+        }
+
+        match self {
+            Self::InvalidAddress(_) => ConnectionError::InvalidAddress,
+            Self::ConnectionFailed(e) if is_crypto_error(e) => ConnectionError::InvalidCertificate,
+            Self::ConnectionFailed(_) => ConnectionError::ConnectionInitFailed,
+            Self::InvalidCertificate => ConnectionError::InvalidCertificate,
+            Self::HandshakeFailed(HandshakeError::ConnectionFailed(e)) if is_crypto_error(e) => {
+                ConnectionError::InvalidCertificate
+            }
+            Self::HandshakeFailed(_) => ConnectionError::HandshakeFailed,
+            Self::Timeout => ConnectionError::Timeout,
+        }
+    }
+
+    fn was_closed(&self) -> bool {
+        let connection_error = match self {
+            Self::ConnectionFailed(e)
+            | Self::HandshakeFailed(HandshakeError::ConnectionFailed(e)) => e,
+            _ => return false,
+        };
+
+        matches!(
+            connection_error,
+            quinn::ConnectionError::ApplicationClosed(closed)
+            if closed.error_code.into_inner() == 0
+        )
+    }
+}
+
+impl From<ConnectionInitError> for FullConnectionError {
+    fn from(value: ConnectionInitError) -> Self {
+        match value {
+            ConnectionInitError::ConnectionFailed(e) => Self::ConnectionFailed(e),
+            ConnectionInitError::InvalidCertificate => Self::InvalidCertificate,
+        }
     }
 }
 

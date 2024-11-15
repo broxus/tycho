@@ -49,7 +49,7 @@ impl Peer {
         send_request(&mut send_stream, request).await?;
         send_stream.get_mut().finish()?;
 
-        recv_response(&mut recv_stream).await
+        recv_response(&mut recv_stream).await.map_err(Into::into)
     }
 
     pub async fn send_message(&self, request: Request) -> Result<()> {
