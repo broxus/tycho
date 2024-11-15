@@ -30,7 +30,6 @@ pub struct Downloader {
 }
 
 pub enum DownloadResult {
-    NotFound,
     Verified(Point),
     IllFormed(Point),
 }
@@ -149,9 +148,9 @@ impl Downloader {
         &self,
         point_id: &PointId,
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
-        verified_broadcast: oneshot::Receiver<Point>,
+        verified_broadcast: oneshot::Receiver<DownloadResult>,
         effects: Effects<DownloadContext>,
-    ) -> DownloadResult {
+    ) -> Option<DownloadResult> {
         let semaphore_opt = {
             let mut limiter = self.inner.limiter.lock();
             limiter.enter(point_id.round)
@@ -185,9 +184,9 @@ impl Downloader {
         &self,
         point_id: &PointId,
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
-        verified_broadcast: oneshot::Receiver<Point>,
+        broadcast_result: oneshot::Receiver<DownloadResult>,
         effects: Effects<DownloadContext>,
-    ) -> DownloadResult {
+    ) -> Option<DownloadResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_download_task_time");
         effects.meter_start(point_id);
         let span_guard = effects.span().enter();
@@ -234,7 +233,7 @@ impl Downloader {
             interval: tokio::time::interval(CachedConfig::download_retry()),
         };
         let downloaded = task
-            .run(dependers_rx, verified_broadcast)
+            .run(dependers_rx, broadcast_result)
             .instrument(effects.span().clone())
             .await;
 
@@ -272,8 +271,8 @@ impl<T: DownloadType> DownloadTask<T> {
     pub async fn run(
         &mut self,
         mut dependers_rx: mpsc::UnboundedReceiver<PeerId>,
-        mut verified_broadcast: oneshot::Receiver<Point>,
-    ) -> DownloadResult {
+        mut broadcast_result: oneshot::Receiver<DownloadResult>,
+    ) -> Option<DownloadResult> {
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         self.interval
             .set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -285,18 +284,18 @@ impl<T: DownloadType> DownloadTask<T> {
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                Ok(point) = &mut verified_broadcast => break DownloadResult::Verified(point),
+                Ok(bcast_result) = &mut broadcast_result => break Some(bcast_result),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => if self.match_peer_updates(update).is_err() {
                     future::pending::<()>().await;
                 },
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
-                        Some(found) => break found,
+                        Some(found) => break Some(found),
                         None => if self.shall_continue() {
                             continue
                         } else {
-                            break DownloadResult::NotFound;
+                            break None;
                         }
                     },
                 // most rare arm to make progress despite slow responding peers
