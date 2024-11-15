@@ -8,7 +8,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::WeakDagRound;
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::CachedConfig;
-use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
+use crate::models::{DagPoint, Digest, Round, Signature, UnixTime};
 
 #[cfg_attr(feature = "test", derive(Clone))]
 pub struct DagLocation {
@@ -41,7 +41,6 @@ impl DagLocation {
     }
 }
 
-// Todo remove inner locks and introduce global current dag round watch simultaneously, see Collector
 #[derive(Clone)]
 pub struct InclusionState(Arc<InclusionStateInner>);
 struct InclusionStateInner {
@@ -58,8 +57,8 @@ impl InclusionState {
     }
 
     /// Must not be used for downloaded dependencies
-    pub fn init(&self, first_completed: &DagPoint) {
-        _ = self.0.signable.get_or_init(|| {
+    pub fn init(&self, first_completed: &DagPoint) -> &Signable {
+        self.0.signable.get_or_init(|| {
             let signable = Signable {
                 first_completed: first_completed.clone(),
                 signed: OnceLock::new(),
@@ -79,48 +78,25 @@ impl InclusionState {
                 signable.reject();
             }
             signable
-        });
+        })
     }
     pub fn signable(&self) -> Option<&'_ Signable> {
         self.0.signable.get()
     }
-    pub fn signed(&self) -> Option<&'_ Result<Signed, ()>> {
-        self.0.signable.get()?.signed.get()
-    }
-    pub fn signed_point(&self, at: Round) -> Option<&'_ ValidPoint> {
-        let signable = self.0.signable.get()?;
-        if signable.signed.get()?.as_ref().ok()?.at == at {
-            signable.first_completed.valid()
-        } else {
-            None
-        }
-    }
-    pub fn point(&self) -> Option<&DagPoint> {
-        self.0
-            .signable
-            .get()
-            .map(|signable| &signable.first_completed)
-    }
 }
 
-// Todo actually we are not interested in the round of making a signature,
-//   but a round of the first (and only) reference.
-//   Since the single version of a point is decided as eligible for signature (trusted),
-//   it may be included immediately; no need to include it twice.
-//   One cannot include point with the time lesser than the proven anchor candidate -
-//   and that's all for the global time sequence, i.e. any node with a great time skew
-//   can produce points to be included and committed, but cannot accomplish leader's requirements.
+// Actually we are not interested in the round of making a signature,
+// but a round of the first (and only) reference.
+// Since the single version of a point is decided as eligible for signature (trusted),
+// it may be included immediately; no need to include it twice.
+// One cannot include point with the time lesser than the proven anchor candidate -
+// and that's all for the global time sequence, i.e. any node with a big enough time skew
+// can produce points to be included and committed, but cannot accomplish leader's requirements.
 #[derive(Debug)]
 pub struct Signable {
-    first_completed: DagPoint,
+    pub first_completed: DagPoint,
     // signature cannot be rolled back, the point must be included as next point dependency
-    signed: OnceLock<Result<Signed, ()>>,
-}
-
-#[derive(Debug)]
-pub struct Signed {
-    pub at: Round,
-    pub with: Signature,
+    signed: OnceLock<Result<Signature, ()>>,
 }
 
 impl Signable {
@@ -134,10 +110,7 @@ impl Signable {
             if valid.info.data().time < (UnixTime::now() + CachedConfig::clock_skew()) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
-                    Ok(Signed {
-                        at,
-                        with: Signature::new(key_pair, valid.info.digest()),
-                    })
+                    Ok(Signature::new(key_pair, valid.info.digest()))
                 });
                 if this_call_signed {
                     if valid.info.round() > at {
@@ -170,6 +143,9 @@ impl Signable {
     fn reject(&self) {
         metrics::counter!("tycho_mempool_signing_rejected").increment(1);
         _ = self.signed.set(Err(()));
+    }
+    pub fn signed(&self) -> Option<&Result<Signature, ()>> {
+        self.signed.get()
     }
 }
 
