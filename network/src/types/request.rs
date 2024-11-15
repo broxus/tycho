@@ -14,6 +14,13 @@ pub enum Version {
 }
 
 impl Version {
+    pub fn try_from_u16(value: u16) -> Option<Self> {
+        match value {
+            1 => Some(Self::V1),
+            _ => None,
+        }
+    }
+
     pub fn to_u16(self) -> u16 {
         self as u16
     }
@@ -23,9 +30,9 @@ impl TryFrom<u16> for Version {
     type Error = anyhow::Error;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::V1),
-            _ => Err(anyhow::anyhow!("invalid version: {value}")),
+        match Self::try_from_u16(value) {
+            Some(version) => Ok(version),
+            None => Err(anyhow::anyhow!("invalid version: {value}")),
         }
     }
 }

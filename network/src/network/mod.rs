@@ -198,7 +198,7 @@ impl Network {
     }
 
     /// Initiate a connection to the specified peer.
-    pub async fn connect<T>(&self, addr: T, peer_id: &PeerId) -> Result<Peer>
+    pub async fn connect<T>(&self, addr: T, peer_id: &PeerId) -> Result<Peer, ConnectionError>
     where
         T: Into<Address>,
     {
@@ -209,7 +209,7 @@ impl Network {
         self.0.disconnect(peer_id);
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self) {
         self.0.shutdown().await
     }
 
@@ -270,20 +270,18 @@ impl NetworkInner {
         self.endpoint.peer_id()
     }
 
-    async fn connect(&self, addr: Address, peer_id: &PeerId) -> Result<Peer> {
-        #[derive(thiserror::Error, Debug)]
-        #[error("connection error: {0}")]
-        struct ConnectionError(#[source] Arc<anyhow::Error>);
-
+    async fn connect(&self, addr: Address, peer_id: &PeerId) -> Result<Peer, ConnectionError> {
         let (tx, rx) = oneshot::channel();
         self.connection_manager_handle
             .send(ConnectionManagerRequest::Connect(addr, *peer_id, tx))
             .await
-            .map_err(|_e| NetworkShutdownError)?;
+            .map_err(|_e| ConnectionError::Shutdown)?;
 
-        let res = rx.await?;
-        let connection = res.map_err(ConnectionError)?;
-        Ok(Peer::new(connection, self.config.clone()))
+        let Ok(res) = rx.await else {
+            return Err(ConnectionError::Shutdown);
+        };
+
+        res.map(|c| Peer::new(c, self.config.clone()))
     }
 
     fn disconnect(&self, peer_id: &PeerId) {
@@ -296,13 +294,18 @@ impl NetworkInner {
         Some(Peer::new(connection, self.config.clone()))
     }
 
-    async fn shutdown(&self) -> Result<()> {
+    async fn shutdown(&self) {
         let (sender, receiver) = oneshot::channel();
-        self.connection_manager_handle
+        if self
+            .connection_manager_handle
             .send(ConnectionManagerRequest::Shutdown(sender))
             .await
-            .map_err(|_e| NetworkShutdownError)?;
-        receiver.await.map_err(Into::into)
+            .is_err()
+        {
+            return;
+        }
+
+        receiver.await.ok();
     }
 
     fn is_closed(&self) -> bool {
@@ -366,9 +369,21 @@ fn bind_socket_to_addr<T: ToSocketAddrs>(bind_address: T) -> Result<std::net::Ud
     Err(err)
 }
 
-#[derive(thiserror::Error, Debug)]
-#[error("network has been shutdown")]
-struct NetworkShutdownError;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConnectionError {
+    #[error("invalid address")]
+    InvalidAddress,
+    #[error("connection init failed")]
+    ConnectionInitFailed,
+    #[error("invalid certificate")]
+    InvalidCertificate,
+    #[error("handshake failed")]
+    HandshakeFailed,
+    #[error("connection timeout")]
+    Timeout,
+    #[error("network has been shutdown")]
+    Shutdown,
+}
 
 #[cfg(test)]
 mod tests {
@@ -426,6 +441,63 @@ mod tests {
             .connect(peer1.local_addr(), peer1.peer_id())
             .await
             .unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_peer_id_detectable() -> Result<()> {
+        tycho_util::test::init_logger("invalid_peer_id_detectable", "debug");
+
+        let peer1 = make_network()?;
+        let peer2 = make_network()?;
+
+        let make_invalid_peer_info = |network: &Network| {
+            Arc::new(PeerInfo {
+                id: PeerId([0; 32]),
+                address_list: vec![network.remote_addr().clone()].into_boxed_slice(),
+                created_at: 0,
+                expires_at: u32::MAX,
+                signature: Box::new([0; 64]),
+            })
+        };
+        let _handle = peer1.known_peers().insert(make_peer_info(&peer2), false)?;
+        let _handle = peer1
+            .known_peers()
+            .insert(make_invalid_peer_info(&peer2), false)?;
+
+        let _handle = peer2.known_peers().insert(make_peer_info(&peer1), false)?;
+        let _handle = peer2
+            .known_peers()
+            .insert(make_invalid_peer_info(&peer1), false)?;
+
+        let req = Request {
+            version: Default::default(),
+            body: "hello".into(),
+        };
+
+        peer1.query(peer2.peer_id(), req.clone()).await?;
+        peer2.query(peer1.peer_id(), req.clone()).await?;
+
+        fn assert_is_invalid_certificate(e: anyhow::Error) {
+            // A non-recursive downcast to find a connection error
+            let e = (*e).downcast_ref::<ConnectionError>().unwrap();
+            assert_eq!(*e, ConnectionError::InvalidCertificate);
+        }
+
+        let err1 = peer1
+            .query(&PeerId([0; 32]), req.clone())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_is_invalid_certificate(err1);
+
+        let err2 = peer2
+            .query(&PeerId([0; 32]), req.clone())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_is_invalid_certificate(err2);
 
         Ok(())
     }
