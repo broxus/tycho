@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::task::AbortHandle;
-use tycho_network::{Network, PublicOverlay, Request};
+use tycho_network::{ConnectionError, Network, PublicOverlay, Request};
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
@@ -157,6 +157,8 @@ pub enum Error {
     RequestFailed(u32),
     #[error("internal error: {0}")]
     Internal(#[source] anyhow::Error),
+    #[error("timeout")]
+    Timeout,
 }
 
 struct Inner {
@@ -305,15 +307,30 @@ impl Inner {
     async fn send_impl(&self, neighbour: Neighbour, req: Request) -> Result<(), Error> {
         let started_at = Instant::now();
 
-        let res = self
-            .overlay
-            .send(&self.network, neighbour.peer_id(), req)
-            .await;
+        let res = tokio::time::timeout(
+            self.config.neighbors.send_timeout,
+            self.overlay.send(&self.network, neighbour.peer_id(), req),
+        )
+        .await;
 
         let roundtrip = started_at.elapsed() * 2; // Multiply by 2 to estimate the roundtrip time
-        neighbour.track_request(&roundtrip, res.is_ok());
 
-        res.map_err(Error::NetworkError)
+        match res {
+            Ok(response) => {
+                neighbour.track_request(&roundtrip, response.is_ok());
+
+                if let Err(e) = &response {
+                    apply_network_error(e, &neighbour);
+                }
+
+                response.map_err(Error::NetworkError)
+            }
+            Err(_) => {
+                neighbour.track_request(&roundtrip, false);
+                neighbour.punish(PunishReason::Slow);
+                Err(Error::Timeout)
+            }
+        }
     }
 
     async fn query_impl(
@@ -323,22 +340,29 @@ impl Inner {
     ) -> Result<QueryResponse<Bytes>, Error> {
         let started_at = Instant::now();
 
-        let res = self
-            .overlay
-            .query(&self.network, neighbour.peer_id(), req)
-            .await;
+        let res = tokio::time::timeout(
+            self.config.neighbors.query_timeout,
+            self.overlay.query(&self.network, neighbour.peer_id(), req),
+        )
+        .await;
 
         let roundtrip = started_at.elapsed();
 
         match res {
-            Ok(response) => Ok(QueryResponse {
+            Ok(Ok(response)) => Ok(QueryResponse {
                 data: response.body,
                 roundtrip_ms: roundtrip.as_millis() as u64,
                 neighbour,
             }),
-            Err(e) => {
+            Ok(Err(e)) => {
                 neighbour.track_request(&roundtrip, false);
+                apply_network_error(&e, &neighbour);
                 Err(Error::NetworkError(e))
+            }
+            Err(_) => {
+                neighbour.track_request(&roundtrip, false);
+                neighbour.punish(PunishReason::Slow);
+                Err(Error::Timeout)
             }
         }
     }
@@ -445,5 +469,23 @@ impl QueryResponseHandle {
     fn track_request(&self, success: bool) {
         self.neighbour
             .track_request(&Duration::from_millis(self.roundtrip_ms), success);
+    }
+}
+
+fn apply_network_error(error: &anyhow::Error, neighbour: &Neighbour) {
+    // NOTE: `(*error)` is a non-recurisve downcast
+    let Some(error) = (*error).downcast_ref() else {
+        // TODO: Handle other errors as well
+        return;
+    };
+
+    match error {
+        ConnectionError::InvalidAddress | ConnectionError::InvalidCertificate => {
+            neighbour.punish(PunishReason::Malicious);
+        }
+        ConnectionError::Timeout => {
+            neighbour.punish(PunishReason::Slow);
+        }
+        _ => {}
     }
 }

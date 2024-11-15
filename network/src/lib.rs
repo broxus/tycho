@@ -5,9 +5,9 @@ pub use dht::{
     StorageError,
 };
 pub use network::{
-    Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,
-    NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream, ToSocket,
-    WeakKnownPeerHandle, WeakNetwork,
+    Connection, ConnectionError, KnownPeerHandle, KnownPeers, KnownPeersError, Network,
+    NetworkBuilder, NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream,
+    ToSocket, WeakKnownPeerHandle, WeakNetwork,
 };
 pub use quinn;
 pub use types::{

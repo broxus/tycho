@@ -43,6 +43,16 @@ pub struct NeighborsConfig {
     /// Default: 300 ms.
     #[serde(with = "serde_helpers::humantime")]
     pub default_roundtrip: Duration,
+
+    /// Send timeout (unidirectional).
+    ///
+    /// Default: 500ms.
+    pub send_timeout: Duration,
+
+    /// Query timeout (bidirectional).
+    ///
+    /// Default: 1s.
+    pub query_timeout: Duration,
 }
 
 impl Default for NeighborsConfig {
@@ -53,6 +63,8 @@ impl Default for NeighborsConfig {
             keep: 5,
             max_ping_tasks: 5,
             default_roundtrip: Duration::from_millis(300),
+            send_timeout: Duration::from_millis(500),
+            query_timeout: Duration::from_secs(1),
         }
     }
 }
@@ -81,6 +93,11 @@ pub struct ValidatorsConfig {
     ///
     /// Default: 5.
     pub max_ping_tasks: usize,
+
+    /// Send timeout (unidirectional).
+    ///
+    /// Default: 500ms.
+    pub send_timeout: Duration,
 }
 
 impl Default for ValidatorsConfig {
@@ -90,6 +107,7 @@ impl Default for ValidatorsConfig {
             ping_timeout: Duration::from_secs(1),
             keep: 5,
             max_ping_tasks: 5,
+            send_timeout: Duration::from_millis(500),
         }
     }
 }

@@ -185,7 +185,7 @@ impl BlockSubscriber for NoopSubscriber {
     type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
 
     #[inline]
-    fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'_> {
+    fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         futures_util::future::ready(Ok(()))
     }
 
@@ -384,7 +384,7 @@ pub mod test {
         fn prepare_block<'a>(
             &'a self,
             cx: &'a BlockSubscriberContext,
-        ) -> Self::PrepareBlockFut<'_> {
+        ) -> Self::PrepareBlockFut<'a> {
             tracing::info!(
                 block_id = %cx.block.id(),
                 mc_block_id = %cx.mc_block_id,

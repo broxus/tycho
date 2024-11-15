@@ -1,6 +1,7 @@
 pub use self::client::{
-    BlockDataFull, BlockchainRpcClient, BlockchainRpcClientBuilder, DataRequirement,
-    PendingArchive, PendingArchiveResponse, SelfBroadcastListener,
+    BlockDataFull, BlockDataFullWithNeighbour, BlockchainRpcClient, BlockchainRpcClientBuilder,
+    DataRequirement, PendingArchive, PendingArchiveResponse, PendingPersistentState,
+    SelfBroadcastListener,
 };
 pub use self::service::{
     BlockchainRpcService, BlockchainRpcServiceBuilder, BlockchainRpcServiceConfig,

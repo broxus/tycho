@@ -16,9 +16,7 @@ use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::Storage;
 
-use crate::block_strider::provider::{
-    BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker, RetryConfig,
-};
+use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};
 use crate::overlay_client::{Neighbour, PunishReason};
 
@@ -26,14 +24,12 @@ use crate::overlay_client::{Neighbour, PunishReason};
 #[serde(default)]
 pub struct ArchiveBlockProviderConfig {
     pub max_archive_to_memory_size: ByteSize,
-    pub retry_config: RetryConfig,
 }
 
 impl Default for ArchiveBlockProviderConfig {
     fn default() -> Self {
         Self {
             max_archive_to_memory_size: ByteSize::mb(100),
-            retry_config: RetryConfig::default(),
         }
     }
 }

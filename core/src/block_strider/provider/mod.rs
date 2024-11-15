@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,11 +21,13 @@ use tycho_util::serde_helpers;
 
 pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
+pub use self::box_provider::BoxBlockProvider;
 use self::futures::SelectNonEmptyFut;
 pub use self::storage_provider::StorageBlockProvider;
 
 mod archive_provider;
 mod blockchain_provider;
+mod box_provider;
 mod futures;
 mod storage_provider;
 
@@ -67,6 +69,8 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
 }
 
 pub trait BlockProviderExt: Sized {
+    fn boxed(self) -> BoxBlockProvider;
+
     fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T>;
 
     fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T>;
@@ -75,6 +79,10 @@ pub trait BlockProviderExt: Sized {
 }
 
 impl<B: BlockProvider> BlockProviderExt for B {
+    fn boxed(self) -> BoxBlockProvider {
+        BoxBlockProvider::new(self)
+    }
+
     fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T> {
         ChainBlockProvider {
             left: self,
@@ -95,7 +103,6 @@ impl<B: BlockProvider> BlockProviderExt for B {
         RetryBlockProvider {
             inner: self,
             config,
-            attempts: AtomicUsize::new(0),
         }
     }
 }
@@ -123,12 +130,6 @@ pub struct ChainBlockProvider<T1, T2> {
     is_right: AtomicBool,
 }
 
-pub struct CycleBlockProvider<T1, T2> {
-    left: T1,
-    right: T2,
-    is_right: AtomicBool,
-}
-
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
@@ -146,7 +147,7 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
         })
     }
 
-    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(async {
             if self.is_right.load(Ordering::Acquire) {
                 self.right.get_block(block_id_relation).await
@@ -155,6 +156,12 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
             }
         })
     }
+}
+
+pub struct CycleBlockProvider<T1, T2> {
+    left: T1,
+    right: T2,
+    is_right: AtomicBool,
 }
 
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
@@ -186,7 +193,7 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
         })
     }
 
-    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(async {
             if self.is_right.load(Ordering::Acquire) {
                 self.right.get_block(block_id_relation).await
@@ -200,7 +207,6 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
 pub struct RetryBlockProvider<T> {
     inner: T,
     config: RetryConfig,
-    attempts: AtomicUsize,
 }
 
 impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
@@ -209,29 +215,23 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
-            // TODO: Backoff?
-            let mut interval = tokio::time::interval(self.config.polling_interval);
+            let mut attempts = 0usize;
 
             loop {
                 let res = self.inner.get_next_block(prev_block_id).await;
-                if res.is_some() {
-                    self.attempts.store(0, Ordering::Release);
-                    break res;
-                } else {
-                    self.attempts.fetch_add(1, Ordering::Release);
-                }
-
-                if self.attempts.load(Ordering::Acquire) >= self.config.limit {
-                    self.attempts.store(0, Ordering::Release);
+                if res.is_some() || attempts >= self.config.attempts {
                     break res;
                 }
 
-                interval.tick().await;
+                attempts += 1;
+
+                // TODO: Backoff?
+                tokio::time::sleep(self.config.interval).await;
             }
         })
     }
 
-    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         self.inner.get_block(block_id_relation)
     }
 }
@@ -438,20 +438,20 @@ pub struct RetryConfig {
     /// Retry limit.
     ///
     /// Default: 1.
-    pub limit: usize,
+    pub attempts: usize,
 
     /// Polling interval for downloading archive.
     ///
     /// Default: 1 second.
     #[serde(with = "serde_helpers::humantime")]
-    pub polling_interval: Duration,
+    pub interval: Duration,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            limit: 1,
-            polling_interval: Duration::from_secs(1),
+            attempts: 1,
+            interval: Duration::from_secs(1),
         }
     }
 }
@@ -553,13 +553,13 @@ mod test {
         });
 
         let left_config = RetryConfig {
-            limit: LEFT_LIMIT,
-            polling_interval: Duration::from_millis(POLLING_INTERVAL_MS),
+            attempts: LEFT_LIMIT,
+            interval: Duration::from_millis(POLLING_INTERVAL_MS),
         };
 
         let right_config = RetryConfig {
-            limit: RIGHT_LIMIT,
-            polling_interval: Duration::from_millis(POLLING_INTERVAL_MS),
+            attempts: RIGHT_LIMIT,
+            interval: Duration::from_millis(POLLING_INTERVAL_MS),
         };
 
         let left = left_provider.clone().retry(left_config);

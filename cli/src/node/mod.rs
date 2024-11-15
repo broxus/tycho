@@ -416,11 +416,21 @@ impl Node {
         };
 
         // Create block strider
+        let archive_block_provider = ArchiveBlockProvider::new(
+            self.blockchain_rpc_client.clone(),
+            self.storage.clone(),
+            self.archive_block_provider_config.clone(),
+        );
+
         let blockchain_block_provider = BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
             self.storage.clone(),
-            self.blockchain_block_provider_config.clone(),
+            self.blockchain_block_provider_config,
         );
+
+        // TODO: Uncomment when archive block provider can initiate downloads for shard blocks.
+        // blockchain_block_provider =
+        //     blockchain_block_provider.with_fallback(archive_block_provider.clone());
 
         let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
 
@@ -431,12 +441,6 @@ impl Node {
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
-        let archive_block_provider = ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.archive_block_provider_config.clone(),
-        );
-
         let block_strider = BlockStrider::builder()
             .with_provider(
                 collator
@@ -444,12 +448,7 @@ impl Node {
                     .chain(archive_block_provider.clone())
                     .chain(collator.new_sync_point(CollatorSyncContext::Recent))
                     .chain((
-                        blockchain_block_provider
-                            .retry(self.blockchain_block_provider_config.retry_config)
-                            .cycle(
-                                archive_block_provider
-                                    .retry(self.archive_block_provider_config.retry_config),
-                            ),
+                        blockchain_block_provider,
                         storage_block_provider,
                         collator_block_provider,
                     )),
