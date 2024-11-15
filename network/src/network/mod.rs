@@ -210,7 +210,7 @@ impl Network {
     }
 
     pub async fn shutdown(&self) {
-        self.0.shutdown().await
+        self.0.shutdown().await;
     }
 
     pub fn is_closed(&self) -> bool {
