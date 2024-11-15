@@ -12,6 +12,7 @@ pub struct DagHead(Arc<DagHeadInner>);
 struct DagHeadInner {
     // if any `key_pair` is not empty, then the node may use it at current round
     produce_keys: Option<Arc<KeyPair>>,
+    prev_produce_keys: Option<Arc<KeyPair>>,
     includes_keys: Option<Arc<KeyPair>>,
     witness_keys: Option<Arc<KeyPair>>,
     prev: DagRound,
@@ -36,12 +37,16 @@ impl DagHead {
             .expect("prev to engine round must be always in dag");
 
         let guard = peer_schedule.atomic();
+
         let produce_keys = guard.local_keys(current.round());
+        let prev_produce_keys = guard.local_keys(prev.round());
+
         let includes_keys = guard.local_keys(top_round.round());
         let witness_keys = includes_keys.as_ref().and_then(|_| produce_keys.clone());
 
         Self(Arc::new(DagHeadInner {
             produce_keys,
+            prev_produce_keys,
             includes_keys,
             witness_keys,
             prev,
@@ -53,6 +58,10 @@ impl DagHead {
 
     pub fn produce_keys(&self) -> Option<&KeyPair> {
         self.0.produce_keys.as_deref()
+    }
+
+    pub fn prev_produce_keys(&self) -> Option<&KeyPair> {
+        self.0.prev_produce_keys.as_deref()
     }
 
     pub fn includes_keys(&self) -> Option<&KeyPair> {

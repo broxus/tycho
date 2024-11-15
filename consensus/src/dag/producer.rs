@@ -15,6 +15,7 @@ use crate::models::{
 pub struct LastOwnPoint {
     pub digest: Digest,
     pub evidence: BTreeMap<PeerId, Signature>,
+    pub includes: BTreeMap<PeerId, Digest>,
     pub round: Round,
     pub signers: PeerCount,
 }
@@ -53,7 +54,12 @@ impl Producer {
         );
         let mut anchor_proof =
             Self::link_from_includes(&local_id, current_round, &includes, AnchorStageRole::Proof);
-        let witness = Self::witness(finished_round);
+        let witness = Self::witness(
+            finished_round,
+            &local_id,
+            head.prev_produce_keys(),
+            last_own_point,
+        );
         Self::update_link_from_witness(
             &mut anchor_trigger,
             current_round.round(),
@@ -118,35 +124,8 @@ impl Producer {
     }
 
     fn includes(finished_dag_round: &DagRound, key_pair: &KeyPair) -> Vec<PointInfo> {
-        let finished_round = finished_dag_round.round();
-        let mut last_includes = Vec::new();
-        let mut includes = finished_dag_round
-            .select(|(_, loc)| match loc.state.signed() {
-                Some(Ok(_)) => loc
-                    .state
-                    .signed_point(finished_round)
-                    .map(|valid| valid.info.clone()),
-                Some(Err(())) => None,
-                None => {
-                    last_includes.push(loc.state.clone());
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        // support known points
-        includes.append(
-            &mut last_includes
-                .into_par_iter()
-                .filter_map(|state| {
-                    if let Some(signable) = state.signable() {
-                        signable.sign(finished_round, Some(key_pair));
-                    };
-                    state
-                        .signed_point(finished_round)
-                        .map(|valid| valid.info.clone())
-                })
-                .collect(),
-        );
+        let round = finished_dag_round.round();
+        let includes = Self::references(round, finished_dag_round, Some(key_pair));
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
             "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
@@ -156,17 +135,81 @@ impl Producer {
         includes
     }
 
-    fn witness(finished_round: &DagRound) -> Vec<PointInfo> {
-        match finished_round.prev().upgrade() {
-            Some(witness_round) => witness_round
-                .select(|(_, loc)| {
-                    loc.state
-                        .signed_point(finished_round.round())
-                        .map(|valid| valid.info.clone())
-                })
-                .collect(),
-            None => vec![],
+    fn witness(
+        finished_dag_round: &DagRound,
+        local_id: &PeerId,
+        key_pair: Option<&KeyPair>,
+        last_own_point: Option<&LastOwnPoint>,
+    ) -> Vec<PointInfo> {
+        let round = finished_dag_round.round();
+        let Some(witness_round) = finished_dag_round.prev().upgrade() else {
+            return Vec::new();
+        };
+        // have to make additional signatures because there still may be spawned tasks to Signer
+        let references = Self::references(round, &witness_round, key_pair);
+        let Some(includes) = last_own_point
+            .filter(|l| l.round == round)
+            .map(|l| &l.includes)
+        else {
+            // have to link all @ r-2 if r-1 was skipped - because we made signatures;
+            // exclude own point from failed round - do not make other nodes massively ask for it;
+            return references
+                .into_iter()
+                .filter(|witness| witness.data().author != local_id)
+                .collect();
+        };
+        // do not repeat includes from previous point if it existed (they also contain own point)
+        references
+            .into_iter()
+            .filter(|witness| !includes.contains_key(&witness.data().author))
+            .collect()
+    }
+
+    fn references(
+        round: Round,
+        dag_round: &DagRound,
+        key_pair: Option<&KeyPair>,
+    ) -> Vec<PointInfo> {
+        let mut last_references = Vec::new();
+        let mut references = dag_round
+            .select(|(_, loc)| {
+                loc.state
+                    .signable()
+                    .and_then(|signable| match signable.signed() {
+                        Some(sig) if sig.is_ok() => {
+                            signable.first_completed.valid().map(|v| v.info.clone())
+                        }
+                        None if key_pair.is_some() => {
+                            last_references.push(loc.state.clone());
+                            None
+                        }
+                        Some(_) | None => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        if last_references.is_empty() {
+            return references;
         }
+
+        // support known points
+        let mut last_references = last_references
+            .into_par_iter()
+            .filter_map(|state| {
+                state.signable().and_then(|signable| {
+                    signable.sign(round, key_pair);
+                    match signable.signed() {
+                        Some(sig) if sig.is_ok() => {
+                            signable.first_completed.valid().map(|v| v.info.clone())
+                        }
+                        Some(_) | None => None,
+                    }
+                })
+            })
+            .collect();
+
+        references.append(&mut last_references);
+        references
     }
 
     fn link_from_includes(

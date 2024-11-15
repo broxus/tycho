@@ -86,8 +86,8 @@ impl Signer {
             // only previous to current round
             signable.sign(current_round, head.witness_keys());
         };
-        match state.signed() {
-            Some(Ok(signed)) => SignatureResponse::Signature(signed.with.clone()),
+        match signable.signed() {
+            Some(Ok(sig)) => SignatureResponse::Signature(sig.clone()),
             Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),
             None => SignatureResponse::TryLater,
         }

@@ -160,6 +160,7 @@ impl Broadcaster {
         Arc::new(LastOwnPoint {
             digest: *self.point.digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
+            includes: self.point.data().includes.clone(),
             round: self.point.round(),
             signers: self.signers_count,
         })

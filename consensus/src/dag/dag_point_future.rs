@@ -80,12 +80,10 @@ impl DagPointFuture {
         };
         store.insert_point(point, &status);
         let dag_point = DagPoint::Trusted(ValidPoint::new(point));
-        state.init(&dag_point); // only after persisted
-        if let Some(signable) = state.signable() {
-            signable.sign(point.round(), key_pair);
-        }
+        let signable = state.init(&dag_point); // only after persisted
+        signable.sign(point.round(), key_pair);
         assert!(
-            state.signed_point(point.round()).is_some(),
+            signable.signed().map_or(false, |sig| sig.is_ok()),
             "Coding or configuration error: local point cannot be signed; \
             node is not in validator set?"
         );
@@ -100,7 +98,6 @@ impl DagPointFuture {
     ) -> Self {
         let store_fut = tokio::task::spawn_blocking({
             let point = point.clone();
-            let state = state.clone();
             let store = store.clone();
             move || {
                 let status = PointStatus {
@@ -108,14 +105,16 @@ impl DagPointFuture {
                     ..Default::default()
                 };
                 store.insert_point(&point, &status);
-                let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
-                state.init(&dag_point);
-                dag_point
+                DagPoint::IllFormed(Arc::new(point.id()))
             }
         });
         let task = async move { store_fut.await.expect("db insert ill-formed broadcast") };
+        let state = state.clone();
         Self(DagPointFutureType::Store(Shared::new(JoinTask::new(
-            task.instrument(effects.span().clone()),
+            task.inspect(move |dag_point| {
+                state.init(dag_point);
+            })
+            .instrument(effects.span().clone()),
         ))))
     }
 
@@ -130,7 +129,6 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.downgrade();
         let info = PointInfo::from(point);
         let point = point.clone();
-        let state = state.clone();
         let downloader = downloader.clone();
         let store = store.clone();
         let validate_effects = Effects::<ValidateContext>::new(effects, &info);
@@ -171,11 +169,17 @@ impl DagPointFuture {
             })
             .await
             .expect("db set point status");
-            state.init(&dag_point);
             dag_point
         };
+
+        let state = state.clone();
         DagPointFuture(DagPointFutureType::Validate {
-            task: Shared::new(JoinTask::new(task.instrument(effects.span().clone()))),
+            task: Shared::new(JoinTask::new(
+                task.inspect(move |dag_point| {
+                    state.init(dag_point);
+                })
+                .instrument(effects.span().clone()),
+            )),
             certified: once_certified_tx,
         })
     }
@@ -202,7 +206,6 @@ impl DagPointFuture {
             digest: *digest,
         };
         let point_dag_round = point_dag_round.downgrade();
-        let state = state.clone();
         let downloader = downloader.clone();
         let store = store.clone();
         let span = effects.span().clone();
@@ -261,7 +264,6 @@ impl DagPointFuture {
                     future::Either::Left(future::ready(Ok(()))),
                 ),
                 Some(Err(dag_point)) => {
-                    state.init(&dag_point);
                     return dag_point;
                 }
                 None => {
@@ -282,15 +284,9 @@ impl DagPointFuture {
                             })
                             .await
                             .expect("db store ill-formed download");
-                            let dag_point = DagPoint::IllFormed(Arc::new(point_id));
-                            state.init(&dag_point);
-                            return dag_point;
+                            return DagPoint::IllFormed(Arc::new(point_id));
                         }
-                        DownloadResult::NotFound => {
-                            let dag_point = DagPoint::NotFound(Arc::new(point_id));
-                            state.init(&dag_point);
-                            return dag_point;
-                        }
+                        DownloadResult::NotFound => return DagPoint::NotFound(Arc::new(point_id)),
                     };
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();
@@ -347,11 +343,17 @@ impl DagPointFuture {
             .await
             .expect("db set point status");
 
-            state.init(&dag_point);
             dag_point
         };
+
+        let state = state.clone();
         DagPointFuture(DagPointFutureType::Load {
-            task: Shared::new(JoinTask::new(task.instrument(span))),
+            task: Shared::new(JoinTask::new(
+                task.inspect(move |dag_point| {
+                    state.init(dag_point);
+                })
+                .instrument(span),
+            )),
             certified: once_certified_tx,
             dependers_tx,
             verified: Arc::new(OnceTake::new(broadcast_tx)),
