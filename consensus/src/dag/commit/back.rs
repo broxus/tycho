@@ -471,10 +471,10 @@ impl DagBack {
     ) -> Option<ValidPoint> {
         dag_round
             .view(author, |loc| {
-                loc.versions()
-                    .iter()
+                loc.versions
+                    .values()
                     // better try later than wait now if some point is still downloading
-                    .filter_map(|(_digest, version)| {
+                    .filter_map(|version| {
                         version.clone().now_or_never()
                         // TODO log target for commit logic debug
                         // let b = if a.is_some() { "ready" } else { "noone" };
@@ -502,7 +502,7 @@ impl DagBack {
     ) -> Option<ValidPoint> {
         dag_round
             .view(author, |loc| {
-                loc.versions().get(digest).cloned()
+                loc.versions.get(digest).cloned()
                 // if a.is_none() {
                 //     tracing::warn!(
                 //         "!! NO DIGEST {} @ {} # {}",

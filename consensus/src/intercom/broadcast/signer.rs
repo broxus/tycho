@@ -63,10 +63,10 @@ impl Signer {
             cmp::Ordering::Less => head.prev(),
         };
         let state = match point_dag_round.view(author, |loc| {
-            if loc.versions().is_empty() {
+            if loc.versions.is_empty() {
                 Err(())
             } else {
-                Ok(loc.state().clone())
+                Ok(loc.state.clone())
             }
         }) {
             // locations are prepopulated for all expected peers

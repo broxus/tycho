@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use everscale_crypto::ed25519::KeyPair;
 use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
@@ -63,7 +64,12 @@ enum DagPointFutureType {
 impl DagPointFuture {
     /// locally created points are assumed to be valid, checked prior insertion if needed;
     /// for points of others - there are all other methods
-    pub fn new_local_trusted(point: &Point, state: &InclusionState, store: &MempoolStore) -> Self {
+    pub fn new_local_trusted(
+        point: &Point,
+        state: &InclusionState,
+        store: &MempoolStore,
+        key_pair: Option<&KeyPair>,
+    ) -> Self {
         let status = PointStatus {
             is_own_broadcast: point.round() != Genesis::round(),
             is_ill_formed: false,
@@ -75,6 +81,14 @@ impl DagPointFuture {
         store.insert_point(point, &status);
         let dag_point = DagPoint::Trusted(ValidPoint::new(point));
         state.init(&dag_point); // only after persisted
+        if let Some(signable) = state.signable() {
+            signable.sign(point.round(), key_pair);
+        }
+        assert!(
+            state.signed_point(point.round()).is_some(),
+            "Coding or configuration error: local point cannot be signed; \
+            node is not in validator set?"
+        );
         Self(DagPointFutureType::Ready(future::ready(dag_point)))
     }
 

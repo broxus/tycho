@@ -406,7 +406,7 @@ impl Verifier {
     fn versions_except(dag_location: &DagLocation, except: Option<&Digest>) -> Vec<DagPointFuture> {
         // this is a synchronization point as whole closure runs under DashMap's lock
         dag_location
-            .versions()
+            .versions
             .iter()
             .filter(|(digest, _)| except.map_or(true, |except| except != *digest))
             .map(|(_, shared)| shared.clone())

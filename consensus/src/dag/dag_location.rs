@@ -1,21 +1,15 @@
-use std::collections::{btree_map, BTreeMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
 
 use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::WeakDagRound;
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::CachedConfig;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
 
-/// If DAG location exists, it must have non-empty `versions` map;
-///
-/// Inclusion state is filled if it belongs to the 2 latest dag rounds
-/// and will be used for own point production
-///
-/// Note methods encapsulate mutability to preserve this invariant, a bit less panics
-#[derive(Default)]
 #[cfg_attr(feature = "test", derive(Clone))]
 pub struct DagLocation {
     // one of the points at current location
@@ -27,68 +21,54 @@ pub struct DagLocation {
     /// other (equivocated) points may be received as includes, witnesses or a proven vertex;
     /// we have to include signed points @ r+0 & @ r-1 as dependencies in our point @ r+1.
     /// Not needed for transitive dependencies.
-    state: InclusionState,
+    pub state: InclusionState,
     /// only one of the point versions at current location
     /// may become proven by the next round point(s) of a node;
     /// even if we marked a proven point as invalid, consensus may ignore our decision
-    versions: BTreeMap<Digest, DagPointFuture>,
+    pub versions: BTreeMap<Digest, DagPointFuture>,
     /// If author produced and sent a point with invalid sig, that only affects equivocation,
     /// but that point cannot be used in any other way.
     pub bad_sig_in_broadcast: bool,
 }
 
 impl DagLocation {
-    // point that is validated depends on other equivocated points futures (if any)
-    // in the same location, so need to keep order of futures' completion;
-    // to make signature we are interested in the single validated point only
-    // (others are at least suspicious and cannot be signed)
-    pub fn get_or_init<F>(&mut self, digest: &Digest, init: F) -> &DagPointFuture
-    where
-        F: FnOnce(&InclusionState) -> DagPointFuture,
-    {
-        self.versions
-            .entry(*digest)
-            .or_insert_with(|| init(&self.state))
-    }
-    pub fn init_or_modify<F, U>(
-        &mut self,
-        digest: &Digest,
-        init: F,
-        modify: U,
-    ) -> Option<&DagPointFuture>
-    where
-        F: FnOnce(&InclusionState) -> DagPointFuture,
-        U: FnOnce(&DagPointFuture),
-    {
-        match self.versions.entry(*digest) {
-            btree_map::Entry::Occupied(entry) => {
-                modify(entry.get());
-                None
-            }
-            btree_map::Entry::Vacant(entry) => Some(entry.insert(init(&self.state))),
+    pub fn new(parent: WeakDagRound) -> Self {
+        DagLocation {
+            state: InclusionState::new(parent),
+            versions: BTreeMap::new(),
+            bad_sig_in_broadcast: false,
         }
-    }
-    pub fn versions(&self) -> &'_ BTreeMap<Digest, DagPointFuture> {
-        &self.versions
-    }
-    pub fn state(&self) -> &'_ InclusionState {
-        &self.state
     }
 }
 
 // Todo remove inner locks and introduce global current dag round watch simultaneously, see Collector
-#[derive(Default, Clone)]
-pub struct InclusionState(Arc<OnceLock<Signable>>);
+#[derive(Clone)]
+pub struct InclusionState(Arc<InclusionStateInner>);
+struct InclusionStateInner {
+    parent: WeakDagRound,
+    signable: OnceLock<Signable>,
+}
 
 impl InclusionState {
+    fn new(parent: WeakDagRound) -> Self {
+        Self(Arc::new(InclusionStateInner {
+            parent,
+            signable: OnceLock::new(),
+        }))
+    }
+
     /// Must not be used for downloaded dependencies
-    pub(super) fn init(&self, first_completed: &DagPoint) {
-        _ = self.0.get_or_init(|| {
+    pub fn init(&self, first_completed: &DagPoint) {
+        _ = self.0.signable.get_or_init(|| {
             let signable = Signable {
                 first_completed: first_completed.clone(),
                 signed: OnceLock::new(),
             };
-            if first_completed.trusted().is_none() {
+            if first_completed.trusted().is_some() {
+                if let Some(dag_round) = self.0.parent.upgrade() {
+                    dag_round.threshold().add();
+                }
+            } else {
                 tracing::warn!(
                     result = display(first_completed.alt()),
                     author = display(first_completed.author().alt()),
@@ -102,13 +82,13 @@ impl InclusionState {
         });
     }
     pub fn signable(&self) -> Option<&'_ Signable> {
-        self.0.get()
+        self.0.signable.get()
     }
     pub fn signed(&self) -> Option<&'_ Result<Signed, ()>> {
-        self.0.get()?.signed.get()
+        self.0.signable.get()?.signed.get()
     }
     pub fn signed_point(&self, at: Round) -> Option<&'_ ValidPoint> {
-        let signable = self.0.get()?;
+        let signable = self.0.signable.get()?;
         if signable.signed.get()?.as_ref().ok()?.at == at {
             signable.first_completed.valid()
         } else {
@@ -116,7 +96,10 @@ impl InclusionState {
         }
     }
     pub fn point(&self) -> Option<&DagPoint> {
-        self.0.get().map(|signable| &signable.first_completed)
+        self.0
+            .signable
+            .get()
+            .map(|signable| &signable.first_completed)
     }
 }
 
@@ -194,7 +177,7 @@ impl AltFormat for DagLocation {}
 impl std::fmt::Debug for AltFmt<'_, DagLocation> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let loc = AltFormat::unpack(self);
-        for (digest, promise) in loc.versions() {
+        for (digest, promise) in &loc.versions {
             write!(f, "#{}-", digest.alt())?;
             match promise.clone().now_or_never() {
                 None => write!(f, "None, ")?,

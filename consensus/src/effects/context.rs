@@ -95,12 +95,13 @@ pub struct DownloadContext {
 }
 impl EffectsContext for DownloadContext {}
 impl Effects<DownloadContext> {
-    pub fn new<T>(parent: &Effects<T>, point_id: &PointId) -> Self
+    pub fn new<'a, T>(parent: &'a Effects<T>, point_id: &PointId) -> Self
     where
         T: EffectsContext,
-        for<'a> &'a T: Into<DownloadContext>,
+        &'a T: Into<DownloadContext>,
     {
-        parent.new_child(parent.ctx().into(), || {
+        let context = parent.ctx().into();
+        parent.new_child(context, || {
             tracing::error_span!(
                 "download",
                 author = display(point_id.author.alt()),
@@ -143,10 +144,10 @@ pub struct ValidateContext {
 }
 impl EffectsContext for ValidateContext {}
 impl Effects<ValidateContext> {
-    pub fn new<T>(parent: &Effects<T>, info: &PointInfo) -> Self
+    pub fn new<'a, T>(parent: &'a Effects<T>, info: &PointInfo) -> Self
     where
         T: EffectsContext,
-        for<'a> &'a Effects<T>: Into<ValidateContext>,
+        &'a Effects<T>: Into<ValidateContext>,
     {
         let context = parent.into();
         let span = tracing::error_span!(

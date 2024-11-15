@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use everscale_crypto::ed25519::KeyPair;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
@@ -42,7 +44,7 @@ impl Producer {
             Some(stage) if stage.leader == local_id && proven_vertex.is_none() => return None,
             _ => {}
         };
-        let includes = Self::includes(finished_round);
+        let includes = Self::includes(finished_round, key_pair);
         let mut anchor_trigger = Self::link_from_includes(
             &local_id,
             current_round,
@@ -115,24 +117,41 @@ impl Producer {
         ))
     }
 
-    fn includes(finished_round: &DagRound) -> Vec<PointInfo> {
-        let includes = finished_round
-            .select(|(_, loc)| {
-                loc.state()
-                    .point()
-                    .and_then(|dag_point| dag_point.trusted())
-                    // TODO refactor Signable: we are interested not in the round of signature,
-                    //   but whether was a point already included or not (just in order not to
-                    //   include it twice); repeating inclusions are suboptimal but still correct
-                    .filter(|_| loc.state().signed().map_or(true, |r| r.is_ok()))
-                    .map(|dag_point| dag_point.info.clone())
+    fn includes(finished_dag_round: &DagRound, key_pair: &KeyPair) -> Vec<PointInfo> {
+        let finished_round = finished_dag_round.round();
+        let mut last_includes = Vec::new();
+        let mut includes = finished_dag_round
+            .select(|(_, loc)| match loc.state.signed() {
+                Some(Ok(_)) => loc
+                    .state
+                    .signed_point(finished_round)
+                    .map(|valid| valid.info.clone()),
+                Some(Err(())) => None,
+                None => {
+                    last_includes.push(loc.state.clone());
+                    None
+                }
             })
             .collect::<Vec<_>>();
+        // support known points
+        includes.append(
+            &mut last_includes
+                .into_par_iter()
+                .filter_map(|state| {
+                    if let Some(signable) = state.signable() {
+                        signable.sign(finished_round, Some(key_pair));
+                    };
+                    state
+                        .signed_point(finished_round)
+                        .map(|valid| valid.info.clone())
+                })
+                .collect(),
+        );
         assert!(
-            includes.len() >= finished_round.peer_count().majority(),
+            includes.len() >= finished_dag_round.peer_count().majority(),
             "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
-            finished_round.round().next(),
-            finished_round.alt()
+            finished_dag_round.round().next(),
+            finished_dag_round.alt()
         );
         includes
     }
@@ -141,7 +160,7 @@ impl Producer {
         match finished_round.prev().upgrade() {
             Some(witness_round) => witness_round
                 .select(|(_, loc)| {
-                    loc.state()
+                    loc.state
                         .signed_point(finished_round.round())
                         .map(|valid| valid.info.clone())
                 })

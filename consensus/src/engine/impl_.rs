@@ -11,7 +11,7 @@ use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverla
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Committer, DagFront, DagRound, InclusionState, Verifier};
+use crate::dag::{Committer, DagFront, DagRound, Verifier};
 use crate::effects::{
     AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolAdapterStore, MempoolStore,
 };
@@ -29,7 +29,7 @@ pub struct Engine {
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
-    init_task: Option<JoinTask<InclusionState>>,
+    init_task: Option<JoinTask<()>>,
 }
 
 #[derive(Clone)]
@@ -113,11 +113,11 @@ impl Engine {
                     move || {
                         store.init_storage(&overlay_id);
                         // may be overwritten or left unused until next clean task, does not matter
-                        genesis_dag_round.insert_exact_sign(&genesis, Some(&key_pair), &store)
+                        genesis_dag_round.insert_exact_sign(&genesis, Some(&key_pair), &store);
                     }
                 });
                 match init_storage_task.await {
-                    Ok(genesis_incl_state) => genesis_incl_state,
+                    Ok(()) => (),
                     Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                     Err(e) => panic!("failed to clean db on genesis {e:?}"),
                 }
@@ -165,8 +165,8 @@ impl Engine {
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> Option<(Point, InclusionState)> {
-        let genesis_incl_state = self.init_task.take().expect("init task must be set").await;
+    async fn pre_run(&mut self) -> Option<Point> {
+        self.init_task.take().expect("init task must be set").await;
         let broadcast_points = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
             let peer_schedule = self.round_task.state.peer_schedule.clone();
@@ -217,29 +217,17 @@ impl Engine {
                     self.round_task
                         .init_prev_broadcast(pre_last, &round_effects);
                 }
-                // start point's inclusion state is pushed into collector during loop run
-                let incl_state = self.dag.top().insert_exact_sign(
-                    &last,
-                    Some(&keys),
-                    &self.round_task.state.store,
-                );
-                Some((last, incl_state))
+                self.dag
+                    .top()
+                    .insert_exact_sign(&last, Some(&keys), &self.round_task.state.store);
+                Some(last)
             }
-            None => {
-                if top_round == Genesis::round().next() {
-                    // dag top is genesis round
-                    self.round_task.collector.init(
-                        top_round,
-                        std::iter::once(future::ready(genesis_incl_state).boxed()).collect(),
-                    );
-                }
-                None
-            }
+            None => None,
         }
     }
 
     pub async fn run(mut self) {
-        let mut start_point_with_state = self.pre_run().await;
+        let mut start_point = self.pre_run().await;
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
@@ -311,26 +299,20 @@ impl Engine {
 
             let head = self.dag.head(&self.round_task.state.peer_schedule);
 
-            let (collector_signal_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry);
+            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry);
 
-            let (own_point_fut, own_point_state) = match start_point_with_state.take() {
-                Some((point, state)) => (
-                    future::ready(Ok(Some(point))).boxed(),
-                    future::ready(state).boxed(),
+            let own_point_fut = match start_point.take() {
+                Some(point) => future::ready(Some(point)).boxed(),
+                None => self.round_task.own_point_task(
+                    &head,
+                    collector_signal_tx.subscribe(),
+                    &round_effects,
                 ),
-                None => self.round_task.own_point_task(&head, &round_effects),
             };
 
             let round_task_run = self
                 .round_task
-                .run(
-                    own_point_fut,
-                    own_point_state,
-                    collector_signal_tx,
-                    collector_signal_rx,
-                    &head,
-                    &round_effects,
-                )
+                .run(own_point_fut, collector_signal_tx, &head, &round_effects)
                 .until_ready();
 
             if let Some(committer) = ready_committer {
@@ -343,9 +325,8 @@ impl Engine {
             }
 
             match round_task_run.await {
-                Ok((round_task, next_round)) => {
+                Ok(round_task) => {
                     self.round_task = round_task;
-                    self.consensus_round.set_max(next_round);
                 }
                 Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                 Err(e) => panic!("mempool engine failed: {e:?}"),
