@@ -52,7 +52,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 
     let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
 
-    let _ = genesis_round.insert_exact_sign(genesis, Some(&local_keys), store);
+    genesis_round.insert_exact_sign(genesis, Some(&local_keys), store);
 
     (genesis_round, peer_schedule, stub_downloader)
 }
@@ -71,7 +71,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     let prev_dag_round = dag_round.prev().upgrade().expect("prev DAG round exists");
     let prev_points = prev_dag_round
         .select(|(_, loc)| {
-            loc.versions()
+            loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
                 .map(|p| p.into_valid().expect("must be trusted"))
@@ -148,7 +148,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     }
 
     for point in points.values() {
-        _ = dag_round.insert_exact_sign(point, Some(&peers[0].1), store);
+        dag_round.insert_exact_sign(point, Some(&peers[0].1), store);
     }
 }
 

@@ -58,7 +58,7 @@ impl Uploader {
     ) -> Option<SearchStatus> {
         let found = dag_round
             .view(&point_id.author, |loc| {
-                loc.versions().get(&point_id.digest).cloned()
+                loc.versions.get(&point_id.digest).cloned()
             })
             .flatten();
         let task_found = found.is_some();

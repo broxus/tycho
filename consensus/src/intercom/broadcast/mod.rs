@@ -9,5 +9,4 @@ pub(super) use signer::*;
 mod broadcast_filter;
 mod broadcaster;
 mod collector;
-mod dto;
 mod signer;

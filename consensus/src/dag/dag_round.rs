@@ -1,15 +1,15 @@
 use std::cmp;
+use std::collections::btree_map;
 use std::sync::{Arc, Weak};
 
 use everscale_crypto::ed25519::KeyPair;
-use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
-use crate::dag::dag_location::{DagLocation, InclusionState};
+use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -31,6 +31,7 @@ struct DagRoundInner {
     peer_count: PeerCount,
     anchor_stage: Option<AnchorStage>,
     locations: FastDashMap<PeerId, DagLocation>,
+    threshold: Threshold,
     prev: WeakDagRound,
 }
 
@@ -51,10 +52,6 @@ impl DagRound {
 
     fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
         let peers = peer_schedule.atomic().peers_for(round).clone();
-        let locations = peers
-            .iter()
-            .map(|peer_id| (*peer_id, DagLocation::default()))
-            .collect::<FastDashMap<_, _>>();
 
         let peer_count = match round.cmp(&Genesis::round()) {
             cmp::Ordering::Less => panic!(
@@ -66,13 +63,20 @@ impl DagRound {
                 PeerCount::try_from(peers.len()).unwrap_or_else(|e| panic!("{e} for {round:?}"))
             }
         };
-        Self(Arc::new(DagRoundInner {
+        let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
             anchor_stage: AnchorStage::of(round, peer_schedule),
-            locations,
+            locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
+            threshold: Threshold::new(peer_count),
             prev,
-        }))
+        }));
+
+        for peer in peers.iter() {
+            (this.0.locations).insert(*peer, DagLocation::new(this.downgrade()));
+        }
+
+        this
     }
 
     pub fn round(&self) -> Round {
@@ -85,6 +89,10 @@ impl DagRound {
 
     pub fn anchor_stage(&self) -> Option<&'_ AnchorStage> {
         self.0.anchor_stage.as_ref()
+    }
+
+    pub fn threshold(&self) -> &'_ Threshold {
+        &self.0.threshold
     }
 
     #[cfg(feature = "test")]
@@ -134,39 +142,31 @@ impl DagRound {
     /// for genesis (next round key pair) and own points (point round key pair)
     /// this does not start recursive validation so node may restart with only broadcast point
     /// and download dependencies when consensus round is determined
+    /// Note must be called inside [`tokio::task::spawn_blocking()`] unlike other methods
     pub fn insert_exact_sign(
         &self,
         point: &Point,
         key_pair: Option<&KeyPair>,
         store: &MempoolStore,
-    ) -> InclusionState {
+    ) {
         assert_eq!(
             point.round(),
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        let state = self.edit(&point.data().author, |loc| {
-            let _ready = loc.init_or_modify(
-                point.digest(),
-                |state| DagPointFuture::new_local_trusted(point, state, store),
-                |_existing| {
+        self.edit(&point.data().author, |loc| {
+            loc.versions
+                .entry(*point.digest())
+                .and_modify(|_| {
                     panic!(
                         "local point must be created only once. {:?}",
                         point.id().alt()
                     )
-                },
-            );
-            loc.state().clone()
+                })
+                .or_insert_with(|| {
+                    DagPointFuture::new_local_trusted(point, &loc.state, store, key_pair)
+                });
         });
-        if let Some(signable) = state.signable() {
-            signable.sign(self.round(), key_pair);
-        }
-        assert!(
-            state.signed_point(self.round()).is_some(),
-            "Coding or configuration error: local point cannot be signed; \
-            node is not in validator set?"
-        );
-        state
     }
 
     pub fn set_bad_sig_in_broadcast_exact(&self, author: &PeerId) {
@@ -185,11 +185,12 @@ impl DagRound {
             "Coding error: point round does not match dag round"
         );
         self.edit(&point.data().author, |loc| {
-            let _ready = loc.init_or_modify(
-                point.digest(),
-                |state| DagPointFuture::new_ill_formed_broadcast(point, state, store, effects),
-                |existing| existing.resolve_download(point),
-            );
+            loc.versions
+                .entry(*point.digest())
+                .and_modify(|first| first.resolve_download(point))
+                .or_insert_with(|| {
+                    DagPointFuture::new_ill_formed_broadcast(point, &loc.state, store, effects)
+                });
         });
     }
 
@@ -200,7 +201,7 @@ impl DagRound {
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
-    ) -> Option<BoxFuture<'static, InclusionState>> {
+    ) {
         let _guard = effects.span().enter();
         assert_eq!(
             point.round(),
@@ -209,20 +210,18 @@ impl DagRound {
         );
         let digest = point.digest();
         self.edit(&point.data().author, |loc| {
-            let result_state = loc.state().clone();
-            loc.init_or_modify(
-                digest,
-                // FIXME: prior Responder refactor: could not sign during validation,
-                //   because current DAG round could advance concurrently;
-                //   now current dag round changes consistently,
-                //   maybe its possible to reduce locking in 'inclusion state'
-                |state| {
-                    DagPointFuture::new_broadcast(self, point, state, downloader, store, effects)
-                },
-                |existing| existing.resolve_download(point),
-            )
-            .map(|first| first.clone().map(|_| result_state).boxed())
-        })
+            match loc.versions.entry(*digest) {
+                btree_map::Entry::Occupied(occupied) => {
+                    let first = occupied.get();
+                    first.resolve_download(point);
+                }
+                btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert(DagPointFuture::new_broadcast(
+                        self, point, &loc.state, downloader, store, effects,
+                    ));
+                }
+            }
+        });
     }
 
     /// notice: `round` must exactly match point's round,
@@ -236,9 +235,9 @@ impl DagRound {
         effects: &Effects<EngineContext>,
     ) {
         self.edit(author, |loc| {
-            loc.get_or_init(digest, |state| {
+            loc.versions.entry(*digest).or_insert_with(|| {
                 DagPointFuture::new_load(
-                    self, author, digest, None, state, downloader, store, effects,
+                    self, author, digest, None, &loc.state, downloader, store, effects,
                 )
             });
         });
@@ -255,23 +254,24 @@ impl DagRound {
         store: &MempoolStore,
         effects: &Effects<ValidateContext>,
     ) -> DagPointFuture {
-        let future = self.edit(author, |loc| {
-            loc.get_or_init(digest, |state| {
-                DagPointFuture::new_load(
-                    self,
-                    author,
-                    digest,
-                    Some(depender),
-                    state,
-                    downloader,
-                    store,
-                    effects,
-                )
-            })
-            .clone()
-        });
-        future.add_depender(depender);
-        future
+        self.edit(author, |loc| {
+            loc.versions
+                .entry(*digest)
+                .and_modify(|first| first.add_depender(depender))
+                .or_insert_with(|| {
+                    DagPointFuture::new_load(
+                        self,
+                        author,
+                        digest,
+                        Some(depender),
+                        &loc.state,
+                        downloader,
+                        store,
+                        effects,
+                    )
+                })
+                .clone()
+        })
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {

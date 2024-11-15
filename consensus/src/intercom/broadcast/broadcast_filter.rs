@@ -1,12 +1,11 @@
 use std::collections::hash_map;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use dashmap::mapref::entry::Entry as DashMapEntry;
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use super::dto::ConsensusEvent;
-use crate::dag::{DagFront, DagHead, DagRound, Verifier, VerifyError};
+use crate::dag::{DagFront, DagHead, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::{Consensus, RoundWatch};
@@ -20,16 +19,11 @@ pub struct BroadcastFilter {
 }
 
 impl BroadcastFilter {
-    pub fn new(
-        peer_schedule: &PeerSchedule,
-        consensus_round: &RoundWatch<Consensus>,
-        output: mpsc::UnboundedSender<ConsensusEvent>,
-    ) -> Self {
+    pub fn new(peer_schedule: &PeerSchedule, consensus_round: &RoundWatch<Consensus>) -> Self {
         Self {
             inner: Arc::new(BroadcastFilterInner {
                 peer_schedule: peer_schedule.clone(),
                 consensus_round: consensus_round.clone(),
-                output,
                 by_round: Default::default(),
             }),
         }
@@ -72,7 +66,6 @@ type MapByPeer = FastHashMap<PeerId, (Result<Point, Digest>, usize)>;
 struct BroadcastFilterInner {
     peer_schedule: PeerSchedule,
     consensus_round: RoundWatch<Consensus>,
-    output: mpsc::UnboundedSender<ConsensusEvent>,
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
     by_round: FastDashMap<Round, (PeerCount, MapByPeer)>,
@@ -196,7 +189,7 @@ impl BroadcastFilterInner {
                     match &verified {
                         Ok(()) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
-                                self.send_validating(&dag_round, point, downloader, store, effects);
+                                dag_round.add_broadcast_exact(point, downloader, store, effects);
                             }
                         }
                         Err(
@@ -227,21 +220,6 @@ impl BroadcastFilterInner {
             (false, None, None) // should ban sender
         };
 
-        if is_threshold_reached && round >= top_round {
-            // notify collector after max consensus round is updated
-            // so engine will be consistent after collector finishes and exits
-            self.consensus_round.set_max(round);
-            // do not apply peer schedule changes as DagBack may be not ready validating smth old
-            if round == top_round {
-                // do not wait for Collector to exit and advance engine round
-                self.advance_round(head, downloader, store, effects);
-            } else {
-                self.output
-                    .send(ConsensusEvent::Forward(round))
-                    .expect("channel from filter to collector closed");
-            }
-        }
-
         // we should ban a peer that broadcasts its rounds out of order,
         //   though we cannot prove this decision for other nodes;
         // rarely a consecutive pair of broadcasts may be reordered during high CPU load
@@ -268,6 +246,15 @@ impl BroadcastFilterInner {
             advance = Some(is_threshold_reached).filter(|x| *x),
             "received broadcast"
         );
+
+        if is_threshold_reached && round >= top_round {
+            // notify collector after max consensus round is updated
+            // so engine will be consistent after collector finishes and exits
+            self.consensus_round.set_max(round);
+            // must not apply peer schedule changes as DagBack may be not ready validating smth old
+            // but threshold can be reached only when peer schedule is defined, so it's safe
+            self.advance_round(head, downloader, store, effects);
+        }
     }
 
     /// drop everything up to the new round (inclusive)
@@ -311,9 +298,9 @@ impl BroadcastFilterInner {
                 missed.push(round.0);
                 continue;
             };
-            // Note: no need to channel to Collector, no new local point will reference them anyway
+            // preserve order by round to not create excessive download tasks
             for point in points {
-                _ = point_round.add_broadcast_exact(&point, downloader, store, effects);
+                point_round.add_broadcast_exact(&point, downloader, store, effects);
             }
             released.push(round.0);
         }
@@ -323,10 +310,7 @@ impl BroadcastFilterInner {
 
         for dag_round in [head.prev(), head.current(), head.next()] {
             let round = dag_round.round();
-            self.output
-                .send(ConsensusEvent::Forward(round))
-                .expect("channel from filter to collector closed");
-            let dashmap::mapref::entry::Entry::Occupied(entry) = self.by_round.entry(round) else {
+            let DashMapEntry::Occupied(entry) = self.by_round.entry(round) else {
                 not_found.push(round.0);
                 continue;
             };
@@ -334,7 +318,7 @@ impl BroadcastFilterInner {
             for (peer_id, (point_or_digest, _)) in map_by_peer {
                 match point_or_digest {
                     Ok(point) => {
-                        _ = dag_round.add_broadcast_exact(point, downloader, store, effects);
+                        dag_round.add_broadcast_exact(point, downloader, store, effects);
                     }
                     Err(digest) => {
                         dag_round.add_evicted_broadcast_exact(
@@ -356,28 +340,5 @@ impl BroadcastFilterInner {
             not_found = debug(not_found),
             "advance round"
         );
-    }
-
-    fn send_validating(
-        &self,
-        point_round: &DagRound,
-        point: &Point,
-        downloader: &Downloader,
-        store: &MempoolStore,
-        effects: &Effects<EngineContext>,
-    ) {
-        // this may be not the first insert into DAG - in case some node received it earlier,
-        // and we've already received its point that references current broadcast
-        if let Some(first_state_fut) =
-            point_round.add_broadcast_exact(point, downloader, store, effects)
-        {
-            let validating = ConsensusEvent::Validating {
-                point_id: point.id(),
-                task: first_state_fut,
-            };
-            self.output
-                .send(validating)
-                .expect("channel from filter to collector closed");
-        }
     }
 }

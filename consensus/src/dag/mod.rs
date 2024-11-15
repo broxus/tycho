@@ -2,7 +2,6 @@ pub use anchor_stage::align_genesis;
 #[cfg(feature = "test")]
 pub use anchor_stage::AnchorStage;
 pub use commit::*;
-pub use dag_location::InclusionState;
 pub use dag_round::*;
 pub use front::*;
 pub use head::*;
@@ -18,4 +17,5 @@ mod dag_round;
 mod front;
 mod head;
 mod producer;
+mod threshold;
 mod verifier;

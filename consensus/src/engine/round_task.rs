@@ -4,29 +4,29 @@ use std::time::Instant;
 
 use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tracing::Instrument;
 use tycho_util::futures::JoinTask;
 
-use crate::dag::{DagHead, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
+use crate::dag::{DagHead, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{
     AltFormat, CollectorContext, Effects, EngineContext, MempoolStore, ValidateContext,
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
-use crate::engine::Genesis;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
 };
-use crate::models::{Link, Point, PointInfo, Round};
+use crate::models::{Link, Point, PointInfo};
 
 pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
     pub store: MempoolStore,
     pub responder: Responder,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
+    pub consensus_round: RoundWatch<Consensus>,
     input_buffer: InputBuffer,
     dispatcher: Dispatcher,
     pub broadcast_filter: BroadcastFilter,
@@ -52,8 +52,7 @@ impl RoundTaskReady {
         responder: Responder,
         input_buffer: InputBuffer,
     ) -> Self {
-        let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
-        let broadcast_filter = BroadcastFilter::new(&peer_schedule, consensus_round, bcast_tx);
+        let broadcast_filter = BroadcastFilter::new(&peer_schedule, consensus_round);
         let downloader = Downloader::new(dispatcher, &peer_schedule, consensus_round.receiver());
         Self {
             state: RoundTaskState {
@@ -61,12 +60,13 @@ impl RoundTaskReady {
                 store,
                 responder,
                 top_known_anchor,
+                consensus_round: consensus_round.clone(),
                 input_buffer,
                 dispatcher: dispatcher.clone(),
                 broadcast_filter,
                 downloader,
             },
-            collector: Collector::new(bcast_rx),
+            collector: Collector::new(consensus_round.receiver()),
             last_own_point: None,
             prev_broadcast: None,
         }
@@ -103,104 +103,114 @@ impl RoundTaskReady {
     pub fn own_point_task(
         &self,
         head: &DagHead,
+        mut collector_signal_rx: watch::Receiver<CollectorSignal>,
         round_effects: &Effects<EngineContext>,
-    ) -> (
-        BoxFuture<'static, Result<Option<Point>, JoinError>>,
-        BoxFuture<'static, InclusionState>,
-    ) {
+    ) -> BoxFuture<'static, Option<Point>> {
         let current_round = head.current().round();
 
-        metrics::gauge!("tycho_mempool_includes_ready_round_lag")
-            .set(current_round.0 as f32 - self.collector.includes_ready_round().next().0 as f32);
-        let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
-        let allowed_to_produce = match self
-            .collector
-            .includes_ready_round()
-            .cmp(&current_round.prev().max(Genesis::round()))
-        {
-            cmp::Ordering::Less => false,
-            cmp::Ordering::Equal => true,
-            cmp::Ordering::Greater => panic!(
-                "have includes ready at {:?}, but producing point at {:?}",
-                self.collector.includes_ready_round(),
-                current_round,
-            ),
-        } && self.last_own_point.as_ref().map_or(true, |prev_own| {
-            match prev_own.round.next().cmp(&current_round) {
-                cmp::Ordering::Less => true,
-                cmp::Ordering::Equal => {
-                    prev_own.evidence.len() >= prev_own.signers.majority_of_others()
-                }
-                cmp::Ordering::Greater => panic!(
-                    "already produced point at {:?} and gathered {}/{} evidence, \
+        let allowed_to_produce =
+            self.last_own_point.as_ref().map_or(true, |prev_own| {
+                match prev_own.round.next().cmp(&current_round) {
+                    cmp::Ordering::Less => true,
+                    cmp::Ordering::Equal => {
+                        prev_own.evidence.len() >= prev_own.signers.majority_of_others()
+                    }
+                    cmp::Ordering::Greater => panic!(
+                        "already produced point at {:?} and gathered {}/{} evidence, \
                      trying to produce point at {:?}",
-                    prev_own.round,
-                    prev_own.evidence.len(),
-                    prev_own.signers.majority_of_others(),
-                    current_round
-                ),
-            }
-        });
+                        prev_own.round,
+                        prev_own.evidence.len(),
+                        prev_own.signers.majority_of_others(),
+                        current_round
+                    ),
+                }
+            });
 
-        let point_fut = if allowed_to_produce {
-            self.own_point_fut(own_point_state_tx, head.clone(), round_effects)
-        } else {
-            drop(own_point_state_tx);
-            future::ready(Ok(None)).boxed()
-        };
-        let own_point_state = async move {
-            match own_point_state_rx.await {
-                Ok(state) => state,
-                Err(_) => future::pending().await,
-            }
-        };
-        (point_fut, own_point_state.boxed())
-    }
+        if !allowed_to_produce {
+            return future::ready(None).boxed();
+        }
 
-    fn own_point_fut(
-        &self,
-        own_point_state_tx: oneshot::Sender<InclusionState>,
-        head: DagHead,
-        round_effects: &Effects<EngineContext>,
-    ) -> BoxFuture<'static, Result<Option<Point>, JoinError>> {
         let input_buffer = self.state.input_buffer.clone();
         let last_own_point = self.last_own_point.clone();
         let store = self.state.store.clone();
+        let head = head.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let task_start_time = Instant::now();
-            let point_opt = Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
-            if let Some(own_point) = point_opt.as_ref() {
-                // Note: actually we should use `.includes_keys()`, this is a WorkAround to support
-                //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
-                //   this is safe as any node never changes its keys until restart, after which
-                //   the node does not recognise points signed with old keypair as locally created
-                let wa_keys = head.produce_keys();
-                let state = head.current().insert_exact_sign(own_point, wa_keys, &store);
-                own_point_state_tx.send(state).ok();
-                metrics::histogram!("tycho_mempool_engine_produce_time")
-                    .record(task_start_time.elapsed());
+        // must stay lazy: not started until polled
+        async move {
+            let mut threshold = Box::pin(head.prev().threshold().reached());
+            let is_in_time = loop {
+                tokio::select!(
+                    () = &mut threshold => {
+                        break true;
+                    },
+                    recv_status = collector_signal_rx.changed() => {
+                        if recv_status.is_err() {
+                            break false;
+                        }
+                        match *collector_signal_rx.borrow_and_update() {
+                            CollectorSignal::Err | CollectorSignal::Finish => break false,
+                            CollectorSignal::Retry => continue,
+                        }
+                    }
+                );
             };
-            point_opt
-            // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
-        })
+            if !is_in_time {
+                return None;
+            }
+            drop(threshold);
+
+            let point_result = tokio::task::spawn_blocking(move || {
+                let task_start_time = Instant::now();
+                let point_opt =
+                    Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
+                if let Some(own_point) = point_opt.as_ref() {
+                    // Note: actually we should use `.includes_keys()`, this is a WorkAround to support
+                    //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
+                    //   this is safe as any node never changes its keys until restart, after which
+                    //   the node does not recognise points signed with old keypair as locally created
+                    let wa_keys = head.produce_keys();
+                    head.current().insert_exact_sign(own_point, wa_keys, &store);
+                    metrics::histogram!("tycho_mempool_engine_produce_time")
+                        .record(task_start_time.elapsed());
+                };
+                point_opt
+            })
+            .await;
+            match point_result {
+                Ok(result) => result,
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => {
+                    tracing::warn!("produce point task cancelled: {e}");
+                    None
+                }
+            }
+        }
         .instrument(round_effects.span().clone())
         .boxed()
     }
 
     pub fn run(
         self,
-        own_point_fut: BoxFuture<'static, Result<Option<Point>, JoinError>>,
-        own_point_state: BoxFuture<'static, InclusionState>,
+        own_point_fut: BoxFuture<'static, Option<Point>>,
         collector_signal_tx: watch::Sender<CollectorSignal>,
-        collector_signal_rx: watch::Receiver<CollectorSignal>,
         head: &DagHead,
         round_effects: &Effects<EngineContext>,
     ) -> RoundTaskRunning {
         let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
 
+        // Signer must stop making new signatures for witness round before new point is produced
+        // own point future must do nothing until polled (must not be spawned)
+        self.state.responder.update(
+            &self.state.broadcast_filter,
+            head,
+            &self.state.downloader,
+            &self.state.store,
+            round_effects,
+        );
+
         let broadcaster_run = tokio::spawn({
             let own_point_round = head.current().downgrade();
+            let collector_signal_rx = collector_signal_tx.subscribe();
             let round_effects = round_effects.clone();
             let peer_schedule = self.state.peer_schedule.clone();
             let prev_bcast = self.prev_broadcast;
@@ -208,7 +218,7 @@ impl RoundTaskReady {
             let downloader = self.state.downloader.clone();
             let store = self.state.store.clone();
             async move {
-                let own_point = own_point_fut.await.expect("cannot be cancelled");
+                let own_point = own_point_fut.await;
                 round_effects.own_point(own_point.as_ref());
 
                 if let Some(own_point) = own_point {
@@ -244,30 +254,19 @@ impl RoundTaskReady {
         });
 
         let collector_run = tokio::spawn({
-            let mut collector = self.collector;
+            let collector = self.collector;
+            let consensus_round = self.state.consensus_round.clone();
             let effects = Effects::<CollectorContext>::new(round_effects);
             let head = head.clone();
             async move {
-                let next_round = collector
-                    .run(
-                        effects,
-                        head,
-                        own_point_state,
-                        collector_signal_tx,
-                        bcaster_ready_rx,
-                    )
+                let next_round = head.next().round();
+                let collector = collector
+                    .run(effects, head, collector_signal_tx, bcaster_ready_rx)
                     .await;
-                (collector, next_round)
+                consensus_round.set_max(next_round);
+                collector
             }
         });
-
-        self.state.responder.update(
-            &self.state.broadcast_filter,
-            head,
-            &self.state.downloader,
-            &self.state.store,
-            round_effects,
-        );
 
         RoundTaskRunning {
             state: self.state,
@@ -321,13 +320,13 @@ pub struct RoundTaskRunning {
     state: RoundTaskState,
     last_own_point: Option<Arc<LastOwnPoint>>,
     broadcaster_run: JoinHandle<Option<(AbortHandle, Arc<LastOwnPoint>)>>,
-    collector_run: JoinHandle<(Collector, Round)>,
+    collector_run: JoinHandle<Collector>,
 }
 
 impl RoundTaskRunning {
-    pub async fn until_ready(self) -> Result<(RoundTaskReady, Round), JoinError> {
+    pub async fn until_ready(self) -> Result<RoundTaskReady, JoinError> {
         match tokio::try_join!(self.collector_run, self.broadcaster_run) {
-            Ok(((collector, next_round), bcast_result)) => {
+            Ok((collector, bcast_result)) => {
                 let (prev_broadcast, last_own_point) = match bcast_result {
                     None => (None, self.last_own_point),
                     Some((new_prev_bcast, new_last_own_point)) => {
@@ -341,7 +340,7 @@ impl RoundTaskRunning {
                     last_own_point, // replaces prev point only when there is new one
                     prev_broadcast, // continue prev broadcast for one adjacent round
                 };
-                Ok((ready, next_round))
+                Ok(ready)
             }
             Err(join_error) => Err(join_error),
         }
