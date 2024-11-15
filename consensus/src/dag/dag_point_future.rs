@@ -55,7 +55,7 @@ enum DagPointFutureType {
         // this could be a `Notify`, but both sender and receiver must be used only once
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
         dependers_tx: mpsc::UnboundedSender<PeerId>,
-        verified: Arc<OnceTake<oneshot::Sender<Point>>>,
+        resolve: Arc<OnceTake<oneshot::Sender<DownloadResult>>>,
     },
     Store(Shared<JoinTask<DagPoint>>),
     Ready(future::Ready<DagPoint>),
@@ -272,8 +272,8 @@ impl DagPointFuture {
                         .run(&point_id, dependers_rx, broadcast_rx, download_effects)
                         .await;
                     let verified = match downloaded {
-                        DownloadResult::Verified(point) => point,
-                        DownloadResult::IllFormed(point) => {
+                        Some(DownloadResult::Verified(point)) => point,
+                        Some(DownloadResult::IllFormed(point)) => {
                             tokio::task::spawn_blocking({
                                 let store = store.clone();
                                 let status = PointStatus {
@@ -286,7 +286,7 @@ impl DagPointFuture {
                             .expect("db store ill-formed download");
                             return DagPoint::IllFormed(Arc::new(point_id));
                         }
-                        DownloadResult::NotFound => return DagPoint::NotFound(Arc::new(point_id)),
+                        None => return DagPoint::NotFound(Arc::new(point_id)),
                     };
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();
@@ -356,7 +356,7 @@ impl DagPointFuture {
             )),
             certified: once_certified_tx,
             dependers_tx,
-            verified: Arc::new(OnceTake::new(broadcast_tx)),
+            resolve: Arc::new(OnceTake::new(broadcast_tx)),
         })
     }
 
@@ -367,11 +367,16 @@ impl DagPointFuture {
         }
     }
 
-    pub fn resolve_download(&self, broadcast: &Point) {
-        if let DagPointFutureType::Load { verified, .. } = &self.0 {
-            if let Some(oneshot) = verified.take() {
+    pub fn resolve_download(&self, broadcast: &Point, is_ok: bool) {
+        if let DagPointFutureType::Load { resolve, .. } = &self.0 {
+            if let Some(oneshot) = resolve.take() {
+                let result = if is_ok {
+                    DownloadResult::Verified(broadcast.clone())
+                } else {
+                    DownloadResult::IllFormed(broadcast.clone())
+                };
                 // receiver is dropped upon completion
-                _ = oneshot.send(broadcast.clone());
+                oneshot.send(result).ok();
             }
         }
     }

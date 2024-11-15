@@ -187,7 +187,7 @@ impl DagRound {
         self.edit(&point.data().author, |loc| {
             loc.versions
                 .entry(*point.digest())
-                .and_modify(|first| first.resolve_download(point))
+                .and_modify(|first| first.resolve_download(point, false))
                 .or_insert_with(|| {
                     DagPointFuture::new_ill_formed_broadcast(point, &loc.state, store, effects)
                 });
@@ -213,7 +213,7 @@ impl DagRound {
             match loc.versions.entry(*digest) {
                 btree_map::Entry::Occupied(occupied) => {
                     let first = occupied.get();
-                    first.resolve_download(point);
+                    first.resolve_download(point, true);
                 }
                 btree_map::Entry::Vacant(vacant) => {
                     vacant.insert(DagPointFuture::new_broadcast(
