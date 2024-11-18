@@ -22,6 +22,10 @@ use crate::types::{
 };
 use crate::validator::ValidationStatus;
 
+#[cfg(test)]
+#[path = "tests/blocks_cache_tests.rs"]
+pub(super) mod tests;
+
 #[derive(Default)]
 pub struct BlocksCache {
     masters: Mutex<MasterBlocksCache>,
@@ -521,7 +525,14 @@ impl BlocksCache {
                 return Ok(McBlockSubgraphExtract::AlreadyExtracted);
             };
 
-            if matches!(&occupied_entry.data, BlockCacheEntryData::Received { .. }) {
+            if matches!(
+                &occupied_entry.data,
+                BlockCacheEntryData::Received { .. }
+                    | BlockCacheEntryData::Collated {
+                        received_after_collation: true,
+                        ..
+                    }
+            ) {
                 guard.data.move_range_start(block_id.seqno);
             }
 
