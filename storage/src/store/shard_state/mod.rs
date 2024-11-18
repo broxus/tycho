@@ -155,7 +155,7 @@ impl ShardStateStorage {
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(cell_id)?;
+        let cell = self.cell_storage.load_cell(&cell_id)?;
 
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }

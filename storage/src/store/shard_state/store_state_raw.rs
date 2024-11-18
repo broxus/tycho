@@ -225,7 +225,7 @@ impl StoreStateContext {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
-                let cell = self.cell_storage.load_cell(cell_id)?;
+                let cell = self.cell_storage.load_cell(&cell_id)?;
                 Ok(ShardStateStuff::from_root(
                     block_id,
                     Cell::from(cell as Arc<_>),
@@ -624,7 +624,7 @@ mod test {
             let (_, value) = state?;
 
             // check that state actually exists
-            let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
+            let cell = cell_storage.load_cell(&HashBytes::from_slice(value.as_ref()))?;
 
             let mut batch = WriteBatch::default();
             let (pending_op, _) =
