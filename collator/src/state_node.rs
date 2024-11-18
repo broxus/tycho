@@ -61,6 +61,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
+        virtualize: bool,
     ) -> Result<bool>;
     /// Return block by it's id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
@@ -189,6 +190,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
+        virtualize: bool,
     ) -> Result<bool> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
 
@@ -202,7 +204,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let updated = self
             .storage
             .shard_state_storage()
-            .store_state_root(&handle, state_root, false)
+            .store_state_root(&handle, state_root, virtualize)
             .await?;
 
         Ok(updated)

@@ -1671,14 +1671,21 @@ impl CollatorStdImpl {
             };
             let adapter = self.state_node_adapter.clone();
             let labels = labels.clone();
-            let new_state_root = finalized.new_state_root.clone();
+
+            let new_state_root = finalized
+                .block_candidate
+                .block
+                .as_ref()
+                .load_state_update()?
+                .new;
+
             async move {
                 let _histogram = HistogramGuard::begin_with_labels(
                     "tycho_collator_build_new_state_time",
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root)
+                    .store_state_root(&block_id, meta, new_state_root, true)
                     .await
             }
         });
