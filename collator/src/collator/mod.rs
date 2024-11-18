@@ -768,7 +768,12 @@ impl CollatorStdImpl {
 
         enum GetNewShardStateStuff {
             ReloadFromStorage(JoinTask<Result<bool>>),
-            BuildFromNewObservable(ShardStateStuff),
+            BuildFromNewObservable {
+                block_id: BlockId,
+                shard_state: Box<ShardStateUnsplit>,
+                root: Cell,
+                tracker: MinRefMcStateTracker,
+            },
         }
 
         let get_new_state_stuff = {
@@ -779,12 +784,12 @@ impl CollatorStdImpl {
                 self.store_new_state_tasks.push(store_new_state_task);
 
                 // build state stuff from new observable state after collation
-                GetNewShardStateStuff::BuildFromNewObservable(ShardStateStuff::from_state_and_root(
-                    &block_id,
-                    new_observable_state,
-                    new_state_root,
-                    &tracker,
-                )?)
+                GetNewShardStateStuff::BuildFromNewObservable {
+                    block_id,
+                    shard_state: new_observable_state,
+                    root: new_state_root,
+                    tracker,
+                }
             }
         };
 
@@ -792,7 +797,12 @@ impl CollatorStdImpl {
 
         self.delayed_working_state.future = Some(Box::pin(async move {
             let new_state_stuff = match get_new_state_stuff {
-                GetNewShardStateStuff::BuildFromNewObservable(state_stuff) => state_stuff,
+                GetNewShardStateStuff::BuildFromNewObservable {
+                    block_id,
+                    shard_state,
+                    root,
+                    tracker,
+                } => ShardStateStuff::from_state_and_root(&block_id, shard_state, root, &tracker)?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;
                     let load_task = JoinTask::new({
