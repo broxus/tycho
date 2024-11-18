@@ -18,16 +18,14 @@ use crate::db::*;
 
 pub struct CellStorage {
     db: BaseDb,
-    cells_cache: Arc<CellsIndex>,
+    cells_cache: Arc<CellsCache>,
     raw_cells_cache: RawCellsCache,
     pending: PendingOperations,
 }
 
-type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
-
 impl CellStorage {
     pub fn new(db: BaseDb, cache_size_bytes: u64) -> Arc<Self> {
-        let cells_cache = Default::default();
+        let cells_cache = Arc::new(Default::default());
         let raw_cells_cache = RawCellsCache::new(cache_size_bytes);
 
         Arc::new(Self {
@@ -274,7 +272,7 @@ impl CellStorage {
                             if depth >= NEW_CELLS_DEPTH_THRESHOLD {
                                 // NOTE: `get` here is used to affect a "hotness" of the value, because
                                 // there is a big chance that we will need it soon during state processing
-                                if let Some(entry) = self.raw_cache.0.get(key) {
+                                if let Some(entry) = self.raw_cache.shard(key).get(key) {
                                     let rc = entry.header.header.load(Ordering::Acquire);
                                     break 'value (rc, rc > 0);
                                 }
@@ -378,17 +376,15 @@ impl CellStorage {
 
     pub fn load_cell(
         self: &Arc<Self>,
-        hash: HashBytes,
+        hash: &HashBytes,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(&hash) {
-            if let Some(cell) = cell.upgrade() {
-                return Ok(cell);
-            }
+        if let Some(cell) = self.cells_cache.get(hash) {
+            return Ok(cell);
         }
 
-        let cell = match self.raw_cells_cache.get_raw(&self.db, &hash, &self.pending) {
+        let cell = match self.raw_cells_cache.get_raw(&self.db, hash, &self.pending) {
             Ok(value) => 'cell: {
                 if let Some(value) = value {
                     let rc = &value.header.header;
@@ -404,11 +400,7 @@ impl CellStorage {
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
-        if self
-            .cells_cache
-            .insert(hash, Arc::downgrade(&cell))
-            .is_none()
-        {
+        if self.cells_cache.insert(hash, Arc::downgrade(&cell)) {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
@@ -504,7 +496,7 @@ impl CellStorage {
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        if self.cells_cache.remove(hash).is_some() {
+        if self.cells_cache.remove(hash) {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
@@ -658,7 +650,7 @@ impl StorageCell {
         let mut res = Ok(());
         Self::initialize_inner(state, &mut || match self
             .cell_storage
-            .load_cell(unsafe { (*slot).hash })
+            .load_cell(unsafe { &(*slot).hash })
         {
             Ok(cell) => unsafe {
                 *slot = StorageCellReferenceData {
@@ -865,8 +857,48 @@ impl StorageCellReferenceData {
     }
 }
 
-struct RawCellsCache(Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>);
+const CELL_SHARDS: usize = 256;
 
+struct CellsCache {
+    shards: [CellsCacheShard; CELL_SHARDS],
+}
+
+impl Default for CellsCache {
+    fn default() -> Self {
+        Self {
+            shards: [(); CELL_SHARDS].map(|_| Default::default()),
+        }
+    }
+}
+
+impl CellsCache {
+    #[inline(always)]
+    fn shard(&self, key: &HashBytes) -> &CellsCacheShard {
+        &self.shards[key[0] as usize]
+    }
+
+    fn get(&self, key: &HashBytes) -> Option<Arc<StorageCell>> {
+        self.shard(key).get(key).and_then(|v| v.upgrade())
+    }
+
+    /// Returns `true` if the value was inserted, `false` if the value was already present.
+    fn insert(&self, key: &HashBytes, value: Weak<StorageCell>) -> bool {
+        self.shard(key).insert(*key, value).is_none()
+    }
+
+    /// Returns `true` if the value was removed, `false` if the value was not present.
+    fn remove(&self, key: &HashBytes) -> bool {
+        self.shard(key).remove(key).is_some()
+    }
+}
+
+type CellsCacheShard = FastDashMap<HashBytes, Weak<StorageCell>>;
+
+struct RawCellsCache {
+    shards: [RawCellsCacheShard; CELL_SHARDS],
+}
+
+type RawCellsCacheShard = Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>;
 type RawCellsCacheItem = ThinArc<AtomicI64, u8>;
 
 #[derive(Clone, Copy)]
@@ -908,21 +940,33 @@ impl RawCellsCache {
         const MAX_CELL_SIZE: u64 = 192;
         const KEY_SIZE: u64 = 32;
 
-        let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
+        const MIN_CACHE_SIZE: u64 = 1 << 20; // 1 MB
+
+        let shard_size_in_bytes = std::cmp::max(size_in_bytes / CELL_SHARDS as u64, MIN_CACHE_SIZE);
+
+        let estimated_cell_cache_capacity = shard_size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
         tracing::info!(
             estimated_cell_cache_capacity,
-            max_cell_cache_size = %bytesize::ByteSize(size_in_bytes),
+            max_cell_cache_size = %bytesize::ByteSize(shard_size_in_bytes * CELL_SHARDS as u64),
+            cell_shard_size = %bytesize::ByteSize(shard_size_in_bytes),
         );
 
-        let raw_cache = Cache::with(
-            estimated_cell_cache_capacity as usize,
-            size_in_bytes,
-            CellSizeEstimator,
-            FastHasherState::default(),
-            DefaultLifecycle::default(),
-        );
+        let shards = [(); CELL_SHARDS].map(|_| {
+            Cache::with(
+                estimated_cell_cache_capacity as usize,
+                shard_size_in_bytes,
+                CellSizeEstimator,
+                FastHasherState::default(),
+                DefaultLifecycle::default(),
+            )
+        });
 
-        Self(raw_cache)
+        Self { shards }
+    }
+
+    #[inline(always)]
+    fn shard(&self, key: &HashBytes) -> &RawCellsCacheShard {
+        &self.shards[key[0] as usize]
     }
 
     fn get_raw(
@@ -933,7 +977,7 @@ impl RawCellsCache {
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
 
-        match self.0.get_value_or_guard(key, None) {
+        match self.shard(key).get_value_or_guard(key, None) {
             GuardResult::Value(value) => Ok(Some(value)),
             GuardResult::Guard(g) => Ok(
                 if let Some(value) = {
@@ -970,7 +1014,7 @@ impl RawCellsCache {
         refs_buffer.clear();
 
         // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
-        if let Some(value) = self.0.peek(key) {
+        if let Some(value) = self.shard(key).peek(key) {
             let rc = value.header.header.load(Ordering::Acquire);
             if rc <= 0 {
                 return Err(CellStorageError::CellNotFound);
@@ -999,19 +1043,19 @@ impl RawCellsCache {
 
     fn insert(&self, key: &HashBytes, refs: u32, value: &[u8]) {
         let value = RawCellsCacheItem::from_header_and_slice(AtomicI64::new(refs as _), value);
-        self.0.insert(*key, value);
+        self.shard(key).insert(*key, value);
     }
 
     fn add_refs(&self, key: &HashBytes, refs: u32) {
         // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
-        if let Some(v) = self.0.peek(key) {
+        if let Some(v) = self.shard(key).peek(key) {
             v.header.header.fetch_add(refs as i64, Ordering::Release);
         }
     }
 
     fn remove_refs(&self, key: &HashBytes, refs: u32) {
         // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
-        if let Some(v) = self.0.peek(key) {
+        if let Some(v) = self.shard(key).peek(key) {
             let old_refs = v.header.header.fetch_sub(refs as i64, Ordering::Release);
             debug_assert!(old_refs >= refs as i64);
         }
