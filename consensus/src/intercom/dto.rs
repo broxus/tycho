@@ -98,6 +98,8 @@ pub enum SignatureRejectedReason {
     TooOldRound,
     #[tl(id = "intercom.signatureRejectedReason.cannotSign")]
     CannotSign,
+    #[tl(id = "intercom.signatureRejectedReason.unknownPeer")]
+    UnknownPeer,
 }
 
 #[derive(TlWrite, TlRead, Debug)]

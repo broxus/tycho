@@ -50,8 +50,12 @@ impl DagRound {
     }
 
     fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
-        let peers_len = peer_schedule.atomic().peers_for(round).len();
-        let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
+        let peers = peer_schedule.atomic().peers_for(round).clone();
+        let locations = peers
+            .iter()
+            .map(|peer_id| (*peer_id, DagLocation::default()))
+            .collect::<FastDashMap<_, _>>();
+
         let peer_count = match round.cmp(&Genesis::round()) {
             cmp::Ordering::Less => panic!(
                 "Coding error: DAG round {} not allowed before genesis",
@@ -59,7 +63,7 @@ impl DagRound {
             ),
             cmp::Ordering::Equal => PeerCount::GENESIS,
             cmp::Ordering::Greater => {
-                PeerCount::try_from(peers_len).unwrap_or_else(|e| panic!("{e} for {round:?}"))
+                PeerCount::try_from(peers.len()).unwrap_or_else(|e| panic!("{e} for {round:?}"))
             }
         };
         Self(Arc::new(DagRoundInner {
@@ -92,8 +96,14 @@ impl DagRound {
     where
         F: FnOnce(&mut DagLocation) -> R,
     {
-        let mut loc = self.0.locations.entry(*author).or_default();
-        edit(loc.value_mut())
+        match self.0.locations.get_mut(author) {
+            Some(mut loc) => edit(loc.value_mut()),
+            None => panic!(
+                "DAG must not contain location {} @ {}",
+                author.alt(),
+                self.round().0
+            ),
+        }
     }
 
     pub fn view<F, R>(&self, author: &PeerId, view: F) -> Option<R>

@@ -62,26 +62,30 @@ impl Signer {
             cmp::Ordering::Equal => head.current(),
             cmp::Ordering::Less => head.prev(),
         };
-
-        // TODO do not state().clone() - mutating closure on location is easily used;
-        //  need to remove inner locks from InclusionState and leave it guarded by DashMap;
-        //  also sign points during their validation, see comments in DagLocation::add_validate()
-        let Some(state) = point_dag_round.view(author, |loc| loc.state().clone()) else {
-            // retry broadcast
-            return SignatureResponse::NoPoint;
-        };
-        if round > current_round {
-            // point was moved from broadcast filter to dag, do not respond with `NoPoint`
-            return SignatureResponse::TryLater;
-        }
-        if let Some(signable) = state.signable() {
-            if round == current_round {
-                signable.sign(current_round, head.includes_keys());
+        let state = match point_dag_round.view(author, |loc| {
+            if loc.versions().is_empty() {
+                Err(())
             } else {
-                // only previous to current round
-                signable.sign(current_round, head.witness_keys());
-            };
-        }
+                Ok(loc.state().clone())
+            }
+        }) {
+            // locations are prepopulated for all expected peers
+            None => return SignatureResponse::Rejected(SignatureRejectedReason::UnknownPeer),
+            // point may be moving from broadcast filter to dag, do not respond with `NoPoint`;
+            // anyway cannot sign future round, even if point future is resolved
+            Some(_) if round > current_round => return SignatureResponse::TryLater,
+            Some(Err(())) => return SignatureResponse::NoPoint,
+            Some(Ok(state)) => state,
+        };
+        let Some(signable) = state.signable() else {
+            return SignatureResponse::TryLater; // still validating
+        };
+        if round == current_round {
+            signable.sign(current_round, head.includes_keys());
+        } else {
+            // only previous to current round
+            signable.sign(current_round, head.witness_keys());
+        };
         match state.signed() {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.with.clone()),
             Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),

@@ -1,4 +1,3 @@
-use std::cmp;
 use std::collections::{btree_map, BTreeMap};
 use std::sync::{Arc, OnceLock};
 
@@ -85,7 +84,10 @@ impl InclusionState {
     /// Must not be used for downloaded dependencies
     pub(super) fn init(&self, first_completed: &DagPoint) {
         _ = self.0.get_or_init(|| {
-            let signed = OnceLock::new();
+            let signable = Signable {
+                first_completed: first_completed.clone(),
+                signed: OnceLock::new(),
+            };
             if first_completed.trusted().is_none() {
                 tracing::warn!(
                     result = display(first_completed.alt()),
@@ -94,16 +96,13 @@ impl InclusionState {
                     digest = display(first_completed.digest().alt()),
                     "resolved dag point",
                 );
-                _ = signed.set(Err(()));
+                signable.reject();
             }
-            Signable {
-                first_completed: first_completed.clone(),
-                signed,
-            }
+            signable
         });
     }
     pub fn signable(&self) -> Option<&'_ Signable> {
-        self.0.get().filter(|signable| !signable.is_completed())
+        self.0.get()
     }
     pub fn signed(&self) -> Option<&'_ Result<Signed, ()>> {
         self.0.get()?.signed.get()
@@ -158,29 +157,36 @@ impl Signable {
                     })
                 });
                 if this_call_signed {
-                    match valid.info.round().cmp(&at) {
-                        cmp::Ordering::Less => {
-                            metrics::counter!("tycho_mempool_signing_prev_round_count")
-                                .increment(1);
-                        }
-                        cmp::Ordering::Equal => {
-                            metrics::counter!("tycho_mempool_signing_current_round_count")
-                                .increment(1);
-                        }
-                        cmp::Ordering::Greater => panic!("cannot sign points of future rounds"),
-                    };
-                }
-            } // else decide later
+                    if valid.info.round() > at {
+                        panic!(
+                            "cannot sign point of future round {:?} at round {}",
+                            valid.info.id(),
+                            at.0
+                        );
+                    } else if valid.info.round() == at {
+                        metrics::counter!("tycho_mempool_signing_current_round_count").increment(1);
+                    } else if valid.info.round() == at.prev() {
+                        metrics::counter!("tycho_mempool_signing_prev_round_count").increment(1);
+                    } else {
+                        panic!(
+                            "cannot sign point of old round {:?} at round {}",
+                            valid.info.id(),
+                            at.0
+                        );
+                    }
+                } // else: just retry of sig request
+            } else {
+                // decide later
+                metrics::counter!("tycho_mempool_signing_postponed").increment(1);
+            }
         } else {
             self.reject();
         }
         this_call_signed
     }
     fn reject(&self) {
+        metrics::counter!("tycho_mempool_signing_rejected").increment(1);
         _ = self.signed.set(Err(()));
-    }
-    fn is_completed(&self) -> bool {
-        self.signed.get().is_some()
     }
 }
 
