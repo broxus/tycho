@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use everscale_types::cell::CellFamily;
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
@@ -79,11 +80,16 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        self.store_state_root(handle, state.root_cell().clone())
+        self.store_state_root(handle, state.root_cell().clone(), false)
             .await
     }
 
-    pub async fn store_state_root(&self, handle: &BlockHandle, root_cell: Cell) -> Result<bool> {
+    pub async fn store_state_root(
+        &self,
+        handle: &BlockHandle,
+        mut root_cell: Cell,
+        virtualize: bool,
+    ) -> Result<bool> {
         if handle.has_state() {
             return Ok(false);
         }
@@ -104,11 +110,16 @@ impl ShardStateStorage {
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+            if virtualize {
+                root_cell = Cell::virtualize(root_cell);
+            }
+
             let root_hash = *root_cell.repr_hash();
 
             let mut batch = rocksdb::WriteBatch::default();
 
-            let (pending_op, new_cell_count) = cell_storage.store_cell(&mut batch, root_cell)?;
+            let (pending_op, new_cell_count) =
+                cell_storage.store_cell(&mut batch, root_cell, virtualize)?;
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());

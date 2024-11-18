@@ -234,6 +234,7 @@ impl CellStorage {
         &self,
         batch: &mut rocksdb::WriteBatch,
         root: Cell,
+        virtualized: bool,
     ) -> Result<(PendingOperation<'_>, usize), CellStorageError> {
         struct CellWithRefs<'a> {
             rc: u32,
@@ -246,6 +247,7 @@ impl CellStorage {
             alloc: &'a Bump,
             transaction: FastHashMap<HashBytes, CellWithRefs<'a>>,
             buffer: Vec<u8>,
+            virtualized: bool,
         }
 
         impl Context<'_> {
@@ -293,7 +295,9 @@ impl CellStorage {
 
                         let data = if !has_value {
                             self.buffer.clear();
-                            if StorageCell::serialize_to(cell, &mut self.buffer).is_err() {
+                            if StorageCell::serialize_to(cell, &mut self.buffer, self.virtualized)
+                                .is_err()
+                            {
                                 return Err(CellStorageError::InvalidCell);
                             }
                             Some(self.alloc.alloc_slice_copy(self.buffer.as_slice()) as &[u8])
@@ -334,6 +338,7 @@ impl CellStorage {
             alloc: &alloc,
             transaction: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             buffer: Vec::with_capacity(512),
+            virtualized,
         };
 
         // Check root cell
@@ -604,8 +609,18 @@ impl StorageCell {
         true
     }
 
-    pub fn serialize_to(cell: &DynCell, target: &mut Vec<u8>) -> Result<()> {
-        let descriptor = cell.descriptor();
+    pub fn serialize_to(cell: &DynCell, target: &mut Vec<u8>, virtualize: bool) -> Result<()> {
+        let mut descriptor = cell.descriptor();
+
+        if virtualize {
+            anyhow::ensure!(
+                descriptor.cell_type() != CellType::PrunedBranch
+                    || descriptor.level_mask().level() >= 1,
+                everscale_types::error::Error::PrunedBranchAccess,
+            );
+            descriptor = descriptor.virtualize(1);
+        }
+
         let hash_count = descriptor.hash_count();
         let ref_count = descriptor.reference_count();
 

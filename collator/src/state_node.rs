@@ -202,7 +202,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let updated = self
             .storage
             .shard_state_storage()
-            .store_state_root(&handle, state_root)
+            .store_state_root(&handle, state_root, false)
             .await?;
 
         Ok(updated)

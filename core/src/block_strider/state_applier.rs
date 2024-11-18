@@ -246,17 +246,20 @@ where
             .load_state_update()
             .context("Failed to load state update")?;
 
-        let new_state = rayon_run(move || update.apply(&prev_root))
-            .await
-            .context("Failed to apply state update")?;
-        let new_state = ShardStateStuff::from_root(block.id(), new_state, mc_state_tracker)
-            .context("Failed to create new state")?;
-
         let state_storage = self.inner.storage.shard_state_storage();
-        state_storage
-            .store_state(handle, &new_state)
-            .await
-            .context("Failed to store new state")?;
+        let save_fut = state_storage.store_state_root(handle, update.new.clone(), true);
+
+        let apply_fut = rayon_run(move || update.apply(&prev_root));
+
+        let (save_res, apply_res) = futures_util::future::join(save_fut, apply_fut).await;
+        save_res.context("Failed to store new state")?;
+
+        let new_state = ShardStateStuff::from_root(
+            block.id(),
+            apply_res.context("Failed to apply state update")?,
+            mc_state_tracker,
+        )
+        .context("Failed to create new state")?;
 
         Ok(new_state)
     }
