@@ -1644,6 +1644,14 @@ def mempool_engine_rates() -> RowPanel:
             "tycho_mempool_signing_prev_round_count",
             "Previous round broadcasts signed",
         ),
+        create_counter_panel(
+            "tycho_mempool_signing_postponed",
+            "Signings postponed: point time too far in future",
+        ),
+        create_counter_panel(
+            "tycho_mempool_signing_rejected",
+            "Signings rejected: signer not in vset or point issue",
+        ),
     ]
     return create_row("Mempool engine rates", metrics)
 
