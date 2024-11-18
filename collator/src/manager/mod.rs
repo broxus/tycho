@@ -1040,9 +1040,7 @@ where
                 store_res.applied_mc_queue_range.as_ref(),
             )
             .await?;
-            self.ready_to_sync.notify_one();
         } else {
-            self.ready_to_sync.notify_one();
             // try to commit block if it was collated first
             if store_res.received_and_collated {
                 // here commit will not cause on_block_accepted event
@@ -1061,6 +1059,8 @@ where
                 self.commit_valid_master_block(&block_id).await?;
             }
         }
+
+        self.ready_to_sync.notify_one();
 
         Ok(())
     }
@@ -2054,8 +2054,12 @@ where
             return Ok(());
         }
 
+        self.ready_to_sync.notified().await;
+
         // process valid block
         self.commit_valid_master_block(&block_id).await?;
+
+        self.ready_to_sync.notify_one();
 
         Ok(())
     }
