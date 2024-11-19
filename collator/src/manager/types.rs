@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
-use tycho_block_util::queue::QueueDiffStuff;
+use tokio::sync::Notify;
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -26,6 +28,9 @@ pub(super) enum CollatorState {
 pub(super) struct ActiveCollator<C> {
     pub collator: C,
     pub state: CollatorState,
+
+    /// For graceful collation cancellation
+    pub cancel_collation: Arc<Notify>,
 }
 
 #[derive(Default)]
@@ -289,19 +294,18 @@ impl BlockCacheEntry {
         }
     }
 
-    pub fn queue_diff_and_msgs(&self) -> Result<(&QueueDiffStuff, &Lazy<OutMsgDescr>)> {
-        if let BlockCacheEntryData::Received {
-            queue_diff,
-            out_msgs,
-            ..
-        } = &self.data
-        {
-            Ok((queue_diff, out_msgs))
-        } else {
-            anyhow::bail!(
-                "Block should be `Received` to contain `queue_diff` and `out_msgs` ({})",
-                self.block_id
-            )
+    pub fn int_processed_to(&self) -> &BTreeMap<ShardIdent, QueueKey> {
+        match &self.data {
+            BlockCacheEntryData::Collated {
+                candidate_stuff, ..
+            } => {
+                &candidate_stuff
+                    .candidate
+                    .queue_diff_aug
+                    .diff()
+                    .processed_upto
+            }
+            BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_upto,
         }
     }
 }

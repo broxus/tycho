@@ -53,11 +53,17 @@ impl ZerostateId {
     }
 }
 
+/// Default zeros for start round and genesis time are the same in
+/// [`ConsensusInfo`](everscale_types::models::ConsensusInfo).
+///
+/// This will replace genesis from master chain data only if this has time greater than in mc.
+/// Also, this genesis must have round not less than in last applied mc block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MempoolGlobalConfig {
-    /// actual genesis round may be greater after alignment in config builder
+    /// must be set to the `processed_to_anchor_id` from last signed master chain block
+    /// actual genesis round may be greater (or still equal) after alignment
     pub start_round: u32,
     pub genesis_time_millis: u64,
     #[serde(flatten)]
-    pub consensus_config: ConsensusConfig,
+    pub consensus_config: Option<ConsensusConfig>,
 }

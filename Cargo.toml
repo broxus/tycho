@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Broxus Team"]
 rust-version = "1.80.0"
@@ -123,15 +123,15 @@ ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = 
 ton_vm = { git = "https://github.com/broxus/ton-labs-vm.git", rev = "013e1dbe1bfb1237c51617f8c6c5a20a086f7d6a" }
 
 # local deps
-tycho-block-util = { path = "./block-util", version = "0.1.1" }
-tycho-collator = { path = "./collator", version = "0.1.1" }
-tycho-consensus = { path = "./consensus", version = "0.1.1" }
-tycho-control = { path = "./control", version = "0.1.1" }
-tycho-core = { path = "./core", version = "0.1.1" }
-tycho-network = { path = "./network", version = "0.1.1" }
-tycho-rpc = { path = "./rpc", version = "0.1.1" }
-tycho-storage = { path = "./storage", version = "0.1.1" }
-tycho-util = { path = "./util", version = "0.1.1" }
+tycho-block-util = { path = "./block-util", version = "0.1.2" }
+tycho-collator = { path = "./collator", version = "0.1.2" }
+tycho-consensus = { path = "./consensus", version = "0.1.2" }
+tycho-control = { path = "./control", version = "0.1.2" }
+tycho-core = { path = "./core", version = "0.1.2" }
+tycho-network = { path = "./network", version = "0.1.2" }
+tycho-rpc = { path = "./rpc", version = "0.1.2" }
+tycho-storage = { path = "./storage", version = "0.1.2" }
+tycho-util = { path = "./util", version = "0.1.2" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

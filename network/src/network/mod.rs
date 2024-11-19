@@ -8,11 +8,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use self::config::EndpointConfig;
 pub use self::config::{NetworkConfig, QuicConfig};
 pub use self::connection::{Connection, RecvStream, SendStream};
+use self::connection_manager::{ActivePeers, ConnectionManager, ConnectionManagerRequest};
 pub use self::connection_manager::{
-    ActivePeers, KnownPeerHandle, KnownPeers, KnownPeersError, PeerBannedError, WeakActivePeers,
-    WeakKnownPeerHandle,
+    KnownPeerHandle, KnownPeers, KnownPeersError, PeerBannedError, WeakKnownPeerHandle,
 };
-use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
 use self::endpoint::Endpoint;
 pub use self::peer::Peer;
 use crate::types::{
@@ -106,7 +105,6 @@ impl NetworkBuilder {
         let config = Arc::new(config);
         let endpoint = Arc::new(Endpoint::new(endpoint_config, socket.into())?);
         let active_peers = ActivePeers::new(config.active_peers_event_channel_capacity);
-        let weak_active_peers = ActivePeers::downgrade(&active_peers);
         let known_peers = KnownPeers::new();
 
         let remote_addr = self.optional_fields.remote_addr.unwrap_or_else(|| {
@@ -115,31 +113,27 @@ impl NetworkBuilder {
             addr.into()
         });
 
-        let inner = Arc::new_cyclic(move |_weak| {
-            let service = service.boxed_clone();
+        let service = service.boxed_clone();
 
-            let (connection_manager, connection_manager_handle) = ConnectionManager::new(
-                config.clone(),
-                endpoint.clone(),
-                active_peers,
-                known_peers.clone(),
-                service,
-            );
+        let (connection_manager, connection_manager_handle) = ConnectionManager::new(
+            config.clone(),
+            endpoint.clone(),
+            active_peers.clone(),
+            known_peers.clone(),
+            service,
+        );
 
-            tokio::spawn(connection_manager.start());
+        tokio::spawn(connection_manager.start());
 
-            NetworkInner {
-                config,
-                remote_addr,
-                endpoint,
-                active_peers: weak_active_peers,
-                known_peers,
-                connection_manager_handle,
-                keypair,
-            }
-        });
-
-        Ok(Network(inner))
+        Ok(Network(Arc::new(NetworkInner {
+            config,
+            remote_addr,
+            endpoint,
+            active_peers,
+            known_peers,
+            connection_manager_handle,
+            keypair,
+        })))
     }
 }
 
@@ -168,40 +162,51 @@ impl Network {
         }
     }
 
+    /// The public address of this node.
     pub fn remote_addr(&self) -> &Address {
         self.0.remote_addr()
     }
 
+    /// The listening address of this node.
     pub fn local_addr(&self) -> SocketAddr {
         self.0.local_addr()
     }
 
+    /// The local peer id of this node.
     pub fn peer_id(&self) -> &PeerId {
         self.0.peer_id()
     }
 
+    /// Returns true if the peer is currently connected.
+    pub fn is_active(&self, peer_id: &PeerId) -> bool {
+        self.0.active_peers.contains(peer_id)
+    }
+
+    /// Returns a connection wrapper for the specified peer.
     pub fn peer(&self, peer_id: &PeerId) -> Option<Peer> {
         self.0.peer(peer_id)
     }
 
+    /// A set of known peers.
     pub fn known_peers(&self) -> &KnownPeers {
-        self.0.known_peers()
+        &self.0.known_peers
     }
 
-    pub fn subscribe(&self) -> Result<broadcast::Receiver<PeerEvent>> {
-        let active_peers = self.0.active_peers.upgrade().ok_or(NetworkShutdownError)?;
-        Ok(active_peers.subscribe())
+    /// Subscribe to active peer changes.
+    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        self.0.active_peers.subscribe()
     }
 
-    pub async fn connect<T>(&self, addr: T, peer_id: &PeerId) -> Result<PeerId>
+    /// Initiate a connection to the specified peer.
+    pub async fn connect<T>(&self, addr: T, peer_id: &PeerId) -> Result<Peer>
     where
         T: Into<Address>,
     {
         self.0.connect(addr.into(), peer_id).await
     }
 
-    pub fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
-        self.0.disconnect(peer_id)
+    pub fn disconnect(&self, peer_id: &PeerId) {
+        self.0.disconnect(peer_id);
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -246,7 +251,7 @@ struct NetworkInner {
     config: Arc<NetworkConfig>,
     remote_addr: Address,
     endpoint: Arc<Endpoint>,
-    active_peers: WeakActivePeers,
+    active_peers: ActivePeers,
     known_peers: KnownPeers,
     connection_manager_handle: mpsc::Sender<ConnectionManagerRequest>,
     keypair: ed25519::KeyPair,
@@ -265,11 +270,7 @@ impl NetworkInner {
         self.endpoint.peer_id()
     }
 
-    fn known_peers(&self) -> &KnownPeers {
-        &self.known_peers
-    }
-
-    async fn connect(&self, addr: Address, peer_id: &PeerId) -> Result<PeerId> {
+    async fn connect(&self, addr: Address, peer_id: &PeerId) -> Result<Peer> {
         #[derive(thiserror::Error, Debug)]
         #[error("connection error: {0}")]
         struct ConnectionError(#[source] Arc<anyhow::Error>);
@@ -281,20 +282,17 @@ impl NetworkInner {
             .map_err(|_e| NetworkShutdownError)?;
 
         let res = rx.await?;
-        res.map_err(|e| anyhow::Error::new(ConnectionError(e)))
+        let connection = res.map_err(ConnectionError)?;
+        Ok(Peer::new(connection, self.config.clone()))
     }
 
-    fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
-        let Some(active_peers) = self.active_peers.upgrade() else {
-            anyhow::bail!("network has been shutdown");
-        };
-        active_peers.remove(peer_id, DisconnectReason::Requested);
-        Ok(())
+    fn disconnect(&self, peer_id: &PeerId) {
+        self.active_peers
+            .remove(peer_id, DisconnectReason::Requested);
     }
 
     fn peer(&self, peer_id: &PeerId) -> Option<Peer> {
-        let active_peers = self.active_peers.upgrade()?;
-        let connection = active_peers.get(peer_id)?;
+        let connection = self.active_peers.get(peer_id)?;
         Some(Peer::new(connection, self.config.clone()))
     }
 

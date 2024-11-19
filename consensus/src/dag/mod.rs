@@ -1,5 +1,6 @@
+pub use anchor_stage::align_genesis;
 #[cfg(feature = "test")]
-pub use anchor_stage::*;
+pub use anchor_stage::AnchorStage;
 pub use commit::*;
 pub use dag_location::InclusionState;
 pub use dag_round::*;
@@ -18,6 +19,3 @@ mod front;
 mod head;
 mod producer;
 mod verifier;
-
-/// Commit leader is changed every 4 rounds
-pub const WAVE_ROUNDS: u32 = 4;

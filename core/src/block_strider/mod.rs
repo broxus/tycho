@@ -318,7 +318,9 @@ where
         async move {
             let res = provider.get_next_block(&prev_block_id).await?;
             Some(res.with_context(|| {
-                format!("BUGGY PROVIDER. failed to fetch master block: {prev_block_id}")
+                format!(
+                    "BUGGY PROVIDER. failed to fetch next master block after prev: {prev_block_id}"
+                )
             }))
         }
     }

@@ -399,7 +399,8 @@ impl DagBack {
                 }
             }
         }
-        // do not commit genesis - we may place some arbitrary payload in it
+        // do not commit genesis - we may place some arbitrary payload in it,
+        // also mempool adapter does not expect it, and collator cannot use it too
         let history_limit = Genesis::round().next().max(Round(
             (anchor.round().0).saturating_sub(CachedConfig::commit_history_rounds()),
         ));

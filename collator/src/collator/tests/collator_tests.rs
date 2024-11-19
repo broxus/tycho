@@ -43,7 +43,7 @@ async fn test_import_init_anchors() {
 
     let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
-        processed_to_msgs_offset as _,
+        processed_to_msgs_offset,
         last_block_chain_time,
         shard_id,
         &mut anchors_cache,
@@ -77,7 +77,7 @@ async fn test_import_init_anchors() {
 
     let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
-        processed_to_msgs_offset as _,
+        processed_to_msgs_offset,
         last_block_chain_time,
         shard_id,
         &mut anchors_cache,
@@ -110,7 +110,7 @@ async fn test_import_init_anchors() {
 
     let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
-        processed_to_msgs_offset as _,
+        processed_to_msgs_offset,
         last_block_chain_time,
         shard_id,
         &mut anchors_cache,
@@ -143,7 +143,7 @@ async fn test_import_init_anchors() {
 
     let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
-        processed_to_msgs_offset as _,
+        processed_to_msgs_offset,
         last_block_chain_time,
         shard_id,
         &mut anchors_cache,
@@ -175,7 +175,7 @@ async fn test_import_init_anchors() {
 
     let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
-        processed_to_msgs_offset as _,
+        processed_to_msgs_offset,
         last_block_chain_time,
         shard_id,
         &mut anchors_cache,
@@ -208,7 +208,7 @@ async fn test_import_init_anchors() {
 
     let anchors_info = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
-        processed_to_msgs_offset as _,
+        processed_to_msgs_offset,
         last_block_chain_time,
         shard_id,
         &mut anchors_cache,

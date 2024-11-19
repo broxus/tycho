@@ -21,7 +21,7 @@ use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
-use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
+use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
@@ -251,11 +251,7 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    pub async fn run(
-        self,
-        last_block_id: &BlockId,
-        last_mc_block_seqno: Option<u32>,
-    ) -> Result<()> {
+    pub async fn run(self, last_block_id: &BlockId) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage
@@ -279,12 +275,14 @@ impl Node {
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
         if let Some(global) = self.mempool_config_override.as_ref() {
             mempool_adapter
-                .override_config(|config| {
-                    config.set_consensus_config(&global.consensus_config);
+                .set_config(|config| {
+                    if let Some(consensus_config) = &global.consensus_config {
+                        config.set_consensus_config(consensus_config);
+                    } // else: will be set from mc state after sync
                     config.set_genesis(global.start_round, global.genesis_time_millis);
                 })
                 .await;
-        }
+        };
 
         // Create RPC
         let (rpc_block_subscriber, rpc_state_subscriber) = if let Some(config) = &self.rpc_config {
@@ -356,7 +354,6 @@ impl Node {
             validator.clone(),
             CollatorStdImplFactory,
             self.mempool_config_override.clone(),
-            last_mc_block_seqno,
         );
         let collator = CollatorStateSubscriber {
             adapter: collation_manager.state_node_adapter().clone(),
@@ -388,7 +385,12 @@ impl Node {
                 builder = builder.with_memory_profiler(Arc::new(profiler));
             }
 
-            builder.build().await?
+            builder
+                .build(ControlServerVersion {
+                    version: crate::TYCHO_VERSION.to_owned(),
+                    build: crate::TYCHO_BUILD.to_owned(),
+                })
+                .await?
         };
 
         // Spawn control server endpoint

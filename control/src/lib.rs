@@ -8,7 +8,9 @@ pub use self::error::{ServerError, ServerResult};
 #[cfg(feature = "server")]
 pub use self::profiler::{MemoryProfiler, StubMemoryProfiler};
 #[cfg(feature = "server")]
-pub use self::server::{ControlEndpoint, ControlServer, ControlServerBuilder, ControlServerConfig};
+pub use self::server::{
+    ControlEndpoint, ControlServer, ControlServerBuilder, ControlServerConfig, ControlServerVersion,
+};
 
 pub mod proto;
 

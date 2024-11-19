@@ -19,7 +19,6 @@ use crate::BaseArgs;
 pub enum CmdControl {
     Status(CmdStatus),
     Ping(CmdPing),
-    GetInfo(CmdGetInfo),
     GetAccount(CmdGetAccount),
     FindArchive(CmdFindArchive),
     ListArchives(CmdListArchives),
@@ -40,7 +39,6 @@ impl CmdControl {
         match self {
             Self::Status(cmd) => cmd.run(args),
             Self::Ping(cmd) => cmd.run(args),
-            Self::GetInfo(cmd) => cmd.run(args),
             Self::GetAccount(cmd) => cmd.run(args),
             Self::FindArchive(cmd) => cmd.run(args),
             Self::ListArchives(cmd) => cmd.run(args),
@@ -90,6 +88,17 @@ impl CmdStatus {
             };
 
             print_json(serde_json::json!({
+                "tycho_version": status.node_info.version,
+                "tycho_build": status.node_info.build,
+                "public_addr": status.node_info.public_addr,
+                "local_addr": status.node_info.local_addr.to_string(),
+                "adnl_id": status.node_info.adnl_id,
+                "collator": status.node_info.collator.map(|c| {
+                    serde_json::json!({
+                        "supported_block_version": c.global_version.version,
+                        "supported_capabilities": c.global_version.capabilities,
+                    })
+                }),
                 "init_mc_seqno": status.init_block_id.map(|id| id.seqno),
                 "init_mc_block_id": status.init_block_id.map(|id| id.to_string()),
                 "latest_mc_seqno": mc_seqno,
@@ -117,33 +126,6 @@ impl CmdPing {
             let timestamp = client.ping().await?;
             print_json(serde_json::json!({
                 "timestamp": timestamp,
-            }))
-        })
-    }
-}
-
-/// Get a brief node info.
-#[derive(Parser)]
-pub struct CmdGetInfo {
-    #[clap(flatten)]
-    args: ControlArgs,
-}
-
-impl CmdGetInfo {
-    pub fn run(self, args: BaseArgs) -> Result<()> {
-        self.args.rt(args, |client| async move {
-            let info = client.get_node_info().await?;
-            print_json(serde_json::json!({
-                "public_addr": info.public_addr,
-                "local_addr": info.local_addr.to_string(),
-                "adnl_id": info.adnl_id,
-                "validator_public_key": info.validator_public_key,
-                "collator": info.collator.map(|c| {
-                    serde_json::json!({
-                        "supported_block_version": c.global_version.version,
-                        "supported_capabilities": c.global_version.capabilities,
-                    })
-                })
             }))
         })
     }

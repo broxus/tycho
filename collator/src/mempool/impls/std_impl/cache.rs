@@ -1,3 +1,4 @@
+use std::cmp;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -6,6 +7,36 @@ use tokio::sync::Notify;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
+
+#[derive(thiserror::Error, Debug)]
+pub enum CacheError {
+    #[error("Mempool Adapter Cache has gap between prev and found anchors {self:?}")]
+    UnexpectedGap {
+        prev_anchor_id: MempoolAnchorId,
+        found_prev_id: MempoolAnchorId,
+        found_id: MempoolAnchorId,
+        is_paused: bool,
+    },
+    #[error("Mempool Adapter Cache cannot contain anchor between prev and found ones {self:?}")]
+    UnexpectedAnchor {
+        prev_anchor_id: MempoolAnchorId,
+        found_prev_id: MempoolAnchorId,
+        found_id: MempoolAnchorId,
+        is_paused: bool,
+    },
+    #[error("Only first anchor after Genesis may be not linked to previous one {self:?}")]
+    NoPreviousAnchor {
+        prev_anchor_id: MempoolAnchorId,
+        found_id: MempoolAnchorId,
+        is_paused: bool,
+    },
+    #[error("cache was not cleaned properly: it must contain prev anchor {self:?}")]
+    FirstAnchorRemoved {
+        prev_anchor_id: MempoolAnchorId,
+        first_id: MempoolAnchorId,
+        is_paused: bool,
+    },
+}
 
 #[derive(Default)]
 struct CacheData {
@@ -98,7 +129,7 @@ impl Cache {
     pub async fn get_next_anchor(
         &self,
         prev_anchor_id: MempoolAnchorId,
-    ) -> Option<Arc<MempoolAnchor>> {
+    ) -> Result<Option<Arc<MempoolAnchor>>, CacheError> {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -116,25 +147,70 @@ impl Cache {
                             "Anchor cache is empty, waiting"
                         );
                     }
-                    // Return the first anchor on node start
-                    Some((_, first)) if prev_anchor_id == 0 => return Some(first.clone()),
-                    // Trying to get anchor that is too old
-                    Some((first_id, _)) if prev_anchor_id < *first_id => {
-                        tracing::warn!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            %prev_anchor_id,
-                            %first_id,
-                            is_paused = Some(data.is_paused).filter(|x| *x),
-                            "Requested anchor is too old"
-                        );
-                        return None;
+                    Some((first_id, first)) if prev_anchor_id < *first_id => {
+                        return match first.prev_id {
+                            None => {
+                                // Return the first anchor after genesis
+                                Ok(Some(first.clone()))
+                            }
+                            Some(id) if id == prev_anchor_id => {
+                                // First anchor in cache is exactly next to requested
+                                // Ok(Some(first.clone()));
+                                // interesting if we can ever get this error
+                                Err(CacheError::FirstAnchorRemoved {
+                                    prev_anchor_id,
+                                    first_id: first.id,
+                                    is_paused: data.is_paused,
+                                })
+                            }
+                            Some(_) => {
+                                // Trying to get anchor that is too old
+                                tracing::warn!(
+                                    target: tracing_targets::MEMPOOL_ADAPTER,
+                                    %prev_anchor_id,
+                                    %first_id,
+                                    first_prev_id = first.prev_id,
+                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    "Requested anchor is too old"
+
+                                );
+                                Ok(None)
+                            }
+                        };
                     }
                     Some(_) => {
                         // Find the index of the previous anchor
                         if let Some(index) = data.anchors.get_index_of(&prev_anchor_id) {
                             // Try to get the next anchor
-                            if let Some((_, value)) = data.anchors.get_index(index + 1) {
-                                return Some(value.clone());
+                            if let Some((_, found)) = data.anchors.get_index(index + 1) {
+                                let error = if let Some(found_prev_id) = found.prev_id {
+                                    match prev_anchor_id.cmp(&found_prev_id) {
+                                        cmp::Ordering::Equal => return Ok(Some(found.clone())),
+                                        cmp::Ordering::Less => CacheError::UnexpectedGap {
+                                            prev_anchor_id,
+                                            found_prev_id,
+                                            found_id: found.id,
+                                            is_paused: data.is_paused,
+                                        },
+                                        cmp::Ordering::Greater => CacheError::UnexpectedAnchor {
+                                            prev_anchor_id,
+                                            found_prev_id,
+                                            found_id: found.id,
+                                            is_paused: data.is_paused,
+                                        },
+                                    }
+                                } else {
+                                    CacheError::NoPreviousAnchor {
+                                        prev_anchor_id,
+                                        found_id: found.id,
+                                        is_paused: data.is_paused,
+                                    }
+                                };
+                                tracing::error!(
+                                    target: tracing_targets::MEMPOOL_ADAPTER,
+                                    "{error}"
+                                );
+                                return Err(error);
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
@@ -146,7 +222,7 @@ impl Cache {
                         } else {
                             let (last_id, _) = data.anchors.last().expect("map is not empty");
                             if *last_id > prev_anchor_id {
-                                return None; // will not be received
+                                return Ok(None); // will not be received
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,

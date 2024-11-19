@@ -8,7 +8,7 @@ use everscale_types::models::ConsensusConfig;
 use serde::{Deserialize, Serialize};
 use tycho_network::OverlayId;
 
-use crate::dag::WAVE_ROUNDS;
+use crate::dag::align_genesis;
 use crate::models::{Link, Point, PointData, PointId, Round, UnixTime};
 
 static CONFIG: OnceLock<MempoolConfig> = OnceLock::new();
@@ -255,36 +255,27 @@ pub struct MempoolConfigBuilder {
 }
 
 impl MempoolConfigBuilder {
-    pub fn set_node_config(&mut self, node_config: &MempoolNodeConfig) -> &mut Self {
+    pub fn set_node_config(&mut self, node_config: &MempoolNodeConfig) {
         self.node_config = Some(node_config.clone());
-        self
     }
 
-    pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) -> &mut Self {
+    pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) {
         self.consensus_config = Some(consensus_config.clone());
-        self
     }
 
-    pub fn set_genesis(&mut self, start_round: u32, time_millis: u64) -> &mut Self {
-        // Must be (divisible by 4)+1, ie 1,5,9 etc., see `crate::dag::AnchorStage::of()`
-        let aligned_start = ((start_round + 2) / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
-        assert!(
-            aligned_start > Round::BOTTOM.0,
-            "aligned genesis round is too low and will make code panic"
-        );
+    pub fn set_genesis(&mut self, start_round: u32, time_millis: u64) {
         self.genesis_data = Some(GenesisData {
-            round: aligned_start,
+            start_round,
             time_millis,
         });
-        self
     }
 
     pub fn get_consensus_config(&self) -> Option<&ConsensusConfig> {
         self.consensus_config.as_ref()
     }
 
-    pub fn get_genesis(&self) -> Option<(u32, u64)> {
-        (self.genesis_data.as_ref()).map(|gen| (gen.round, gen.time_millis))
+    pub fn get_genesis(&self) -> Option<GenesisData> {
+        self.genesis_data
     }
 
     pub fn build(&self) -> Result<MempoolConfig> {
@@ -302,7 +293,7 @@ impl MempoolConfigBuilder {
             .ok_or(anyhow!("mempool node config is not known"))?;
 
         let inner = MempoolConfig {
-            genesis_round: Round(genesis_data.round),
+            genesis_round: align_genesis(genesis_data.start_round),
             genesis_time: UnixTime::from_millis(genesis_data.time_millis),
             clock_skew: UnixTime::from_millis(consensus_config.clock_skew_millis as u64),
             payload_batch_bytes: consensus_config.payload_batch_bytes as usize,
@@ -345,10 +336,11 @@ impl MempoolConfigBuilder {
 }
 
 // Note: never derive Default for Genesis data
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct GenesisData {
-    round: u32,
-    time_millis: u64,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GenesisData {
+    /// will be aligned to become genesis round
+    pub start_round: u32,
+    pub time_millis: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

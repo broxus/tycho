@@ -1,4 +1,5 @@
 mod cache;
+mod config;
 mod deduplicator;
 mod parser;
 
@@ -9,14 +10,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{BlockId, ConsensusConfig, ValidatorSet};
+use everscale_types::models::ConsensusConfig;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tycho_consensus::prelude::*;
-use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
+use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::MempoolStorage;
 use tycho_util::time::now_millis;
 
 use crate::mempool::impls::std_impl::cache::Cache;
+use crate::mempool::impls::std_impl::config::ConfigAdapter;
 use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
     DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor,
@@ -24,102 +26,8 @@ use crate::mempool::{
 };
 use crate::tracing_targets;
 
-struct EngineConfig {
-    builder: MempoolConfigBuilder,
-    state_update_ctx: Option<StateUpdateContext>,
-    engine_handle: Option<EngineHandle>,
-}
-
-impl EngineConfig {
-    fn apply_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
-        let round = new_cx.consensus_info.vset_switch_round;
-        let whole_set = (new_cx.current_validator_set.1.list.iter())
-            .map(|descr| PeerId(descr.public_key.0))
-            .collect::<Vec<_>>();
-        let subset = Self::compute_peers_subset(
-            &new_cx.current_validator_set.1,
-            &new_cx.mc_block_id,
-            round,
-            new_cx.shuffle_validators,
-        )?;
-        tracing::info!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            len = subset.len(),
-            vset_len = whole_set.len(),
-            %round,
-            "New current validator subset"
-        );
-        engine.set_next_peers(&whole_set, Some((round, &subset)));
-        Ok(())
-    }
-
-    fn apply_next_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) {
-        if let Some((_, next)) = &new_cx.next_validator_set {
-            // NOTE: do not try to calculate subset from next set
-            //  because it is impossible without known future session_update_round
-            let whole_set = (next.list.iter())
-                .map(|descr| PeerId(descr.public_key.0))
-                .collect::<Vec<_>>();
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                vset_len = whole_set.len(),
-                "New net validator set"
-            );
-            engine.set_next_peers(&whole_set, None);
-        }
-    }
-
-    fn apply_prev_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> Result<()> {
-        if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
-            let round = new_cx.consensus_info.prev_vset_switch_round;
-            let whole_set = prev_set
-                .list
-                .iter()
-                .map(|descr| PeerId(descr.public_key.0))
-                .collect::<Vec<_>>();
-            let subset = Self::compute_peers_subset(
-                prev_set,
-                &new_cx.mc_block_id,
-                round,
-                new_cx.consensus_info.prev_shuffle_mc_validators,
-            )?;
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                len = subset.len(),
-                vset_len = whole_set.len(),
-                %round,
-                "New prev validator subset"
-            );
-            engine.set_next_peers(&whole_set, Some((round, &subset)));
-        }
-
-        Ok(())
-    }
-
-    fn compute_peers_subset(
-        validator_set: &ValidatorSet,
-        mc_block_id: &BlockId,
-        session_update_round: u32,
-        shuffle_validators: bool,
-    ) -> Result<Vec<PeerId>> {
-        let Some((list, _)) =
-            validator_set.compute_mc_subset(session_update_round, shuffle_validators)
-        else {
-            bail!(
-                "Mempool peer set is empty after shuffle, mc_block_id: {}",
-                mc_block_id,
-            )
-        };
-        let result = list
-            .into_iter()
-            .map(|x| PeerId(x.public_key.0))
-            .collect::<Vec<_>>();
-        Ok(result)
-    }
-}
-
 pub struct MempoolAdapterStdImpl {
-    engine_config: Mutex<EngineConfig>,
+    config: Mutex<ConfigAdapter>,
 
     cache: Arc<Cache>,
 
@@ -146,7 +54,7 @@ impl MempoolAdapterStdImpl {
         config_builder.set_node_config(mempool_node_config);
 
         Self {
-            engine_config: Mutex::new(EngineConfig {
+            config: Mutex::new(ConfigAdapter {
                 builder: config_builder,
                 state_update_ctx: None,
                 engine_handle: None,
@@ -162,17 +70,18 @@ impl MempoolAdapterStdImpl {
         }
     }
 
-    /// **Warning:** only to apply changes from `GlobalConfig` json after mempool crash
-    pub async fn override_config<F>(&self, fun: F)
+    /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state
+    /// only if applied mc state has greater time and GEQ round
+    pub async fn set_config<F, R>(&self, fun: F) -> R
     where
-        F: FnOnce(&mut MempoolConfigBuilder),
+        F: FnOnce(&mut MempoolConfigBuilder) -> R,
     {
-        let mut guard = self.engine_config.lock().await;
-        fun(&mut guard.builder);
+        let mut config_guard = self.config.lock().await;
+        fun(&mut config_guard.builder)
     }
 
     /// Runs mempool engine
-    fn run(&self, config_guard: &MutexGuard<'_, EngineConfig>) -> Result<EngineHandle> {
+    fn run(&self, config_guard: &MutexGuard<'_, ConfigAdapter>) -> Result<EngineHandle> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
@@ -181,7 +90,7 @@ impl MempoolAdapterStdImpl {
             .state_update_ctx
             .as_ref()
             .ok_or(anyhow!("last state update context is not set"))?;
-        let (genesis_round, _) = config_guard
+        let genesis = config_guard
             .builder
             .get_genesis()
             .context("genesis must be set")?;
@@ -217,16 +126,16 @@ impl MempoolAdapterStdImpl {
             .saturating_sub(consensus_config.max_consensus_lag_rounds as u32)
             .saturating_sub(consensus_config.deduplicate_rounds as u32)
             .saturating_sub(consensus_config.commit_history_rounds as u32)
-            .max(genesis_round);
+            .max(genesis.start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
             }
-            EngineConfig::apply_vset(&handle, last_state_update)?;
-            EngineConfig::apply_next_vset(&handle, last_state_update);
+            ConfigAdapter::apply_vset(&handle, last_state_update)?;
+            ConfigAdapter::apply_next_vset(&handle, last_state_update);
         } else if estimated_sync_bottom >= last_state_update.consensus_info.prev_vset_switch_round {
-            EngineConfig::apply_prev_vset(&handle, last_state_update)?;
-            EngineConfig::apply_vset(&handle, last_state_update)?;
+            ConfigAdapter::apply_prev_vset(&handle, last_state_update)?;
+            ConfigAdapter::apply_vset(&handle, last_state_update)?;
             if last_state_update.next_validator_set.is_some() {
                 tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, "cannot use next vset");
             }
@@ -235,8 +144,9 @@ impl MempoolAdapterStdImpl {
                 "cannot start from outdated peer sets (too short mempool epoch(s)): \
                  estimated sync bottom {estimated_sync_bottom} \
                  is older than prev vset switch round {}; \
-                 genesis round {genesis_round}, masterchain processed to anchor {} in block {}",
+                 start round {}, masterchain processed to anchor {} in block {}",
                 last_state_update.consensus_info.prev_vset_switch_round,
+                genesis.start_round,
                 last_state_update.mc_processed_to_anchor_id,
                 last_state_update.mc_block_id,
             )
@@ -279,7 +189,8 @@ impl MempoolAdapterStdImpl {
         let mut parser = Parser::new(config.deduplicate_rounds);
         let mut first_after_gap = None;
         while let Some(commit) = anchor_rx.recv().await {
-            let (anchor, history) = match commit {
+            let committed = match commit {
+                MempoolOutput::NextAnchor(committed) => committed,
                 MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
                     parser = Parser::new(config.deduplicate_rounds);
@@ -303,7 +214,6 @@ impl MempoolAdapterStdImpl {
                     cache.set_paused(true);
                     continue;
                 }
-                MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             };
 
             let task = tokio::task::spawn_blocking({
@@ -311,12 +221,13 @@ impl MempoolAdapterStdImpl {
                 let store = store.clone();
 
                 move || {
-                    let author = anchor.data().author;
-                    let chain_time = anchor.data().time.as_u64();
-                    let anchor_id: MempoolAnchorId = anchor.round().0;
+                    let author = committed.anchor.data().author;
+                    let chain_time = committed.anchor.data().time.as_u64();
+                    let anchor_id: MempoolAnchorId = committed.anchor.round().0;
                     metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
-                    let payloads = store.expand_anchor_history(&anchor, &history);
+                    let payloads =
+                        store.expand_anchor_history(&committed.anchor, &committed.history);
 
                     let is_executable = first_after_gap
                         .as_ref()
@@ -328,6 +239,7 @@ impl MempoolAdapterStdImpl {
                     if is_executable {
                         anchors.push(Arc::new(MempoolAnchor {
                             id: anchor_id,
+                            prev_id: committed.prev_anchor.map(|round| round.0),
                             chain_time,
                             author,
                             externals: unique_messages,
@@ -368,7 +280,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         // NOTE: on the first call mempool engine will not be running
         //      and `state_update_ctx` will be `None`
 
-        let mut config_guard = self.engine_config.lock().await;
+        let mut config_guard = self.config.lock().await;
 
         let Some(engine) = config_guard.engine_handle.as_ref() else {
             tracing::info!(
@@ -378,35 +290,57 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 "Will start mempool with state update from mc block"
             );
 
-            if let Some((round, time)) = (config_guard.builder.get_genesis())
-                .filter(|(_, time)| *time > new_cx.consensus_info.genesis_millis)
-            {
+            if let Some(genesis) = (config_guard.builder.get_genesis()).filter(|genesis| {
+                genesis.start_round >= new_cx.consensus_info.genesis_round
+                    && genesis.time_millis > new_cx.consensus_info.genesis_millis
+            }) {
                 // Note: assume that global config is applied to mempool adapter
                 //   before collator is run in synchronous code, so this method is called later
 
+                // genesis does not have externals, so only strictly greater time and round
+                // will be saved into next block, so genesis can have values GEQ than in prev block
                 anyhow::ensure!(
-                    round >= new_cx.mc_processed_to_anchor_id && time >= new_cx.mc_block_chain_time,
-                    "new genesis round {} and time {} should be >= \
+                    genesis.start_round >= new_cx.mc_processed_to_anchor_id
+                        && genesis.time_millis >= new_cx.mc_block_chain_time,
+                    "new {genesis:?} should be >= \
                     master block processed_to_anchor_id {} and gen chain_time {}",
-                    round,
-                    time,
                     new_cx.mc_processed_to_anchor_id,
                     new_cx.mc_block_chain_time,
                 );
 
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
-                    %round,
-                    %time,
-                    "Using genesis override"
+                    ?genesis,
+                    "Using genesis override from global config"
                 );
+                match config_guard.builder.get_consensus_config() {
+                    Some(cc) if cc == &new_cx.consensus_config => {
+                        tracing::warn!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "consensus config from global config is the same as in mc block"
+                        );
+                    }
+                    Some(_) => {
+                        tracing::warn!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "consensus config from global config overrides one from mc block"
+                        );
+                    }
+                    None => {
+                        (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
+                        tracing::warn!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "no consensus config in global config, using one from mc block"
+                        );
+                    }
+                }
             } else {
                 config_guard.builder.set_genesis(
                     new_cx.consensus_info.genesis_round,
                     new_cx.consensus_info.genesis_millis,
                 );
                 (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
-            }
+            };
 
             config_guard.state_update_ctx = Some(new_cx);
             config_guard.engine_handle = Some(self.run(&config_guard)?);
@@ -425,8 +359,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        EngineConfig::apply_vset(engine, &new_cx)?;
-        EngineConfig::apply_next_vset(engine, &new_cx);
+        ConfigAdapter::apply_vset(engine, &new_cx)?;
+        ConfigAdapter::apply_next_vset(engine, &new_cx);
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
     }
@@ -468,7 +402,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "get_next_anchor"
         );
 
-        let result = match self.cache.get_next_anchor(prev_anchor_id).await {
+        let result = match self.cache.get_next_anchor(prev_anchor_id).await? {
             Some(anchor) => GetAnchorResult::Exist(anchor),
             None => GetAnchorResult::NotExist,
         };

@@ -19,9 +19,6 @@ pub trait ControlServer {
     /// Get node status.
     async fn get_status() -> ServerResult<NodeStatusResponse>;
 
-    /// Returns a node info.
-    async fn get_node_info() -> NodeInfoResponse;
-
     /// Trigger manual GC for archives.
     async fn trigger_archives_gc(req: TriggerGcRequest);
 
@@ -76,9 +73,22 @@ pub trait ControlServer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatusResponse {
     pub status_at: u32,
+    pub node_info: NodeInfo,
     pub init_block_id: Option<BlockId>,
     pub last_applied_block: Option<LastAppliedBlock>,
     pub validator_status: Option<ValidatorStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub version: String,
+    pub build: String,
+
+    // TODO: Somehow expose tycho_network::Address?
+    pub public_addr: String,
+    pub local_addr: SocketAddr,
+    pub adnl_id: HashBytes,
+    pub collator: Option<CollatorInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,17 +103,6 @@ pub struct ValidatorStatus {
     pub in_current_vset: bool,
     pub in_next_vset: bool,
     pub is_elected: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeInfoResponse {
-    // TODO: Somehow expose tycho_network::Address?
-    pub public_addr: String,
-    pub local_addr: SocketAddr,
-    pub adnl_id: HashBytes,
-    pub validator_public_key: Option<HashBytes>,
-    #[serde(default)]
-    pub collator: Option<CollatorInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
