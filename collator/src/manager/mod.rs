@@ -460,14 +460,16 @@ where
             return Ok(());
         }
 
+        // if block was collated then queue diff can be already applied
+        // but if shard block or containing master were incorrect
+        // then applied diff from collation was already removed
+        // so we need to apply diff from bc anyway
         let BlockCacheEntryData::Received {
             queue_diff,
             out_msgs,
-            collated_after_receive: false,
             ..
         } = &block_entry.data
         else {
-            // If block was collated then queue diff is already applied
             return Ok(());
         };
 
@@ -489,25 +491,27 @@ where
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ?cancel_reason,
-            "Start handle collation cancelled",
+            "start handle collation cancelled",
         );
         match cancel_reason {
             CollationCancelReason::AnchorNotFound(_)
             | CollationCancelReason::NextAnchorNotFound(_)
             | CollationCancelReason::ExternalCancel => {
+                // sync cache and collator state access
+                self.ready_to_sync.notified().await;
+                scopeguard::defer!(self.ready_to_sync.notify_one());
+
                 // mark collator as cancelled
                 self.set_collator_state(&next_block_id_short.shard, |ac| {
                     ac.state = CollatorState::Cancelled;
                 });
 
                 // run sync if all collators cancelled or waiting
-                self.ready_to_sync.notified().await;
-
                 let has_active = self.active_collators.iter().any(|ac| {
                     ac.state == CollatorState::Active || ac.state == CollatorState::CancelPending
                 });
                 if !has_active {
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                         "no active collators in shards and masterchain, \
                         will run sync to last applied mc block",
                     );
@@ -524,8 +528,6 @@ where
                     )
                     .await?;
                 }
-
-                self.ready_to_sync.notify_one();
             }
         }
         Ok(())
@@ -541,8 +543,12 @@ where
         collation_config: Arc<CollationConfig>,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Will run next collation step",
+            "will run next collation step",
         );
+
+        // sync cache and collator state access
+        self.ready_to_sync.notified().await;
+        scopeguard::defer!(self.ready_to_sync.notify_one());
 
         let updated_collator_state = self.set_collator_state(&next_block_id_short.shard, |ac| {
             if ac.state == CollatorState::CancelPending {
@@ -552,7 +558,7 @@ where
         if updated_collator_state == Some(CollatorState::Cancelled) {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 shard_id = %next_block_id_short.shard,
-                "Collator was cancelled before",
+                "collator was cancelled before",
             );
             return Ok(());
         }
@@ -581,7 +587,7 @@ where
         mc_block_min_interval_ms: u64,
     ) -> Result<()> {
         let next_step = Self::detect_next_collation_step(
-            self.collation_sync_state.clone(),
+            &mut self.collation_sync_state.lock(),
             self.active_collation_sessions
                 .read()
                 .keys()
@@ -602,11 +608,12 @@ where
             NextCollationStep::CollateMaster(next_mc_block_chain_time) => {
                 if !shard_id.is_masterchain() {
                     // shard collator will wait and master collator will work
-                    self.set_collator_state(&ShardIdent::MASTERCHAIN, |ac| {
-                        ac.state = CollatorState::Active;
-                    });
                     self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
                 }
+
+                self.set_collator_state(&ShardIdent::MASTERCHAIN, |ac| {
+                    ac.state = CollatorState::Active;
+                });
 
                 self.enqueue_mc_block_collation(
                     prev_mc_block_id.get_next_id_short(),
@@ -659,7 +666,7 @@ where
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ct = collation_result.candidate.chain_time,
             processed_to_anchor_id = collation_result.candidate.processed_to_anchor_id,
-            "Start processing block candidate",
+            "start processing block candidate",
         );
 
         let _histogram =
@@ -673,7 +680,9 @@ where
             collation_result.mc_data.is_some(),
         );
 
+        // sync cache and collator state access
         self.ready_to_sync.notified().await;
+        scopeguard::defer!(self.ready_to_sync.notify_one());
 
         // find collation session related to this block by session id
         let session_info = match self
@@ -690,7 +699,7 @@ where
                 // and found out that we should not collated at all
                 tracing::warn!(
                     target: tracing_targets::COLLATION_MANAGER,
-                    "There is no active session related to collated block. Skipped",
+                    "there is no active session related to collated block. Skipped",
                 );
 
                 self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Waiting);
@@ -709,7 +718,7 @@ where
         let store_res = if collator_cancelled {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 shard_id = %block_id.shard,
-                "Collator was cancelled before",
+                "collator was cancelled before",
             );
 
             self.mq_adapter.clear_session_state()?;
@@ -717,12 +726,20 @@ where
                 .blocks_cache
                 .get_last_collated_block_and_applied_mc_queue_range();
 
-            BlockCacheStoreResult {
+            let store_res = BlockCacheStoreResult {
                 received_and_collated: false,
                 block_mismatch: false,
                 last_collated_mc_block_id,
                 applied_mc_queue_range,
-            }
+            };
+
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                ?store_res,
+                "block candidate was not saved to cache",
+            );
+
+            store_res
         } else {
             let store_res = self
                 .blocks_cache
@@ -732,14 +749,15 @@ where
                 self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
                 self.mq_adapter.clear_session_state()?;
             }
+
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                ?store_res,
+                "saved block candidate to cache",
+            );
+
             store_res
         };
-
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            ?store_res,
-            "Saved block candidate to cache",
-        );
 
         let collation_cancelled = collator_cancelled || store_res.block_mismatch;
 
@@ -821,7 +839,7 @@ where
                         }
                         Err(e) => {
                             tracing::error!(target: tracing_targets::COLLATION_MANAGER,
-                                "Block candidate validation failed: {e:?}",
+                                "block candidate validation failed: {e:?}",
                             );
                         }
                     }
@@ -864,36 +882,28 @@ where
                         .await?;
                 }
             }
-            self.ready_to_sync.notify_one();
-        } else {
-            self.ready_to_sync.notify_one();
+        } else if block_id.is_masterchain() {
+            // when candidate is master
 
-            if block_id.is_masterchain() {
-                // when candidate is master
-
-                // save mc block latest chain time
-                self.renew_mc_block_latest_chain_time(candidate_chain_time);
-
-                // execute master state update processing routines
-                self.process_mc_state_update(collation_result.mc_data.unwrap(), false)
-                    .await?;
-            } else {
-                // when candidate is shard
-
-                // run master block collation if required or resume collation attempts in shard
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "Will run next collation step",
-                );
-                self.run_next_collation_step(
-                    &collation_result.prev_mc_block_id,
-                    block_id.shard,
-                    candidate_chain_time,
-                    false,
-                    Some(block_id),
-                    collation_result.collation_config.mc_block_min_interval_ms as _,
-                )
+            // execute master state update processing routines
+            self.process_mc_state_update(collation_result.mc_data.unwrap(), false)
                 .await?;
-            }
+        } else {
+            // when candidate is shard
+
+            // run master block collation if required or resume collation attempts in shard
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "will run next collation step",
+            );
+            self.run_next_collation_step(
+                &collation_result.prev_mc_block_id,
+                block_id.shard,
+                candidate_chain_time,
+                false,
+                Some(block_id),
+                collation_result.collation_config.mc_block_min_interval_ms as _,
+            )
+            .await?;
         }
 
         Ok(())
@@ -907,21 +917,22 @@ where
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
     pub async fn handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Start processing block from bc",
+            "start processing block from bc",
         );
 
         let block_id = *state.block_id();
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
 
+        // sync cache and collator state access
         self.ready_to_sync.notified().await;
+        scopeguard::defer!(self.ready_to_sync.notify_one());
 
         let Some(store_res) = self
             .blocks_cache
             .store_received(self.state_node_adapter.clone(), state.clone())
             .await?
         else {
-            self.ready_to_sync.notify_one();
             return Ok(());
         };
 
@@ -937,11 +948,10 @@ where
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ?store_res,
-            "Saved block from bc to cache",
+            "saved block from bc to cache",
         );
 
         if !block_id.is_masterchain() {
-            self.ready_to_sync.notify_one();
             return Ok(());
         }
 
@@ -1061,8 +1071,6 @@ where
             }
         }
 
-        self.ready_to_sync.notify_one();
-
         Ok(())
     }
 
@@ -1098,7 +1106,7 @@ where
         applied_range: &(BlockSeqno, BlockSeqno),
     ) -> Result<bool> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "Start sync to applied mc block",
+            "start sync to applied mc block",
         );
 
         let _histogram = HistogramGuard::begin("tycho_collator_sync_to_applied_mc_block_time");
@@ -1126,7 +1134,7 @@ where
                     prev_genesis_time_millis = last_consesus_info.genesis_millis,
                     new_genesis_start_round = mp_cfg_override.start_round,
                     new_genesis_time_millis = mp_cfg_override.genesis_time_millis,
-                    "Will drop uncommitted internal messages from queue on new genesis",
+                    "will drop uncommitted internal messages from queue on new genesis",
                 );
                 self.mq_adapter.clear_session_state()?;
             }
@@ -1279,7 +1287,10 @@ where
                 // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
                 //      because anchors from stub have older chain time than in zerostate and it will brake collation
                 if state.block_id().seqno != 0 {
-                    self.renew_mc_block_latest_chain_time(state.get_gen_chain_time());
+                    Self::renew_mc_block_latest_chain_time(
+                        &mut self.collation_sync_state.lock(),
+                        state.get_gen_chain_time(),
+                    );
                 }
 
                 // TODO: refactor this logic
@@ -1817,9 +1828,7 @@ where
 
     /// Set master block latest chain time to calc next interval for master block collation.
     /// Prune all cached chain times for all shards upto current
-    fn renew_mc_block_latest_chain_time(&self, chain_time: u64) {
-        let mut guard = self.collation_sync_state.lock();
-
+    fn renew_mc_block_latest_chain_time(guard: &mut CollationSyncState, chain_time: u64) {
         if guard.mc_block_latest_chain_time < chain_time {
             guard.mc_block_latest_chain_time = chain_time;
         }
@@ -1840,7 +1849,7 @@ where
     /// 1. Store collation status for current shard
     /// 2. Detect the next step: wait for master status, resume attempts, run master collation
     fn detect_next_collation_step(
-        collation_sync_state: Arc<Mutex<CollationSyncState>>,
+        guard: &mut CollationSyncState,
         active_shards: Vec<ShardIdent>,
         shard_id: ShardIdent,
         last_imported_anchor_ct: u64,
@@ -1850,8 +1859,6 @@ where
         let _histogram = HistogramGuard::begin(
             "tycho_collator_update_last_collated_chain_time_and_check_should_collate_mc_block_time",
         );
-
-        let mut guard = collation_sync_state.lock();
 
         let mc_block_latest_chain_time = guard.mc_block_latest_chain_time;
 
@@ -2017,6 +2024,11 @@ where
         for shard_collation_state in guard.states.values_mut() {
             shard_collation_state.status = CollationStatus::AttemptsInProgress;
         }
+
+        // will renew latest master block chain time
+        // because anyway we will collate master block
+        // on current exit from this method
+        Self::renew_mc_block_latest_chain_time(guard, next_mc_block_chain_time);
 
         NextCollationStep::CollateMaster(next_mc_block_chain_time)
     }
