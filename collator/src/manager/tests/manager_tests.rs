@@ -8,29 +8,6 @@ use crate::collator::CollatorStdImplFactory;
 use crate::manager::types::{CollationSyncState, NextCollationStep};
 use crate::validator::ValidatorStdImpl;
 
-fn renew_mc_block_latest_chain_time(
-    collation_sync_state: Arc<Mutex<CollationSyncState>>,
-    chain_time: u64,
-) {
-    let mut guard = collation_sync_state.lock();
-
-    if guard.mc_block_latest_chain_time < chain_time {
-        guard.mc_block_latest_chain_time = chain_time;
-    }
-
-    // prune
-    for (_, collation_state) in guard.states.iter_mut() {
-        collation_state
-            .last_imported_chain_times
-            .retain(|(ct, _)| ct > &chain_time);
-        let mc_collation_forced = collation_state
-            .last_imported_chain_times
-            .iter()
-            .any(|(_, forced)| *forced);
-        collation_state.mc_collation_forced = mc_collation_forced;
-    }
-}
-
 #[test]
 fn test_detect_next_collation_step() {
     let collation_sync_state: Arc<Mutex<CollationSyncState>> = Default::default();
@@ -46,10 +23,12 @@ fn test_detect_next_collation_step() {
 
     type CM = CollationManager<CollatorStdImplFactory, ValidatorStdImpl>;
 
+    let mut guard = collation_sync_state.lock();
+
     // first anchor after genesis always exceed mc block interval
     // master collator ready to collate master, but should wait for shards
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -64,7 +43,7 @@ fn test_detect_next_collation_step() {
 
     // when shard collator imported the same anchor then we should collate master
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -77,7 +56,7 @@ fn test_detect_next_collation_step() {
     );
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 
-    renew_mc_block_latest_chain_time(collation_sync_state.clone(), sc_anchor_ct);
+    CM::renew_mc_block_latest_chain_time(&mut guard, sc_anchor_ct);
 
     // after master block collation we do not try to detect next step right away
     // we will resume collation attempts that will cause the import of the next anchor
@@ -86,7 +65,7 @@ fn test_detect_next_collation_step() {
     // so shard collator will wait for updated master collator state
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -103,7 +82,7 @@ fn test_detect_next_collation_step() {
     // so it will cause next attempts for master and shard collators
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -122,7 +101,7 @@ fn test_detect_next_collation_step() {
     // so it will cause next attempt for shard
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -141,7 +120,7 @@ fn test_detect_next_collation_step() {
     // so shard collator should wait for other collators
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -158,7 +137,7 @@ fn test_detect_next_collation_step() {
     // so it will cause next attempt for master again
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -178,7 +157,7 @@ fn test_detect_next_collation_step() {
     // so we can collate next master
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -191,14 +170,14 @@ fn test_detect_next_collation_step() {
     );
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
 
-    renew_mc_block_latest_chain_time(collation_sync_state.clone(), mc_anchor_ct);
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
 
     // next anchor in shard (14000) will not exceed master block interval
     // and we do not have new state from master collator
     // so shard collator will wait for updated master collator state
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -215,7 +194,7 @@ fn test_detect_next_collation_step() {
     // so master collator will force master collation without importing next anchor
     // and we will run master collation right now because shard is already waiting
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -228,13 +207,13 @@ fn test_detect_next_collation_step() {
     );
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 
-    renew_mc_block_latest_chain_time(collation_sync_state.clone(), sc_anchor_ct);
+    CM::renew_mc_block_latest_chain_time(&mut guard, sc_anchor_ct);
 
     // consider that master has unprocessed messages after collation
     // so master collator will force master collation without importing next anchor
     // then we should wait for shard
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -252,7 +231,7 @@ fn test_detect_next_collation_step() {
     // and we will run master collation right now
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -265,14 +244,14 @@ fn test_detect_next_collation_step() {
     );
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 
-    renew_mc_block_latest_chain_time(collation_sync_state.clone(), sc_anchor_ct);
+    CM::renew_mc_block_latest_chain_time(&mut guard, sc_anchor_ct);
 
     // consider that master has processed all messages
     // next anchor in master (14000) will not exceed master block interval
     // will continue attempts for master
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -291,7 +270,7 @@ fn test_detect_next_collation_step() {
     // will continue attempts for master
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -310,7 +289,7 @@ fn test_detect_next_collation_step() {
     // so it will collate 31 blocks until max uncommitted chain length reached
     // then it will force master block collation
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         sc_shard_id,
         sc_anchor_ct,
@@ -327,7 +306,7 @@ fn test_detect_next_collation_step() {
     // will continue attempts for master
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -346,7 +325,7 @@ fn test_detect_next_collation_step() {
     // will continue attempts for master
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -366,7 +345,7 @@ fn test_detect_next_collation_step() {
     // so we can collate next master
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
-        collation_sync_state.clone(),
+        &mut guard,
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
@@ -379,5 +358,5 @@ fn test_detect_next_collation_step() {
     );
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
 
-    renew_mc_block_latest_chain_time(collation_sync_state.clone(), mc_anchor_ct);
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
 }
