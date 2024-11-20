@@ -122,7 +122,7 @@ impl BlockHandle {
             .contains(BlockFlags::HAS_PERSISTENT_QUEUE_STATE)
     }
 
-    pub fn mc_ref_seqno(&self) -> u32 {
+    pub fn ref_by_mc_seqno(&self) -> u32 {
         if self.inner.id.shard.is_masterchain() {
             self.inner.id.seqno
         } else {

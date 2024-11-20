@@ -62,9 +62,11 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         meta: NewBlockMeta,
         state_root: Cell,
     ) -> Result<bool>;
-    /// Return block by it's id from node local state
+    /// Return block by its id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
-    /// Return block handle by it's id from node local state
+    /// Return block by its handle from node local state
+    async fn load_block_by_handle(&self, handle: &BlockHandle) -> Result<Option<BlockStuff>>;
+    /// Return block handle by its id from node local state
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>>;
     /// Accept block:
     /// 1. (TODO) Broadcast block to blockchain network
@@ -214,14 +216,22 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
-        let block_storage = self.storage.block_storage();
 
         match handle_storage.load_handle(block_id) {
-            Some(handle) if handle.has_data() => {
-                block_storage.load_block_data(&handle).await.map(Some)
-            }
+            Some(handle) => self.load_block_by_handle(&handle).await,
             _ => Ok(None),
         }
+    }
+
+    async fn load_block_by_handle(&self, handle: &BlockHandle) -> Result<Option<BlockStuff>> {
+        if !handle.has_data() {
+            return Ok(None);
+        }
+
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block by handle: {}", handle.id().as_short_id());
+
+        let block_storage = self.storage.block_storage();
+        block_storage.load_block_data(handle).await.map(Some)
     }
 
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>> {

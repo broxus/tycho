@@ -223,8 +223,8 @@ pub(super) struct BlockCacheEntry {
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without master.
     pub top_shard_blocks_info: Vec<(BlockId, bool)>,
 
-    /// Id of master block that includes current shard block in his subgraph
-    pub containing_mc_block: Option<BlockCacheKey>,
+    /// Seqno of master block that includes current shard block in his subgraph
+    pub ref_by_mc_seqno: u32,
 }
 
 impl BlockCacheEntry {
@@ -234,6 +234,7 @@ impl BlockCacheEntry {
     ) -> Result<Self> {
         let block_id = *candidate.block.id();
         let prev_blocks_ids = candidate.prev_blocks_ids.clone();
+        let ref_by_mc_seqno = candidate.ref_by_mc_seqno;
         let entry = BlockCandidateStuff {
             candidate: *candidate,
             signatures: Default::default(),
@@ -259,7 +260,7 @@ impl BlockCacheEntry {
             },
             prev_blocks_ids,
             top_shard_blocks_info,
-            containing_mc_block: None,
+            ref_by_mc_seqno,
         })
     }
 
@@ -268,6 +269,7 @@ impl BlockCacheEntry {
         prev_blocks_ids: Vec<BlockId>,
         queue_diff: QueueDiffStuff,
         out_msgs: Lazy<OutMsgDescr>,
+        ref_by_mc_seqno: u32,
     ) -> Result<Self> {
         let block_id = *state.block_id();
 
@@ -296,7 +298,7 @@ impl BlockCacheEntry {
             },
             prev_blocks_ids,
             top_shard_blocks_info,
-            containing_mc_block: None,
+            ref_by_mc_seqno,
         })
     }
 

@@ -535,7 +535,7 @@ impl proto::ControlServer for ControlServer {
         .into();
 
         Ok(proto::AccountStateResponse {
-            mc_seqno: block_handle.mc_ref_seqno(),
+            mc_seqno: block_handle.ref_by_mc_seqno(),
             gen_utime: block_handle.gen_utime(),
             state,
         })

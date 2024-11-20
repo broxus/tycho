@@ -987,7 +987,7 @@ impl BlockStorage {
     }
 
     fn prepare_archive_id(&self, handle: &BlockHandle) -> PreparedArchiveId {
-        let mc_seqno = handle.mc_ref_seqno();
+        let mc_seqno = handle.ref_by_mc_seqno();
 
         let mut archive_ids = self.archive_ids.write();
 
