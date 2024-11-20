@@ -392,7 +392,7 @@ mod tests {
 
     use super::*;
     use crate::types::{service_message_fn, service_query_fn, BoxCloneService, PeerInfo, Request};
-    use crate::util::NetworkExt;
+    use crate::util::{NetworkExt, UnknownPeerError};
 
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
         let handle = |request: ServiceRequest| async move {
@@ -485,19 +485,33 @@ mod tests {
             assert_eq!(*e, ConnectionError::InvalidCertificate);
         }
 
-        let err1 = peer1
+        let err = peer1
             .query(&PeerId([0; 32]), req.clone())
             .await
             .map(|_| ())
             .unwrap_err();
-        assert_is_invalid_certificate(err1);
+        assert_is_invalid_certificate(err);
 
-        let err2 = peer2
+        let err = peer2
             .query(&PeerId([0; 32]), req.clone())
             .await
             .map(|_| ())
             .unwrap_err();
-        assert_is_invalid_certificate(err2);
+        assert_is_invalid_certificate(err);
+
+        fn assert_is_unknown_peer(e: anyhow::Error, peer_id: &PeerId) {
+            // A non-recursive downcast to find an error
+            let e = (*e).downcast_ref::<UnknownPeerError>().unwrap();
+            assert_eq!(e, &UnknownPeerError { peer_id: *peer_id });
+        }
+
+        let invalid_peer_id = PeerId([0xff; 32]);
+        let err = peer1
+            .query(&invalid_peer_id, req.clone())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_is_unknown_peer(err, &invalid_peer_id);
 
         Ok(())
     }

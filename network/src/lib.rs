@@ -27,7 +27,7 @@ pub use self::overlay::{
 };
 pub use self::util::{
     check_peer_signature, try_handle_prefix, try_handle_prefix_with_offset, NetworkExt, Routable,
-    Router, RouterBuilder,
+    Router, RouterBuilder, UnknownPeerError,
 };
 
 mod dht;

@@ -54,7 +54,7 @@ where
                 network.connect(address, peer_id).await?
             }
             // Error otherwise
-            None => anyhow::bail!("trying to interact with an unknown peer: {peer_id}"),
+            None => anyhow::bail!(UnknownPeerError { peer_id: *peer_id }),
         }
     };
 
@@ -78,4 +78,10 @@ where
     fn call(self, peer: &'a Peer, request: Request) -> Fut {
         self(peer, request)
     }
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("trying to interact with an unknown peer: {peer_id}")]
+pub struct UnknownPeerError {
+    pub peer_id: PeerId,
 }

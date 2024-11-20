@@ -3,7 +3,7 @@ use bytes::Buf;
 pub use self::router::{Routable, Router, RouterBuilder};
 #[cfg(test)]
 pub use self::test::make_peer_info_stub;
-pub use self::traits::NetworkExt;
+pub use self::traits::{NetworkExt, UnknownPeerError};
 use crate::types::PeerId;
 
 mod router;

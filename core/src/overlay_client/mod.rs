@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::task::AbortHandle;
-use tycho_network::{ConnectionError, Network, PublicOverlay, Request};
+use tycho_network::{ConnectionError, Network, PublicOverlay, Request, UnknownPeerError};
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
@@ -475,6 +475,10 @@ impl QueryResponseHandle {
 fn apply_network_error(error: &anyhow::Error, neighbour: &Neighbour) {
     // NOTE: `(*error)` is a non-recurisve downcast
     let Some(error) = (*error).downcast_ref() else {
+        if let Some(UnknownPeerError { .. }) = (*error).downcast_ref() {
+            neighbour.punish(PunishReason::Malicious);
+        }
+
         // TODO: Handle other errors as well
         return;
     };
