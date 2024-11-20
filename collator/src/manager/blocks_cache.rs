@@ -43,9 +43,7 @@ impl BlocksCache {
         let mut result = vec![];
         for mut shard_cache in self.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
-                if entry.containing_mc_block.is_none()
-                    || entry.containing_mc_block == Some(next_mc_block_id_short)
-                {
+                if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
                     {
@@ -96,28 +94,25 @@ impl BlocksCache {
 
     /// Find shard block in cache and then get containing master block id if link exists
     pub fn find_containing_mc_block(&self, shard_block_id: &BlockId) -> Option<(BlockId, bool)> {
-        let mc_block_key = {
+        let mc_block_seqno = {
             let guard = self.shards.get(&shard_block_id.shard)?;
             guard
                 .value()
                 .blocks
                 .get(&shard_block_id.seqno)
-                .and_then(|sbc| sbc.containing_mc_block)?
+                .map(|sbc| sbc.ref_by_mc_seqno)?
         };
 
         let guard = self.masters.lock();
-        guard
-            .blocks
-            .get(&mc_block_key.seqno)
-            .map(|block_container| {
-                // NOTE: Assume the all collated shard blocks are valid since the
-                // containing master block will be different otherwise and will be
-                // discarded (stuck then cancelled) during the validation process.
-                // FIXME: `is_valid` might have a different meaning like "validation finished"
-                let is_valid = true;
+        guard.blocks.get(&mc_block_seqno).map(|block_container| {
+            // NOTE: Assume the all collated shard blocks are valid since the
+            // containing master block will be different otherwise and will be
+            // discarded (stuck then cancelled) during the validation process.
+            // FIXME: `is_valid` might have a different meaning like "validation finished"
+            let is_valid = true;
 
-                (block_container.block_id, is_valid)
-            })
+            (block_container.block_id, is_valid)
+        })
     }
 
     pub fn get_last_collated_block_and_applied_mc_queue_range(
@@ -234,7 +229,7 @@ impl BlocksCache {
 
                     // if shard block included in current master block subgraph
                     if force_include // top shard blocks consider included anyway in this case
-                    || matches!(sc_block_entry.containing_mc_block, Some(key) if &key == mc_block_key)
+                        || sc_block_entry.ref_by_mc_seqno == mc_block_key.seqno
                     {
                         prev_block_ids = Some((
                             Some(prev_sc_block_id),
@@ -281,7 +276,6 @@ impl BlocksCache {
         let received_and_collated;
         let last_collated_mc_block_id;
         let applied_mc_queue_range;
-        let mut set_containing_mc_block = None;
 
         let block_mismatch;
         if mc_data.is_some() {
@@ -291,10 +285,6 @@ impl BlocksCache {
             received_and_collated = res.received_and_collated;
             last_collated_mc_block_id = masters_guard.data.last_collated_mc_block_id;
             applied_mc_queue_range = masters_guard.data.applied_mc_queue_range;
-
-            if let Some(ids) = res.new_data {
-                set_containing_mc_block = Some(ids.top_shard_block_ids);
-            }
         } else {
             let res = {
                 let mut g = self.shards.entry(block_id.shard).or_default();
@@ -307,11 +297,6 @@ impl BlocksCache {
             (last_collated_mc_block_id, applied_mc_queue_range) =
                 self.get_last_collated_block_and_applied_mc_queue_range();
         };
-
-        if let Some(ids) = set_containing_mc_block {
-            // Traverse shard blocks and update their link to the containing master block
-            self.set_containing_mc_block(block_id.as_short_id(), ids);
-        }
 
         Ok(BlockCacheStoreResult {
             received_and_collated,
@@ -335,7 +320,6 @@ impl BlocksCache {
         let received_and_collated;
         let last_collated_mc_block_id;
         let applied_mc_queue_range;
-        let mut set_containing_mc_block = None;
 
         let block_mismatch;
         let last_known_synced = 'sync: {
@@ -354,10 +338,6 @@ impl BlocksCache {
 
                 last_collated_mc_block_id = masters_guard.data.last_collated_mc_block_id;
                 applied_mc_queue_range = masters_guard.data.applied_mc_queue_range;
-
-                if let Some(ids) = res.new_data {
-                    set_containing_mc_block = Some(ids.top_shard_block_ids);
-                }
             } else {
                 let res = {
                     let mut g = self.shards.entry(block_id.shard).or_default();
@@ -376,11 +356,6 @@ impl BlocksCache {
                     self.get_last_collated_block_and_applied_mc_queue_range();
             };
 
-            if let Some(ids) = set_containing_mc_block {
-                // Traverse shard blocks and update their link to the containing master block
-                self.set_containing_mc_block(block_id.as_short_id(), ids);
-            }
-
             return Ok(Some(BlockCacheStoreResult {
                 received_and_collated,
                 block_mismatch,
@@ -395,28 +370,6 @@ impl BlocksCache {
             "received block is not newer than last known synced, skipped"
         );
         Ok(None)
-    }
-
-    fn set_containing_mc_block(
-        &self,
-        mc_block_key: BlockCacheKey,
-        mut top_block_ids: VecDeque<BlockId>,
-    ) {
-        while let Some(prev_shard_block_id) = top_block_ids.pop_front() {
-            if let Some(mut shard_cache) = self.shards.get_mut(&prev_shard_block_id.shard) {
-                if let Some(shard_block) = shard_cache.blocks.get_mut(&prev_shard_block_id.seqno) {
-                    if shard_block.containing_mc_block.is_none() {
-                        shard_block.containing_mc_block = Some(mc_block_key);
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                            block_id = %shard_block.block_id,
-                            "containing_mc_block set"
-                        );
-
-                        top_block_ids.extend(&shard_block.prev_blocks_ids);
-                    }
-                }
-            }
-        }
     }
 
     /// Find master block candidate in cache, append signatures info and return updated
@@ -580,7 +533,7 @@ impl BlocksCache {
                 let sc_block_id = sc_block_entry.block_id;
 
                 // if shard block included in current master block subgraph
-                if matches!(sc_block_entry.containing_mc_block, Some(key) if key == mc_block_key) {
+                if sc_block_entry.ref_by_mc_seqno == mc_block_key.seqno {
                     // 5. Extract
                     sc_block_entry
                         .prev_blocks_ids
@@ -691,7 +644,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
         &mut self,
         candidate: Box<BlockCandidate>,
         mc_data: Option<Arc<McData>>,
-    ) -> Result<StoredBlock<T::NewCollated>> {
+    ) -> Result<StoredBlock> {
         let block_id = *candidate.block.id();
         match self.blocks.entry(block_id.seqno) {
             btree_map::Entry::Occupied(mut occupied) => {
@@ -713,7 +666,6 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 if entry.block_id != block_id {
                     return Ok(StoredBlock {
                         received_and_collated: false,
-                        new_data: None,
                         block_mismatch: true,
                     });
                 }
@@ -731,18 +683,16 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
 
                 Ok(StoredBlock {
                     received_and_collated: true,
-                    new_data: None,
                     block_mismatch: false,
                 })
             }
             btree_map::Entry::Vacant(vacant) => {
-                let new_data = self.data.on_insert_collated(&candidate)?;
+                self.data.on_insert_collated(&candidate)?;
 
                 vacant.insert(BlockCacheEntry::from_collated(candidate, mc_data)?);
 
                 Ok(StoredBlock {
                     received_and_collated: false,
-                    new_data: Some(new_data),
                     block_mismatch: false,
                 })
             }
@@ -750,10 +700,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
     }
 
     /// Adds an existing block info to the blocks map
-    fn store_received_block(
-        &mut self,
-        ctx: ReceivedBlockContext,
-    ) -> Result<StoredBlock<T::NewReceived>> {
+    fn store_received_block(&mut self, ctx: ReceivedBlockContext) -> Result<StoredBlock> {
         let block_id = *ctx.state.block_id();
 
         let mut prev_ids_to_clear = Vec::new();
@@ -786,14 +733,14 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                         ctx.prev_ids,
                         ctx.queue_diff,
                         ctx.out_msgs,
+                        ctx.ref_by_mc_seqno,
                     )?;
 
-                    let new_data = self.data.on_insert_received(&new_entry)?;
+                    self.data.on_insert_received(&new_entry)?;
                     occupied.insert(new_entry);
 
                     StoredBlock {
                         received_and_collated: false,
-                        new_data: Some(new_data),
                         block_mismatch: true,
                     }
                 } else {
@@ -804,7 +751,6 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
 
                     StoredBlock {
                         received_and_collated: true,
-                        new_data: None,
                         block_mismatch: false,
                     }
                 }
@@ -815,6 +761,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     ctx.prev_ids,
                     ctx.queue_diff,
                     ctx.out_msgs,
+                    ctx.ref_by_mc_seqno,
                 )?);
 
                 // Remove state from prev block because we need only last one
@@ -822,11 +769,10 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     prev_ids_to_clear = entry.prev_blocks_ids.clone();
                 }
 
-                let new_data = self.data.on_insert_received(entry)?;
+                self.data.on_insert_received(entry)?;
 
                 StoredBlock {
                     received_and_collated: false,
-                    new_data: Some(new_data),
                     block_mismatch: false,
                 }
             }
@@ -905,8 +851,8 @@ impl MasterBlocksCacheData {
 }
 
 impl BlocksCacheData for MasterBlocksCacheData {
-    type NewCollated = MasterBlockIds;
-    type NewReceived = MasterBlockIds;
+    type NewCollated = ();
+    type NewReceived = ();
 
     fn on_update_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
         self.update_last_collated_block_id(candidate.block.id());
@@ -915,10 +861,7 @@ impl BlocksCacheData for MasterBlocksCacheData {
 
     fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<Self::NewCollated> {
         self.update_last_collated_block_id(candidate.block.id());
-
-        Ok(MasterBlockIds {
-            top_shard_block_ids: candidate.top_shard_blocks_ids.iter().copied().collect(),
-        })
+        Ok(())
     }
 
     fn on_update_received(&mut self, entry: &BlockCacheEntry) -> Result<()> {
@@ -928,10 +871,7 @@ impl BlocksCacheData for MasterBlocksCacheData {
 
     fn on_insert_received(&mut self, entry: &BlockCacheEntry) -> Result<Self::NewReceived> {
         self.move_range_end(entry.block_id.seqno);
-
-        Ok(MasterBlockIds {
-            top_shard_block_ids: entry.iter_top_block_ids().copied().collect(),
-        })
+        Ok(())
     }
 }
 
@@ -979,7 +919,7 @@ impl BlocksCacheData for ShardBlocksCacheData {
         self.update_top_shard_block_additional_info(candidate)
     }
 
-    fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
+    fn on_insert_collated(&mut self, candidate: &BlockCandidate) -> Result<Self::NewCollated> {
         self.update_top_shard_block_additional_info(candidate)
     }
 
@@ -997,6 +937,7 @@ struct ReceivedBlockContext {
     prev_ids: Vec<BlockId>,
     queue_diff: QueueDiffStuff,
     out_msgs: Lazy<OutMsgDescr>,
+    ref_by_mc_seqno: u32,
     // NOTE: `BlockStuff` can also be added here if needed since it's already loaded
 }
 
@@ -1018,8 +959,14 @@ impl ReceivedBlockContext {
                 out_msgs: EMPTY_OUT_MSGS
                     .get_or_init(|| Lazy::new(&OutMsgDescr::new()).unwrap())
                     .clone(),
+                ref_by_mc_seqno: 0,
             });
         }
+
+        let Some(block_handle) = state_node_adapter.load_block_handle(block_id).await? else {
+            bail!("block not found: {block_id}");
+        };
+        let ref_by_mc_seqno = block_handle.ref_by_mc_seqno();
 
         let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
             bail!("block not found: {block_id}");
@@ -1043,18 +990,14 @@ impl ReceivedBlockContext {
             prev_ids,
             queue_diff,
             out_msgs,
+            ref_by_mc_seqno,
         })
     }
 }
 
-struct StoredBlock<T> {
+struct StoredBlock {
     received_and_collated: bool,
-    new_data: Option<T>,
     block_mismatch: bool,
-}
-
-struct MasterBlockIds {
-    top_shard_block_ids: VecDeque<BlockId>,
 }
 
 pub type BeforeTailIdsResult = BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>;

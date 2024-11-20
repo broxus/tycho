@@ -397,7 +397,7 @@ mod tests {
             let (handle, status) = block_handles.create_or_load_handle(&block_id, meta);
             assert_eq!(status, HandleCreationStatus::Created);
 
-            assert_eq!(handle.mc_ref_seqno(), 456);
+            assert_eq!(handle.ref_by_mc_seqno(), 456);
             assert!(!handle.is_key_block());
             assert!(!handle.is_applied());
 
@@ -423,7 +423,7 @@ mod tests {
             let (handle, status) = block_handles.create_or_load_handle(&block_id, meta);
             assert_eq!(status, HandleCreationStatus::Fetched);
 
-            assert_eq!(handle.mc_ref_seqno(), 456);
+            assert_eq!(handle.ref_by_mc_seqno(), 456);
             assert!(!handle.is_key_block());
             assert!(handle.is_applied());
         }

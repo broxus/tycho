@@ -1193,7 +1193,7 @@ where
                             .load_block_handle(&prev_block_id)
                             .await?
                             .unwrap();
-                        if prev_shard_block_handle.mc_ref_seqno() <= init_mc_block_id.seqno {
+                        if prev_shard_block_handle.ref_by_mc_seqno() <= init_mc_block_id.seqno {
                             continue;
                         }
                     }
