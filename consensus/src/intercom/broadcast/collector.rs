@@ -152,7 +152,7 @@ impl CollectorTask {
     }
 
     fn match_consensus(&self, consensus_round: Round) -> Result<(), ()> {
-        #[allow(clippy::match_same_arms)] // for comments
+        #[allow(clippy::match_same_arms, reason = "comments")]
         let should_fail = match consensus_round.cmp(&self.next_round) {
             // we're too late, consensus moved forward
             cmp::Ordering::Greater => true,

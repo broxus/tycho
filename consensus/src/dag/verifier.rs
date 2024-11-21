@@ -18,7 +18,7 @@ use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof,
+    AnchorStageRole, Cert, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof,
     ValidPoint,
 };
 
@@ -269,8 +269,6 @@ impl Verifier {
                         if let Some(vertex) = &proven_vertex_dep {
                             vertex.mark_certified();
                         }
-                    } else {
-                        break;
                     }
                 },
                 is_valid = &mut is_valid_fut, if valid.is_none() => {
@@ -285,27 +283,35 @@ impl Verifier {
             }
         }
 
-        let (dag_point, level) = match (certified.unwrap_or_default(), valid, sig_ok, unique_in_loc)
-        {
-            (true, _, _, _) => (
+        let (dag_point, level) = match (
+            certified.unwrap_or_default(),
+            valid.expect("validation must be completed to participate in consensus"),
+            sig_ok,
+            unique_in_loc,
+        ) {
+            (true, true, _, _) => (
                 // here "trust consensus" call chain resolves;
                 // ignore other flags, though it looks like a race condition:
                 // follow majority's decision now, otherwise will follow it via sync
-                DagPoint::Trusted(ValidPoint::new(info)),
-                tracing::Level::DEBUG,
+                DagPoint::Certified(ValidPoint::new(info)),
+                tracing::Level::TRACE,
             ),
-            (false, Some(true), Some(true), Some(true)) => (
+            (false, true, Some(true), Some(true)) => (
                 DagPoint::Trusted(ValidPoint::new(info)),
                 tracing::Level::TRACE,
             ),
-            (false, Some(true), Some(true), Some(false)) => (
+            (false, true, Some(true), Some(false)) => (
                 DagPoint::Suspicious(ValidPoint::new(info)),
                 tracing::Level::WARN,
             ),
-            (false, Some(false), _, _) | (false, _, Some(false), _) => {
-                (DagPoint::Invalid(info), tracing::Level::ERROR)
-            }
-            (false, _, _, _) => {
+            (is_certified, false, _, _) | (is_certified, _, Some(false), _) => (
+                DagPoint::Invalid(Cert {
+                    inner: info,
+                    is_certified,
+                }),
+                tracing::Level::ERROR,
+            ),
+            (false, true, Some(true), None) | (false, true, None, None | Some(true | false)) => {
                 let _guard = effects.span().enter();
                 unreachable!(
                     "unexpected pattern in loop break: \
@@ -378,7 +384,7 @@ impl Verifier {
             }
         };
 
-        #[allow(clippy::match_same_arms)] // for comments
+        #[allow(clippy::match_same_arms, reason = "comments")]
         match info.anchor_link(link_field) {
             Link::ToSelf => {
                 // do not search in DAG the point that is currently under validation;
@@ -492,8 +498,12 @@ impl Verifier {
             match dag_point {
                 DagPoint::Trusted(_)
                 | DagPoint::Suspicious(_)
+                | DagPoint::Certified(_)
                 | DagPoint::Invalid(_)
-                | DagPoint::IllFormed(_) => {
+                | DagPoint::IllFormed(_)
+                | DagPoint::NotFound(Cert {
+                    is_certified: true, ..
+                }) => {
                     return false;
                 }
                 DagPoint::NotFound(_) => {
@@ -529,8 +539,14 @@ impl Verifier {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         match dag_point {
-                            DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                                if !Self::is_proof_ok(&info, &valid.info) {
+                            DagPoint::Trusted(ValidPoint { info: found, .. })
+                            | DagPoint::Suspicious(ValidPoint { info: found, .. })
+                            | DagPoint::Certified(ValidPoint { info: found, .. })
+                            | DagPoint::Invalid(Cert {
+                                inner: found,
+                                is_certified: true,
+                            }) => {
+                                if !Self::is_proof_ok(&info, &found) {
                                     return false;
                                 } // else ok continue
                             }
@@ -544,14 +560,20 @@ impl Verifier {
                         }
                     }
                     Some(_) | None => {
-                        #[allow(clippy::match_same_arms)] // for comments
+                        #[allow(clippy::match_same_arms, reason = "comments")]
                         match dag_point {
-                            DagPoint::Trusted(_) | DagPoint::Suspicious(_) => {
+                            DagPoint::Trusted(_)
+                            | DagPoint::Suspicious(_)
+                            | DagPoint::Certified(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`
                                 // None: point must have filled `prev_digest` and `includes`
                                 return false;
                             }
-                            DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
+                            DagPoint::Invalid(_)
+                            | DagPoint::IllFormed(_)
+                            | DagPoint::NotFound(Cert {
+                                is_certified: true, ..
+                            }) => {
                                 // Some: point must have named _this_ point in `prev_digest`,
                                 //       just to be invalid for an invalid dependency
                                 // None: author must have skipped current point's round
@@ -566,29 +588,32 @@ impl Verifier {
                 }
             } else {
                 match dag_point {
-                    DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                        if valid.info.anchor_round(AnchorStageRole::Trigger)
-                            > anchor_trigger_id.round
-                            || valid.info.anchor_round(AnchorStageRole::Proof)
-                                > anchor_proof_id.round
+                    DagPoint::Trusted(ValidPoint { info, .. })
+                    | DagPoint::Suspicious(ValidPoint { info, .. })
+                    | DagPoint::Certified(ValidPoint { info, .. })
+                    | DagPoint::Invalid(Cert {
+                        inner: info,
+                        is_certified: true,
+                    }) => {
+                        if info.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
+                            || info.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
                         {
                             // did not actualize the chain
                             return false;
                         }
-                        let valid_point_id = valid.info.id();
+                        let valid_point_id = info.id();
                         if ({
                             valid_point_id == anchor_trigger_link_id
-                                && valid.info.anchor_id(AnchorStageRole::Trigger)
-                                    != anchor_trigger_id
+                                && info.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
                         }) || ({
                             valid_point_id == anchor_proof_link_id
-                                && valid.info.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
+                                && info.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
                         }) {
                             // path does not lead to destination
                             return false;
                         }
                         if valid_point_id == anchor_proof_link_id
-                            && valid.info.data().anchor_time != info.data().anchor_time
+                            && info.data().anchor_time != info.data().anchor_time
                         {
                             // anchor candidate's time is not inherited from its proof
                             return false;
@@ -759,7 +784,7 @@ impl ValidateContext {
             DagPoint::IllFormed(_) => (&Self::VALIDATE_LABELS[1..=1], 1),
             DagPoint::Invalid(_) => (&Self::VALIDATE_LABELS[2..=2], 1),
             DagPoint::Suspicious(_) => (&Self::VALIDATE_LABELS[3..=3], 1),
-            DagPoint::Trusted(_) => (&Self::VALIDATE_LABELS[..], 0),
+            DagPoint::Certified(_) | DagPoint::Trusted(_) => (&Self::VALIDATE_LABELS[..], 0),
         };
         metrics::counter!("tycho_mempool_verifier_validate", labels).increment(count);
         result
