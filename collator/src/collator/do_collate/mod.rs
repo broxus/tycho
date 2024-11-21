@@ -50,7 +50,7 @@ impl CollatorStdImpl {
         skip_all,
         fields(
             block_id = %self.next_block_info,
-            ct = self.anchors_cache.as_ref().unwrap().get_last_imported_anchor_ct().unwrap_or_default()
+            ct = self.anchors_cache.get_last_imported_anchor_ct().unwrap_or_default()
         )
     )]
     pub(super) async fn do_collate(
@@ -95,7 +95,7 @@ impl CollatorStdImpl {
             top_shard_blocks_info,
         )?;
 
-        let anchors_cache = self.anchors_cache.take().unwrap();
+        let anchors_cache = std::mem::take(&mut self.anchors_cache);
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
@@ -131,7 +131,7 @@ impl CollatorStdImpl {
         })
         .await?;
 
-        self.anchors_cache = Some(anchors_cache);
+        self.anchors_cache = anchors_cache;
 
         let block_id = *finalized.block_candidate.block.id();
         let finalize_wu_total = finalized.finalize_wu_total;
@@ -926,8 +926,6 @@ impl CollatorStdImpl {
     ) -> Result<Box<BlockCollationData>> {
         let created_by = self
             .anchors_cache
-            .as_ref()
-            .unwrap()
             .get_last_imported_anchor_author()
             .unwrap();
 
