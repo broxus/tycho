@@ -40,6 +40,7 @@ mod mq_iterator_adapter;
 mod types;
 
 pub use error::CollationCancelReason;
+pub use types::ForceMasterCollation;
 
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
@@ -95,7 +96,7 @@ pub trait CollatorEventListener: Send + Sync {
         prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
-        force_mc_block: bool,
+        force_mc_block: ForceMasterCollation,
         collation_config: Arc<CollationConfig>,
     ) -> Result<()>;
     /// Handle when collator action was cancelled
@@ -1283,7 +1284,7 @@ impl CollatorStdImpl {
                     working_state.mc_data.block_id,
                     working_state.next_block_id_short,
                     working_state.prev_shard_data_ref().gen_chain_time(),
-                    true,
+                    ForceMasterCollation::ByUprocessedMessages,
                     working_state.collation_config.clone(),
                 )
                 .await?;
@@ -1382,7 +1383,7 @@ impl CollatorStdImpl {
                             working_state.mc_data.block_id,
                             working_state.next_block_id_short,
                             next_anchor.chain_time,
-                            false,
+                            ForceMasterCollation::No,
                             working_state.collation_config.clone(),
                         )
                         .await?;
@@ -1405,7 +1406,7 @@ impl CollatorStdImpl {
                         working_state.mc_data.block_id,
                         working_state.next_block_id_short,
                         last_imported_chain_time,
-                        true,
+                        ForceMasterCollation::ByAnchorImportSkipped,
                         working_state.collation_config.clone(),
                     )
                     .await?;
@@ -1465,10 +1466,10 @@ impl CollatorStdImpl {
             ForceMcBlockByUncommittedChainLength,
             HasUnprocessedMessages,
             HasExternals,
-            ImportedAnchorHasNoExternals,
-            AnchorImportSkipped,
+            NoPendingMessages,
             ForceEmptyShardBlock,
         }
+        let mut anchor_import_skipped = false;
         let mut try_collate_check = 'check: {
             if force_mc_block_by_uncommitted_chain {
                 TryCollateCheck::ForceMcBlockByUncommittedChainLength
@@ -1621,7 +1622,8 @@ impl CollatorStdImpl {
                             }
                         },
                         ImportNextAnchor::Skipped => {
-                            break 'check TryCollateCheck::AnchorImportSkipped
+                            anchor_import_skipped = true;
+                            break;
                         }
                     }
                 }
@@ -1640,7 +1642,7 @@ impl CollatorStdImpl {
                 match (has_uprocessed_messages, has_externals) {
                     (true, _) => TryCollateCheck::HasUnprocessedMessages,
                     (false, true) => TryCollateCheck::HasExternals,
-                    (false, false) => TryCollateCheck::ImportedAnchorHasNoExternals,
+                    (false, false) => TryCollateCheck::NoPendingMessages,
                 }
             }
         };
@@ -1653,10 +1655,7 @@ impl CollatorStdImpl {
 
         // when no messages for processing
         // then force empty shard block collation if related timeout elapsed
-        if matches!(
-            try_collate_check,
-            TryCollateCheck::ImportedAnchorHasNoExternals
-        ) {
+        if matches!(try_collate_check, TryCollateCheck::NoPendingMessages) {
             let empty_sc_block_interval_ms =
                 working_state.collation_config.empty_sc_block_interval_ms as u64;
             let ct_elapsed_from_prev_block =
@@ -1672,10 +1671,10 @@ impl CollatorStdImpl {
         match try_collate_check {
             TryCollateCheck::HasUnprocessedMessages
             | TryCollateCheck::HasExternals
-            | TryCollateCheck::AnchorImportSkipped
             | TryCollateCheck::ForceEmptyShardBlock => {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     reason = ?try_collate_check,
+                    anchor_import_skipped,
                     top_processed_to_anchor,
                     last_imported_anchor_id,
                     last_imported_chain_time,
@@ -1687,11 +1686,12 @@ impl CollatorStdImpl {
                 self.do_collate(working_state, None, last_imported_chain_time)
                     .await?;
             }
-            TryCollateCheck::ImportedAnchorHasNoExternals
+            TryCollateCheck::NoPendingMessages
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     reason = ?try_collate_check,
-                    force_mc_block = force_mc_block_by_uncommitted_chain,
+                    anchor_import_skipped,
+                    force_mc_block_by_uncommitted_chain,
                     top_processed_to_anchor,
                     last_imported_anchor_id,
                     last_imported_chain_time,
@@ -1701,12 +1701,23 @@ impl CollatorStdImpl {
                     "will NOT collate next shard block, will notify collation manager",
                 );
 
+                // we should force master block collation when anchor import was skipped
+                // because without importing of next anchor chain time will not update
+                // and master block interval will never be elapsed
+                let force_mc_block = match try_collate_check {
+                    TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
+                        ForceMasterCollation::ByUncommittedChain
+                    }
+                    _ if anchor_import_skipped => ForceMasterCollation::ByAnchorImportSkipped,
+                    _ => ForceMasterCollation::No,
+                };
+
                 self.listener
                     .on_skipped(
                         working_state.mc_data.block_id,
                         working_state.next_block_id_short,
                         last_imported_chain_time,
-                        force_mc_block_by_uncommitted_chain,
+                        force_mc_block,
                         working_state.collation_config.clone(),
                     )
                     .await?;

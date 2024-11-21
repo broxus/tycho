@@ -27,6 +27,7 @@ use self::types::{BlockCacheKey, CandidateStatus, CollationSyncState, McBlockSub
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
+    ForceMasterCollation,
 };
 use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
 use crate::manager::types::BlockCacheStoreResult;
@@ -212,7 +213,7 @@ where
         prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
-        force_mc_block: bool,
+        force_mc_block: ForceMasterCollation,
         collation_config: Arc<CollationConfig>,
     ) -> Result<()> {
         self.spawn_task(method_to_async_closure!(
@@ -533,13 +534,13 @@ where
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short, ct = anchor_chain_time, force_mc_block))]
+    #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short, ct = anchor_chain_time, ?force_mc_block))]
     async fn handle_collation_skipped(
         &self,
         prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
-        force_mc_block: bool,
+        force_mc_block: ForceMasterCollation,
         collation_config: Arc<CollationConfig>,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -582,7 +583,7 @@ where
         prev_mc_block_id: &BlockId,
         shard_id: ShardIdent,
         chain_time: u64,
-        force_mc_block: bool,
+        force_mc_block: ForceMasterCollation,
         trigger_shard_block_id_opt: Option<BlockId>,
         mc_block_min_interval_ms: u64,
     ) -> Result<()> {
@@ -747,6 +748,23 @@ where
 
             if store_res.block_mismatch {
                 self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
+
+                // when master block mismatched then should cancel shard collators as well
+                if block_id.is_masterchain() {
+                    for mut ac in self
+                        .active_collators
+                        .iter_mut()
+                        .filter(|ac| ac.key() != &block_id.shard)
+                    {
+                        ac.state = match ac.state {
+                            CollatorState::Waiting | CollatorState::Cancelled => {
+                                CollatorState::Cancelled
+                            }
+                            _ => CollatorState::CancelPending,
+                        };
+                    }
+                }
+
                 self.mq_adapter.clear_session_state()?;
             }
 
@@ -899,7 +917,7 @@ where
                 &collation_result.prev_mc_block_id,
                 block_id.shard,
                 candidate_chain_time,
-                false,
+                ForceMasterCollation::No,
                 Some(block_id),
                 collation_result.collation_config.mc_block_min_interval_ms as _,
             )
@@ -943,6 +961,23 @@ where
                     _ => CollatorState::CancelPending,
                 };
             });
+
+            // when master block mismatched then should cancel shard collators as well
+            if block_id.is_masterchain() {
+                for mut ac in self
+                    .active_collators
+                    .iter_mut()
+                    .filter(|ac| ac.key() != &block_id.shard)
+                {
+                    ac.state = match ac.state {
+                        CollatorState::Waiting | CollatorState::Cancelled => {
+                            CollatorState::Cancelled
+                        }
+                        _ => CollatorState::CancelPending,
+                    };
+                }
+            }
+
             self.mq_adapter.clear_session_state()?;
         }
 
@@ -1852,7 +1887,7 @@ where
         active_shards: Vec<ShardIdent>,
         shard_id: ShardIdent,
         last_imported_anchor_ct: u64,
-        force_mc_block: bool,
+        force_mc_block: ForceMasterCollation,
         mc_block_min_interval_ms: u64,
     ) -> NextCollationStep {
         let _histogram = HistogramGuard::begin(
@@ -1861,42 +1896,38 @@ where
 
         let mc_block_latest_chain_time = guard.mc_block_latest_chain_time;
 
-        // check if master collation state exist and "force" flag rised for master collator
-        let mut mc_collation_state_exist = false;
-        let mut forced_in_mc_collator = false;
-        if shard_id.is_masterchain() {
-            mc_collation_state_exist = true;
-            forced_in_mc_collator = force_mc_block;
-        } else if let Some(mc_collation_state) = guard.states.get(&ShardIdent::MASTERCHAIN) {
-            mc_collation_state_exist = !mc_collation_state.last_imported_chain_times.is_empty();
-            forced_in_mc_collator = mc_collation_state.mc_collation_forced;
-        }
+        // check if master collation state exists
+        let mc_collation_state_exist = shard_id.is_masterchain()
+            || guard
+                .states
+                .get(&ShardIdent::MASTERCHAIN)
+                .map_or(false, |state| !state.last_imported_chain_times.is_empty());
+
+        // check if master collation hard forced for all shards
+        if shard_id.is_masterchain()
+            && matches!(force_mc_block, ForceMasterCollation::ByUprocessedMessages)
+        {
+            guard.mc_collation_forced_for_all = true;
+        };
+        let hard_forced_for_all = guard.mc_collation_forced_for_all;
 
         // save current shard collator state
+        let forced_in_current_shard = force_mc_block.is_forced();
         let current_collation_state = guard.states.entry(shard_id).or_default();
         current_collation_state
             .last_imported_chain_times
-            .push((last_imported_anchor_ct, force_mc_block));
-        current_collation_state.mc_collation_forced |= force_mc_block;
-
-        // wait for master collation status if it not exist yet
-        if !mc_collation_state_exist {
-            current_collation_state.status = CollationStatus::WaitForMasterStatus;
-
-            return NextCollationStep::WaitForMasterStatus;
-        } else {
-            current_collation_state.status = CollationStatus::AttemptsInProgress;
-        }
+            .push((last_imported_anchor_ct, forced_in_current_shard));
+        current_collation_state.mc_collation_forced |= forced_in_current_shard;
 
         // check if should collate master by current shard or because forced in master collator
-        let should_collate_by_current_shard = if forced_in_mc_collator {
+        let should_collate_by_current_shard = if hard_forced_for_all {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
-                "Master block collation forced in master shard {}",
-                ShardIdent::MASTERCHAIN,
+                "Master block collation hard forced for all shards\
+                mostly because there are unprocessed messages for master",
             );
             true
-        } else if force_mc_block {
+        } else if forced_in_current_shard {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Master block collation forced in current shard {}",
@@ -1951,11 +1982,12 @@ where
                                         .unwrap_or_default()
                                         > mc_block_min_interval_ms
                             });
-                        // otherwise get the first one if master block collation forced in master collator
+
+                        // otherwise get the first one if master block collation hard forced for all shards
                         let first_chain_time_that_exceed_or_forced =
                             match first_chain_time_that_exceed_or_forced {
                                 Some((ct, _)) => Some(*ct),
-                                None if forced_in_mc_collator => shard_collation_state
+                                None if hard_forced_for_all => shard_collation_state
                                     .last_imported_chain_times
                                     .first()
                                     .map(|(ct, _)| *ct),
@@ -1987,7 +2019,17 @@ where
 
             // resume for current shard only when should not collate master by current shard
             if !should_collate_by_current_shard {
-                shards_to_resume_attempts.push(shard_id);
+                // wait for master collation status if it not exist yet
+                let current_collation_state = guard.states.entry(shard_id).or_default();
+                if !mc_collation_state_exist {
+                    current_collation_state.status = CollationStatus::WaitForMasterStatus;
+
+                    return NextCollationStep::WaitForMasterStatus;
+                } else {
+                    current_collation_state.status = CollationStatus::AttemptsInProgress;
+
+                    shards_to_resume_attempts.push(shard_id);
+                }
             }
 
             if shard_id.is_masterchain() {
@@ -2013,6 +2055,8 @@ where
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
+            hard_forced_for_all,
+            forced_in_current_shard,
             mc_block_min_interval_ms,
             next_mc_block_chain_time,
             "Master block collation forced or interval exceeded in every shard - \
@@ -2028,6 +2072,9 @@ where
         // because anyway we will collate master block
         // on current exit from this method
         Self::renew_mc_block_latest_chain_time(guard, next_mc_block_chain_time);
+
+        // drop "forced for all" flag if we decided to collate master
+        guard.mc_collation_forced_for_all = false;
 
         NextCollationStep::CollateMaster(next_mc_block_chain_time)
     }
