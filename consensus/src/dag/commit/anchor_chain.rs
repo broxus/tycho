@@ -36,6 +36,11 @@ impl AnchorChain {
     pub fn undo_next(&mut self, next: EnqueuedAnchor) {
         self.queue.push_front(next);
     }
+
+    pub fn drop_upto(&mut self, new_bottom_round: Round) {
+        self.queue
+            .retain(|enq| enq.anchor.round() >= new_bottom_round);
+    }
 }
 
 impl AltFormat for EnqueuedAnchor {}
