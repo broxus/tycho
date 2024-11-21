@@ -37,6 +37,8 @@ pub(super) struct ActiveCollator<C> {
 pub(super) struct CollationSyncState {
     /// Latest known chain time for master block: last imported or next to be collated
     pub mc_block_latest_chain_time: u64,
+    /// Master block collation is forced for all shards anyway
+    pub mc_collation_forced_for_all: bool,
     pub states: FastHashMap<ShardIdent, CollationState>,
 }
 

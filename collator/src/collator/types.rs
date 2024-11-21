@@ -1358,3 +1358,16 @@ pub struct FinalResult {
     pub create_queue_diff_elapsed: Duration,
     pub apply_queue_diff_elapsed: Duration,
 }
+
+#[derive(Debug)]
+pub enum ForceMasterCollation {
+    No,
+    ByUncommittedChain,
+    ByAnchorImportSkipped,
+    ByUprocessedMessages,
+}
+impl ForceMasterCollation {
+    pub fn is_forced(&self) -> bool {
+        !matches!(self, Self::No)
+    }
+}
