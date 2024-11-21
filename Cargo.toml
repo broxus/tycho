@@ -97,11 +97,11 @@ tarpc = { version = "0.34", features = [
 ] }
 tempfile = "3.10"
 thiserror = "1.0"
-tikv-jemallocator = { version = "0.5", features = [
+tikv-jemallocator = { version = "0.6.0", features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ] }
-tikv-jemalloc-ctl = { version = "0.5" }
+tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 tl-proto = "0.4"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.15"
@@ -133,6 +133,9 @@ tycho-network = { path = "./network", version = "0.1.4" }
 tycho-rpc = { path = "./rpc", version = "0.1.4" }
 tycho-storage = { path = "./storage", version = "0.1.4" }
 tycho-util = { path = "./util", version = "0.1.4" }
+
+[patch.crates-io]
+weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", branch = "next-rocksdb" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

@@ -491,6 +491,7 @@ impl CellStorage {
         drop(stack);
 
         // Write transaction to the `WriteBatch`
+        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time");
         let total = transaction.len();
         for (key, CellState { removes, .. }) in transaction {
             self.raw_cells_cache.remove_refs(key, removes);
