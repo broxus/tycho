@@ -125,7 +125,7 @@ impl Producer {
 
     fn includes(finished_dag_round: &DagRound, key_pair: &KeyPair) -> Vec<PointInfo> {
         let round = finished_dag_round.round();
-        let includes = Self::references(round, finished_dag_round, Some(key_pair));
+        let includes = Self::references(round, finished_dag_round, Some(key_pair), true);
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
             "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
@@ -146,7 +146,7 @@ impl Producer {
             return Vec::new();
         };
         // have to make additional signatures because there still may be spawned tasks to Signer
-        let references = Self::references(round, &witness_round, key_pair);
+        let references = Self::references(round, &witness_round, key_pair, false);
         let Some(includes) = last_own_point
             .filter(|l| l.round == round)
             .map(|l| &l.includes)
@@ -169,6 +169,7 @@ impl Producer {
         round: Round,
         dag_round: &DagRound,
         key_pair: Option<&KeyPair>,
+        include_certified: bool,
     ) -> Vec<PointInfo> {
         let mut last_references = Vec::new();
         let mut references = dag_round
@@ -176,14 +177,17 @@ impl Producer {
                 loc.state
                     .signable()
                     .and_then(|signable| match signable.signed() {
-                        Some(sig) if sig.is_ok() => {
-                            signable.first_completed.valid().map(|v| v.info.clone())
+                        Some(Ok(_sig)) => signable.first_completed.valid().map(|v| v.info.clone()),
+                        _ if include_certified
+                            && signable.first_completed.certified().is_some() =>
+                        {
+                            signable.first_completed.certified().map(|v| v.info.clone())
                         }
                         None if key_pair.is_some() => {
                             last_references.push(loc.state.clone());
                             None
                         }
-                        Some(_) | None => None,
+                        Some(Err(_)) | None => None,
                     })
             })
             .collect::<Vec<_>>();
@@ -199,10 +203,8 @@ impl Producer {
                 state.signable().and_then(|signable| {
                     signable.sign(round, key_pair);
                     match signable.signed() {
-                        Some(sig) if sig.is_ok() => {
-                            signable.first_completed.valid().map(|v| v.info.clone())
-                        }
-                        Some(_) | None => None,
+                        Some(Ok(_sig)) => signable.first_completed.valid().map(|v| v.info.clone()),
+                        Some(Err(_)) | None => None,
                     }
                 })
             })

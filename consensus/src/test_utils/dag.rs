@@ -74,7 +74,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
-                .map(|p| p.into_valid().expect("must be trusted"))
+                .map(|p| p.valid().cloned().expect("must be trusted"))
                 .map(|p| p.info)
                 .next()
         })

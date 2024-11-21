@@ -36,7 +36,7 @@ pub fn set_print_panic_hook(with_exit: bool) {
             if with_exit {
                 std::io::stderr().flush().ok();
                 std::io::stdout().flush().ok();
-                #[allow(clippy::exit)]
+                #[allow(clippy::exit, reason = "requires 'test' feature")]
                 std::process::exit(1);
             }
         }

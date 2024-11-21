@@ -54,7 +54,7 @@ impl AnchorStage {
     }
 
     fn role(round: Round) -> Option<AnchorStageRole> {
-        #[allow(clippy::match_same_arms)]
+        #[allow(clippy::match_same_arms, reason = "comments")]
         match round.0 % WAVE_ROUNDS {
             0 => None, // anchor candidate (surprisingly, nothing special about this point)
             1 => Some(AnchorStageRole::Proof),

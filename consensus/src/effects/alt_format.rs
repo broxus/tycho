@@ -83,8 +83,11 @@ impl Display for AltFmt<'_, DagPoint> {
         f.write_str(match AltFormat::unpack(self) {
             DagPoint::Trusted(_) => "Trusted",
             DagPoint::Suspicious(_) => "Suspicious",
+            DagPoint::Certified(_) => "Certified",
+            DagPoint::Invalid(cert) if cert.is_certified => "Invalid(certified)",
             DagPoint::Invalid(_) => "Invalid",
             DagPoint::IllFormed(_) => "IllFormed",
+            DagPoint::NotFound(cert) if cert.is_certified => "NotFound(certified)",
             DagPoint::NotFound(_) => "NotFound",
         })
     }

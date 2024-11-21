@@ -63,7 +63,7 @@ impl InclusionState {
                 first_completed: first_completed.clone(),
                 signed: OnceLock::new(),
             };
-            if first_completed.trusted().is_some() {
+            if first_completed.trusted().is_some() || first_completed.certified().is_some() {
                 if let Some(dag_round) = self.0.parent.upgrade() {
                     dag_round.threshold().add();
                 }

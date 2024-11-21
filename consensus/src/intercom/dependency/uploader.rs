@@ -65,7 +65,7 @@ impl Uploader {
         let ready = found.and_then(|shared| shared.now_or_never());
 
         let level = if let Some(dag_point) = ready.as_ref() {
-            if dag_point.trusted().is_some() {
+            if dag_point.valid().is_some() {
                 // just fine
                 tracing::Level::TRACE
             } else {
@@ -92,7 +92,7 @@ impl Uploader {
         );
         match ready {
             Some(dag_point) => {
-                if dag_point.trusted().is_some() {
+                if dag_point.valid().is_some() {
                     Some(SearchStatus::Found)
                 } else {
                     Some(SearchStatus::None)
@@ -110,7 +110,7 @@ impl Uploader {
         effects: &Effects<EngineContext>,
     ) -> Option<SearchStatus> {
         let status = store.get_status(point_id.round, &point_id.digest)?;
-        let result = if status.is_trusted || status.is_certified {
+        let result = if status.is_valid || status.is_trusted || status.is_certified {
             Some(SearchStatus::Found)
         } else {
             None

@@ -19,7 +19,7 @@ use crate::effects::{
 };
 use crate::engine::Genesis;
 use crate::intercom::{DownloadResult, Downloader};
-use crate::models::{DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
+use crate::models::{Cert, DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -135,7 +135,6 @@ impl DagPointFuture {
 
         let (certified_tx, certified_rx) = oneshot::channel();
         let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
-        let once_certified_tx_clone = once_certified_tx.clone();
 
         let task = async move {
             let point_id = point.id();
@@ -161,7 +160,6 @@ impl DagPointFuture {
             };
             let status = PointStatus {
                 is_validated: true,
-                is_certified: !once_certified_tx_clone.has_value(),
                 ..dag_point.basic_status()
             };
             tokio::task::spawn_blocking(move || {
@@ -225,7 +223,9 @@ impl DagPointFuture {
             let stored = tokio::task::spawn_blocking({
                 let store = store.clone();
                 move || match store.get_status(point_id.round, &point_id.digest) {
-                    Some(status) if status.is_trusted || status.is_certified => {
+                    Some(status)
+                        if status.is_trusted || (status.is_valid && status.is_certified) =>
+                    {
                         // should be often on reboot
                         let info = store
                             .get_info(point_id.round, point_id.digest)
@@ -237,7 +237,10 @@ impl DagPointFuture {
                         let info = store
                             .get_info(point_id.round, point_id.digest)
                             .expect("info by status must exist in DB");
-                        Some(Err(DagPoint::Invalid(info)))
+                        Some(Err(DagPoint::Invalid(Cert {
+                            inner: info,
+                            is_certified: status.is_certified,
+                        })))
                     }
                     Some(status) if status.is_ill_formed => {
                         Some(Err(DagPoint::IllFormed(Arc::new(point_id))))
@@ -286,7 +289,12 @@ impl DagPointFuture {
                             .expect("db store ill-formed download");
                             return DagPoint::IllFormed(Arc::new(point_id));
                         }
-                        None => return DagPoint::NotFound(Arc::new(point_id)),
+                        None => {
+                            return DagPoint::NotFound(Cert {
+                                inner: Arc::new(point_id),
+                                is_certified: once_certified_tx_clone.take().is_none(),
+                            })
+                        }
                     };
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();
@@ -334,7 +342,6 @@ impl DagPointFuture {
             };
             let status = PointStatus {
                 is_validated: true,
-                is_certified: !once_certified_tx_clone.has_value(), // it may come from next point
                 ..dag_point.basic_status()
             };
             tokio::task::spawn_blocking(move || {
@@ -387,9 +394,7 @@ impl DagPointFuture {
         if let DagPointFutureType::Validate { certified, .. }
         | DagPointFutureType::Load { certified, .. } = &self.0
         {
-            // FIXME limit dependencies by COMMIT_ROUNDS (including bottom, excluding this as top)
             if let Some(oneshot) = certified.take() {
-                // TODO store status when taken or follow only in-mem recursion?
                 // receiver is dropped upon completion
                 _ = oneshot.send(());
             }
