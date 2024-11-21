@@ -1,7 +1,7 @@
 use bytesize::ByteSize;
 use weedb::rocksdb::{
-    BlockBasedIndexType, BlockBasedOptions, DBCompressionType, DataBlockIndexType, MergeOperands,
-    Options, ReadOptions, SliceTransform,
+    BlockBasedIndexType, BlockBasedOptions, CompactionPri, DBCompressionType, DataBlockIndexType,
+    MemtableFactory, MergeOperands, Options, ReadOptions, SliceTransform,
 };
 use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
@@ -232,12 +232,25 @@ impl ColumnFamilyOptions<Caches> for Cells {
         opts.set_compaction_filter("cell_compaction", refcount::compaction_filter);
 
         // optimize for bulk inserts and single writer
-        opts.set_max_write_buffer_number(6); // 6 * 512MB = 3GB for write buffers
+        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB
         opts.set_min_write_buffer_number_to_merge(2); // allow early flush
         opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
 
-        // try to do more merges in memory
-        opts.set_max_successive_merges(100);
+        opts.set_max_successive_merges(0); // it will eat cpu, we are doing first merge in hashmap anyway.
+
+        // - Write batch size: 500K entries
+        // - Entry size: ~244 bytes (32 SHA + 8 seq + 192 value + 12 overhead)
+        // - Memtable size: 512MB
+
+        // 1. Entries per memtable = 512MB / 244B ≈ 2.2M entries
+        // 2. Target bucket load factor = 10-12 entries per bucket (RocksDB recommendation)
+        // 3. Bucket count = entries / target_load = 2.2M / 11 ≈ 200K
+        opts.set_memtable_factory(MemtableFactory::HashLinkList {
+            bucket_count: 200_000,
+        });
+
+        opts.set_memtable_prefix_bloom_ratio(0.1); // we use hash-based memtable so bloom filter is not that useful
+        opts.set_bloom_locality(1); // Optimize bloom filter locality
 
         let mut block_factory = BlockBasedOptions::default();
 
@@ -252,7 +265,7 @@ impl ColumnFamilyOptions<Caches> for Cells {
 
         // to match fs block size
         block_factory.set_block_size(4096);
-        block_factory.set_format_version(5);
+        block_factory.set_format_version(6);
 
         // we have 4096 / 256 = 16 keys per block, so binary search is enough
         block_factory.set_data_block_index_type(DataBlockIndexType::BinarySearch);
@@ -261,16 +274,17 @@ impl ColumnFamilyOptions<Caches> for Cells {
         block_factory.set_pin_l0_filter_and_index_blocks_in_cache(true);
 
         opts.set_block_based_table_factory(&block_factory);
+        opts.set_prefix_extractor(SliceTransform::create_noop());
 
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
-        opts.set_memtable_prefix_bloom_ratio(0.1);
+        opts.set_memtable_whole_key_filtering(true);
+        opts.set_memtable_prefix_bloom_ratio(0.25);
 
         opts.set_compression_type(DBCompressionType::None);
 
-        opts.set_level_zero_file_num_compaction_trigger(8); // flush L0 as soon as possible
+        opts.set_compaction_pri(CompactionPri::OldestSmallestSeqFirst);
+        opts.set_level_zero_file_num_compaction_trigger(8);
+
         opts.set_target_file_size_base(512 * 1024 * 1024); // smaller files for more efficient GC
-        opts.set_max_background_jobs(16);
-        opts.set_max_subcompactions(4);
 
         opts.set_max_bytes_for_level_base(4 * 1024 * 1024 * 1024); // 4GB per level
         opts.set_max_bytes_for_level_multiplier(8.0);
@@ -305,8 +319,17 @@ impl ColumnFamilyOptions<Caches> for Cells {
         opts.set_enable_write_thread_adaptive_yield(false);
         opts.set_allow_concurrent_memtable_write(false);
         opts.set_enable_pipelined_write(true);
-        opts.set_inplace_update_support(true);
+        opts.set_inplace_update_support(false);
         opts.set_unordered_write(true); // we don't use snapshots
+        opts.set_avoid_unnecessary_blocking_io(true); // schedule unnecessary IO in background;
+
+        opts.set_auto_tuned_ratelimiter(
+            256 * 1024 * 1024, // 256MB/s base rate
+            100_000,           // 100ms refill (standard value)
+            10,                // fairness (standard value)
+        );
+
+        opts.set_periodic_compaction_seconds(3600 * 24); // force compaction once a day
     }
 }
 
