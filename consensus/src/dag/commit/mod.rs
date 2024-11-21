@@ -14,6 +14,11 @@ use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{CachedConfig, Genesis};
 use crate::models::{AnchorData, AnchorStageRole, Round};
 
+enum SyncError {
+    TryLater,
+    Impossible(Round),
+}
+
 pub struct Committer {
     dag: DagBack,
     // from the oldest to the current round; newer ones are in the future;
@@ -50,12 +55,32 @@ impl Committer {
         self.dag.bottom_round()
     }
 
+    pub fn dag_len(&self) -> usize {
+        self.dag.len()
+    }
+
     /// returns new bottom after gap if it was moved, and `None` if no gap occurred
     pub fn extend_from_ahead(&mut self, rounds: &[DagRound]) {
         self.dag.extend_from_front(rounds);
     }
 
-    pub fn commit(&mut self) -> Vec<AnchorData> {
+    /// returns new full history bottom
+    /// as `Ok` if successfully dropped all given range, otherwise as `Err`
+    pub fn drop_upto(&mut self, new_bottom_round: Round) -> Result<Round, Round> {
+        // cannot leave dag empty
+        let actual_bottom = new_bottom_round.min(self.dag.top().round());
+        self.dag.drop_upto(actual_bottom);
+        self.anchor_chain.drop_upto(actual_bottom);
+        self.full_history_bottom =
+            Round((actual_bottom.0).saturating_add(CachedConfig::commit_history_rounds()));
+        if actual_bottom == new_bottom_round {
+            Ok(self.full_history_bottom)
+        } else {
+            Err(self.full_history_bottom)
+        }
+    }
+
+    pub fn commit(&mut self) -> Result<Vec<AnchorData>, Round> {
         // may run for long several times in a row and commit nothing, because of missed points
         let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
 
@@ -65,7 +90,7 @@ impl Committer {
         self.commit_up_to(current_round)
     }
 
-    fn commit_up_to(&mut self, current_round: Round) -> Vec<AnchorData> {
+    fn commit_up_to(&mut self, current_round: Round) -> Result<Vec<AnchorData>, Round> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -78,7 +103,7 @@ impl Committer {
         // * * otherwise: breaks the chain, so that only its prefix can be committed
         // * in anchor history: cancels current commit and the latter anchor chain
 
-        self.enqueue_new_anchors(current_round);
+        self.enqueue_new_anchors(current_round)?;
 
         let _span = if let Some(top) = self.anchor_chain.top() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
@@ -92,13 +117,13 @@ impl Committer {
             )
             .entered()
         } else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
         self.dequeue_anchors()
     }
 
-    fn enqueue_new_anchors(&mut self, current_round: Round) {
+    fn enqueue_new_anchors(&mut self, current_round: Round) -> Result<(), Round> {
         // some state may have restored from db or resolved from download
 
         // take all ready triggers, skipping not ready ones
@@ -107,7 +132,7 @@ impl Committer {
                 .top_proof_round()
                 .unwrap_or(self.dag.bottom_round()),
             current_round,
-        );
+        )?;
 
         if let Some(last_trigger) = triggers.back() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
@@ -119,15 +144,19 @@ impl Committer {
         // if chain is broken - take the prefix until first gap
 
         for trigger in triggers {
-            // update for each trigger
-            let Some(last_proof_round) = (self.anchor_chain.top_proof_round())
-                // init chain after each gap
-                .or_else(|| self.dag.last_unusable_proof_round(&trigger))
-            else {
-                return; // cannot init
+            let last_proof_round = match self.anchor_chain.top_proof_round() {
+                Some(top_proof_round) => top_proof_round,
+                None => match self.dag.last_unusable_proof_round(&trigger) {
+                    // init chain after each gap
+                    Ok(last_unusable_proof_round) => last_unusable_proof_round,
+                    Err(SyncError::TryLater) => return Ok(()), // cannot init
+                    Err(SyncError::Impossible(round)) => return Err(round),
+                },
             };
-            let Some(chain_part) = self.dag.anchor_chain(last_proof_round, &trigger) else {
-                break; // some dag point future is not yet resolved
+            let chain_part = match self.dag.anchor_chain(last_proof_round, &trigger) {
+                Ok(chain_part) => chain_part,
+                Err(SyncError::TryLater) => break, // some dag point future is not yet resolved
+                Err(SyncError::Impossible(round)) => return Err(round),
             };
             for next in chain_part {
                 if let Some(back) = self.anchor_chain.top() {
@@ -140,29 +169,32 @@ impl Committer {
                 self.anchor_chain.enqueue(next);
             }
         }
+        Ok(())
     }
 
-    fn dequeue_anchors(&mut self) -> Vec<AnchorData> {
+    fn dequeue_anchors(&mut self) -> Result<Vec<AnchorData>, Round> {
         let mut ordered = Vec::new();
 
         // tracing::warn!("anchor_chain {:?}", self.anchor_chain.alt());
 
         while let Some(next) = self.anchor_chain.next() {
             // in case previous anchor was triggered directly - rounds are already dropped
-            self.dag.drain_upto(Round(
+            self.dag.drop_upto(Round(
                 (next.anchor.round().0).saturating_sub(CachedConfig::commit_history_rounds()),
             ));
-            let Some(uncommitted) = self
+            let uncommitted = match self
                 .dag
                 .gather_uncommitted(self.full_history_bottom, &next.anchor)
-            else {
-                // tracing::warn!(
-                //     "undo anchor {:?}, {:?}",
-                //     next.anchor.id().alt(),
-                //     &self.dag.alt()
-                // );
-                self.anchor_chain.undo_next(next);
-                break; // will continue at the next call if now some point isn't ready
+            {
+                Ok(uncommitted) => uncommitted,
+                Err(SyncError::TryLater) => {
+                    self.anchor_chain.undo_next(next);
+                    break; // will continue at the next call if now some point isn't ready
+                }
+                Err(SyncError::Impossible(round)) => {
+                    self.anchor_chain.undo_next(next);
+                    return Err(round);
+                }
             };
 
             match self
@@ -206,7 +238,7 @@ impl Committer {
                 history: committed,
             });
         }
-        ordered
+        Ok(ordered)
     }
 }
 
@@ -423,9 +455,13 @@ mod test {
 
     fn commit(committer: &mut Committer, up_to: Option<Round>) -> Vec<AnchorData> {
         let committed = if let Some(up_to) = up_to {
-            committer.commit_up_to(up_to)
+            committer
+                .commit_up_to(up_to)
+                .expect("no certified NotFound or Invalid points")
         } else {
-            committer.commit()
+            committer
+                .commit()
+                .expect("no certified NotFound or Invalid points")
         };
         for data in &committed {
             println!("anchor {:?}", data.anchor.id().alt());

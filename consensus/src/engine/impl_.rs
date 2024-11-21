@@ -398,21 +398,60 @@ fn committer_task(
     round_effects: Effects<EngineContext>,
 ) -> JoinHandle<Committer> {
     tokio::task::spawn_blocking(move || {
-        if let Some(full_history_bottom) = full_history_bottom {
+        // may run for long several times in a row and commit nothing, because of missed points
+        let _span = round_effects.span().enter();
+
+        let mut committed = None;
+        let mut new_full_history_bottom = None;
+
+        let start_bottom = committer.bottom_round();
+        let start_dag_len = committer.dag_len();
+
+        for attempt in 0.. {
+            match committer.commit() {
+                Ok(data) => {
+                    committed = Some(data);
+                    break;
+                }
+                Err(round) => {
+                    let result = committer.drop_upto(round.next());
+                    new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
+                    tracing::info!(
+                        ?start_bottom,
+                        start_dag_len,
+                        current_bottom = ?committer.bottom_round(),
+                        current_dag_len = committer.dag_len(),
+                        attempt,
+                        "comitter rounds were dropped as impossible to sync"
+                    );
+                    if result.is_err() {
+                        break;
+                    } else if attempt > start_dag_len {
+                        panic!(
+                            "infinite loop on dropping dag rounds: \
+                             start dag len {start_dag_len}, start bottom {start_bottom:?} \
+                             resulting {:?}",
+                            committer.alt()
+                        )
+                    };
+                }
+            }
+        }
+
+        if let Some(new_bottom) = new_full_history_bottom.or(full_history_bottom) {
             committed_info_tx
-                .send(MempoolOutput::NewStartAfterGap(full_history_bottom)) // not recoverable
+                .send(MempoolOutput::NewStartAfterGap(new_bottom)) // not recoverable
                 .expect("Failed to send anchor history info to mpsc channel");
-        };
+        }
 
-        let committed = committer.commit();
-
-        round_effects.log_committed(&committed);
-
-        for data in committed {
-            round_effects.commit_metrics(&data.anchor);
-            committed_info_tx
-                .send(MempoolOutput::NextAnchor(data)) // not recoverable
-                .expect("Failed to send anchor history info to mpsc channel");
+        if let Some(committed) = committed {
+            round_effects.log_committed(&committed);
+            for data in committed {
+                round_effects.commit_metrics(&data.anchor);
+                committed_info_tx
+                    .send(MempoolOutput::NextAnchor(data)) // not recoverable
+                    .expect("Failed to send anchor history info to mpsc channel");
+            }
         }
 
         committer

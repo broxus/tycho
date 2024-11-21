@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::convert::identity;
 use std::ops::Bound;
 use std::sync::atomic;
 use std::{array, mem};
@@ -9,10 +8,13 @@ use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
 
+use crate::dag::commit::SyncError;
 use crate::dag::{DagRound, EnqueuedAnchor};
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{CachedConfig, Genesis};
-use crate::models::{AnchorStageRole, Digest, Link, PointId, PointInfo, Round, ValidPoint};
+use crate::models::{
+    AnchorStageRole, DagPoint, Digest, Link, PointId, PointInfo, Round, ValidPoint,
+};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -41,8 +43,6 @@ impl DagBack {
         }
     }
 
-    #[cfg(feature = "test")]
-    #[allow(dead_code, reason = "false positive as used inside macro call only")]
     pub fn len(&self) -> usize {
         self.assert_len();
         self.rounds.len()
@@ -102,29 +102,25 @@ impl DagBack {
         );
     }
 
-    pub fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
-        // strictly `COMMIT_ROUNDS` will precede the current one, which is +1 to the new length
-        // let new_bottom_round = Round((current.0).saturating_sub(MempoolConfig::COMMIT_ROUNDS as u32));
-
-        let bottom_round = self.bottom_round(); // assures that dag is contiguous
-        let amount = new_bottom_round.0.saturating_sub(bottom_round.0) as usize;
-        let mut result = Vec::with_capacity(amount);
-
+    pub fn drop_upto(&mut self, new_bottom_round: Round) {
         // TODO use `std::cmp::Reverse` for keys + `BTreeMap::split_off()`; this will also make
-        // order of rounds in DagBack same as in DagFront: newer in back and older in front
+        //   order of rounds in DagBack same as in DagFront: newer in back and older in front
         while let Some(entry) = self.rounds.first_entry() {
             if *entry.key() < new_bottom_round {
-                result.push(entry.remove());
+                entry.remove();
             } else {
                 break;
             }
         }
-        result
     }
 
     /// not yet used commit triggers in historical order;
     /// `last_proof_round` allows to continue chain from its end
-    pub fn triggers(&self, last_proof_round_or_bottom: Round, up_to: Round) -> VecDeque<PointInfo> {
+    pub(super) fn triggers(
+        &self,
+        last_proof_round_or_bottom: Round,
+        up_to: Round,
+    ) -> Result<VecDeque<PointInfo>, Round> {
         let mut triggers = VecDeque::new();
         // let mut string = String::new();
         let rev_iter = self
@@ -143,19 +139,24 @@ impl DagBack {
             if stage.is_used.load(atomic::Ordering::Relaxed) {
                 break;
             };
-            if let Some(trigger) =
-                Self::any_ready_valid_point(dag_round, &stage.leader /* , &mut string */)
-            {
-                // iter is from newest to oldest, restore historical order
-                triggers.push_front(trigger.info);
+            match Self::any_ready_valid_point(dag_round, &stage.leader) {
+                Ok(trigger) => {
+                    // iter is from newest to oldest, restore historical order
+                    triggers.push_front(trigger.info);
+                }
+                Err(SyncError::TryLater) => {} // skip
+                Err(SyncError::Impossible(round)) => return Err(round),
             }
         }
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
 
-        triggers
+        Ok(triggers)
     }
 
-    pub fn last_unusable_proof_round(&self, trigger: &PointInfo) -> Option<Round> {
+    pub(super) fn last_unusable_proof_round(
+        &self,
+        trigger: &PointInfo,
+    ) -> Result<Round, SyncError> {
         // anchor chain is not init yet, and exactly anchor trigger or proof is at the bottom -
         // dag cannot contain corresponding anchor candidate
 
@@ -163,7 +164,7 @@ impl DagBack {
         let mut last_proof = trigger.anchor_id(AnchorStageRole::Proof);
 
         if last_proof.round <= bottom_round {
-            return Some(last_proof.round);
+            return Ok(last_proof.round);
         };
 
         // iter for proof->candidate->proof chain
@@ -216,7 +217,7 @@ impl DagBack {
             };
 
             let Some((_, anchor_dag_round)) = rev_iter.next() else {
-                return Some(proof.round());
+                return Ok(proof.round());
             };
 
             assert_eq!(
@@ -237,18 +238,18 @@ impl DagBack {
             last_proof = anchor.anchor_id(AnchorStageRole::Proof);
 
             if last_proof.round <= bottom_round {
-                return Some(last_proof.round);
+                return Ok(last_proof.round);
             };
         }
         unreachable!("iter exhausted, last unusable proof not found")
     }
 
     // Some contiguous part of anchor chain in historical order; None in case of a gap
-    pub fn anchor_chain(
+    pub(super) fn anchor_chain(
         &self,
         last_proof_round: Round,
         trigger: &PointInfo,
-    ) -> Option<VecDeque<EnqueuedAnchor>> {
+    ) -> Result<VecDeque<EnqueuedAnchor>, SyncError> {
         assert_eq!(
             trigger.anchor_link(AnchorStageRole::Trigger),
             &Link::ToSelf,
@@ -261,7 +262,7 @@ impl DagBack {
             // so this proof is already in chain with `direct_trigger: None`
             // this proof can even be the last element in chain, as those next trigger and proof
             // still wait for corresponding anchor point future to resolve
-            return Some(VecDeque::new());
+            return Ok(VecDeque::new());
         }
 
         let mut rev_iter = self
@@ -310,7 +311,7 @@ impl DagBack {
                             lookup_proof_id.alt()
                         );
                         // reached already committed proof, so dag is contiguous
-                        return Some(result);
+                        return Ok(result);
                     }
                 }
                 _ => panic!(
@@ -373,11 +374,15 @@ impl DagBack {
             });
         }
 
-        let linked_to_proof_round = result.front()?.anchor.anchor_round(AnchorStageRole::Proof);
+        let linked_to_proof_round = result
+            .front()
+            .ok_or(SyncError::TryLater)?
+            .anchor
+            .anchor_round(AnchorStageRole::Proof);
         if linked_to_proof_round <= last_proof_round {
-            Some(result)
+            Ok(result)
         } else {
-            None
+            Err(SyncError::TryLater)
         }
     }
 
@@ -385,11 +390,11 @@ impl DagBack {
     /// `None` is a signal to break whole assembled commit chain and retry later
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
-    pub fn gather_uncommitted(
+    pub(super) fn gather_uncommitted(
         &self,
         full_history_bottom: Round,
         anchor: &PointInfo, // @ r+1
-    ) -> Option<VecDeque<ValidPoint>> {
+    ) -> Result<VecDeque<ValidPoint>, SyncError> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
             if to.is_empty() {
                 *to = from.clone();
@@ -461,35 +466,37 @@ impl DagBack {
                 self.alt(),
             );
         }
-        Some(uncommitted)
+        Ok(uncommitted)
     }
 
     fn any_ready_valid_point(
         dag_round: &DagRound,
         author: &PeerId,
-        // _string: &mut String,
-    ) -> Option<ValidPoint> {
+    ) -> Result<ValidPoint, SyncError> {
         dag_round
             .view(author, |loc| {
                 loc.versions
                     .values()
                     // better try later than wait now if some point is still downloading
-                    .filter_map(|version| {
-                        version.clone().now_or_never()
-                        // TODO log target for commit logic debug
-                        // let b = if a.is_some() { "ready" } else { "noone" };
-                        // string.push_str(&format!(
-                        //     "{} @ {} # {} : {b};",
-                        //     author.alt(),
-                        //     dag_round.round().0,
-                        //     digest.alt()
-                        // ));
-                        // a
-                    })
+                    .filter_map(|version| version.clone().now_or_never())
                     // take any suitable
-                    .find_map(move |dag_point| dag_point.into_valid())
+                    .find_map(move |dag_point| match dag_point {
+                        DagPoint::Trusted(valid)
+                        | DagPoint::Suspicious(valid)
+                        | DagPoint::Certified(valid) => Some(Ok(valid)),
+                        DagPoint::Invalid(cert) if cert.is_certified => {
+                            Some(Err(SyncError::Impossible(cert.inner.round())))
+                        }
+                        DagPoint::NotFound(cert) if cert.is_certified => {
+                            Some(Err(SyncError::Impossible(cert.inner.round)))
+                        }
+                        DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
+                            None
+                        }
+                    })
             })
             .flatten()
+            .unwrap_or(Err(SyncError::TryLater))
     }
 
     // needed only in commit where all points are validated and stored in DAG
@@ -499,44 +506,33 @@ impl DagBack {
         author: &PeerId,
         digest: &Digest,
         point_kind: &'static str,
-    ) -> Option<ValidPoint> {
-        dag_round
-            .view(author, |loc| {
-                loc.versions.get(digest).cloned()
-                // if a.is_none() {
-                //     tracing::warn!(
-                //         "!! NO DIGEST {} @ {} # {}",
-                //         author.alt(),
-                //         digest.alt(),
-                //         dag_round.round().0
-                //     );
-                // };
-                // a
-            })
-            // .expect("author")
-            .and_then(identity) // flatten result
-            .and_then(|fut| {
-                fut.now_or_never()
-                // if a.is_none() {
-                //     tracing::warn!(
-                //         "!! NEVER {} @ {} # {}",
-                //         author.alt(),
-                //         digest.alt(),
-                //         dag_round.round().0
-                //     );
-                // };
-                // a
-            })
-            .map(|dag_point| dag_point.into_valid().ok_or("is not valid"))
-            .transpose()
-            .unwrap_or_else(|msg| {
+    ) -> Result<ValidPoint, SyncError> {
+        let Some(dag_point) = dag_round
+            .view(author, |loc| loc.versions.get(digest).cloned()) // not yet created
+            .flatten()
+            .and_then(|p| p.now_or_never())
+        else {
+            return Err(SyncError::TryLater);
+        }; // not yet resolved;
+        match dag_point {
+            DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) | DagPoint::Certified(valid) => {
+                Ok(valid)
+            }
+            DagPoint::Invalid(cert) if cert.is_certified => {
+                Err(SyncError::Impossible(cert.inner.round()))
+            }
+            DagPoint::NotFound(cert) if cert.is_certified => {
+                Err(SyncError::Impossible(cert.inner.round))
+            }
+            dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
                 let point_id = PointId {
                     author: *author,
                     round: dag_round.round(),
                     digest: *digest,
                 };
-                panic!("{point_kind} {msg}: {:?}", point_id.alt())
-            })
+                panic!("{point_kind} {}: {:?}", dp.alt(), point_id.alt())
+            }
+        }
     }
 }
 
