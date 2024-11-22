@@ -74,16 +74,26 @@ impl ShardStateStorage {
         &self.min_ref_mc_state
     }
 
-    pub async fn store_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<bool> {
+    pub async fn store_state(
+        &self,
+        handle: &BlockHandle,
+        state: &ShardStateStuff,
+        hint: StoreStateHint,
+    ) -> Result<bool> {
         if handle.id() != state.block_id() {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        self.store_state_root(handle, state.root_cell().clone())
+        self.store_state_root(handle, state.root_cell().clone(), hint)
             .await
     }
 
-    pub async fn store_state_root(&self, handle: &BlockHandle, root_cell: Cell) -> Result<bool> {
+    pub async fn store_state_root(
+        &self,
+        handle: &BlockHandle,
+        root_cell: Cell,
+        hint: StoreStateHint,
+    ) -> Result<bool> {
         if handle.has_state() {
             return Ok(false);
         }
@@ -105,17 +115,25 @@ impl ShardStateStorage {
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
+            let estimated_merkle_update_size = hint.estimate_cell_count();
 
-            let mut batch = rocksdb::WriteBatch::default();
+            let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
+            let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
-            let (pending_op, new_cell_count) = cell_storage.store_cell(&mut batch, root_cell)?;
+            let (pending_op, new_cell_count) =
+                cell_storage.store_cell(&mut batch, root_cell, estimated_merkle_update_size)?;
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
+            metrics::histogram!("tycho_storage_state_update_size_bytes")
+                .record(batch.size_in_bytes() as f64);
+            metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
+                .record(estimated_update_size_bytes as f64);
+
             raw_db.write(batch)?;
 
             // Ensure that pending operation guard is dropped after the batch is written
@@ -222,11 +240,10 @@ impl ShardStateStorage {
                 let db = self.db.clone();
                 let cell_storage = self.cell_storage.clone();
                 let key = key.to_vec();
-                let mut batch = rocksdb::WriteBatch::default();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let (pending_op, stats) =
-                        cell_storage.remove_cell(&mut batch, &alloc, &root_hash)?;
+                    let (pending_op, stats, mut batch) =
+                        cell_storage.remove_cell(&alloc, &root_hash)?;
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
@@ -364,6 +381,23 @@ impl ShardStateStorage {
         iter.seek_to_first();
 
         Ok(iter.key().map(BlockId::from_slice))
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct StoreStateHint {
+    pub block_data_size: Option<usize>,
+}
+
+impl StoreStateHint {
+    fn estimate_cell_count(&self) -> usize {
+        const MIN_BLOCK_SIZE: usize = 4 << 10; // 4 KB
+
+        let block_data_size = self.block_data_size.unwrap_or(MIN_BLOCK_SIZE);
+
+        // y = 3889.9821 + 14.7480 × √x
+        // R-squared: 0.7035
+        ((3889.9821 + 14.7480 * (block_data_size as f64).sqrt()) as usize).next_power_of_two()
     }
 }
 

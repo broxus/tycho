@@ -69,7 +69,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &master_state_stuff)
+        .store_state(&handle, &master_state_stuff, Default::default())
         .await?;
 
     // first master block
@@ -142,7 +142,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
 
         storage
             .shard_state_storage()
-            .store_state(&handle, &shard_state_stuff)
+            .store_state(&handle, &shard_state_stuff, Default::default())
             .await?;
     }
 

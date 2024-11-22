@@ -411,7 +411,7 @@ impl StarterInner {
                 });
 
             let stored = state_storage
-                .store_state(&handle, &state)
+                .store_state(&handle, &state, Default::default())
                 .await
                 .with_context(|| {
                     format!("failed to import zerostate for {}", state.block_id().shard)
