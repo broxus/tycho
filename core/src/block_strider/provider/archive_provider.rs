@@ -61,6 +61,10 @@ impl ArchiveBlockProvider {
         }
     }
 
+    pub async fn clear(&self) {
+        self.inner.clear_known_archives().await;
+    }
+
     async fn get_next_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
         const MAX_OVERLAP_BLOCKS: u32 = 5;
 
@@ -100,10 +104,6 @@ impl ArchiveBlockProvider {
                     }
                     Ok(None) => {
                         tracing::info!("archive block provider finished");
-
-                        // Clear archives cache
-                        this.clear_known_archives().await;
-
                         break 'main None;
                     }
                     Err(e) => {
