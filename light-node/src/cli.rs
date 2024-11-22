@@ -11,7 +11,7 @@ use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProviderExt, BlockStrider,
     BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState,
-    ShardStateApplier, Starter, StarterConfig, StateSubscriber, StorageBlockProvider,
+    PsSubscriber, ShardStateApplier, Starter, StarterConfig, StateSubscriber, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -336,6 +336,9 @@ impl<C> Node<C> {
             self.archive_block_provider_config.clone(),
         );
 
+        let gc_subscriber = GcSubscriber::new(self.storage.clone());
+        let ps_subscriber = PsSubscriber::new(self.storage.clone());
+
         let block_strider = BlockStrider::builder()
             .with_provider(
                 archive_block_provider.chain((blockchain_block_provider, storage_block_provider)),
@@ -346,11 +349,11 @@ impl<C> Node<C> {
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
-                        (rpc_state.1, subscriber),
+                        (rpc_state.1, subscriber, ps_subscriber),
                     ),
                     (MetricsSubscriber, rpc_state.0),
                 )
-                    .chain(GcSubscriber::new(self.storage.clone())),
+                    .chain(gc_subscriber),
             )
             .build();
 
