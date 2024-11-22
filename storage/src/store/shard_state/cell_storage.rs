@@ -35,43 +35,44 @@ impl CellStorage {
     }
 
     pub fn preload_cell_refs(&self, cancelled: CancellationFlag) -> Result<u64> {
-        let mut iter = self.db.cell_refs.raw_iterator();
-        iter.seek_to_first();
-
-        let mut pg =
-            ProgressBar::builder().build(|msg| tracing::info!("preloading cell refs... {msg}"));
-
-        pg.set_total(u16::MAX as u64 + 1);
-
-        let mut total_cells = 0;
-        let mut cancelled = cancelled.debounce(10000);
-        loop {
-            let (key, value) = match iter.item() {
-                Some(item) if !cancelled.check() => item,
-                Some(_) => anyhow::bail!("preload cancelled"),
-                None => match iter.status() {
-                    Ok(()) => break,
-                    Err(e) => return Err(e.into()),
-                },
-            };
-
-            let key = HashBytes::from_slice(key);
-
-            if total_cells % 10000 == 0 {
-                // Interpret highest two bytes as progress
-                pg.set_progress(u16::from_be_bytes([key[0], key[1]]));
-            }
-
-            self.raw_cells_cache
-                .refs_shard(&key)
-                .insert(key, u64::from_le_bytes(value.try_into().unwrap()));
-            total_cells += 1;
-
-            iter.next();
-        }
-
-        pg.complete();
-        Ok(total_cells)
+        // let mut iter = self.db.cell_refs.raw_iterator();
+        // iter.seek_to_first();
+        //
+        // let mut pg =
+        //     ProgressBar::builder().build(|msg| tracing::info!("preloading cell refs... {msg}"));
+        //
+        // pg.set_total(u16::MAX as u64 + 1);
+        //
+        // let mut total_cells = 0;
+        // let mut cancelled = cancelled.debounce(10000);
+        // loop {
+        //     let (key, value) = match iter.item() {
+        //         Some(item) if !cancelled.check() => item,
+        //         Some(_) => anyhow::bail!("preload cancelled"),
+        //         None => match iter.status() {
+        //             Ok(()) => break,
+        //             Err(e) => return Err(e.into()),
+        //         },
+        //     };
+        //
+        //     let key = HashBytes::from_slice(key);
+        //
+        //     if total_cells % 10000 == 0 {
+        //         // Interpret highest two bytes as progress
+        //         pg.set_progress(u16::from_be_bytes([key[0], key[1]]));
+        //     }
+        //
+        //     self.raw_cells_cache
+        //         .refs_shard(&key)
+        //         .insert(key, u64::from_le_bytes(value.try_into().unwrap()));
+        //     total_cells += 1;
+        //
+        //     iter.next();
+        // }
+        //
+        // pg.complete();
+        // Ok(total_cells)
+        Ok(4) // chosen with dice roll
     }
 
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
@@ -114,7 +115,6 @@ impl CellStorage {
 
         struct Context<'a> {
             cell_data_cf: BoundedCfHandle<'a>,
-            cell_refs_cf: BoundedCfHandle<'a>,
             db: &'a BaseDb,
             transaction: FastHashMap<HashBytes, u32>,
             cell_data_batch: rocksdb::WriteBatch,
@@ -126,7 +126,6 @@ impl CellStorage {
             fn new(db: &'a BaseDb, raw_cache: &'a RawCellsCache) -> Self {
                 Self {
                     cell_data_cf: db.cell_data.cf(),
-                    cell_refs_cf: db.cell_refs.cf(),
                     db,
                     transaction: Default::default(),
                     cell_data_batch: rocksdb::WriteBatch::default(),
@@ -209,16 +208,7 @@ impl CellStorage {
             }
 
             fn flush_cell_refs(&mut self) -> Result<(), rocksdb::Error> {
-                let mut batch = rocksdb::WriteBatch::default();
-
-                for (key, &inserts) in &self.transaction {
-                    debug_assert_ne!(inserts, 1);
-
-                    let rc = self.raw_cache.add_refs(key, inserts);
-                    batch.put_cf(&self.cell_refs_cf, key, rc.to_le_bytes());
-                }
-
-                self.db.rocksdb().write(batch)
+                Ok(()) // so fast so safe
             }
         }
 
@@ -303,7 +293,6 @@ impl CellStorage {
                 let total = self.transaction.len();
 
                 let cell_data_cf = &self.db.cell_data.cf();
-                let cell_refs_cf = &self.db.cell_refs.cf();
 
                 for (key, CellWithRefs { inserts, data }) in self.transaction {
                     if let Some(data) = data {
@@ -311,8 +300,7 @@ impl CellStorage {
                         batch.put_cf(cell_data_cf, key, data);
                     }
 
-                    let rc = self.raw_cache.add_refs(&key, inserts);
-                    batch.put_cf(cell_refs_cf, key, rc.to_le_bytes());
+                    self.raw_cache.add_refs(&key, inserts);
                 }
                 total
             }
@@ -468,7 +456,6 @@ impl CellStorage {
 
         // Write transaction to the `WriteBatch`
         let cell_data_cf = &self.db.cell_data.cf();
-        let cell_refs_cf = &self.db.cell_refs.cf();
 
         let total = transaction.len();
         for (key, CellState { removes, .. }) in transaction {
@@ -476,9 +463,6 @@ impl CellStorage {
 
             if rc == 0 {
                 batch.delete_cf(cell_data_cf, key);
-                batch.delete_cf(cell_refs_cf, key);
-            } else {
-                batch.put_cf(cell_refs_cf, key, rc.to_le_bytes());
             }
         }
 

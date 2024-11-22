@@ -1,7 +1,7 @@
 use bytesize::ByteSize;
 use weedb::rocksdb::{
-    BlockBasedIndexType, BlockBasedOptions, DBCompressionType, DataBlockIndexType, MergeOperands,
-    Options, ReadOptions,
+    BlockBasedIndexType, BlockBasedOptions, CuckooTableOptions, DBCompressionType,
+    DataBlockIndexType, MergeOperands, Options, ReadOptions, SliceTransform,
 };
 use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
@@ -209,22 +209,65 @@ impl ColumnFamilyOptions<Caches> for CellData {
     fn options(opts: &mut Options, caches: &mut Caches) {
         opts.set_level_compaction_dynamic_level_bytes(true);
 
-        optimize_for_level_compaction(opts, ByteSize::gib(1u64));
+        // optimize for bulk inserts and single writer
+        opts.set_max_write_buffer_number(4);
+        opts.set_min_write_buffer_number_to_merge(2);
+        opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB per memtable
 
         let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
 
+        block_factory.set_block_cache(&caches.block_cache);
+
+        // 10 bits per key, stored at the end of the sst
         block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_block_size(16 * 1024);
-        block_factory.set_format_version(5);
+        block_factory.set_optimize_filters_for_memory(true);
+        block_factory.set_whole_key_filtering(true);
+
+        // to match fs block size
+        block_factory.set_block_size(4096);
+        block_factory.set_format_version(6);
+
+        // we have 4096 / 256 = 16 keys per block, so binary search is enough
+        block_factory.set_data_block_index_type(DataBlockIndexType::BinarySearch);
+
+        block_factory.set_index_type(BlockBasedIndexType::HashSearch);
+        block_factory.set_pin_l0_filter_and_index_blocks_in_cache(true);
 
         opts.set_block_based_table_factory(&block_factory);
+
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+
+        // it's mostly hashes, so we can't compress it :(
+        opts.set_compression_type(DBCompressionType::None);
+
+        opts.set_target_file_size_base(256 * 1024 * 1024); // Larger files for write efficiency
+        opts.set_max_bytes_for_level_base(1024 * 1024 * 1024); // Larger level base
+
         opts.set_optimize_filters_for_hits(true);
-        // option is set for cf
-        opts.set_compression_type(DBCompressionType::Lz4);
+
+        // https://github.com/facebook/rocksdb/blob/26b480609c4cd69784d731012a7d4ee6ce023c5c/include/rocksdb/utilities/table_properties_collectors.h#L21-L30
+        opts.add_compact_on_deletion_collector_factory(
+            100, // N: examine 100 consecutive entries
+            // Small enough window to detect local delete patterns
+            // Large enough to avoid spurious compactions
+            45, // D: trigger on 45 deletions in window
+            // Balance between the space reclaim and compaction frequency
+            // ~45% deletion density trigger
+            0.5, /* deletion_ratio: trigger if 50% of a total file is deleted
+                  * Backup trigger for overall file health
+                  * Higher than window trigger to prefer local optimization */
+        );
+
+        // we have our own cache and don't want `kcompactd` goes brrr scenario
+        opts.set_use_direct_reads(true);
+        opts.set_use_direct_io_for_flush_and_compaction(true);
+
+        // single writer optimizations
+        opts.set_enable_write_thread_adaptive_yield(false);
+        opts.set_allow_concurrent_memtable_write(false);
+        opts.set_enable_pipelined_write(true);
+        opts.set_inplace_update_support(false); // Disable since no updates
+        opts.set_unordered_write(true); // WARN: we don't snapshot this table, yes?
     }
 }
 
@@ -238,25 +281,33 @@ impl ColumnFamily for CellRefs {
 }
 
 impl ColumnFamilyOptions<Caches> for CellRefs {
-    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
-        opts.set_level_compaction_dynamic_level_bytes(true);
-
-        optimize_for_level_compaction(opts, ByteSize::gib(1u64));
-
+    fn options(opts: &mut Options, _: &mut Caches) {
         let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
 
+        // Write optimizations
+        opts.set_write_buffer_size(1024 * 1024 * 1024); // 1GB
+        opts.set_max_write_buffer_number(4);
+        opts.set_min_write_buffer_number_to_merge(2);
+
+        // Compression
+        opts.set_compression_type(DBCompressionType::Lz4);
+
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+
+        // Block settings
+        block_factory.set_block_size(4096);
+        block_factory.set_format_version(6);
+
+        // we want to know in which sst file the key is located for deletion
         block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_block_size(16 * 1024);
-        block_factory.set_format_version(5);
+        block_factory.set_whole_key_filtering(true);
+        block_factory.set_optimize_filters_for_memory(true);
 
         opts.set_block_based_table_factory(&block_factory);
-        opts.set_optimize_filters_for_hits(true);
-        // option is set for cf
-        opts.set_compression_type(DBCompressionType::Lz4);
+
+        opts.set_unordered_write(true); // WARN: we don't snapshot this table, yes?
+        opts.set_use_direct_io_for_flush_and_compaction(true);
+        opts.set_use_direct_reads(true);
     }
 }
 

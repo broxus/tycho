@@ -60,7 +60,6 @@ weedb::tables! {
         pub block_data_entries: tables::BlockDataEntries,
         pub shard_states: tables::ShardStates,
         pub cell_data: tables::CellData,
-        pub cell_refs: tables::CellRefs,
         pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
         pub shards_internal_messages: tables::ShardsInternalMessages,

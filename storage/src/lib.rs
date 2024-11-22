@@ -61,9 +61,7 @@ impl StorageBuilder {
         let update_options = |opts: &mut rocksdb::Options, threads: usize, fdlimit: u64| {
             opts.set_paranoid_checks(false);
 
-            // bigger base level size - less compactions
             // parallel compactions finishes faster - less write stalls
-
             opts.set_max_subcompactions(threads as u32 / 2);
 
             // io
