@@ -137,6 +137,8 @@ impl StorageBuilder {
             temp_file_storage.clone(),
             self.config.cells_cache_size.as_u64(),
         )?;
+        shard_state_storage.preload_cell_refs().await?;
+
         let persistent_state_storage = PersistentStateStorage::new(
             base_db.clone(),
             &file_db,

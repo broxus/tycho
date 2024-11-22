@@ -119,7 +119,7 @@ impl StoreStateContext {
             .open_as_mapped_mut()?;
 
         let raw = self.db.rocksdb().as_ref();
-        let write_options = self.db.cells.new_write_config();
+        let write_options = self.db.temp_cells.new_write_config();
 
         let mut ctx = FinalizationContext::new(&self.db);
         ctx.clear_temp_cells(&self.db)?;
@@ -627,14 +627,10 @@ mod test {
             let cell = cell_storage.load_cell(&HashBytes::from_slice(value.as_ref()))?;
 
             let mut batch = WriteBatch::default();
-            let (pending_op, _) =
-                cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
+            cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
-            db.rocksdb().write_opt(batch, db.cells.write_config())?;
-
-            // Ensure that pending operation guard is dropped after the batch is written
-            drop(pending_op);
+            db.rocksdb().write_opt(batch, db.cell_data.write_config())?;
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
@@ -643,7 +639,7 @@ mod test {
         db.trigger_compaction().await;
         db.trigger_compaction().await;
 
-        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = db.cell_data.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
