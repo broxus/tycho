@@ -30,7 +30,7 @@ impl Producer {
     ) -> Option<Point> {
         let current_round = head.current();
         let finished_round = head.prev();
-        let key_pair = head.produce_keys()?;
+        let key_pair = head.keys().to_produce.as_deref()?;
 
         let proven_vertex = last_own_point
             // previous round's point needs 2F signatures from peers scheduled for current round
@@ -57,7 +57,7 @@ impl Producer {
         let witness = Self::witness(
             finished_round,
             &local_id,
-            head.prev_produce_keys(),
+            head.keys().to_witness_prev.as_deref(),
             last_own_point,
         );
         Self::update_link_from_witness(
