@@ -46,7 +46,9 @@ async fn persistent_shard_state() -> Result<()> {
         NewBlockMeta::zero_state(zerostate.as_ref().gen_utime, true),
     );
 
-    shard_states.store_state(&handle, &zerostate).await?;
+    shard_states
+        .store_state(&handle, &zerostate, Default::default())
+        .await?;
 
     // Check seqno
     let min_ref_mc_state = shard_states.min_ref_mc_state();

@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
-use tycho_storage::{BlockConnection, BlockHandle, NewBlockMeta, Storage};
+use tycho_storage::{BlockConnection, BlockHandle, NewBlockMeta, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -254,7 +254,9 @@ where
 
         let state_storage = self.inner.storage.shard_state_storage();
         state_storage
-            .store_state(handle, &new_state)
+            .store_state(handle, &new_state, StoreStateHint {
+                block_data_size: Some(block.data_size()),
+            })
             .await
             .context("Failed to store new state")?;
 
