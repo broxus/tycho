@@ -4,7 +4,6 @@ use weedb::{
     Caches, MigrationError, Semver, Tables, VersionProvider, WeeDb, WeeDbBuilder, WeeDbRaw,
 };
 
-pub mod refcount;
 pub mod tables;
 
 pub trait WeeDbExt<T: Tables>: Sized {
@@ -60,7 +59,8 @@ weedb::tables! {
         pub package_entries: tables::PackageEntries,
         pub block_data_entries: tables::BlockDataEntries,
         pub shard_states: tables::ShardStates,
-        pub cells: tables::Cells,
+        pub cell_data: tables::CellData,
+        pub cell_refs: tables::CellRefs,
         pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
         pub shards_internal_messages: tables::ShardsInternalMessages,

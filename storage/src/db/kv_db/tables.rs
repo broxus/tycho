@@ -5,8 +5,6 @@ use weedb::rocksdb::{
 };
 use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
-use super::refcount;
-
 // took from
 // https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
 // todo: need to benchmark and update if it's not optimal
@@ -198,21 +196,50 @@ impl ColumnFamilyOptions<Caches> for ShardStates {
     }
 }
 
-/// Stores cells data
+/// Stores cell data
 /// - Key: `[u8; 32]` (cell repr hash)
 /// - Value: `StorageCell`
-pub struct Cells;
+pub struct CellData;
 
-impl ColumnFamily for Cells {
-    const NAME: &'static str = "cells";
+impl ColumnFamily for CellData {
+    const NAME: &'static str = "cell_data";
 }
 
-impl ColumnFamilyOptions<Caches> for Cells {
+impl ColumnFamilyOptions<Caches> for CellData {
     fn options(opts: &mut Options, caches: &mut Caches) {
         opts.set_level_compaction_dynamic_level_bytes(true);
 
-        opts.set_merge_operator_associative("cell_merge", refcount::merge_operator);
-        opts.set_compaction_filter("cell_compaction", refcount::compaction_filter);
+        optimize_for_level_compaction(opts, ByteSize::gib(1u64));
+
+        let mut block_factory = BlockBasedOptions::default();
+        block_factory.set_block_cache(&caches.block_cache);
+        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
+        block_factory.set_whole_key_filtering(true);
+        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
+
+        block_factory.set_bloom_filter(10.0, false);
+        block_factory.set_block_size(16 * 1024);
+        block_factory.set_format_version(5);
+
+        opts.set_block_based_table_factory(&block_factory);
+        opts.set_optimize_filters_for_hits(true);
+        // option is set for cf
+        opts.set_compression_type(DBCompressionType::Lz4);
+    }
+}
+
+/// Stores cell refs
+/// - Key: `[u8; 32]` (cell repr hash)
+/// - Value: u64 (le)
+pub struct CellRefs;
+
+impl ColumnFamily for CellRefs {
+    const NAME: &'static str = "cell_refs";
+}
+
+impl ColumnFamilyOptions<Caches> for CellRefs {
+    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
+        opts.set_level_compaction_dynamic_level_bytes(true);
 
         optimize_for_level_compaction(opts, ByteSize::gib(1u64));
 

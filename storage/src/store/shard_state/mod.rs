@@ -9,6 +9,7 @@ use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::CancellationFlag;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -56,6 +57,43 @@ impl ShardStateStorage {
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
         }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn preload_cell_refs(&self) -> Result<()> {
+        tracing::info!("started");
+
+        let cell_storage = self.cell_storage.clone();
+
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
+        let span = tracing::Span::current();
+        let cancelled = cancelled.clone();
+
+        let started_at = Instant::now();
+
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
+
+            let total_cells = cell_storage.preload_cell_refs(cancelled)?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+
+            tracing::info!(
+                total_cells,
+                elapsed = %humantime::format_duration(started_at.elapsed()),
+                "finished"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
     }
 
     pub fn metrics(&self) -> ShardStateStorageMetrics {
@@ -108,16 +146,13 @@ impl ShardStateStorage {
 
             let mut batch = rocksdb::WriteBatch::default();
 
-            let (pending_op, new_cell_count) = cell_storage.store_cell(&mut batch, root_cell)?;
+            let new_cell_count = cell_storage.store_cell(&mut batch, root_cell)?;
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
             raw_db.write(batch)?;
-
-            // Ensure that pending operation guard is dropped after the batch is written
-            drop(pending_op);
 
             hist.finish();
 
@@ -223,16 +258,12 @@ impl ShardStateStorage {
                 let mut batch = rocksdb::WriteBatch::default();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let (pending_op, stats) =
-                        cell_storage.remove_cell(&mut batch, &alloc, &root_hash)?;
+                    let stats = cell_storage.remove_cell(&mut batch, &alloc, &root_hash)?;
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
                         .rocksdb()
-                        .write_opt(batch, db.cells.write_config())?;
-
-                    // Ensure that pending operation guard is dropped after the batch is written
-                    drop(pending_op);
+                        .write_opt(batch, db.cell_data.write_config())?;
 
                     Ok::<_, anyhow::Error>((stats, alloc))
                 })

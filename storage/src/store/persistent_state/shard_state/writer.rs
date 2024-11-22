@@ -223,8 +223,8 @@ impl<'a> ShardStateWriter<'a> {
         let mut file = self.states_dir.unnamed_file().open()?;
 
         let raw = self.db.rocksdb().as_ref();
-        let read_options = self.db.cells.read_config();
-        let cf = self.db.cells.cf();
+        let read_options = self.db.cell_data.read_config();
+        let cf = self.db.cell_data.cf();
 
         let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
 
@@ -256,18 +256,9 @@ impl<'a> ShardStateWriter<'a> {
                         .get_pinned_cf_opt(&cf, hash, read_options)?
                         .ok_or(CellWriterError::CellNotFound)?;
 
-                    let value = match crate::refcount::strip_refcount(value.as_ref()) {
-                        Some(bytes) => bytes,
-                        None => {
-                            return Err(CellWriterError::CellNotFound.into());
-                        }
-                    };
-                    if value.is_empty() {
-                        return Err(CellWriterError::InvalidCell.into());
-                    }
-
-                    let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
-                        .ok_or(CellWriterError::InvalidCell)?;
+                    let (descriptor, data) =
+                        deserialize_cell(value.as_ref(), &mut references_buffer)
+                            .ok_or(CellWriterError::InvalidCell)?;
 
                     let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
 
