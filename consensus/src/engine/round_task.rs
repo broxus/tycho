@@ -164,11 +164,11 @@ impl RoundTaskReady {
                 let point_opt =
                     Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
                 if let Some(own_point) = point_opt.as_ref() {
-                    // Note: actually we should use `.includes_keys()`, this is a WorkAround to support
+                    // Note: actually we should use `keys().to_include`, this is a WorkAround to support
                     //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
                     //   this is safe as any node never changes its keys until restart, after which
                     //   the node does not recognise points signed with old keypair as locally created
-                    let wa_keys = head.produce_keys();
+                    let wa_keys = head.keys().to_produce.as_deref();
                     head.current().insert_exact_sign(own_point, wa_keys, &store);
                     metrics::histogram!("tycho_mempool_engine_produce_time")
                         .record(task_start_time.elapsed());

@@ -81,10 +81,10 @@ impl Signer {
             return SignatureResponse::TryLater; // still validating
         };
         if round == current_round {
-            signable.sign(current_round, head.includes_keys());
+            signable.sign(current_round, head.keys().to_include.as_deref());
         } else {
             // only previous to current round
-            signable.sign(current_round, head.witness_keys());
+            signable.sign(current_round, head.keys().to_witness.as_deref());
         };
         match signable.signed() {
             Some(Ok(sig)) => SignatureResponse::Signature(sig.clone()),

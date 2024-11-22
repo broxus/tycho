@@ -10,11 +10,7 @@ use crate::models::Round;
 pub struct DagHead(Arc<DagHeadInner>);
 
 struct DagHeadInner {
-    // if any `key_pair` is not empty, then the node may use it at current round
-    produce_keys: Option<Arc<KeyPair>>,
-    prev_produce_keys: Option<Arc<KeyPair>>,
-    includes_keys: Option<Arc<KeyPair>>,
-    witness_keys: Option<Arc<KeyPair>>,
+    key_group: KeyGroup,
     prev: DagRound,
     current: DagRound,
     next: DagRound,
@@ -36,19 +32,8 @@ impl DagHead {
             .upgrade()
             .expect("prev to engine round must be always in dag");
 
-        let guard = peer_schedule.atomic();
-
-        let produce_keys = guard.local_keys(current.round());
-        let prev_produce_keys = guard.local_keys(prev.round());
-
-        let includes_keys = guard.local_keys(top_round.round());
-        let witness_keys = includes_keys.as_ref().and_then(|_| produce_keys.clone());
-
         Self(Arc::new(DagHeadInner {
-            produce_keys,
-            prev_produce_keys,
-            includes_keys,
-            witness_keys,
+            key_group: KeyGroup::new(current.round(), peer_schedule),
             prev,
             current,
             next: top_round.clone(),
@@ -56,20 +41,8 @@ impl DagHead {
         }))
     }
 
-    pub fn produce_keys(&self) -> Option<&KeyPair> {
-        self.0.produce_keys.as_deref()
-    }
-
-    pub fn prev_produce_keys(&self) -> Option<&KeyPair> {
-        self.0.prev_produce_keys.as_deref()
-    }
-
-    pub fn includes_keys(&self) -> Option<&KeyPair> {
-        self.0.includes_keys.as_deref()
-    }
-
-    pub fn witness_keys(&self) -> Option<&KeyPair> {
-        self.0.witness_keys.as_deref()
+    pub fn keys(&self) -> &KeyGroup {
+        &self.0.key_group
     }
 
     pub fn prev(&self) -> &DagRound {
@@ -86,5 +59,34 @@ impl DagHead {
 
     pub fn last_back_bottom(&self) -> Round {
         self.0.last_back_bottom
+    }
+}
+
+/// if any `KeyPair` is not empty, then the node may use it at current round
+pub struct KeyGroup {
+    pub to_produce: Option<Arc<KeyPair>>,
+    pub to_include: Option<Arc<KeyPair>>,
+    pub to_witness: Option<Arc<KeyPair>>,
+    /// used after round is advanced, to finish witness of previous round
+    pub to_witness_prev: Option<Arc<KeyPair>>,
+}
+
+impl KeyGroup {
+    pub fn new(current: Round, peer_schedule: &PeerSchedule) -> Self {
+        let guard = peer_schedule.atomic();
+
+        let to_include = guard.local_keys(current.next());
+        let to_produce = guard.local_keys(current);
+        let to_witness = to_include.as_ref().and_then(|_| to_produce.clone());
+        let to_witness_prev = to_produce
+            .as_ref()
+            .and_then(|_| guard.local_keys(current.prev()));
+
+        Self {
+            to_produce,
+            to_include,
+            to_witness,
+            to_witness_prev,
+        }
     }
 }
