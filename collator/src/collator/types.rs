@@ -1204,42 +1204,18 @@ pub struct AnchorsCache {
 }
 
 impl AnchorsCache {
-    pub fn set_last_imported_anchor_info(
-        &mut self,
-        anchor_id: MempoolAnchorId,
-        anchor_ct: u64,
-        created_by: HashBytes,
-    ) {
-        let anchor_info = AnchorInfo {
-            id: anchor_id,
-            ct: anchor_ct,
-            all_exts_count: 0,
-            our_exts_count: 0,
-            author: PeerId(created_by.0),
-        };
+    pub fn set_last_imported_anchor_info(&mut self, anchor_info: AnchorInfo) {
         self.last_imported_anchor = Some(anchor_info);
     }
 
-    pub fn get_last_imported_anchor_ct(&self) -> Option<u64> {
-        self.last_imported_anchor.as_ref().map(|anchor| anchor.ct)
-    }
-
-    pub fn get_last_imported_anchor_author(&self) -> Option<HashBytes> {
-        self.last_imported_anchor
-            .as_ref()
-            .map(|anchor| anchor.author.0.into())
+    pub fn last_imported_anchor(&self) -> Option<&AnchorInfo> {
+        self.last_imported_anchor.as_ref()
     }
 
     pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
         self.last_imported_anchor
             .as_ref()
             .map(|anchor| (anchor.id, anchor.ct))
-    }
-
-    pub fn get_last_imported_anchor_id_and_all_exts_counts(&self) -> Option<(u32, u64)> {
-        self.last_imported_anchor
-            .as_ref()
-            .map(|anchor| (anchor.id, anchor.all_exts_count as _))
     }
 
     pub fn insert(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
@@ -1250,16 +1226,17 @@ impl AnchorsCache {
         self.last_imported_anchor = Some(AnchorInfo::from_anchor(anchor, our_exts_count));
     }
 
-    pub fn remove(&mut self, index: usize) {
+    pub fn remove(&mut self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
         if index == 0 {
-            self.cache.pop_front();
+            self.cache.pop_front()
         } else {
-            self.cache.remove(index);
+            self.cache.remove(index)
         }
     }
 
     pub fn clear(&mut self) {
         self.cache.clear();
+        self.last_imported_anchor = None;
     }
 
     pub fn len(&self) -> usize {
@@ -1276,14 +1253,6 @@ impl AnchorsCache {
 
     pub fn set_has_pending_externals(&mut self, has_pending_externals: bool) {
         self.has_pending_externals = has_pending_externals;
-    }
-
-    pub fn iter_from_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
-        self.cache
-            .iter()
-            .skip(index)
-            .map(|(_, anchor)| anchor)
-            .cloned()
     }
 }
 
