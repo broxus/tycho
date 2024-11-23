@@ -68,7 +68,8 @@ pub(crate) fn build_stub_collation_data(
         HashBytes::ZERO,
         1,
         anchors_cache
-            .get_last_imported_anchor_ct()
+            .last_imported_anchor()
+            .map(|a| a.ct)
             .unwrap_or_default(),
         Default::default(),
         HashBytes::ZERO,

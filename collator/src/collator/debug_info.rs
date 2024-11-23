@@ -52,9 +52,11 @@ impl std::fmt::Debug for BlockDebugInfo<'_> {
 pub struct DebugBlockInfo<'a>(pub &'a BlockInfo);
 impl std::fmt::Debug for DebugBlockInfo<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let gen_chain_time = self.0.gen_utime as u64 * 1000 + self.0.gen_utime_ms as u64;
         f.debug_struct("BlockInfo")
             .field("version", &self.0.version)
             .field("flags", &self.0.flags)
+            .field("gen_chain_time", &gen_chain_time)
             .field("start_lt", &self.0.start_lt)
             .field("end_lt", &self.0.end_lt)
             .field(

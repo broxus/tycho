@@ -23,7 +23,8 @@ use super::types::{
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
-    BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt, UpdateQueueDiffResult,
+    AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt,
+    UpdateQueueDiffResult,
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
@@ -48,10 +49,7 @@ impl CollatorStdImpl {
     #[tracing::instrument(
         parent =  None,
         skip_all,
-        fields(
-            block_id = %self.next_block_info,
-            ct = self.anchors_cache.get_last_imported_anchor_ct().unwrap_or_default()
-        )
+        fields(block_id = %self.next_block_info, ct = next_chain_time)
     )]
     pub(super) async fn do_collate(
         &mut self,
@@ -576,11 +574,12 @@ impl CollatorStdImpl {
 
         // update read up to info
         if last_read_anchor_id_opt.is_none() || anchors_cache_fully_read {
-            if let Some((id, all_exts_count)) =
-                anchors_cache.get_last_imported_anchor_id_and_all_exts_counts()
+            if let Some(&AnchorInfo {
+                id, all_exts_count, ..
+            }) = anchors_cache.last_imported_anchor()
             {
                 last_read_anchor_id_opt = Some(id);
-                msgs_read_offset_in_last_anchor = all_exts_count;
+                msgs_read_offset_in_last_anchor = all_exts_count as _;
                 if read_from_anchor_id_opt.is_none() {
                     read_from_anchor_id_opt = Some(id);
                 }
@@ -926,8 +925,11 @@ impl CollatorStdImpl {
     ) -> Result<Box<BlockCollationData>> {
         let created_by = self
             .anchors_cache
-            .get_last_imported_anchor_author()
-            .unwrap();
+            .last_imported_anchor()
+            .unwrap()
+            .author
+            .0
+            .into();
 
         // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor
