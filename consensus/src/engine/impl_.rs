@@ -1,9 +1,11 @@
-use std::mem;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::{cmp, mem};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
-use futures_util::{future, FutureExt};
+use futures_util::stream::FuturesUnordered;
+use futures_util::{future, FutureExt, StreamExt};
 use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -11,7 +13,7 @@ use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverla
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Committer, DagFront, DagRound, Verifier};
+use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
 use crate::effects::{
     AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolAdapterStore, MempoolStore,
 };
@@ -167,63 +169,193 @@ impl Engine {
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
     async fn pre_run(&mut self) -> Option<Point> {
         self.init_task.take().expect("init task must be set").await;
-        let broadcast_points = tokio::task::spawn_blocking({
+
+        // take last round from db
+
+        let last_db_round = tokio::task::spawn_blocking({
             let store = self.round_task.state.store.clone();
-            let peer_schedule = self.round_task.state.peer_schedule.clone();
-            // TKA is set in adapter from last signed block, so no need to repeat older broadcasts
-            let top_known_anchor = self.round_task.state.top_known_anchor.get();
-            move || {
-                store
-                    .load_last_broadcasts(top_known_anchor)
-                    .and_then(|(last, prev)| {
-                        peer_schedule
-                            .atomic()
-                            .local_keys(last.round()) // against db cloning
-                            .map(|keys| (PeerId::from(keys.public_key), keys))
-                            .filter(|(local_id, _)| local_id == last.data().author)
-                            .map(|(_, keys)| (last, keys, prev))
-                    })
-            }
+            move || store.last_round()
         })
         .await
         .expect("load last round from db");
 
-        // even if have some history in DB above broadcast rounds, we replay the last broadcasts
-        let top_round = match &broadcast_points {
-            Some((last_broadcast, _, _)) => last_broadcast.round(),
-            None => (Genesis::round().next()).max(self.round_task.state.top_known_anchor.get()),
+        self.effects = Effects::<ChainedRoundsContext>::new(last_db_round);
+
+        // wait collator to load blocks and update peer schedule
+
+        let top_known_anchor = {
+            let min_top_known_anchor =
+                Round((last_db_round.0).saturating_sub(CachedConfig::max_consensus_lag_rounds()));
+
+            // NOTE collator have to apply mc state update to mempool first,
+            //  and pass its top known anchor only after completion
+            let mut top_known_anchor_recv = self.round_task.state.top_known_anchor.receiver();
+            let mut top_known_anchor = top_known_anchor_recv.get();
+            while top_known_anchor < min_top_known_anchor {
+                tracing::info!(
+                    ?top_known_anchor,
+                    ?min_top_known_anchor,
+                    "waiting collator to load up to last top known anchor"
+                );
+                top_known_anchor = top_known_anchor_recv.next().await;
+            }
+            top_known_anchor
         };
-        self.consensus_round.set_max(top_round);
 
-        self.effects = Effects::<ChainedRoundsContext>::new(top_round);
-        let round_effects = Effects::<EngineContext>::new(&self.effects, top_round);
+        // get ready to commit and return deduplicated top known anchor's history to collator
 
-        // store in committer (back dag) - no data to init with;
-        // commiter must contain the same rounds as front dag, plus required history
-        // as consensus may be far away while local history has some unfinished downloads
+        let consensus_round = last_db_round
+            .max(top_known_anchor)
+            .max(Genesis::round().next());
+        self.consensus_round.set_max(consensus_round);
+        let round_effects = Effects::<EngineContext>::new(&self.effects, consensus_round);
+        let dag_bottom_round = Round(
+            (top_known_anchor.0)
+                .saturating_sub(CachedConfig::deduplicate_rounds())
+                .saturating_sub(CachedConfig::commit_history_rounds()),
+        )
+        .max(Genesis::round());
+
         let mut committer = take_committer(&mut self.committer_run).expect("init");
         (self.dag).fill_to_top(
-            top_round,
+            consensus_round,
             Some(&mut committer),
             &self.round_task.state.peer_schedule,
         );
+        committer.drop_upto(dag_bottom_round).ok();
         self.committer_run = tokio::spawn(future::ready(committer));
 
-        // bcast filter will be init on round start
+        // preload and sign last rounds if node may still participate in consensus
 
-        match broadcast_points {
-            Some((last, keys, pre_last)) => {
-                if let Some(pre_last) = pre_last {
-                    self.round_task
-                        .init_prev_broadcast(pre_last, &round_effects);
+        let preloaded_ids = if top_known_anchor < last_db_round && dag_bottom_round < last_db_round
+        {
+            let task = tokio::task::spawn_blocking({
+                // last 3 rounds is enough to create point at last round with all witness deps
+                let preload_bottom = Round(last_db_round.0.saturating_sub(2)).max(Genesis::round());
+                let store = self.round_task.state.store.clone();
+                move || {
+                    let mut map = BTreeMap::<cmp::Reverse<Round>, Vec<PointInfo>>::new();
+                    for (round, group) in &store
+                        .load_info_rounds(preload_bottom, last_db_round)
+                        .into_iter()
+                        .group_by(|info| info.round())
+                    {
+                        map.insert(cmp::Reverse(round), group.collect());
+                    }
+                    map
                 }
-                self.dag
-                    .top()
-                    .insert_exact_sign(&last, Some(&keys), &self.round_task.state.store);
-                Some(last)
+            });
+            match task.await {
+                Ok(result) => result,
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => panic!("preload last rounds on init: {e}"),
             }
-            None => None,
+        } else {
+            Default::default()
+        };
+
+        let mut dag_restore = FuturesUnordered::new();
+        let mut broadcasts = Vec::new();
+        for (cmp::Reverse(round), infos) in preloaded_ids {
+            let dag_round = self.dag.top().scan(round).expect("must exist");
+            for info in &infos {
+                dag_round.add_evicted_broadcast_exact(
+                    &info.data().author,
+                    info.digest(),
+                    &self.round_task.state.downloader,
+                    &self.round_task.state.store,
+                    &round_effects,
+                );
+            }
+
+            _ = dag_round.select(|(_, loc)| {
+                // each restore future is eager, as it has a spawned task inside
+                dag_restore.extend(loc.versions.values().cloned());
+                None::<()>
+            });
+
+            // to repeat broadcasts from two last determined consensus rounds
+            if round >= last_db_round.prev() {
+                let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
+                let mut found = keys
+                    .to_produce
+                    .as_deref()
+                    .map(|k| PeerId::from(k.public_key))
+                    .iter()
+                    .flat_map(|local_id| {
+                        infos
+                            .iter()
+                            .filter(|info| info.data().author == *local_id)
+                            .map(|info| info.id())
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    found.len() <= 1,
+                    "created non-unique broadcasts at {round:?}: {found:?}"
+                );
+                if let Some(id) = found.pop() {
+                    broadcasts.push(id);
+                }
+            }
         }
+
+        broadcasts.sort_unstable_by_key(|a| cmp::Reverse(a.round));
+        let (last_bcast, prev_bcast) = match broadcasts.as_slice() {
+            [last] if last.round >= consensus_round.prev() => (Some(*last), None),
+            [last, prev] if prev.round >= consensus_round.prev() => (Some(*last), Some(*prev)),
+            [] => (None, None),
+            _ => unreachable!(
+                "need only 2 last broadcasts up to {consensus_round:?}, got {:?}",
+                broadcasts.iter().map(|id| id.alt()).collect::<Vec<_>>()
+            ),
+        };
+
+        let (last_bcast, prev_bcast) = if last_bcast.is_some() || prev_bcast.is_some() {
+            // if there's a broadcast at last DB round - then it's round will be current for Engine
+            let task = tokio::task::spawn_blocking({
+                let store = self.round_task.state.store.clone();
+                move || {
+                    let last = last_bcast.map(|id| {
+                        store
+                            .get_point(id.round, &id.digest)
+                            .expect("last bcast by id")
+                    });
+                    if let Some((last, prev_id)) = last.as_ref().zip(prev_bcast.as_ref()) {
+                        assert_eq!(
+                            last.data().prev_digest(),
+                            Some(&prev_id.digest),
+                            "broadcasted ids mismatch: last {:?} has proof for {:?} but found prev {:?}",
+                            last.id().alt(),
+                            last.prev_id().as_ref().map(|id| id.alt()),
+                            prev_id.alt()
+                        );
+                    };
+                    let prev = prev_bcast.map(|id| {
+                        store
+                            .get_point(id.round, &id.digest)
+                            .expect("prev bcast by id")
+                    });
+                    (last, prev)
+                }
+            });
+            match task.await {
+                Ok(result) => result,
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => panic!("loading broadcasts on init: {e}"),
+            }
+        } else {
+            (None, None)
+        };
+
+        while !dag_restore.is_empty() {
+            _ = dag_restore.next().await;
+        }
+        if let Some(prev) = prev_bcast {
+            // prev broadcast may belong only to the prev to top dag round
+            self.round_task.init_prev_broadcast(prev, &round_effects);
+        }
+        // last broadcast may belong to any of the last 2 dag rounds
+        last_bcast
     }
 
     pub async fn run(mut self) {
@@ -236,28 +368,40 @@ impl Engine {
             // commit may take longer than a round if it ends with a jump to catch up with consensus
             let mut ready_committer = take_committer(&mut self.committer_run);
 
-            // do not repeat the `get()` - it can give non-reproducible result
-            let current_round = self.consensus_round.get();
-
-            let round_effects = {
+            let (current_round, round_effects) = {
                 let top_round = self.dag.top().round();
-                assert!(
-                    current_round >= top_round,
-                    "consensus round {} cannot be less than top dag round {}",
-                    current_round.0,
-                    top_round.0,
-                );
+
+                let current_round = if let Some(start_point) = &start_point {
+                    assert!(
+                        start_point.round() == top_round || start_point.round() == top_round.prev(),
+                        "can repeat broadcast only from last two dag rounds, top {top_round:?}, {:?}",
+                        start_point.id().alt()
+                    );
+                    start_point.round()
+                } else {
+                    // do not repeat the `get()` - it can give non-reproducible result
+                    let current_round = self.consensus_round.get();
+                    assert!(
+                        current_round >= top_round,
+                        "consensus round {} cannot be less than top dag round {}",
+                        current_round.0,
+                        top_round.0,
+                    );
+                    current_round
+                };
+
                 metrics::gauge!("tycho_mempool_engine_rounds_skipped")
                     .increment((current_round.0 as f64) - (top_round.0 as f64));
 
                 metrics::gauge!("tycho_mempool_engine_current_round").set(current_round.0);
 
-                if current_round == top_round {
+                let round_effects = if current_round == top_round {
                     Effects::<EngineContext>::new(&self.effects, current_round)
                 } else {
                     self.effects = Effects::<ChainedRoundsContext>::new(current_round);
                     Effects::<EngineContext>::new(&self.effects, current_round)
-                }
+                };
+                (current_round, round_effects)
             };
 
             if let Some(collator_lag) = wait_collator(

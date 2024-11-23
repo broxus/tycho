@@ -46,7 +46,9 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>>;
 
-    fn load_last_broadcasts(&self, bottom: Round) -> Result<Option<(Point, Option<Point>)>>;
+    fn last_round(&self) -> Result<Round>;
+
+    fn load_info_rounds(&self, bottom: Round, top: Round) -> Result<Vec<PointInfo>>;
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
@@ -164,10 +166,15 @@ impl MempoolStore {
             .expect("DB get point status")
     }
 
-    pub fn load_last_broadcasts(&self, bottom: Round) -> Option<(Point, Option<Point>)> {
+    pub fn load_info_rounds(&self, bottom: Round, top: Round) -> Vec<PointInfo> {
         self.0
-            .load_last_broadcasts(bottom)
-            .expect("DB load last broadcasts")
+            .load_info_rounds(bottom, top)
+            .with_context(|| format!("range [{}..{}]", bottom.0, top.0))
+            .expect("DB load info rounds")
+    }
+
+    pub fn last_round(&self) -> Round {
+        self.0.last_round().expect("DB load last round")
     }
 
     pub fn init_storage(&self, overlay_id: &OverlayId) {
@@ -478,45 +485,53 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(result)
     }
 
-    fn load_last_broadcasts(&self, bottom: Round) -> Result<Option<(Point, Option<Point>)>> {
-        let mut last_broadcast_key = None;
-
-        let mut opts = ReadOptions::default();
-        let mut buf = [0; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_prefix(bottom.0, &mut buf);
-        opts.set_iterate_lower_bound(buf);
-
-        let status_cf = self.db.points_status.cf();
-
-        let rev_iter = (self.db.rocksdb()).iterator_cf_opt(&status_cf, opts, IteratorMode::End);
-
-        for item in rev_iter {
-            let (key, status) = item.context("iter over statuses")?;
-            if PointStatus::is_own_broadcast(&status) {
-                last_broadcast_key = Some(key);
-                break;
-            }
-        }
-        let Some(last_broadcast_key) = last_broadcast_key else {
-            return Ok(None);
-        };
-
-        let last_broadcast = self
+    fn last_round(&self) -> Result<Round> {
+        let (last_key, _) = self
             .db
-            .points
-            .get(last_broadcast_key)
-            .context("get last own point")?
-            .map(|a| tl_proto::deserialize::<Point>(&a).context("deserialize last own point"))
-            .ok_or(anyhow::anyhow!("last point by status not found"))??;
+            .points_status
+            .iterator(IteratorMode::End)
+            .next()
+            .ok_or(anyhow::anyhow!(
+                "db is empty, at least last genesis must be provided"
+            ))??;
 
-        let Some(prev_id) = last_broadcast.prev_id() else {
-            return Ok(Some((last_broadcast, None)));
-        };
+        let mut bytes = [0_u8; 4];
+        bytes.copy_from_slice(&last_key[..4]);
 
-        // may be deleted by clean task
-        let prev_point = self.get_point(prev_id.round, &prev_id.digest)?;
+        let round = u32::from_be_bytes(bytes);
+        anyhow::ensure!(round > 0, "key with zero round");
 
-        Ok(Some((last_broadcast, prev_point)))
+        Ok(Round(round))
+    }
+
+    fn load_info_rounds(&self, bottom: Round, top: Round) -> Result<Vec<PointInfo>> {
+        fn opts(bottom: Round, top: Round) -> ReadOptions {
+            let mut opts = ReadOptions::default();
+            let mut buf = [0; MempoolStorage::KEY_LEN];
+            MempoolStorage::fill_prefix(bottom.0, &mut buf);
+            opts.set_iterate_lower_bound(buf);
+            MempoolStorage::fill_prefix(top.next().0, &mut buf);
+            opts.set_iterate_upper_bound(buf);
+            opts
+        }
+
+        let points_info_cf = self.db.points_info.cf();
+
+        let mut result = Vec::new();
+
+        let iter = (self.db.rocksdb()).iterator_cf_opt(
+            &points_info_cf,
+            opts(bottom, top),
+            IteratorMode::Start,
+        );
+
+        for item in iter {
+            let (_, v) = item.context("get point status")?;
+            let info = tl_proto::deserialize::<PointInfo>(&v).context("deserialize point info")?;
+            result.push(info);
+        }
+
+        Ok(result)
     }
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
@@ -572,7 +587,11 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn load_last_broadcasts(&self, _: Round) -> Result<Option<(Point, Option<Point>)>> {
+    fn last_round(&self) -> Result<Round> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn load_info_rounds(&self, _: Round, _: Round) -> Result<Vec<PointInfo>> {
         anyhow::bail!("should not be used in tests")
     }
 
