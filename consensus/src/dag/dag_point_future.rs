@@ -17,7 +17,6 @@ use crate::dag::{DagRound, Verifier};
 use crate::effects::{
     DownloadContext, Effects, EffectsContext, EngineContext, MempoolStore, ValidateContext,
 };
-use crate::engine::Genesis;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{Cert, DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
 
@@ -71,7 +70,6 @@ impl DagPointFuture {
         key_pair: Option<&KeyPair>,
     ) -> Self {
         let status = PointStatus {
-            is_own_broadcast: point.round() != Genesis::round(),
             is_ill_formed: false,
             is_validated: false, // Note this is distinct from other valid points' statuses
             is_valid: true,

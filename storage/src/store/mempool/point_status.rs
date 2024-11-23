@@ -11,7 +11,6 @@ pub struct PointStatus {
     // points are stored only after verified: points with sig or digest mismatch are never stored;
     // certified points are validated, and validation takes place only after verification;
     // locally created points (incl. genesis) are the only not validated before get stored;
-    pub is_own_broadcast: bool,
     pub is_ill_formed: bool, // some well-formness is checked only on validate()
     pub is_validated: bool,  // need to distinguish not-yet-validated from invalid
     pub is_valid: bool,      // a point may be validated as invalid but certified afterward
@@ -30,7 +29,6 @@ pub enum AnchorChainRole {
 
 bitflags::bitflags! {
     struct Flags : u8 {
-        const OwnBroadcast = 0b_1 << 7;
         const IllFormed = 0b_1 << 6;
         const Validated = 0b_1 << 5;
         const Valid = 0b_1 << 4;
@@ -44,7 +42,6 @@ bitflags::bitflags! {
 impl From<Flags> for PointStatus {
     fn from(flags: Flags) -> Self {
         Self {
-            is_own_broadcast: flags.contains(Flags::OwnBroadcast),
             is_ill_formed: flags.contains(Flags::IllFormed),
             is_validated: flags.contains(Flags::Validated),
             is_valid: flags.contains(Flags::Valid),
@@ -67,7 +64,6 @@ impl From<Flags> for PointStatus {
 impl From<&PointStatus> for Flags {
     fn from(status: &PointStatus) -> Self {
         let mut flags = Flags::empty();
-        flags.set(Flags::OwnBroadcast, status.is_own_broadcast);
         flags.set(Flags::IllFormed, status.is_ill_formed);
         flags.set(Flags::Validated, status.is_validated);
         flags.set(Flags::Valid, status.is_valid);
@@ -119,13 +115,6 @@ impl PointStatus {
         }
 
         Ok(status)
-    }
-
-    pub fn is_own_broadcast(bytes: &[u8]) -> bool {
-        match bytes.first() {
-            None => false,
-            Some(byte) => Flags::from_bits_retain(*byte).contains(Flags::OwnBroadcast),
-        }
     }
 
     pub(crate) fn merge(

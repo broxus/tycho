@@ -42,6 +42,11 @@ pub struct CmdRun {
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
 
+    /// simulate anchor id from last signed mc block to start with (otherwise may be paused)
+    #[allow(clippy::option_option, reason = "run-mempool.sh")]
+    #[clap(long)]
+    top_known_anchor: Option<Option<u32>>,
+
     /// step is an amount of points produced by node for payload to grow in size
     #[arg(short, long, default_value_t = 0)]
     payload_step: usize,
@@ -107,6 +112,12 @@ impl CmdRun {
             .boot(input_buffer, mc_zerostate)
             .await
             .context("failed to init mempool")?;
+
+        anchor_consumer.top_known_anchor().set_max_raw(
+            self.top_known_anchor
+                .unwrap_or_default()
+                .unwrap_or_default(),
+        );
 
         tokio::spawn(anchor_consumer.drain());
 

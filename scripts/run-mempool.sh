@@ -20,6 +20,12 @@ while [[ $# -gt 0 ]]; do
           exit 1
         fi
       ;;
+      --top-known-anchor)
+        top_known_anchor=$2
+        shift # past argument
+        if [ "$#" -gt 0 ]; then shift;
+        fi
+      ;;
       *) # positional
         if ! [ -z "$N" ]; then
             echo "ERROR: Too many args"
@@ -43,4 +49,5 @@ RUST_BACKTRACE=1 cargo run --bin tycho --features=debug -- debug mempool \
     --config "${base_dir}/config${N}.json" \
     --global-config "${base_dir}/global-config.json" \
     --import-zerostate "${base_dir}/zerostate.boc" \
-    --logger-config "${root_dir}/logger.json"
+    --logger-config "${root_dir}/logger.json" \
+    --top-known-anchor ${top_known_anchor}
