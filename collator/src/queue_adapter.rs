@@ -35,6 +35,7 @@ where
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
+        end_key: QueueKey,
     ) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
@@ -55,6 +56,11 @@ where
     ) -> Result<()>;
 
     fn clear_session_state(&self) -> Result<()>;
+    /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
+    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
+
+    /// returns the number of diffs in cache for the given shard
+    fn get_diff_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -98,11 +104,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         hash: &HashBytes,
+        end_key: QueueKey,
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_upto = diff.processed_upto.clone();
-        self.queue.apply_diff(diff, block_id_short, hash)?;
+        self.queue.apply_diff(diff, block_id_short, hash, end_key)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             new_messages_len = len,
@@ -151,5 +158,13 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn clear_session_state(&self) -> Result<()> {
         self.queue.clear_session_state()
+    }
+
+    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
+        self.queue.trim_diffs(source_shard, inclusive_until)
+    }
+
+    fn get_diff_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
+        self.queue.get_diffs_count_by_shard(shard_ident)
     }
 }

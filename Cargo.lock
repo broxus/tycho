@@ -890,8 +890,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b73dfe88b44fb8dab157b67818568764a4e43f049313eecaf58e13c55e913af"
+source = "git+https://github.com/broxus/everscale-types.git?rev=8ea6b16e81f1ffd88006263327004b891b5ef47c#8ea6b16e81f1ffd88006263327004b891b5ef47c"
 dependencies = [
  "ahash",
  "anyhow",
@@ -920,8 +919,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "817dbaf10f56aa40db0f83452c51671bd9f0b8741d56f38459ebb911959437e7"
+source = "git+https://github.com/broxus/everscale-types.git?rev=8ea6b16e81f1ffd88006263327004b891b5ef47c#8ea6b16e81f1ffd88006263327004b891b5ef47c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1507,7 +1505,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]

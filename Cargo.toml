@@ -239,3 +239,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."*"]
 opt-level = 1
+
+[patch.crates-io]
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "8ea6b16e81f1ffd88006263327004b891b5ef47c"}

@@ -80,7 +80,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             ref_by_mc_seqno,
             block: block_stuff_aug,
             prev_blocks_ids,
-            top_shard_blocks_ids,
+            top_shard_blocks,
             queue_diff_aug,
             consensus_info,
             ..
@@ -93,7 +93,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             signatures,
             total_signature_weight,
             prev_blocks_ids,
-            top_shard_blocks_ids,
+            top_shard_blocks_ids: top_shard_blocks.into_iter().map(|i| i.block_id).collect(),
             consensus_info,
         }
     }

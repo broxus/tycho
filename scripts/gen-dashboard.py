@@ -1014,6 +1014,11 @@ def block_metrics() -> RowPanel:
             "tycho_do_collate_import_next_anchor_count",
             "Number of imported anchors per tick",
         ),
+        create_gauge_panel(
+            "tycho_do_collate_block_diff_tail_len",
+            "Diff tail length",
+            labels=['workchain=~"$workchain"'],
+        ),
     ]
     return create_row("collator: Block Metrics", metrics)
 
