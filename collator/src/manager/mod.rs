@@ -480,6 +480,7 @@ where
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
+            queue_diff.diff().max_message,
         )
     }
 
@@ -1180,10 +1181,26 @@ where
             }
         }
 
-        // get min internals processed upto
-        let min_processed_to_by_shards = self
+        // internals processed upto
+        let processed_to_by_shards = self
             .read_min_processed_to_for_mc_block(&last_applied_mc_block_key)
             .await?;
+
+        // calc internals processed upto
+        let mut min_processed_to_by_shards = BTreeMap::default();
+
+        for min_processed_upto in processed_to_by_shards.values() {
+            for (shard_id, to_key) in min_processed_upto {
+                min_processed_to_by_shards
+                    .entry(shard_id)
+                    .and_modify(|min| {
+                        if &to_key < min {
+                            *min = to_key;
+                        }
+                    })
+                    .or_insert(to_key);
+            }
+        }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
@@ -1210,7 +1227,7 @@ where
         // try load required previous queue diffs
         let mut prev_queue_diffs = vec![];
         for (shard_id, min_processed_to) in min_processed_to_by_shards {
-            let Some((_, prev_block_ids)) = before_tail_block_ids.get(&shard_id) else {
+            let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
                 continue;
             };
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
@@ -1248,7 +1265,7 @@ where
                     );
                     return Ok(false);
                 };
-                let diff_required = queue_diff_stuff.as_ref().max_message > min_processed_to;
+                let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     diff_block_id = %prev_block_id.as_short_id(),
                     diff_required,
@@ -1270,6 +1287,7 @@ where
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
+                        queue_diff_stuff.diff().max_message,
                     ));
 
                     let prev_ids_info = block_stuff.construct_prev_id()?;
@@ -1282,9 +1300,13 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
-            self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash)?;
+        while let Some((diff, diff_hash, block_id, max_message_key)) = prev_queue_diffs.pop() {
+            self.mq_adapter.apply_diff(
+                diff,
+                block_id.as_short_id(),
+                &diff_hash,
+                max_message_key,
+            )?;
         }
 
         // sync all applied blocks
@@ -1349,7 +1371,7 @@ where
                 // because next we will start to collate new shard blocks after the sync
                 self.blocks_cache.reset_top_shard_blocks_additional_info()?;
 
-                let mc_data = McData::load_from_state(state)?;
+                let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1381,8 +1403,8 @@ where
     async fn read_min_processed_to_for_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<BTreeMap<ShardIdent, QueueKey>> {
-        let mut result = BTreeMap::new();
+    ) -> Result<FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>> {
+        let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
             return Ok(result);
@@ -1403,20 +1425,19 @@ where
                     )
                     .await?;
 
-                    loaded.as_ref().processed_upto.clone()
+                    let loaded = loaded.as_ref().processed_upto.clone();
+
+                    let mut processed_to = FastHashMap::default();
+
+                    for (shard_id, to_key) in loaded {
+                        processed_to.insert(shard_id, to_key);
+                    }
+
+                    processed_to
                 }
             };
 
-            for (shard_id, to_key) in processed_to {
-                result
-                    .entry(shard_id)
-                    .and_modify(|min| {
-                        if &to_key < min {
-                            *min = to_key;
-                        }
-                    })
-                    .or_insert(to_key);
-            }
+            result.insert(top_block_id.shard, processed_to.clone());
         }
 
         Ok(result)

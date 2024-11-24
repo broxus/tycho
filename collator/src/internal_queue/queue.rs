@@ -68,19 +68,28 @@ pub trait LocalQueue<V>
 where
     V: InternalMessageValue + Send + Sync,
 {
+    /// Create iterator for specified shard and return it
     fn iterator(
         &self,
         ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator<V>>>;
+    /// Add messages to session state from `diff.messages` and add diff to the cache
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
+        end_key: QueueKey,
     ) -> Result<()>;
+    /// Move messages from session state to persistent state and update gc ranges
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
+    /// remove all data in session state storage
     fn clear_session_state(&self) -> Result<()>;
+    /// returns the number of diffs in cache for the given shard
+    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
+    /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
+    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -109,20 +118,9 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 
 struct ShortQueueDiff {
     pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
-    pub last_key: Option<QueueKey>,
+    pub end_key: QueueKey,
     pub hash: HashBytes,
 }
-
-impl<V: InternalMessageValue> From<(QueueDiffWithMessages<V>, HashBytes)> for ShortQueueDiff {
-    fn from(value: (QueueDiffWithMessages<V>, HashBytes)) -> Self {
-        Self {
-            processed_upto: value.0.processed_upto,
-            last_key: value.0.messages.last_key_value().map(|(key, _)| *key),
-            hash: value.1,
-        }
-    }
-}
-
 pub struct QueueImpl<S, P, V>
 where
     S: SessionState<V>,
@@ -161,6 +159,7 @@ where
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         hash: &HashBytes,
+        end_key: QueueKey,
     ) -> Result<()> {
         // Get or insert the shard diffs for the given block_id_short.shard
         let mut shard_diffs = self.diffs.entry(block_id_short.shard).or_default();
@@ -202,8 +201,14 @@ where
                 .add_messages(block_id_short.shard, &diff.messages)?;
         }
 
+        let short_diff = ShortQueueDiff {
+            processed_upto: diff.processed_upto,
+            end_key,
+            hash: *hash,
+        };
+
         // Insert the diff into the shard diffs
-        shard_diffs.insert(block_id_short.seqno, (diff, *hash).into());
+        shard_diffs.insert(block_id_short.seqno, short_diff);
 
         Ok(())
     }
@@ -214,23 +219,20 @@ where
         let mut gc_ranges = FastHashMap::default();
 
         for (block_id_short, top_shard_block_changed) in mc_top_blocks {
-            let mut diffs_to_remove = vec![];
             let prev_shard_diffs = self.diffs.get_mut(&block_id_short.shard);
 
-            if let Some(mut shard_diffs) = prev_shard_diffs {
+            if let Some(shard_diffs) = prev_shard_diffs {
                 shard_diffs
                     .range(..=block_id_short.seqno)
                     .for_each(|(block_seqno, shard_diff)| {
-                        // find last key to commit for each shard
                         diffs_for_commit.push(*block_id_short);
-                        let last_key = shard_diff.last_key.unwrap_or_default();
 
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
-                            .or_insert_with(|| last_key);
+                            .or_insert_with(|| shard_diff.end_key);
 
-                        if last_key > *current_last_key {
-                            *current_last_key = last_key;
+                        if shard_diff.end_key > *current_last_key {
+                            *current_last_key = shard_diff.end_key;
                         }
 
                         // find min processed_upto for each shard for GC
@@ -245,13 +247,7 @@ where
                                 }
                             }
                         }
-
-                        diffs_to_remove.push(*block_seqno);
                     });
-
-                for seqno in diffs_to_remove {
-                    shard_diffs.remove(&seqno);
-                }
             }
         }
 
@@ -269,7 +265,21 @@ where
     }
 
     fn clear_session_state(&self) -> Result<()> {
-        self.diffs.clear();
         self.session_state.truncate()
+    }
+
+    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
+        self.diffs.get(shard_ident).map_or(0, |diffs| diffs.len())
+    }
+
+    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
+        let shard_diffs = self.diffs.get_mut(source_shard);
+
+        if let Some(mut shard_diffs) = shard_diffs {
+            shard_diffs
+                .value_mut()
+                .retain(|_, diff| &diff.end_key > inclusive_until);
+        }
+        Ok(())
     }
 }
