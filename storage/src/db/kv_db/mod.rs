@@ -57,6 +57,7 @@ weedb::tables! {
         pub archive_block_ids: tables::ArchiveBlockIds,
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
+        pub full_block_ids: tables::FullBlockIds,
         pub package_entries: tables::PackageEntries,
         pub block_data_entries: tables::BlockDataEntries,
         pub shard_states: tables::ShardStates,

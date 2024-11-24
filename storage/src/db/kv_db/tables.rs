@@ -122,6 +122,23 @@ impl ColumnFamily for KeyBlocks {
 
 impl ColumnFamilyOptions<Caches> for KeyBlocks {}
 
+/// Maps block id (partial) to file hash
+pub struct FullBlockIds;
+
+impl ColumnFamily for FullBlockIds {
+    const NAME: &'static str = "full_block_ids";
+
+    fn read_options(opts: &mut rocksdb::ReadOptions) {
+        opts.set_verify_checksums(false);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for FullBlockIds {
+    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+    }
+}
+
 /// Maps package entry id to entry data
 /// - Key: `BlockIdShort (16 bytes), [u8; 32], package type (1 byte)` <=> (`PackageEntryKey`)
 /// - Value: `Vec<u8>` (block/proof/queue diff data)

@@ -123,7 +123,7 @@ impl ShardStateStorage {
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
-                block_handle_storage.store_handle(&handle);
+                block_handle_storage.store_handle(&handle, false);
             }
 
             Ok::<_, anyhow::Error>((new_cell_count, updated))
