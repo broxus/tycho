@@ -66,7 +66,10 @@ pkcs8 = "0.10"
 prost = "0.13"
 prost-build = "0.13"
 quick_cache = "0.6.0"
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls"] }
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls",
+] }
 rand = "0.8"
 rand_pcg = { version = "0.3" }
 rayon = "1.10"
@@ -133,7 +136,7 @@ tycho-util = { path = "./util", version = "0.1.5" }
 
 [patch.crates-io]
 weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "59728ea0c8703dd28a4c37dee05c1321cd81b966" }
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "8cb2789228c54eff73cb150c8fb5a1d61aeb136d" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "ae4fe8fc17d3bf8e38202632c0a76dec93afc41e" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
