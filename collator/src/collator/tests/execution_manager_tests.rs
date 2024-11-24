@@ -98,6 +98,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         _diff: QueueDiffWithMessages<V>,
         _block_id_short: BlockIdShort,
         _diff_hash: &HashBytes,
+        _end_key: QueueKey,
     ) -> Result<()> {
         unimplemented!()
     }
@@ -123,6 +124,14 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
     }
 
     fn clear_session_state(&self) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn trim_diffs(&self, _source_shard: &ShardIdent, _inclusive_until: &QueueKey) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn get_diff_count_by_shard(&self, _shard_ident: &ShardIdent) -> usize {
         unimplemented!()
     }
 }
@@ -229,6 +238,7 @@ fn gen_stub_working_state(
             },
             top_processed_to_anchor: 0,
             ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
+            shards_processed_upto: Default::default(),
         }),
         collation_config: Arc::new(Default::default()),
         wu_used_from_last_anchor: 0,
