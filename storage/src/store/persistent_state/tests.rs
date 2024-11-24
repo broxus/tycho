@@ -241,7 +241,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         let out_msgs = OutMsgDescr::try_from_sorted_slice(&messages)?;
 
         let queue_diff = QueueDiffStuff::builder(shard, seqno, &prev_hash)
-            .with_processed_upto([(shard, 0, &HashBytes::ZERO)])
+            .with_processed_to([(shard, 0, &HashBytes::ZERO)])
             .with_messages(
                 &QueueKey::max_for_lt(0),
                 &QueueKey::max_for_lt(0),
@@ -351,9 +351,16 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         written
     };
 
+    let tail_len = blocks
+        .iter()
+        .rev()
+        .map(|block| block.queue_diff.as_ref().clone())
+        .len() as u32;
+
     // Read queue queue state from file
     let top_update = OutMsgQueueUpdates {
         diff_hash: *blocks.last().unwrap().queue_diff.diff_hash(),
+        tail_len,
     };
     let mut reader = QueueStateReader::begin_from_mapped(&decompressed, &top_update)?;
     assert_eq!(reader.state().header, target_header);
