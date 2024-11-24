@@ -44,6 +44,12 @@ impl BlocksCache {
         for mut shard_cache in self.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
+                    let processed_upto = entry
+                        .int_processed_to()
+                        .iter()
+                        .map(|(shard, queue_key)| (*shard, *queue_key))
+                        .collect::<FastHashMap<_, _>>();
+
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
                     {
@@ -55,6 +61,7 @@ impl BlocksCache {
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
                             #[cfg(feature = "block-creator-stats")]
                             creators: std::mem::take(&mut shard_cache.data.creators),
+                            processed_upto,
                         });
                         break;
                     }
@@ -133,7 +140,7 @@ impl BlocksCache {
     pub fn get_all_processed_to_by_mc_block_from_cache(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, Option<BTreeMap<ShardIdent, QueueKey>>>> {
+    ) -> Result<FastHashMap<BlockId, Option<FastHashMap<ShardIdent, QueueKey>>>> {
         let mut all_processed_to = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
@@ -149,6 +156,16 @@ impl BlocksCache {
                     mc_block_key,
                 )
             };
+
+            let mut processed_to = FastHashMap::default();
+
+            mc_block_entry
+                .int_processed_to()
+                .iter()
+                .for_each(|(shard, queue_key)| {
+                    processed_to.insert(*shard, *queue_key);
+                });
+
             updated_top_shard_block_ids = mc_block_entry
                 .top_shard_blocks_info
                 .iter()
@@ -156,10 +173,7 @@ impl BlocksCache {
                 .map(|(id, _)| id)
                 .cloned()
                 .collect::<Vec<_>>();
-            all_processed_to.insert(
-                mc_block_entry.block_id,
-                Some(mc_block_entry.int_processed_to().clone()),
-            );
+            all_processed_to.insert(mc_block_entry.block_id, Some(processed_to));
         }
 
         for top_sc_block_id in updated_top_shard_block_ids {
@@ -167,15 +181,21 @@ impl BlocksCache {
                 continue;
             }
 
+            let mut processed_to = FastHashMap::default();
+
             // try to find in cache
-            let mut int_processed_to_opt = None;
             if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    int_processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
+                    sc_block_entry
+                        .int_processed_to()
+                        .iter()
+                        .for_each(|(shard, queue_key)| {
+                            processed_to.insert(*shard, *queue_key);
+                        });
                 }
             }
 
-            all_processed_to.insert(top_sc_block_id, int_processed_to_opt);
+            all_processed_to.insert(top_sc_block_id, Some(processed_to));
         }
 
         Ok(all_processed_to)
@@ -854,6 +874,7 @@ impl BlocksCacheData for MasterBlocksCacheData {
     type NewCollated = ();
     type NewReceived = ();
 
+    // TODO !!! remove result
     fn on_update_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
         self.update_last_collated_block_id(candidate.block.id());
         Ok(())
