@@ -214,10 +214,15 @@ pub struct McData {
     pub top_processed_to_anchor: MempoolAnchorId,
 
     pub ref_mc_state_handle: RefMcStateHandle,
+
+    pub shards_processed_upto: FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>,
 }
 
 impl McData {
-    pub fn load_from_state(state_stuff: &ShardStateStuff) -> Result<Arc<Self>> {
+    pub fn load_from_state(
+        state_stuff: &ShardStateStuff,
+        shards_processed_upto: FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>,
+    ) -> Result<Arc<Self>> {
         let block_id = *state_stuff.block_id();
         let extra = state_stuff.state_extra()?;
         let state = state_stuff.as_ref();
@@ -258,6 +263,7 @@ impl McData {
             top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
+            shards_processed_upto,
         }))
     }
 
@@ -281,7 +287,7 @@ pub struct BlockCandidate {
     pub block: BlockStuffAug,
     pub is_key_block: bool,
     pub prev_blocks_ids: Vec<BlockId>,
-    pub top_shard_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks: Vec<TopShardBlockInfo>,
     pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
@@ -290,6 +296,7 @@ pub struct BlockCandidate {
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub consensus_info: ConsensusInfo,
+    pub processed_upto: FastHashMap<ShardIdent, QueueKey>,
 }
 
 #[derive(Default, Clone)]
@@ -431,6 +438,7 @@ pub struct TopBlockDescription {
     pub proof_funds: ProofFunds,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
+    pub processed_upto: FastHashMap<ShardIdent, QueueKey>,
 }
 
 #[derive(Debug)]
@@ -667,4 +675,10 @@ where
         }
         Ok(res)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TopShardBlockInfo {
+    pub block_id: BlockId,
+    pub processed_upto: FastHashMap<ShardIdent, QueueKey>,
 }
