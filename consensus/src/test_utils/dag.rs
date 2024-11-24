@@ -131,7 +131,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
 
         Verifier::verify(point, peer_schedule).expect("well-formed point");
         let info = PointInfo::from(point);
-        let (_, certified_tx) = oneshot::channel();
+        let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
         let effects = Effects::<ValidateContext>::new(effects, &info);
         Verifier::validate(
             info,

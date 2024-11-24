@@ -2,8 +2,9 @@ use std::cmp;
 use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, StreamExt};
+use futures_util::StreamExt;
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::error::TryRecvError;
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
@@ -153,68 +154,115 @@ impl Verifier {
             }
             cmp::Ordering::Equal => {
                 // dependency check for first point is a part of well-formness check
-                let dag_point = DagPoint::Trusted(ValidPoint::new(info));
-                return ValidateContext::validated(dag_point);
+                return ValidateContext::validated(DagPoint::Trusted(ValidPoint::new(info)));
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
-        let Some(r_0) = r_0.upgrade() else {
-            tracing::info!("cannot (in)validate point, no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new(info));
-            return ValidateContext::validated(dag_point);
+        let Some(r_0_pre) = r_0.upgrade() else {
+            tracing::info!("cannot validate point, no round in local DAG");
+            return ValidateContext::validated(DagPoint::Invalid(Cert {
+                inner: info,
+                is_certified: certified_rx.try_recv() != Err(TryRecvError::Empty),
+            }));
         };
         assert_eq!(
-            r_0.round(),
+            r_0_pre.round(),
             info.round(),
             "Coding error: dag round mismatches point round"
         );
 
-        let mut dependencies = Vec::with_capacity(
-            info.data().includes.len() + info.data().witness.len() + 2, // +2 for anchor fields
-        );
-
-        if !(Self::is_self_links_ok(&info, &r_0)
-            && [AnchorStageRole::Proof, AnchorStageRole::Trigger]
-                .into_iter()
-                .all(|role| {
-                    Self::add_anchor_link_if_ok(
-                        role,
-                        &info,
-                        &r_0,
-                        &downloader,
-                        &store,
-                        &effects,
-                        &mut dependencies,
-                    )
-                }))
-        {
+        if !Self::is_self_links_ok(&info, &r_0_pre) {
             return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
         }
 
-        let Some(r_1) = r_0.prev().upgrade() else {
-            tracing::info!("cannot (in)validate point's 'includes', no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new(info));
-            return ValidateContext::validated(dag_point);
+        if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
+            .into_iter()
+            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre))
+        {
+            return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
         };
 
-        let mut proven_vertex_dep = None;
-        Self::gather_deps(
-            &info,
-            &r_1,
-            &downloader,
-            &store,
-            &effects,
-            &mut dependencies,
-            &mut proven_vertex_dep,
-        );
+        drop(r_0_pre);
+        drop(span_guard);
 
-        let mut signatures_fut = std::pin::pin!(match prev_proof {
-            None => future::Either::Left(future::ready(true)),
-            Some(proof) => future::Either::Right(
-                rayon_run(move || proof.signatures_match()).instrument(effects.span().clone()),
-            ),
-        });
+        // certified flag aborts proof check; checked proof mark dependencies as certified;
+        // check depender's sig before new (down)load point futures are spawned
+        let mut proven_by_cert = if certified_rx.try_recv() != Err(TryRecvError::Empty) {
+            // FIXME either sent or sender dropped - all the same; make distinct and do not drop
+            Some(true)
+        } else if let Some(proof) = prev_proof {
+            let mut signatures_fut = std::pin::pin!(rayon_run(move || proof.signatures_match()));
+            let certified = tokio::select! {
+                biased;
+                _ = &mut certified_rx => {
+                    Ok(true) // certified; certifies
+                },
+                is_sig_ok = &mut signatures_fut => {
+                    if is_sig_ok {
+                        Ok(false) // not certified; certifies
+                    } else {
+                        Err(())
+                    }
+                }
+            };
+            if certified.is_err() {
+                return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
+            }
+            certified.ok()
+        } else {
+            None
+        };
+
+        let span_guard = effects.span().enter();
+
+        let Some(r_0) = r_0.upgrade() else {
+            tracing::info!("cannot validate point, no round in local DAG after proof check");
+            return ValidateContext::validated(DagPoint::Invalid(Cert {
+                inner: info,
+                is_certified: proven_by_cert.unwrap_or_default(),
+            }));
+        };
+
+        let Some(r_1) = r_0.prev().upgrade() else {
+            tracing::info!("cannot validate point's 'includes', no round in local DAG");
+            return ValidateContext::validated(DagPoint::Invalid(Cert {
+                inner: info,
+                is_certified: proven_by_cert.unwrap_or_default(),
+            }));
+        };
+
+        let r_2_opt = r_1.prev().upgrade();
+        if r_2_opt.is_none() && !info.data().witness.is_empty() {
+            tracing::debug!("cannot validate point's 'witness', no round in local DAG");
+            return ValidateContext::validated(DagPoint::Invalid(Cert {
+                inner: info,
+                is_certified: proven_by_cert.unwrap_or_default(),
+            }));
+        }
+
+        let direct_deps =
+            Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &effects);
+
+        let (proven_vertex_dep, prev_other_versions) = r_1
+            .view(&info.data().author, |loc| {
+                Self::versions_partitioned(loc, info.data().prev_digest())
+            })
+            .unwrap_or_default();
+
+        match proven_by_cert {
+            Some(true) => {
+                for shared in &direct_deps {
+                    shared.mark_certified(); // all dependencies
+                }
+            }
+            Some(false) => {
+                if let Some(vertex) = &proven_vertex_dep {
+                    vertex.mark_certified(); // just one among all
+                }
+            }
+            None => {}
+        }
 
         let mut is_unique_in_loc_fut = std::pin::pin!(Self::is_unique_in_loc(
             info.clone(),
@@ -226,16 +274,13 @@ impl Verifier {
         .instrument(effects.span().clone()));
 
         let mut is_valid_fut = std::pin::pin!({
-            // peer has to jump over a round if it had some invalid point in prev loc
-            let other_versions = r_1.view(&info.data().author, |loc| {
-                // do not add same prev_digest twice - it is added as one of 'includes'
-                Self::versions_except(loc, info.data().prev_digest())
-            });
-            let deps_and_prev = dependencies
+            let deps_and_prev = direct_deps
                 .iter()
                 .cloned()
+                // peer has to jump over a round if it had some invalid point in prev loc
+                // do not add same prev_digest twice - it is added as one of 'includes'
                 // do not extend listed dependencies as they may become trusted by consensus
-                .chain(other_versions.into_iter().flatten());
+                .chain(prev_other_versions.into_iter());
             Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(effects.span().clone())
         });
 
@@ -244,38 +289,19 @@ impl Verifier {
         drop(r_1);
         drop(span_guard);
 
-        let mut certified = None;
         let mut valid = None;
-        let mut sig_ok = None;
         let mut unique_in_loc = None;
-
-        while !(valid.is_some()
-            && (certified.unwrap_or_default() || (unique_in_loc.is_some() && sig_ok.is_some())))
-        {
+        while !(valid.is_some() && (unique_in_loc.is_some() || proven_by_cert.unwrap_or(false))) {
             tokio::select! {
                 biased;
-                recv_result = &mut certified_rx, if certified.is_none() => {
-                    certified = Some(recv_result.is_ok()); // oneshot cannot be lagged, only closed
-                    if recv_result.is_ok() {
-                        for shared in &dependencies {
-                            shared.mark_certified();
-                        }
-                    }
-                },
-                is_sig_ok = &mut signatures_fut, if sig_ok.is_none() => {
-                    sig_ok = Some(is_sig_ok);
-                    if is_sig_ok {
-                        // it's a noop if the point doesn't have a proof in its body
-                        if let Some(vertex) = &proven_vertex_dep {
-                            vertex.mark_certified();
-                        }
+                _ = &mut certified_rx, if !proven_by_cert.unwrap_or(false) => {
+                    proven_by_cert = Some(true); // oneshot cannot be lagged, only closed
+                    for shared in &direct_deps {
+                        shared.mark_certified();
                     }
                 },
                 is_valid = &mut is_valid_fut, if valid.is_none() => {
                     valid = Some(is_valid);
-                    if !is_valid {
-                        break;
-                    }
                 },
                 is_unique_in_loc = &mut is_unique_in_loc_fut, if unique_in_loc.is_none() => {
                     unique_in_loc = Some(is_unique_in_loc);
@@ -284,39 +310,35 @@ impl Verifier {
         }
 
         let (dag_point, level) = match (
-            certified.unwrap_or_default(),
+            proven_by_cert.unwrap_or_default(), // no matter prev proof check here
             valid.expect("validation must be completed to participate in consensus"),
-            sig_ok,
             unique_in_loc,
         ) {
-            (true, true, _, _) => (
-                // here "trust consensus" call chain resolves;
-                // ignore other flags, though it looks like a race condition:
-                // follow majority's decision now, otherwise will follow it via sync
+            (true, true, _) => (
                 DagPoint::Certified(ValidPoint::new(info)),
                 tracing::Level::TRACE,
             ),
-            (false, true, Some(true), Some(true)) => (
+            (false, true, Some(true)) => (
                 DagPoint::Trusted(ValidPoint::new(info)),
                 tracing::Level::TRACE,
             ),
-            (false, true, Some(true), Some(false)) => (
+            (false, true, Some(false)) => (
                 DagPoint::Suspicious(ValidPoint::new(info)),
                 tracing::Level::WARN,
             ),
-            (is_certified, false, _, _) | (is_certified, _, Some(false), _) => (
+            (is_certified, false, _) => (
                 DagPoint::Invalid(Cert {
                     inner: info,
                     is_certified,
                 }),
                 tracing::Level::ERROR,
             ),
-            (false, true, Some(true), None) | (false, true, None, None | Some(true | false)) => {
+            (false, true, None) => {
                 let _guard = effects.span().enter();
                 unreachable!(
                     "unexpected pattern in loop break: \
-                     certified={certified:?} valid={valid:?} \
-                     sig_ok={sig_ok:?} unique_in_loc={unique_in_loc:?}"
+                     proven_by_cert={proven_by_cert:?} valid={valid:?} \
+                     unique_in_loc={unique_in_loc:?}"
                 );
             }
         };
@@ -324,9 +346,8 @@ impl Verifier {
             parent: effects.span(),
             level,
             result = display(dag_point.alt()),
-            certified = debug(certified),
+            proven_by_cert = debug(proven_by_cert),
             valid = debug(valid),
-            sig_ok = debug(sig_ok),
             unique_in_loc = debug(unique_in_loc),
             "validated",
         );
@@ -353,14 +374,10 @@ impl Verifier {
     }
 
     /// the only method that scans the DAG deeper than 2 rounds
-    fn add_anchor_link_if_ok(
+    fn is_anchor_link_ok(
         link_field: AnchorStageRole,
         info: &PointInfo,     // @ r+0
         dag_round: &DagRound, // start with r+0
-        downloader: &Downloader,
-        store: &MempoolStore,
-        effects: &Effects<ValidateContext>,
-        dependencies: &mut Vec<DagPointFuture>,
     ) -> bool {
         let linked_id = info.anchor_id(link_field);
 
@@ -384,29 +401,28 @@ impl Verifier {
             }
         };
 
-        #[allow(clippy::match_same_arms, reason = "comments")]
-        match info.anchor_link(link_field) {
-            Link::ToSelf => {
-                // do not search in DAG the point that is currently under validation;
-                // link's destination is already checked by AnchorStage above, cannot be reordered
-            }
-            Link::Direct(_) => {
-                // will be added in a search list as a member of `witness` or `includes`
-            }
-            Link::Indirect { .. } => {
-                // actually no need to check indirect dependencies, but let's reinsure while we can
-                dependencies.push(round.add_dependency_exact(
-                    &linked_id.author,
-                    &linked_id.digest,
-                    &info.data().author,
-                    downloader,
-                    store,
-                    effects,
-                ));
-            }
-        };
-
         true
+    }
+
+    fn versions_partitioned(
+        dag_location: &DagLocation,
+        searched: Option<&Digest>,
+    ) -> (Option<DagPointFuture>, Vec<DagPointFuture>) {
+        let mut found = None;
+        let mut others = Vec::with_capacity(
+            dag_location
+                .versions
+                .len()
+                .saturating_sub(searched.is_some() as usize),
+        );
+        for (digest, shared) in &dag_location.versions {
+            if searched.map_or(false, |prev| prev == digest) {
+                found = Some(shared.clone());
+            } else {
+                others.push(shared.clone());
+            }
+        }
+        (found, others)
     }
 
     fn versions_except(dag_location: &DagLocation, except: Option<&Digest>) -> Vec<DagPointFuture> {
@@ -419,19 +435,16 @@ impl Verifier {
             .collect::<Vec<_>>()
     }
 
-    fn gather_deps(
-        info: &PointInfo, // @ r+0
-        r_1: &DagRound,   // r-1
+    fn spawn_direct_deps(
+        info: &PointInfo,          // @ r+0
+        r_1: &DagRound,            // r-1
+        r_2_opt: Option<DagRound>, // r-2
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<ValidateContext>,
-        dependencies: &mut Vec<DagPointFuture>,
-        proven_vertex_dep: &mut Option<DagPointFuture>,
-    ) {
-        let r_2_opt = r_1.prev().upgrade();
-        if r_2_opt.is_none() {
-            tracing::debug!("cannot (in)validate point's 'witness', no round in local DAG");
-        }
+    ) -> Vec<DagPointFuture> {
+        let mut dependencies =
+            Vec::with_capacity(info.data().includes.len() + info.data().witness.len());
 
         // integrity check passed, so includes contain author's prev point proof
         let includes = info
@@ -457,15 +470,10 @@ impl Verifier {
                 effects,
             );
 
-            // it's sufficient to check only author to get prev (proven) point from well-formed one:
-            // * includes map contains same author at most once - and it matches proven point
-            // * witness map cannot contain same author
-            if author == info.data().author {
-                *proven_vertex_dep = Some(shared.clone());
-            }
-
             dependencies.push(shared);
         }
+
+        dependencies
     }
 
     async fn is_unique_in_loc(

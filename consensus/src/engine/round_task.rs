@@ -291,7 +291,7 @@ impl RoundTaskReady {
                 let _guard = effects.span().enter();
                 panic!("Failed to verify own point: {error}, {:?}", point)
             }
-            let (_, do_not_certify_tx) = oneshot::channel();
+            let (_do_not_drop_or_send, do_not_certify_tx) = oneshot::channel();
             let info = PointInfo::from(&point);
             let validate_effects = Effects::<ValidateContext>::new(&effects, &info);
             let dag_point = Verifier::validate(
