@@ -139,7 +139,9 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    queue.apply_diff(diff, block, &HashBytes::from([1; 32]))?;
+    let end_key = *diff.messages.iter().last().unwrap().0;
+
+    queue.apply_diff(diff, block, &HashBytes::from([1; 32]), end_key)?;
 
     let top_blocks = vec![(block, true)];
 
@@ -182,7 +184,8 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let top_blocks = vec![(block2, true)];
 
-    queue.apply_diff(diff, block2, &HashBytes::from([0; 32]))?;
+    let end_key = *diff.messages.iter().last().unwrap().0;
+    queue.apply_diff(diff, block2, &HashBytes::from([0; 32]), end_key)?;
     queue.commit_diff(&top_blocks)?;
 
     let mut ranges = FastHashMap::default();
@@ -253,7 +256,9 @@ async fn test_queue_clear() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    queue.apply_diff(diff, block, &HashBytes::from([1; 32]))?;
+    let end_key = *diff.messages.iter().last().unwrap().0;
+
+    queue.apply_diff(diff, block, &HashBytes::from([1; 32]), end_key)?;
 
     let mut ranges = FastHashMap::default();
     ranges.insert(
