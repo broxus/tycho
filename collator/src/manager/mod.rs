@@ -473,6 +473,7 @@ where
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
+            queue_diff.diff().max_message,
         )
     }
 
@@ -1211,6 +1212,7 @@ where
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
+                        queue_diff_stuff.diff().max_message,
                     ));
 
                     let prev_ids_info = block_stuff.construct_prev_id()?;
@@ -1223,9 +1225,13 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
-            self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash)?;
+        while let Some((diff, diff_hash, block_id, max_message_key)) = prev_queue_diffs.pop() {
+            self.mq_adapter.apply_diff(
+                diff,
+                block_id.as_short_id(),
+                &diff_hash,
+                max_message_key,
+            )?;
         }
 
         // sync all applied blocks

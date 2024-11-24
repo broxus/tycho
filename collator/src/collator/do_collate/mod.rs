@@ -22,6 +22,7 @@ use super::types::{
     FinalizedCollationResult, ParsedExternals, PrevData, ReadNextExternalsMode, WorkingState,
 };
 use super::CollatorStdImpl;
+use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::types::{
     BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt, UpdateQueueDiffResult,
 };
@@ -204,7 +205,7 @@ impl CollatorStdImpl {
     }
 
     fn run(
-        config: Arc<CollatorConfig>,
+        collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         anchors_cache: AnchorsCache,
         state: Box<ActualState>,
@@ -218,8 +219,15 @@ impl CollatorStdImpl {
         let prepare_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
+        let mc_processed_upto = state
+            .mc_data
+            .processed_upto
+            .internals
+            .get(&shard_id)
+            .cloned();
+
         let prepare_phase =
-            Phase::<PrepareState>::new(config.clone(), mq_adapter, anchors_cache, state);
+            Phase::<PrepareState>::new(collator_config.clone(), mq_adapter, anchors_cache, state);
 
         let mut execute_phase = prepare_phase.run()?;
 
@@ -262,31 +270,58 @@ impl CollatorStdImpl {
 
         let (executor, mq_iterator_adapter, mq_adapter) = execution_wrapper.destruct();
 
+        // state.mc_data.shards.first().unwrap().pr
+
         let (
             UpdateQueueDiffResult {
                 queue_diff,
                 has_unprocessed_messages,
                 diff_messages_len,
                 create_queue_diff_elapsed,
+                processed_upto,
             },
             update_queue_task,
-        ) = finalize_phase.update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter)?;
+        ) = finalize_phase.update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter.clone())?;
 
         let finalize_block_timer = std::time::Instant::now();
+
+        let current_processed_upto = processed_upto.get(&shard_id).cloned();
+
+        // TODO: for supporting multiple shards we should seek min processed_upto
+        // TODO: from every shard to target shard
+        // TODO: Now we use only mc shard
+
+        let min_processed_upto = match (current_processed_upto, mc_processed_upto) {
+            (Some(current), Some(mc))
+                if shard_id.is_masterchain() && current < mc.processed_to_msg =>
+            {
+                bail!("current mc processed_upto is less than mc processed_upto");
+            }
+            (Some(current), Some(mc)) => Some(std::cmp::max(current, mc.processed_to_msg)),
+            (Some(current), None) => Some(current),
+            (None, Some(mc)) => Some(mc.processed_to_msg),
+            (None, None) => None,
+        };
+
+        if let Some(min_processed_upto) = min_processed_upto {
+            mq_adapter.trim_diffs(&shard_id, &min_processed_upto)?;
+        };
+        let diff_tail_len = mq_adapter.get_diff_count_by_shard(&shard_id) as u32;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
             || {
                 let _span = span.enter();
 
-                finalize_phase.finalize_block(
+                finalize_phase.finalize_block(FinalizeBlockContext {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
                     queue_diff,
-                    config,
+                    collator_config,
                     executor,
-                )
+                    diff_tail_len,
+                })
             },
             // wait update queue task before returning collation result
             // to be sure that queue was updated before block commit and next block collation
@@ -1152,6 +1187,10 @@ impl CollatorStdImpl {
             .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
             .set(collation_data.block_id_short.seqno);
+        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
+            .set(collation_data.block_id_short.seqno);
+        metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
+            .set(collation_data.diff_tail_len);
     }
 
     fn wu_metrics(

@@ -327,6 +327,7 @@ impl BlockCollationDataBuilder {
             mempool_config_override: self.mempool_config_override,
             #[cfg(feature = "block-creator-stats")]
             block_create_count: self.block_create_count,
+            diff_tail_len: 0,
         }
     }
 }
@@ -397,6 +398,7 @@ pub(super) struct BlockCollationData {
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
+    pub diff_tail_len: u32,
 }
 
 impl BlockCollationData {
@@ -1306,6 +1308,7 @@ pub struct UpdateQueueDiffResult {
     pub has_unprocessed_messages: bool,
     pub diff_messages_len: usize,
     pub create_queue_diff_elapsed: Duration,
+    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
 }
 
 pub struct FinalizedCollationResult {

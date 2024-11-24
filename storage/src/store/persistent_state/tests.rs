@@ -352,6 +352,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
     // Read queue queue state from file
     let top_update = OutMsgQueueUpdates {
         diff_hash: *blocks.last().unwrap().queue_diff.diff_hash(),
+        tail_len: 0,
     };
     let mut reader = QueueStateReader::begin_from_mapped(&decompressed, &top_update)?;
     assert_eq!(reader.state().header, target_header);
