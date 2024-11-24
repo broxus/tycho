@@ -82,30 +82,14 @@ impl BlockConnectionStorage {
         let block_handle_cf = &self.db.block_handles.cf();
         let rocksdb = self.db.rocksdb();
 
-        if handle.is_key_block() {
-            let mut write_batch = weedb::rocksdb::WriteBatch::default();
-
-            write_batch.merge_cf(
-                block_handle_cf,
-                id.root_hash.as_slice(),
-                handle.meta().to_vec(),
-            );
-            write_batch.put_cf(
-                &self.db.key_blocks.cf(),
-                id.seqno.to_be_bytes(),
-                id.to_vec(),
-            );
-
-            rocksdb.write(write_batch)
-        } else {
-            rocksdb.merge_cf_opt(
+        rocksdb
+            .merge_cf_opt(
                 block_handle_cf,
                 id.root_hash.as_slice(),
                 handle.meta().to_vec(),
                 self.db.block_handles.write_config(),
             )
-        }
-        .unwrap();
+            .unwrap();
     }
 
     pub fn load_connection(

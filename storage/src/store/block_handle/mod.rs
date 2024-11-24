@@ -8,6 +8,7 @@ pub(crate) use self::handle::BlockDataGuard;
 pub use self::handle::{BlockHandle, WeakBlockHandle};
 pub use self::meta::{BlockFlags, BlockMeta, LoadedBlockMeta, NewBlockMeta};
 use crate::db::*;
+use crate::store::PartialBlockId;
 use crate::util::*;
 
 mod handle;
@@ -31,7 +32,7 @@ impl BlockHandleStorage {
     pub fn set_block_applied(&self, handle: &BlockHandle) -> bool {
         let updated = handle.meta().add_flags(BlockFlags::IS_APPLIED);
         if updated {
-            self.store_handle(handle);
+            self.store_handle(handle, false);
         }
         updated
     }
@@ -39,7 +40,7 @@ impl BlockHandleStorage {
     pub fn set_block_persistent(&self, handle: &BlockHandle) -> bool {
         let updated = handle.meta().add_flags(BlockFlags::IS_PERSISTENT);
         if updated {
-            self.store_handle(handle);
+            self.store_handle(handle, false);
         }
         updated
     }
@@ -49,7 +50,7 @@ impl BlockHandleStorage {
             .meta()
             .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE);
         if updated {
-            self.store_handle(handle);
+            self.store_handle(handle, false);
         }
         updated
     }
@@ -59,7 +60,7 @@ impl BlockHandleStorage {
             .meta()
             .add_flags(BlockFlags::HAS_PERSISTENT_QUEUE_STATE);
         if updated {
-            self.store_handle(handle);
+            self.store_handle(handle, false);
         }
         updated
     }
@@ -100,21 +101,23 @@ impl BlockHandleStorage {
                 );
 
                 // Fill the cache with the new handle
-                match self.cache.entry(*block_id) {
+                let is_new = match self.cache.entry(*block_id) {
                     Entry::Vacant(entry) => {
                         entry.insert(handle.downgrade());
+                        true
                     }
                     Entry::Occupied(mut entry) => match entry.get().upgrade() {
                         // Another thread has created the handle
                         Some(handle) => return (handle, HandleCreationStatus::Fetched),
                         None => {
                             entry.insert(handle.downgrade());
+                            true
                         }
                     },
                 };
 
                 // Store the handle in the storage
-                self.store_handle(&handle);
+                self.store_handle(&handle, is_new);
 
                 // Done
                 (handle, HandleCreationStatus::Created)
@@ -142,25 +145,48 @@ impl BlockHandleStorage {
         Some(self.fill_cache(block_id, meta))
     }
 
-    pub fn store_handle(&self, handle: &BlockHandle) {
+    pub fn store_handle(&self, handle: &BlockHandle, is_new: bool) {
         let id = handle.id();
 
-        self.db
-            .rocksdb()
-            .merge_cf_opt(
+        let is_key_block = handle.is_key_block();
+
+        if is_new || is_key_block {
+            let mut batch = weedb::rocksdb::WriteBatch::default();
+
+            batch.merge_cf(
                 &self.db.block_handles.cf(),
-                id.root_hash.as_slice(),
+                id.root_hash,
+                handle.meta().to_vec(),
+            );
+
+            if is_new {
+                batch.put_cf(
+                    &self.db.full_block_ids.cf(),
+                    PartialBlockId::from(id).to_vec(),
+                    id.file_hash,
+                );
+            }
+
+            if is_key_block {
+                batch.put_cf(
+                    &self.db.key_blocks.cf(),
+                    id.seqno.to_be_bytes(),
+                    id.to_vec(),
+                );
+            }
+
+            self.db
+                .rocksdb()
+                .write_opt(batch, self.db.block_handles.write_config())
+        } else {
+            self.db.rocksdb().merge_cf_opt(
+                &self.db.block_handles.cf(),
+                id.root_hash,
                 handle.meta().to_vec(),
                 self.db.block_handles.write_config(),
             )
-            .unwrap();
-
-        if handle.is_key_block() {
-            self.db
-                .key_blocks
-                .insert(id.seqno.to_be_bytes(), id.to_vec())
-                .unwrap();
         }
+        .unwrap();
     }
 
     pub fn load_key_block_handle(&self, seqno: u32) -> Option<BlockHandle> {

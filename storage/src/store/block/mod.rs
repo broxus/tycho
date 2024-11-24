@@ -321,7 +321,7 @@ impl BlockStorage {
             if !handle.has_data() {
                 self.add_data_ext(&archive_id, data)?;
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
-                    self.block_handle_storage.store_handle(&handle);
+                    self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
                 }
             }
@@ -532,7 +532,7 @@ impl BlockStorage {
             if !handle.has_proof() {
                 self.add_data(&archive_id, data)?;
                 if handle.meta().add_flags(BlockFlags::HAS_PROOF) {
-                    self.block_handle_storage.store_handle(&handle);
+                    self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
                 }
             }
@@ -599,7 +599,7 @@ impl BlockStorage {
             if !handle.has_queue_diff() {
                 self.add_data(&archive_id, data)?;
                 if handle.meta().add_flags(BlockFlags::HAS_QUEUE_DIFF) {
-                    self.block_handle_storage.store_handle(&handle);
+                    self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
                 }
             }
@@ -838,8 +838,8 @@ impl BlockStorage {
         let db = self.db.clone();
 
         let BlockGcStats {
-            mc_entries_removed,
-            total_entries_removed,
+            mc_blocks_removed,
+            total_blocks_removed,
         } = rayon_run(move || {
             let _span = span.enter();
 
@@ -862,8 +862,8 @@ impl BlockStorage {
 
         tracing::info!(
             total_cached_handles_removed,
-            mc_entries_removed,
-            total_entries_removed,
+            mc_blocks_removed,
+            total_blocks_removed,
             "finished blocks GC"
         );
         Ok(())
@@ -1364,6 +1364,7 @@ fn remove_blocks(
     let mut stats = BlockGcStats::default();
 
     let raw = db.rocksdb().as_ref();
+    let full_block_ids_cf = db.full_block_ids.cf();
     let block_connections_cf = db.block_connections.cf();
     let package_entries_cf = db.package_entries.cf();
     let block_data_entries_cf = db.block_data_entries.cf();
@@ -1373,13 +1374,12 @@ fn remove_blocks(
     let mut batch = rocksdb::WriteBatch::default();
     let mut batch_len = 0;
 
-    let package_entries_readopts = db.package_entries.new_read_config();
-    let block_handles_readopts = db.block_handles.new_read_config();
-
     // Iterate all entries and find expired items
-    let mut blocks_iter = raw.raw_iterator_cf_opt(&package_entries_cf, package_entries_readopts);
+    let mut blocks_iter =
+        raw.raw_iterator_cf_opt(&full_block_ids_cf, db.full_block_ids.new_read_config());
     blocks_iter.seek_to_first();
 
+    let block_handles_readopts = db.block_handles.new_read_config();
     let is_persistent = |root_hash: &[u8; 32]| -> Result<bool> {
         const FLAGS: u64 =
             ((BlockFlags::IS_KEY_BLOCK.bits() | BlockFlags::IS_PERSISTENT.bits()) as u64) << 32;
@@ -1412,6 +1412,7 @@ fn remove_blocks(
             //
             // It will delete all entries in range [from_seqno, to_seqno) for this shard.
             // Note that package entry keys are the same as block connection keys.
+            batch.delete_range_cf(&full_block_ids_cf, &*range_from, &range_to);
             batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
             batch.delete_range_cf(&block_data_entries_cf, &*range_from, &range_to);
             batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
@@ -1473,9 +1474,9 @@ fn remove_blocks(
         }
 
         // Count entry
-        stats.total_entries_removed += 1;
+        stats.total_blocks_removed += 1;
         if is_masterchain {
-            stats.mc_entries_removed += 1;
+            stats.mc_blocks_removed += 1;
         }
 
         batch.delete_cf(&block_handles_cf, root_hash);
@@ -1486,7 +1487,7 @@ fn remove_blocks(
             Some(max_blocks_per_batch) if batch_len >= max_blocks_per_batch
         ) {
             tracing::info!(
-                total_package_entries_removed = stats.total_entries_removed,
+                total_blocks_removed = stats.total_blocks_removed,
                 "applying intermediate batch",
             );
             let batch = std::mem::take(&mut batch);
@@ -1513,8 +1514,8 @@ fn remove_blocks(
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct BlockGcStats {
-    pub mc_entries_removed: usize,
-    pub total_entries_removed: usize,
+    pub mc_blocks_removed: usize,
+    pub total_blocks_removed: usize,
 }
 
 struct FullBlockDataGuard<'a> {
@@ -1735,7 +1736,7 @@ mod tests {
                 }
 
                 handle.meta().add_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
-                block_handles.store_handle(&handle);
+                block_handles.store_handle(&handle, false);
             }
         }
 
@@ -1748,8 +1749,8 @@ mod tests {
             None,
         )?;
         assert_eq!(stats, BlockGcStats {
-            mc_entries_removed: 69 * ENTRY_TYPES.len(),
-            total_entries_removed: (69 + 49) * ENTRY_TYPES.len(),
+            mc_blocks_removed: 69,
+            total_blocks_removed: 69 + 49,
         });
 
         let removed_ranges = HashMap::from_iter([
@@ -1794,8 +1795,8 @@ mod tests {
             None,
         )?;
         assert_eq!(stats, BlockGcStats {
-            mc_entries_removed: ENTRY_TYPES.len(),
-            total_entries_removed: 2 * ENTRY_TYPES.len(),
+            mc_blocks_removed: 1,
+            total_blocks_removed: 2,
         });
 
         // Remove no blocks
@@ -1807,8 +1808,8 @@ mod tests {
             None,
         )?;
         assert_eq!(stats, BlockGcStats {
-            mc_entries_removed: 0,
-            total_entries_removed: 0,
+            mc_blocks_removed: 0,
+            total_blocks_removed: 0,
         });
 
         Ok(())
