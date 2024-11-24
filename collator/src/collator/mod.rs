@@ -1262,9 +1262,101 @@ impl CollatorStdImpl {
         top_shard_blocks_info: Vec<TopBlockDescription>,
         next_chain_time: u64,
     ) -> Result<()> {
-        let working_state = self.delayed_working_state.wait().await?;
+        let mut working_state = self.delayed_working_state.wait().await?;
 
-        self.do_collate(working_state, Some(top_shard_blocks_info), next_chain_time)
+        // if last imported anchor chain time is less then next required
+        // then we should import next anchors until we reach required chain time
+        let (mut last_imported_anchor_id, mut last_imported_chain_time) = self
+            .anchors_cache
+            .get_last_imported_anchor_id_and_ct()
+            .unwrap();
+        if last_imported_chain_time < next_chain_time {
+            let labels = [("workchain", self.shard_id.workchain().to_string())];
+            let top_processed_to_anchor = working_state.mc_data.top_processed_to_anchor;
+            let max_consensus_lag_rounds = working_state
+                .mc_data
+                .config
+                .get_consensus_config()?
+                .max_consensus_lag_rounds as u32;
+            while last_imported_chain_time < next_chain_time {
+                // next anchor importing can stuck if mempool paused
+                // so allow to cancel collation here
+                let collation_cancelled = self.cancel_collation.notified();
+                let import_fut = Self::import_next_anchor(
+                    self.shard_id,
+                    &mut self.anchors_cache,
+                    self.mpool_adapter.clone(),
+                    top_processed_to_anchor,
+                    max_consensus_lag_rounds,
+                );
+
+                let import_anchor_result = tokio::select! {
+                    res = import_fut => res?,
+                    _ = collation_cancelled => {
+                        tracing::info!(target: tracing_targets::COLLATOR,
+                            top_processed_to_anchor,
+                            last_imported_anchor_id,
+                            last_imported_chain_time,
+                            "collation was cancelled by manager on wait_state_and_do_collate",
+                        );
+                        metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
+                        self.listener
+                            .on_cancelled(
+                                working_state.mc_data.block_id,
+                                working_state.next_block_id_short,
+                                CollationCancelReason::ExternalCancel,
+                            )
+                            .await?;
+                        self.delayed_working_state.delay(working_state);
+                        return Ok(());
+                    }
+                };
+
+                match import_anchor_result {
+                    ImportNextAnchor::Skipped => {
+                        anyhow::bail!(
+                            "anchor import cannot be skipped here because anchor \
+                            with next_chain_time {} should exit",
+                            next_chain_time,
+                        )
+                    }
+                    ImportNextAnchor::Result {
+                        get_anchor_result,
+                        has_our_externals,
+                        ..
+                    } => match get_anchor_result {
+                        GetAnchorResult::NotExist => {
+                            anyhow::bail!(
+                                "anchor with next_chain_time {} should exit",
+                                next_chain_time
+                            )
+                        }
+                        GetAnchorResult::Exist(next_anchor) => {
+                            // time elapsed from prev anchor
+                            let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
+                            self.anchor_timer = std::time::Instant::now();
+                            metrics::histogram!("tycho_collator_from_prev_anchor_time", &labels)
+                                .record(elapsed_from_prev_anchor);
+
+                            working_state.wu_used_from_last_anchor = 0;
+
+                            last_imported_anchor_id = next_anchor.id;
+                            last_imported_chain_time = next_anchor.chain_time;
+
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                top_processed_to_anchor,
+                                last_imported_anchor_id,
+                                last_imported_chain_time,
+                                has_externals = has_our_externals,
+                                "imported next anchor to reach next_chain_time",
+                            );
+                        }
+                    },
+                }
+            }
+        }
+
+        self.do_collate(working_state, Some(top_shard_blocks_info))
             .await
     }
 
@@ -1273,7 +1365,10 @@ impl CollatorStdImpl {
     /// that will route next collation steps
     #[tracing::instrument(
         parent = None, name = "try_collate_next_master_block",
-        skip_all, fields(next_block_id = %self.next_block_info)
+        skip_all, fields(
+            next_block_id = %self.next_block_info,
+            mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+        )
     )]
     async fn try_collate_next_master_block_impl(
         &mut self,
@@ -1457,7 +1552,10 @@ impl CollatorStdImpl {
     /// if max uncommitted chain length reached.
     #[tracing::instrument(
         parent = None, name = "try_collate_next_shard_block",
-        skip_all, fields(next_block_id = %self.next_block_info)
+        skip_all, fields(
+            next_block_id = %self.next_block_info,
+            mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+        )
     )]
     async fn try_collate_next_shard_block_impl(
         &mut self,
@@ -1714,8 +1812,7 @@ impl CollatorStdImpl {
                 );
 
                 drop(histogram);
-                self.do_collate(working_state, None, last_imported_chain_time)
-                    .await?;
+                self.do_collate(working_state, None).await?;
             }
             TryCollateCheck::NoPendingMessages
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
