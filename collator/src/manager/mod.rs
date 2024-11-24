@@ -1932,8 +1932,8 @@ where
         let should_collate_by_current_shard = if hard_forced_for_all {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
-                "Master block collation hard forced for all shards\
-                mostly because there are unprocessed messages for master",
+                "Master block collation hard forced for all shards \
+                because there are unprocessed messages for master",
             );
             true
         } else if forced_in_current_shard {

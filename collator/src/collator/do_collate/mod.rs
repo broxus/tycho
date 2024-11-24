@@ -49,13 +49,15 @@ impl CollatorStdImpl {
     #[tracing::instrument(
         parent =  None,
         skip_all,
-        fields(block_id = %self.next_block_info, ct = next_chain_time)
+        fields(
+            block_id = %self.next_block_info,
+            ct = self.anchors_cache.last_imported_anchor().map(|a| a.ct).unwrap_or_default(),
+        )
     )]
     pub(super) async fn do_collate(
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
-        next_chain_time: u64,
     ) -> Result<()> {
         let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
@@ -77,17 +79,28 @@ impl CollatorStdImpl {
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Start collating block: next_block_id_short={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
-            next_block_id_short,
+            "Start collating block: mc_data_block_id={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
+            mc_data.block_id.as_short_id(),
             DisplayBlockIdsIntoIter(prev_shard_data.blocks_ids()),
             top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
                 v.iter().map(|i| &i.block_id)
             )),
         );
 
+        let Some(&AnchorInfo {
+            ct: next_chain_time,
+            author,
+            ..
+        }) = self.anchors_cache.last_imported_anchor()
+        else {
+            bail!("last_imported_anchor should exist when we collationg block")
+        };
+        let created_by = author.to_bytes().into();
+
         let collation_data = self.create_collation_data(
             next_block_id_short,
             next_chain_time,
+            created_by,
             &mc_data,
             &prev_shard_data,
             top_shard_blocks_info,
@@ -822,11 +835,13 @@ impl CollatorStdImpl {
 
             // run checks
             if new_shard_descr.gen_utime > collation_data_builder.gen_utime {
-                tracing::warn!(target: tracing_targets::COLLATOR,
-                    "ShardTopBlockDescr for {} skipped: it generated at {}, but master block should be generated at {}",
-                    shard_id, new_shard_descr.gen_utime, collation_data_builder.gen_utime,
-                );
-                continue;
+                bail!(
+                    "Error updating master top shards from TopBlockDescription {}: \
+                    it generated at {}, but master block should be generated at {}",
+                    block_id.as_short_id(),
+                    new_shard_descr.gen_utime,
+                    collation_data_builder.gen_utime,
+                )
             }
             if config
                 .get_global_version()?
@@ -919,18 +934,11 @@ impl CollatorStdImpl {
         &mut self,
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
+        created_by: HashBytes,
         mc_data: &Arc<McData>,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
-        let created_by = self
-            .anchors_cache
-            .last_imported_anchor()
-            .unwrap()
-            .author
-            .0
-            .into();
-
         // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor
         let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
