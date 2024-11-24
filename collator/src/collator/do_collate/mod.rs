@@ -9,6 +9,7 @@ use everscale_types::prelude::*;
 use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
+use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
@@ -21,6 +22,7 @@ use super::types::{
     FinalizedCollationResult, ParsedExternals, PrevData, ReadNextExternalsMode, WorkingState,
 };
 use super::{CollatorStdImpl, ForceMasterCollation};
+use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::types::{
     AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, RandSeed, ShardDescriptionExt,
     UpdateQueueDiffResult,
@@ -30,7 +32,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, TopBlockDescription,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
+    TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -220,7 +223,7 @@ impl CollatorStdImpl {
     }
 
     fn run(
-        config: Arc<CollatorConfig>,
+        collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         anchors_cache: AnchorsCache,
         state: Box<ActualState>,
@@ -230,12 +233,12 @@ impl CollatorStdImpl {
     ) -> Result<CollationResult> {
         let shard_id = state.shard_id;
         let labels: [(&str, String); 1] = [("workchain", shard_id.workchain().to_string())];
-
+        let mc_data = state.mc_data.clone();
         let prepare_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
         let prepare_phase =
-            Phase::<PrepareState>::new(config.clone(), mq_adapter, anchors_cache, state);
+            Phase::<PrepareState>::new(collator_config.clone(), mq_adapter, anchors_cache, state);
 
         let mut execute_phase = prepare_phase.run()?;
 
@@ -284,25 +287,48 @@ impl CollatorStdImpl {
                 has_unprocessed_messages,
                 diff_messages_len,
                 create_queue_diff_elapsed,
+                processed_to,
             },
             update_queue_task,
-        ) = finalize_phase.update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter)?;
+        ) = finalize_phase.update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter.clone())?;
 
         let finalize_block_timer = std::time::Instant::now();
+
+        // Get current and masterchain processed values
+        let current_processed_to = processed_to.get(&shard_id).cloned();
+        let mc_processed_to = mc_data
+            .processed_upto
+            .internals
+            .get(&shard_id)
+            .map(|mc| mc.processed_to_msg);
+
+        let min_processed_to = calculate_min_processed_to(
+            &shard_id,
+            current_processed_to,
+            mc_processed_to,
+            &mc_data.shards,
+            &mc_data.shards_processed_to,
+        );
+
+        if let Some(value) = min_processed_to {
+            mq_adapter.trim_diffs(&shard_id, &value)?;
+        };
+        let diff_tail_len = mq_adapter.get_diff_count_by_shard(&shard_id) as u32 + 1;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
             || {
                 let _span = span.enter();
 
-                finalize_phase.finalize_block(
+                finalize_phase.finalize_block(FinalizeBlockContext {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
                     queue_diff,
-                    config,
+                    collator_config,
                     executor,
-                )
+                    diff_tail_len,
+                })
             },
             // wait update queue task before returning collation result
             // to be sure that queue was updated before block commit and next block collation
@@ -847,6 +873,7 @@ impl CollatorStdImpl {
                 proof_funds,
                 #[cfg(feature = "block-creator-stats")]
                 creators,
+                processed_to,
             } = top_block_descr;
 
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
@@ -904,7 +931,14 @@ impl CollatorStdImpl {
                 collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
             }
 
-            collation_data_builder.top_shard_blocks_ids.push(block_id);
+            let top_shard_block_info = TopShardBlockInfo {
+                block_id,
+                processed_to,
+            };
+
+            collation_data_builder
+                .top_shard_blocks
+                .push(top_shard_block_info);
             #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }
@@ -1177,6 +1211,8 @@ impl CollatorStdImpl {
             .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
             .set(collation_data.block_id_short.seqno);
+        metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
+            .set(collation_data.diff_tail_len);
     }
 
     fn wu_metrics(
@@ -1247,7 +1283,7 @@ impl CollatorStdImpl {
             read_ext_msgs={}, read_int_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
             total_execute_msgs_time_mc={}, \
-            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}",
+            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}, diffs_tail_len: {}",
             block_id,
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
@@ -1258,7 +1294,7 @@ impl CollatorStdImpl {
             collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
             collation_data.read_new_msgs_from_iterator_count, collation_data.inserted_new_msgs_to_iterator_count, final_result.has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
-            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total
+            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total, collation_data.diff_tail_len,
         );
 
         tracing::debug!(
@@ -1315,4 +1351,72 @@ impl CollatorStdImpl {
             "total collation timings"
         );
     }
+}
+
+fn calculate_min_processed_to(
+    shard_id: &ShardIdent,
+    current_processed_to: Option<QueueKey>,
+    mc_processed_to: Option<QueueKey>,
+    mc_data_shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
+    mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+) -> Option<QueueKey> {
+    fn find_min_processed_to(
+        shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
+        shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+        shard_id: &ShardIdent,
+        min_processed_to: &mut Option<QueueKey>,
+        skip_condition: impl Fn(&ShardIdent) -> bool,
+    ) {
+        // Iterate through shards with updated top shard blocks and find min processed_to
+        for (shard, descr) in shards {
+            if skip_condition(shard) {
+                continue;
+            }
+
+            if descr.top_sc_block_updated {
+                if let Some(value) = shards_processed_to.get(shard) {
+                    if let Some(v) = value.get(shard_id) {
+                        *min_processed_to = match *min_processed_to {
+                            Some(current_min) => Some(current_min.min(*v)),
+                            None => Some(*v),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    let mut min_processed_to: Option<QueueKey> = None;
+
+    if shard_id.is_masterchain() {
+        find_min_processed_to(
+            mc_data_shards,
+            mc_data_shards_processed_to,
+            shard_id,
+            &mut min_processed_to,
+            |_| false,
+        );
+
+        // Combine with current and masterchain values
+        min_processed_to = [current_processed_to, min_processed_to]
+            .into_iter()
+            .flatten()
+            .min();
+    } else {
+        find_min_processed_to(
+            mc_data_shards,
+            mc_data_shards_processed_to,
+            shard_id,
+            &mut min_processed_to,
+            |shard| shard == shard_id || shard.is_masterchain(),
+        );
+
+        // Combine with current and masterchain values and shard values
+        min_processed_to = [current_processed_to, min_processed_to, mc_processed_to]
+            .into_iter()
+            .flatten()
+            .min();
+    }
+
+    min_processed_to
 }

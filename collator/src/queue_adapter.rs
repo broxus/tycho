@@ -7,15 +7,15 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
-use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
-use crate::internal_queue::state::session_state::SessionStateStdImpl;
+use crate::internal_queue::state::commited_state::CommittedStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
+use crate::internal_queue::state::uncommitted_state::UncommittedStateStdImpl;
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTuple, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
-    queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>,
+    queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>,
 }
 
 pub trait MessageQueueAdapter<V>: Send + Sync
@@ -29,15 +29,16 @@ where
         shards_from: FastHashMap<ShardIdent, QueueKey>,
         shards_to: FastHashMap<ShardIdent, QueueKey>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
-    /// Apply diff to the current queue session state (waiting for the operation to complete)
+    /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
+        end_key: QueueKey,
     ) -> Result<()>;
 
-    /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
+    /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
     fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
 
@@ -55,11 +56,16 @@ where
         messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()>;
 
-    fn clear_session_state(&self) -> Result<()>;
+    fn clear_uncommitted_state(&self) -> Result<()>;
+    /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
+    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
+
+    /// returns the number of diffs in cache for the given shard
+    fn get_diff_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
-    pub fn new(queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>) -> Self {
+    pub fn new(queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>) -> Self {
         Self { queue }
     }
 }
@@ -99,16 +105,17 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         hash: &HashBytes,
+        end_key: QueueKey,
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
-        let processed_upto = diff.processed_upto.clone();
-        self.queue.apply_diff(diff, block_id_short, hash)?;
+        let processed_to = diff.processed_to.clone();
+        self.queue.apply_diff(diff, block_id_short, hash, end_key)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             new_messages_len = len,
             elapsed = ?time.elapsed(),
-            processed_upto = %DisplayIter(processed_upto.iter().map(DisplayTuple)),
+            processed_to = %DisplayIter(processed_to.iter().map(DisplayTuple)),
             "Diff applied",
         );
         Ok(())
@@ -150,7 +157,22 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         iterator.commit(messages)
     }
 
-    fn clear_session_state(&self) -> Result<()> {
-        self.queue.clear_session_state()
+    fn clear_uncommitted_state(&self) -> Result<()> {
+        tracing::trace!(target: tracing_targets::MQ_ADAPTER, "Clearing uncommitted state");
+        self.queue.clear_uncommitted_state()
+    }
+
+    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
+        tracing::trace!(
+            target: tracing_targets::MQ_ADAPTER,
+            source_shard = %source_shard,
+            inclusive_until = %inclusive_until,
+            "Trimming diffs"
+        );
+        self.queue.trim_diffs(source_shard, inclusive_until)
+    }
+
+    fn get_diff_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
+        self.queue.get_diffs_count_by_shard(shard_ident)
     }
 }

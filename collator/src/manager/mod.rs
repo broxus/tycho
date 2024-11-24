@@ -12,7 +12,6 @@ use everscale_types::models::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
-use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::metrics::HistogramGuard;
@@ -40,7 +39,7 @@ use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEven
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
-    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
+    ProcessedTo, ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -480,6 +479,7 @@ where
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
+            queue_diff.diff().max_message,
         )
     }
 
@@ -722,7 +722,7 @@ where
                 "collator was cancelled before",
             );
 
-            self.mq_adapter.clear_session_state()?;
+            self.mq_adapter.clear_uncommitted_state()?;
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
                 .get_last_collated_block_and_applied_mc_queue_range();
@@ -768,7 +768,7 @@ where
                     }
                 }
 
-                self.mq_adapter.clear_session_state()?;
+                self.mq_adapter.clear_uncommitted_state()?;
             }
 
             tracing::debug!(
@@ -984,7 +984,7 @@ where
                 }
             }
 
-            self.mq_adapter.clear_session_state()?;
+            self.mq_adapter.clear_uncommitted_state()?;
         }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1176,14 +1176,26 @@ where
                     new_genesis_time_millis = mp_cfg_override.genesis_info.genesis_millis,
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
-                self.mq_adapter.clear_session_state()?;
+                self.mq_adapter.clear_uncommitted_state()?;
             }
         }
 
-        // get min internals processed upto
-        let min_processed_to_by_shards = self
+        // internals processed upto
+        let processed_to_by_shards = self
             .read_min_processed_to_for_mc_block(&last_applied_mc_block_key)
             .await?;
+
+        // calc internals processed upto
+        let mut min_processed_to_by_shards = BTreeMap::default();
+
+        for min_processed_upto in processed_to_by_shards.values() {
+            for (shard_id, to_key) in min_processed_upto {
+                min_processed_to_by_shards
+                    .entry(shard_id)
+                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
+                    .or_insert(to_key);
+            }
+        }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
@@ -1209,8 +1221,8 @@ where
 
         // try load required previous queue diffs
         let mut prev_queue_diffs = vec![];
-        for (shard_id, min_processed_to) in min_processed_to_by_shards {
-            let Some((_, prev_block_ids)) = before_tail_block_ids.get(&shard_id) else {
+        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
+            let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
                 continue;
             };
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
@@ -1248,7 +1260,7 @@ where
                     );
                     return Ok(false);
                 };
-                let diff_required = queue_diff_stuff.as_ref().max_message > min_processed_to;
+                let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     diff_block_id = %prev_block_id.as_short_id(),
                     diff_required,
@@ -1270,6 +1282,7 @@ where
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
+                        queue_diff_stuff.diff().max_message,
                     ));
 
                     let prev_ids_info = block_stuff.construct_prev_id()?;
@@ -1282,9 +1295,17 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
-            self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash)?;
+        while let Some((diff, diff_hash, block_id, max_message_key)) = prev_queue_diffs.pop() {
+            self.mq_adapter.apply_diff(
+                diff,
+                block_id.as_short_id(),
+                &diff_hash,
+                max_message_key,
+            )?;
+        }
+        // trim diffs tails for all shards
+        for (shard_id, min_processed_to) in min_processed_to_by_shards {
+            self.mq_adapter.trim_diffs(shard_id, min_processed_to)?;
         }
 
         // sync all applied blocks
@@ -1325,7 +1346,7 @@ where
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
                 // to avoid panics if next block was already collated before an it is incorrect
-                self.mq_adapter.clear_session_state()?;
+                self.mq_adapter.clear_uncommitted_state()?;
 
                 let state = mc_block_entry.cached_state()?;
 
@@ -1347,9 +1368,9 @@ where
 
                 // reset top shard blocks info
                 // because next we will start to collate new shard blocks after the sync
-                self.blocks_cache.reset_top_shard_blocks_additional_info()?;
+                self.blocks_cache.reset_top_shard_blocks_additional_info();
 
-                let mc_data = McData::load_from_state(state)?;
+                let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1381,8 +1402,8 @@ where
     async fn read_min_processed_to_for_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<BTreeMap<ShardIdent, QueueKey>> {
-        let mut result = BTreeMap::new();
+    ) -> Result<FastHashMap<ShardIdent, ProcessedTo>> {
+        let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
             return Ok(result);
@@ -1397,26 +1418,20 @@ where
                 Some(processed_to) => processed_to,
                 None => {
                     // try get from storage
-                    let loaded = utils::load_only_queue_diff_stuff(
+                    utils::load_only_queue_diff_stuff(
                         self.state_node_adapter.as_ref(),
                         &top_block_id,
                     )
-                    .await?;
-
-                    loaded.as_ref().processed_upto.clone()
+                    .await?
+                    .as_ref()
+                    .processed_to
+                    .clone()
+                    .into_iter()
+                    .collect()
                 }
             };
 
-            for (shard_id, to_key) in processed_to {
-                result
-                    .entry(shard_id)
-                    .and_modify(|min| {
-                        if &to_key < min {
-                            *min = to_key;
-                        }
-                    })
-                    .or_insert(to_key);
-            }
+            result.insert(top_block_id.shard, processed_to.clone());
         }
 
         Ok(result)

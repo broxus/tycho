@@ -24,7 +24,9 @@ use tycho_util::FastHashMap;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, McData, ProcessedUptoInfoStuff, ProofFunds};
+use crate::types::{
+    BlockCandidate, McData, ProcessedTo, ProcessedUptoInfoStuff, ProofFunds, TopShardBlockInfo,
+};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -205,7 +207,7 @@ pub(super) struct BlockCollationDataBuilder {
     pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
     pub global_version: GlobalVersion,
-    pub top_shard_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks: Vec<TopShardBlockInfo>,
 
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,
@@ -240,7 +242,7 @@ impl BlockCollationDataBuilder {
             created_by,
             global_version,
             shards: None,
-            top_shard_blocks_ids: vec![],
+            top_shard_blocks: vec![],
             mempool_config_override,
         }
     }
@@ -300,7 +302,7 @@ impl BlockCollationDataBuilder {
             created_by: self.created_by,
             global_version: self.global_version,
             shards: self.shards,
-            top_shard_blocks_ids: self.top_shard_blocks_ids,
+            top_shard_blocks: self.top_shard_blocks,
             shard_fees: self.shard_fees,
             value_flow: self.value_flow,
             block_limit,
@@ -329,6 +331,7 @@ impl BlockCollationDataBuilder {
             mempool_config_override: self.mempool_config_override,
             #[cfg(feature = "block-creator-stats")]
             block_create_count: self.block_create_count,
+            diff_tail_len: 0,
         }
     }
 }
@@ -374,7 +377,7 @@ pub(super) struct BlockCollationData {
     pub processed_upto: ProcessedUptoInfoStuff,
 
     /// Ids of top blocks from shards that be included in the master block
-    pub top_shard_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks: Vec<TopShardBlockInfo>,
 
     shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
 
@@ -399,6 +402,7 @@ pub(super) struct BlockCollationData {
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
+    pub diff_tail_len: u32,
 }
 
 impl BlockCollationData {
@@ -1290,6 +1294,7 @@ pub struct UpdateQueueDiffResult {
     pub has_unprocessed_messages: bool,
     pub diff_messages_len: usize,
     pub create_queue_diff_elapsed: Duration,
+    pub processed_to: ProcessedTo,
 }
 
 pub struct FinalizedCollationResult {

@@ -55,6 +55,7 @@ impl BlockStuff {
             state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
             out_msg_queue_updates: OutMsgQueueUpdates {
                 diff_hash: Default::default(),
+                tail_len: 0,
             },
             extra: Lazy::new(&BlockExtra::default()).unwrap(),
         };
