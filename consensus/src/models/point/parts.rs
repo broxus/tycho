@@ -75,7 +75,6 @@ impl Signature {
     }
 }
 
-// TODO impl Display (as u32), Add & Sub (saturating), make u32 private + getter, refactor usage
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TlRead, TlWrite)]
 pub struct Round(pub u32);
 
@@ -99,6 +98,41 @@ impl Round {
             .expect("DAG round number overflow, inner type exhausted")
     }
 }
+
+// General `Sub` impl is intended for metrics, thus results in neither `u32` nor `i64`.
+// Have to handle every other subtraction case individually. Addition is meaningless.
+impl Sub for Round {
+    type Output = f64;
+    #[inline]
+    fn sub(self, rhs: Self) -> Self::Output {
+        if self >= rhs {
+            f64::from(self.0 - rhs.0)
+        } else {
+            -f64::from(rhs.0 - self.0)
+        }
+    }
+}
+
+// Impls for types of config values. One also may unwrap `u32` from `Round` and use it as amount.
+macro_rules! impl_round_add_sub {
+    ($($ty:ty),*$(,)?) => {
+        $(impl Add<$ty> for Round {
+            type Output = Self;
+            #[inline]
+            fn add(self, rhs: $ty) -> Self {
+                Self(self.0.saturating_add(rhs as _))
+            }
+        }
+        impl Sub<$ty> for Round {
+            type Output = Self;
+            #[inline]
+            fn sub(self, rhs: $ty) -> Self {
+                Self(self.0.saturating_sub(rhs as _))
+            }
+        })*
+    };
+}
+impl_round_add_sub! { u8, u16, u32 }
 
 #[derive(Copy, Clone, TlRead, TlWrite, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct UnixTime(u64);

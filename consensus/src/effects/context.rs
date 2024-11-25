@@ -65,7 +65,7 @@ impl Effects<EngineContext> {
         })
     }
     pub fn depth(&self, round: Round) -> u32 {
-        self.context.current_round.0.saturating_sub(round.0)
+        (self.context.current_round - round.0).0
     }
 }
 
@@ -112,7 +112,7 @@ impl Effects<DownloadContext> {
     }
     // per round
     pub fn download_max_depth(&self, round: Round) -> u32 {
-        let depth = self.context.current_round.0.saturating_sub(round.0);
+        let depth = (self.context.current_round - round.0).0;
         let old = self
             .context
             .download_max_depth

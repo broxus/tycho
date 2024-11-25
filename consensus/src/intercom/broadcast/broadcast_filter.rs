@@ -161,9 +161,9 @@ impl BroadcastFilterInner {
                             }
                         }
                         hash_map::Entry::Vacant(vacant) => {
-                            let cached = if head.current().round().0
-                                <= (self.consensus_round.get().0)
-                                    .saturating_sub(CachedConfig::cache_future_broadcasts_rounds())
+                            let cached = if head.current().round()
+                                <= self.consensus_round.get()
+                                    - CachedConfig::cache_future_broadcasts_rounds()
                             {
                                 Ok(point.clone())
                             } else {

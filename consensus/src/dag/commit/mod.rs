@@ -46,8 +46,7 @@ impl Committer {
             "already initialized"
         );
         self.dag.init(bottom_round);
-        self.full_history_bottom =
-            Round((bottom_round.round().0).saturating_add(CachedConfig::commit_history_rounds()));
+        self.full_history_bottom = bottom_round.round() + CachedConfig::commit_history_rounds();
         self.full_history_bottom // hidden in other cases
     }
 
@@ -71,8 +70,7 @@ impl Committer {
         let actual_bottom = new_bottom_round.min(self.dag.top().round());
         self.dag.drop_upto(actual_bottom);
         self.anchor_chain.drop_upto(actual_bottom);
-        self.full_history_bottom =
-            Round((actual_bottom.0).saturating_add(CachedConfig::commit_history_rounds()));
+        self.full_history_bottom = actual_bottom + CachedConfig::commit_history_rounds();
         if actual_bottom == new_bottom_round {
             Ok(self.full_history_bottom)
         } else {
@@ -107,7 +105,7 @@ impl Committer {
 
         let _span = if let Some(top) = self.anchor_chain.top() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
-                .set((current_round.0 as f64) - (top.proof.round().0 as f64));
+                .set(current_round - top.proof.round());
 
             tracing::error_span!(
                 "last anchor proof",
@@ -136,7 +134,7 @@ impl Committer {
 
         if let Some(last_trigger) = triggers.back() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
-                .set((current_round.0 as f64) - (last_trigger.round().0 as f64));
+                .set(current_round - last_trigger.round());
         }
 
         // traverse from oldest to newest;
@@ -179,9 +177,8 @@ impl Committer {
 
         while let Some(next) = self.anchor_chain.next() {
             // in case previous anchor was triggered directly - rounds are already dropped
-            self.dag.drop_upto(Round(
-                (next.anchor.round().0).saturating_sub(CachedConfig::commit_history_rounds()),
-            ));
+            self.dag
+                .drop_upto(next.anchor.round() - CachedConfig::commit_history_rounds());
             let uncommitted = match self
                 .dag
                 .gather_uncommitted(self.full_history_bottom, &next.anchor)
