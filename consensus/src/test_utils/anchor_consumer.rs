@@ -92,7 +92,7 @@ impl AnchorConsumer {
 
             if next_expected_history_round.is_none() {
                 // Genesis point is excluded from commit, points only reference it
-                next_expected_history_round = Some(Genesis::round().next());
+                next_expected_history_round = Some(Genesis::id().round.next());
             }
 
             let anchor_round = anchor.round();

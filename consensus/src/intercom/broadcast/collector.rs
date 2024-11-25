@@ -1,4 +1,5 @@
 use std::cmp;
+use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 
@@ -75,7 +76,9 @@ impl CollectorTask {
         head: DagHead,
         mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) {
-        let mut retry_interval = tokio::time::interval(CachedConfig::broadcast_retry());
+        let mut retry_interval = tokio::time::interval(Duration::from_millis(
+            CachedConfig::get().consensus.broadcast_retry_millis as _,
+        ));
         let mut threshold = std::pin::pin!(head.current().threshold().reached());
 
         loop {

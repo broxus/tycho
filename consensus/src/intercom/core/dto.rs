@@ -20,7 +20,7 @@ impl<'a> TlRead<'a> for BroadcastQuery {
         }
 
         let size = packet.len();
-        if size > CachedConfig::point_max_bytes() + 4usize {
+        if size > CachedConfig::get().point_max_bytes + 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }
@@ -106,7 +106,7 @@ where
         }
 
         let size = packet.len();
-        if size > CachedConfig::point_max_bytes() + 4usize {
+        if size > CachedConfig::get().point_max_bytes + 4usize {
             tracing::error!(size = %size, "Point max size exceeded");
             return Err(TlError::InvalidData);
         }

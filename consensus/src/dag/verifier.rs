@@ -71,7 +71,7 @@ impl Verifier {
     pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
 
-        let result = if point.round() > Genesis::round().next() {
+        let result = if point.round() > Genesis::id().round.next() {
             let [
                 same_round_peers, // @ r+0
                 includes_peers, // @ r-1
@@ -99,7 +99,7 @@ impl Verifier {
                 )
                 .map_or(Ok(()), Err)
             }
-        } else if point.round() >= Genesis::round() {
+        } else if point.round() >= Genesis::id().round {
             // genesis and first point after are reproducible so logic is in well-formness check
             let same_round_peers = peer_schedule.atomic().peers_for(point.round()).clone();
             if same_round_peers.is_empty() {
@@ -145,7 +145,7 @@ impl Verifier {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = effects.span().enter();
 
-        match info.round().cmp(&Genesis::round().next()) {
+        match info.round().cmp(&Genesis::id().round.next()) {
             cmp::Ordering::Less => {
                 // for genesis point it's sufficient to be well-formed and pass integrity check,
                 // it cannot be validated against AnchorStage (as it knows nothing about genesis)
@@ -387,7 +387,7 @@ impl Verifier {
             return true;
         };
 
-        if round.round() == Genesis::round() {
+        if round.round() == Genesis::id().round {
             // notice that point is required to link to the freshest leader point
             // among all its (in)direct dependencies, which is checked later
             return linked_id == *Genesis::id();
@@ -698,7 +698,7 @@ impl Verifier {
         }
 
         match PeerCount::try_from(witness_peers.len()) {
-            Err(_) if point.round() > Genesis::round().next().next() => {
+            Err(_) if point.round() > Genesis::id().round.next().next() => {
                 return Some(VerifyError::Uninit((
                     witness_peers.len(),
                     PointMap::Witness,

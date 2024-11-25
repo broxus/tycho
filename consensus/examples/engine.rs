@@ -208,10 +208,6 @@ fn make_network(
                         .acquire_many(node_count)
                         .await
                         .expect("wait nodes start");
-                    anchor_consumer
-                        .top_known_anchor()
-                        // may be uninit until engine started
-                        .set_max_raw(mempool_config.genesis_round());
                     tokio::try_join!(
                         anchor_consumer.check().map(|_| Err::<(), ()>(())),
                         run_guard.until_any_dropped()

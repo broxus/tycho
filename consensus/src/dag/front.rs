@@ -29,30 +29,30 @@ impl DagFront {
         // notice that procedure happens at round start, before new local point's dependencies
         // finished their validation, a new 'next' dag round will appear and so no `-1` below
         let min_front_rounds = 3 // new current, includes and witness rounds to validate
-            + CachedConfig::commit_history_rounds(); // all committable history for every point
+            + CachedConfig::get().consensus.commit_history_rounds; // all committable history for every point
 
-        Genesis::round().max(top_round - min_front_rounds)
+        Genesis::id().round.max(top_round - min_front_rounds)
     }
 
     pub fn default_back_bottom(top_round: Round) -> Round {
         // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
         // but collator may re-request TKA from collator, not only the next one
-        let reset_rounds = CachedConfig::max_consensus_lag_rounds() // to collate
-            + CachedConfig::deduplicate_rounds()  // to discard full anchor history after restart
-            + CachedConfig::commit_history_rounds(); // to discard incomplete anchor history after restart
+        let reset_rounds = CachedConfig::get().consensus.max_consensus_lag_rounds // to collate
+            + CachedConfig::get().consensus.deduplicate_rounds  // to discard full anchor history after restart
+            + CachedConfig::get().consensus.commit_history_rounds; // to discard incomplete anchor history after restart
 
-        Genesis::round().max(top_round - reset_rounds)
+        Genesis::id().round.max(top_round - reset_rounds)
     }
 
     pub fn max_history_bottom(top_round: Round) -> Round {
         // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
         // but collator may re-request TKA from collator, not only the next one
-        let max_total_rounds = CachedConfig::max_consensus_lag_rounds()
-            + CachedConfig::sync_support_rounds() // to follow consensus during sync
-            + CachedConfig::deduplicate_rounds() // to discard full anchor history after restart
-            + CachedConfig::commit_history_rounds(); // to discard incomplete anchor history after restart
+        let max_total_rounds = CachedConfig::get().consensus.max_consensus_lag_rounds
+            + CachedConfig::get().consensus.sync_support_rounds // to follow consensus during sync
+            + CachedConfig::get().consensus.deduplicate_rounds // to discard full anchor history after restart
+            + CachedConfig::get().consensus.commit_history_rounds; // to discard incomplete anchor history after restart
 
-        Genesis::round().max(top_round - max_total_rounds)
+        Genesis::id().round.max(top_round - max_total_rounds)
     }
 
     pub fn init(&mut self, dag_bottom_round: DagRound) -> Committer {

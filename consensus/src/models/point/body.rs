@@ -70,13 +70,13 @@ impl PointBody {
             + evidence_size
     }
     pub fn make_digest(&self) -> Digest {
-        let mut data = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
+        let mut data = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
         self.write_to(&mut data);
         Digest::new(data.as_ref())
     }
 
     pub fn is_well_formed(&self) -> bool {
-        let genesis_round = Genesis::round();
+        let genesis_round = Genesis::id().round;
         let genesis_round_next = genesis_round.next();
 
         // any genesis is suitable, round number may be taken from configs
@@ -101,7 +101,7 @@ impl PointBody {
                         && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next)
                             .map_or(false, |anchor| anchor == *Genesis::id())
                         && self.data.time == self.data.anchor_time.next()
-                        && self.data.anchor_time == Genesis::time()
+                        && self.data.anchor_time.millis() == CachedConfig::get().genesis.time_millis
                 ))
                     // leader must maintain its chain of proofs,
                     // while others must link to previous points (checked at the end of this method);
@@ -114,7 +114,8 @@ impl PointBody {
             cmp::Ordering::Less => false,
         };
         is_special_ok
-            && CachedConfig::payload_batch_bytes() >= self.payload.iter().map(|x| x.len()).sum()
+            && CachedConfig::get().consensus.payload_batch_bytes as usize
+                >= self.payload.iter().map(|x| x.len()).sum()
             // proof for previous point consists of digest and 2F++ evidences
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
             && self.evidence.is_empty() != self.data.includes.contains_key(&self.data.author)

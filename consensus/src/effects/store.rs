@@ -210,7 +210,8 @@ impl MempoolStore {
                 // tie: collator syncs and does not need committed, but commit may be not finished
                 DagFront::default_back_bottom(committed)
             };
-            least_to_keep - least_to_keep.0 % CachedConfig::clean_rocks_period()
+            least_to_keep
+                - least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32
         }
 
         tokio::spawn(async move {
@@ -297,7 +298,7 @@ impl MempoolStoreImpl for MempoolStorage {
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
 
-        let mut buffer = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
+        let mut buffer = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
         point.write_to(&mut buffer);
         batch.put_cf(&points_cf, key.as_slice(), &buffer);
 

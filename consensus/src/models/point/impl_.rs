@@ -467,7 +467,7 @@ mod tests {
             body: point_body.clone(),
         }));
 
-        let mut data = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
+        let mut data = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
         point.write_to(&mut data);
         let byte_size = data.len();
 
@@ -527,7 +527,7 @@ mod tests {
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
             let point = point.clone();
-            let mut data = Vec::<u8>::with_capacity(CachedConfig::point_max_bytes());
+            let mut data = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
             point.write_to(&mut data);
             byte_size = data.len();
             // data.freeze();

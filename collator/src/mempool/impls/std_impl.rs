@@ -6,7 +6,7 @@ mod parser;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -90,16 +90,10 @@ impl MempoolAdapterStdImpl {
             .state_update_ctx
             .as_ref()
             .ok_or(anyhow!("last state update context is not set"))?;
-        let genesis = config_guard
-            .builder
-            .get_genesis()
-            .context("genesis must be set")?;
         let mempool_config = config_guard.builder.build()?;
-        let consensus_config = (config_guard.builder.get_consensus_config().cloned())
-            .ok_or(anyhow!("consensus config is not set"))?;
 
         // TODO support config change; payload size is bound to mempool rounds
-        self.input_buffer.apply_config(&consensus_config);
+        self.input_buffer.apply_config(&mempool_config.consensus);
 
         // Note: mempool is always run from applied mc block
         self.top_known_anchor
@@ -123,10 +117,10 @@ impl MempoolAdapterStdImpl {
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = last_state_update
             .mc_processed_to_anchor_id
-            .saturating_sub(consensus_config.max_consensus_lag_rounds as u32)
-            .saturating_sub(consensus_config.deduplicate_rounds as u32)
-            .saturating_sub(consensus_config.commit_history_rounds as u32)
-            .max(genesis.start_round);
+            .saturating_sub(mempool_config.consensus.max_consensus_lag_rounds as u32)
+            .saturating_sub(mempool_config.consensus.deduplicate_rounds as u32)
+            .saturating_sub(mempool_config.consensus.commit_history_rounds as u32)
+            .max(mempool_config.genesis.start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
@@ -146,7 +140,7 @@ impl MempoolAdapterStdImpl {
                  is older than prev vset switch round {}; \
                  start round {}, masterchain processed to anchor {} in block {}",
                 last_state_update.consensus_info.prev_vset_switch_round,
-                genesis.start_round,
+                mempool_config.genesis.start_round,
                 last_state_update.mc_processed_to_anchor_id,
                 last_state_update.mc_block_id,
             )
@@ -163,7 +157,7 @@ impl MempoolAdapterStdImpl {
         tokio::spawn(Self::handle_anchors_task(
             self.cache.clone(),
             self.store.clone(),
-            consensus_config,
+            mempool_config.consensus,
             anchor_rx,
         ));
 
@@ -222,7 +216,7 @@ impl MempoolAdapterStdImpl {
 
                 move || {
                     let author = committed.anchor.data().author;
-                    let chain_time = committed.anchor.data().time.as_u64();
+                    let chain_time = committed.anchor.data().time.millis();
                     let anchor_id: MempoolAnchorId = committed.anchor.round().0;
                     metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 

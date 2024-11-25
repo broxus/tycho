@@ -162,8 +162,8 @@ impl BroadcastFilterInner {
                         }
                         hash_map::Entry::Vacant(vacant) => {
                             let cached = if head.current().round()
+                                + (CachedConfig::get().node.cache_future_broadcasts_rounds).get()
                                 <= self.consensus_round.get()
-                                    - CachedConfig::cache_future_broadcasts_rounds()
                             {
                                 Ok(point.clone())
                             } else {

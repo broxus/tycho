@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display, Formatter, Result};
 
 use tycho_network::PeerId;
 
-use crate::engine::{CachedConfig, LogFlavor};
+use crate::engine::CachedConfig;
 use crate::models::{DagPoint, Digest, PointId, Signature};
 
 /// Display implementations to be used as fields in structured logs,
@@ -22,9 +22,9 @@ pub trait AltFormat {
 impl AltFormat for PeerId {}
 impl Display for AltFmt<'_, PeerId> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match CachedConfig::log_flavor() {
-            LogFlavor::Full => write!(f, "{}", self.0),
-            LogFlavor::Truncated => write!(f, "{:.4}", self.0),
+        match CachedConfig::get().node.log_truncate_long_values {
+            false => write!(f, "{}", self.0),
+            true => write!(f, "{:.4}", self.0),
         }
     }
 }
@@ -46,9 +46,9 @@ impl Display for AltFmt<'_, [PeerId]> {
 impl AltFormat for Digest {}
 impl Display for AltFmt<'_, Digest> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match CachedConfig::log_flavor() {
-            LogFlavor::Full => write!(f, "{}", self.0),
-            LogFlavor::Truncated => write!(f, "{:.4}", self.0),
+        match CachedConfig::get().node.log_truncate_long_values {
+            false => write!(f, "{}", self.0),
+            true => write!(f, "{:.4}", self.0),
         }
     }
 }
@@ -56,9 +56,9 @@ impl Display for AltFmt<'_, Digest> {
 impl AltFormat for Signature {}
 impl Display for AltFmt<'_, Signature> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match CachedConfig::log_flavor() {
-            LogFlavor::Full => write!(f, "{}", self.0),
-            LogFlavor::Truncated => write!(f, "{:.4}", self.0),
+        match CachedConfig::get().node.log_truncate_long_values {
+            false => write!(f, "{}", self.0),
+            true => write!(f, "{:.4}", self.0),
         }
     }
 }
@@ -66,9 +66,9 @@ impl Display for AltFmt<'_, Signature> {
 impl AltFormat for PointId {}
 impl Debug for AltFmt<'_, PointId> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match CachedConfig::log_flavor() {
-            LogFlavor::Full => write!(f, "{:?}", self.0),
-            LogFlavor::Truncated => write!(
+        match CachedConfig::get().node.log_truncate_long_values {
+            false => write!(f, "{:?}", self.0),
+            true => write!(
                 f,
                 "PointId( {:.4} @ {} # {:.4} )",
                 self.0.author, self.0.round.0, self.0.digest

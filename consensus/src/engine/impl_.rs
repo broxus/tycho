@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{cmp, mem};
 
 use everscale_crypto::ed25519::KeyPair;
@@ -44,8 +45,8 @@ impl EngineHandle {
         if let Some((switch_round, subset)) = subset {
             // specially for zerostate with unaligned genesis,
             // and for first (prev) vset after reboot or a new genesis
-            let round = if switch_round <= Genesis::round().0 {
-                Genesis::round().next()
+            let round = if switch_round <= Genesis::id().round.0 {
+                Genesis::id().round.next()
             } else {
                 Round(switch_round)
             };
@@ -76,8 +77,8 @@ impl Engine {
         let (genesis, overlay_id) = CachedConfig::init(config);
 
         let consensus_round = RoundWatch::default();
-        consensus_round.set_max(Genesis::round());
-        top_known_anchor.set_max(Genesis::round());
+        consensus_round.set_max(Genesis::id().round);
+        top_known_anchor.set_max(Genesis::id().round);
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let responder = Responder::default();
 
@@ -105,7 +106,7 @@ impl Engine {
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
         let mut dag = DagFront::default();
-        let committer = dag.init(DagRound::new_bottom(Genesis::round(), &peer_schedule));
+        let committer = dag.init(DagRound::new_bottom(Genesis::id().round, &peer_schedule));
         let committer_run = tokio::spawn(future::ready(committer));
 
         let init_task = JoinTask::new({
@@ -163,7 +164,7 @@ impl Engine {
 
     #[cfg(any(test, feature = "test"))]
     pub fn set_start_peers(&self, peers: &[PeerId]) {
-        let first = Genesis::round().next();
+        let first = Genesis::id().round.next();
         (self.round_task.state.peer_schedule).set_next_subset(peers, first, peers);
     }
 
@@ -185,7 +186,8 @@ impl Engine {
         // wait collator to load blocks and update peer schedule
 
         let top_known_anchor = {
-            let min_top_known_anchor = last_db_round - CachedConfig::max_consensus_lag_rounds();
+            let min_top_known_anchor =
+                last_db_round - CachedConfig::get().consensus.max_consensus_lag_rounds;
 
             // NOTE collator have to apply mc state update to mempool first,
             //  and pass its top known anchor only after completion
@@ -206,13 +208,13 @@ impl Engine {
 
         let consensus_round = last_db_round
             .max(top_known_anchor)
-            .max(Genesis::round().next());
+            .max(Genesis::id().round.next());
         self.consensus_round.set_max(consensus_round);
         let round_effects = Effects::<EngineContext>::new(&self.effects, consensus_round);
-        let dag_bottom_round = Genesis::round().max(
+        let dag_bottom_round = Genesis::id().round.max(
             top_known_anchor
-                - CachedConfig::deduplicate_rounds()
-                - CachedConfig::commit_history_rounds(),
+                - CachedConfig::get().consensus.deduplicate_rounds
+                - CachedConfig::get().consensus.commit_history_rounds,
         );
 
         let mut committer = take_committer(&mut self.committer_run).expect("init");
@@ -230,7 +232,7 @@ impl Engine {
         {
             let task = tokio::task::spawn_blocking({
                 // last 3 rounds is enough to create point at last round with all witness deps
-                let preload_bottom = Genesis::round().max(last_db_round - 2_u8);
+                let preload_bottom = Genesis::id().round.max(last_db_round - 2_u8);
                 let store = self.round_task.state.store.clone();
                 move || {
                     let mut map = BTreeMap::<cmp::Reverse<Round>, Vec<PointInfo>>::new();
@@ -474,15 +476,15 @@ fn wait_collator(
     round_effects: &Effects<EngineContext>,
 ) -> Option<impl Future<Output = ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
-    let silent_after = CachedConfig::silent_after(top_known_anchor);
-    // Note silence bound is inclusive with `>=` because new vset may be unknown for next dag top
-    //  (the next after next engine round), while vset switch round is exactly silence bound + 1
-    if current_round >= silent_after {
+    let pause_at = CachedConfig::pause_at(top_known_anchor);
+    // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
+    //  (the next after next engine round), while vset switch round is exactly pause bound + 1
+    if current_round >= pause_at {
         if !*is_paused {
             tracing::info!(
                 parent: round_effects.span(),
                 top_known_anchor = top_known_anchor.0,
-                silent_after = silent_after.0,
+                pause_at = pause_at.0,
                 "enter pause by collator feedback",
             );
             *is_paused = true;
@@ -493,13 +495,13 @@ fn wait_collator(
             loop {
                 let top_known_anchor = top_known_anchor_recv.next().await;
                 //  exit if ready to produce point: collator synced enough
-                let silent_after = CachedConfig::silent_after(top_known_anchor);
-                let exit = current_round < silent_after;
+                let pause_at = CachedConfig::pause_at(top_known_anchor);
+                let exit = current_round < pause_at;
                 tracing::debug!(
                     top_known_anchor = top_known_anchor.0,
-                    silent_after = silent_after.0,
+                    pause_at = pause_at.0,
                     exit = exit,
-                    "collator feedback in silent mode"
+                    "collator feedback in pause mode"
                 );
                 if exit {
                     break;
@@ -507,7 +509,7 @@ fn wait_collator(
             }
         };
         let task = tokio::time::timeout(
-            CachedConfig::broadcast_retry(),
+            Duration::from_millis(CachedConfig::get().consensus.broadcast_retry_millis as _),
             collator_sync.instrument(round_effects.span().clone()),
         )
         .map(|_| ());
@@ -517,7 +519,7 @@ fn wait_collator(
         tracing::info!(
             parent: round_effects.span(),
             top_known_anchor = top_known_anchor.0,
-            silent_after = silent_after.0,
+            pause_at = pause_at.0,
             "exit from pause by collator feedback",
         );
         *is_paused = false;
