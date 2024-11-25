@@ -12,22 +12,20 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use weedb::rocksdb;
 
-use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use crate::db::*;
 use crate::store::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, TempFileStorage};
 use crate::util::*;
 
-mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
 pub struct ShardStateStorage {
     db: BaseDb,
+    cell_db: CellDb,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
-    cell_storage: Arc<CellStorage>,
     temp_file_storage: TempFileStorage,
 
     gc_lock: tokio::sync::Mutex<()>,
@@ -39,19 +37,17 @@ pub struct ShardStateStorage {
 impl ShardStateStorage {
     pub fn new(
         db: BaseDb,
+        cell_db: CellDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,
-        cache_size_bytes: u64,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
-
         Ok(Arc::new(Self {
             db,
+            cell_db,
             block_handle_storage,
             block_storage,
             temp_file_storage,
-            cell_storage,
             gc_lock: Default::default(),
             min_ref_mc_state: Default::default(),
             max_new_mc_cell_count: AtomicUsize::new(0),
@@ -63,7 +59,7 @@ impl ShardStateStorage {
     pub async fn preload_cell_refs(&self) -> Result<()> {
         tracing::info!("started");
 
-        let cell_storage = self.cell_storage.clone();
+        let cell_storage = self.cell_db.clone();
 
         let cancelled = CancellationFlag::new();
         scopeguard::defer! {
@@ -136,7 +132,7 @@ impl ShardStateStorage {
         let block_id = *handle.id();
         let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
-        let cell_storage = self.cell_storage.clone();
+        let cell_storage = self.cell_db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
 
@@ -144,11 +140,10 @@ impl ShardStateStorage {
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
 
-            let mut batch = rocksdb::WriteBatch::default();
-
-            let new_cell_count = cell_storage.store_cell(&mut batch, root_cell)?;
+            let new_cell_count = cell_storage.store_cell(root_cell.as_ref())?;
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
+            let mut batch = rocksdb::WriteBatch::default();
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
@@ -179,7 +174,7 @@ impl ShardStateStorage {
     pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<ShardStateStuff> {
         let ctx = StoreStateContext {
             db: self.db.clone(),
-            cell_storage: self.cell_storage.clone(),
+            cell_db: self.cell_db.clone(),
             temp_file_storage: self.temp_file_storage.clone(),
             min_ref_mc_state: self.min_ref_mc_state.clone(),
         };
@@ -190,7 +185,7 @@ impl ShardStateStorage {
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(&cell_id)?;
+        let cell = self.cell_db.load_cell(&cell_id)?;
 
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }
@@ -253,18 +248,12 @@ impl ShardStateStorage {
                 let _guard = self.gc_lock.lock().await;
 
                 let db = self.db.clone();
-                let cell_storage = self.cell_storage.clone();
+                let cell_storage = self.cell_db.clone();
                 let key = key.to_vec();
-                let mut batch = rocksdb::WriteBatch::default();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let stats = cell_storage.remove_cell(&mut batch, &alloc, &root_hash)?;
-
-                    batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
-                    db.raw()
-                        .rocksdb()
-                        .write_opt(batch, db.cell_data.write_config())?;
-
+                    let stats = cell_storage.remove_cell(&alloc, &root_hash)?;
+                    db.shard_states.remove(key)?;
                     Ok::<_, anyhow::Error>((stats, alloc))
                 })
                 .await??;

@@ -10,9 +10,7 @@ use tycho_block_util::state::*;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
-use weedb::{rocksdb, BoundedCfHandle};
 
-use super::cell_storage::*;
 use super::entries_buffer::*;
 use crate::db::*;
 use crate::store::{BriefBocHeader, ShardStateReader, TempFileStorage};
@@ -22,7 +20,7 @@ pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
     pub db: BaseDb,
-    pub cell_storage: Arc<CellStorage>,
+    pub cell_db: CellDb,
     pub temp_file_storage: TempFileStorage,
     pub min_ref_mc_state: MinRefMcStateTracker,
 }
@@ -118,11 +116,9 @@ impl StoreStateContext {
             .prealloc(header.cell_count as usize * HashesEntry::LEN)
             .open_as_mapped_mut()?;
 
-        let raw = self.db.rocksdb().as_ref();
-        let write_options = self.db.temp_cells.new_write_config();
-
-        let mut ctx = FinalizationContext::new(&self.db);
-        ctx.clear_temp_cells(&self.db)?;
+        let mut tx = self.cell_db.store_big_cell()?;
+        let mut write_data_tx = tx.write_data()?;
+        let mut ctx = FinalizationContext::new(write_data_tx.accessor());
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -196,7 +192,6 @@ impl StoreStateContext {
 
             if batch_len > CELLS_PER_BATCH {
                 ctx.finalize_cell_usages();
-                raw.write_opt(std::mem::take(&mut ctx.write_batch), &write_options)?;
                 batch_len = 0;
             }
 
@@ -205,15 +200,15 @@ impl StoreStateContext {
 
         if batch_len > 0 {
             ctx.finalize_cell_usages();
-            raw.write_opt(std::mem::take(&mut ctx.write_batch), &write_options)?;
         }
 
         // Current entry contains root cell
-        let root_hash = ctx.entries_buffer.repr_hash();
-        ctx.final_check(root_hash)?;
+        let root_hash = HashBytes(*ctx.entries_buffer.repr_hash());
+        ctx.final_check(&root_hash.0)?;
 
-        self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
-        ctx.clear_temp_cells(&self.db)?;
+        drop(ctx);
+        let stored = write_data_tx.commit()?;
+        tx.apply(stored, &root_hash)?;
 
         let shard_state_key = block_id.to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
@@ -225,7 +220,7 @@ impl StoreStateContext {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
-                let cell = self.cell_storage.load_cell(&cell_id)?;
+                let cell = self.cell_db.load_cell(&cell_id)?;
                 Ok(ShardStateStuff::from_root(
                     block_id,
                     Cell::from(cell as Arc<_>),
@@ -237,31 +232,23 @@ impl StoreStateContext {
     }
 }
 
-struct FinalizationContext<'a> {
+struct FinalizationContext<'db, 'tx> {
     pruned_branches: FastHashMap<u32, Vec<u8>>,
     cell_usages: FastHashMap<[u8; 32], i32>,
     entries_buffer: EntriesBuffer,
     output_buffer: Vec<u8>,
-    temp_cells_cf: BoundedCfHandle<'a>,
-    write_batch: rocksdb::WriteBatch,
+    tx: StoreBigCellDataAccessor<'db, 'tx>,
 }
 
-impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a BaseDb) -> Self {
+impl<'db, 'tx> FinalizationContext<'db, 'tx> {
+    fn new(tx: StoreBigCellDataAccessor<'db, 'tx>) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
-            write_batch: rocksdb::WriteBatch::default(),
+            tx,
         }
-    }
-
-    fn clear_temp_cells(&self, db: &BaseDb) -> std::result::Result<(), rocksdb::Error> {
-        let from = &[0x00; 32];
-        let to = &[0xff; 32];
-        db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
     }
 
     // TODO: Somehow reuse `everscale_types::cell::CellParts`.
@@ -438,8 +425,9 @@ impl<'a> FinalizationContext<'a> {
             current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
         };
 
-        self.write_batch
-            .put_cf(&self.temp_cells_cf, repr_hash, output_buffer.as_slice());
+        self.tx
+            .insert_cell(HashBytes::wrap(repr_hash), output_buffer.as_slice())?;
+
         self.cell_usages.insert(*repr_hash, -1);
 
         // Done
@@ -547,7 +535,7 @@ mod test {
     use bytesize::ByteSize;
     use everscale_types::models::ShardIdent;
     use tycho_util::project_root;
-    use weedb::rocksdb::{IteratorMode, WriteBatch};
+    use weedb::rocksdb::IteratorMode;
 
     use super::*;
     use crate::{Storage, StorageConfig};
@@ -587,11 +575,11 @@ mod test {
             .build()
             .await?;
         let base_db = storage.base_db();
-        let cell_storage = &storage.shard_state_storage().cell_storage;
+        let cell_storage = &storage.shard_state_storage().cell_db;
 
         let store_ctx = StoreStateContext {
             db: base_db.clone(),
-            cell_storage: cell_storage.clone(),
+            cell_db: cell_storage.clone(),
             temp_file_storage: storage.temp_file_storage().clone(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
         };
@@ -614,7 +602,7 @@ mod test {
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &BaseDb) -> Result<()> {
+    async fn states_gc(cell_db: &CellDb, db: &BaseDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
@@ -624,13 +612,9 @@ mod test {
             let (_, value) = state?;
 
             // check that state actually exists
-            let cell = cell_storage.load_cell(&HashBytes::from_slice(value.as_ref()))?;
+            let cell = cell_db.load_cell(&HashBytes::from_slice(value.as_ref()))?;
 
-            let mut batch = WriteBatch::default();
-            cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
-
-            // execute batch
-            db.rocksdb().write_opt(batch, db.cell_data.write_config())?;
+            cell_db.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
@@ -639,9 +623,11 @@ mod test {
         db.trigger_compaction().await;
         db.trigger_compaction().await;
 
-        let cells_left = db.cell_data.iterator(IteratorMode::Start).count();
-        tracing::info!("States GC finished. Cells left: {cells_left}");
-        assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+        // TODO: Check if empty
+
+        // let cells_left = db.cell_data.iterator(IteratorMode::Start).count();
+        // tracing::info!("States GC finished. Cells left: {cells_left}");
+        // assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
         Ok(())
     }

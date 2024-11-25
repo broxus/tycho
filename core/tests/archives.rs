@@ -162,6 +162,7 @@ async fn archives() -> Result<()> {
     let config = StorageConfig {
         root_dir: tmp_dir.path().to_owned(),
         rocksdb_lru_capacity: ByteSize::kb(1024),
+        cells_db_limit: ByteSize::gb(1),
         cells_cache_size: ByteSize::kb(1024),
         rocksdb_enable_metrics: false,
         archives_gc: Some(ArchivesGcConfig::default()),
@@ -269,6 +270,7 @@ async fn heavy_archives() -> Result<()> {
     let config = StorageConfig {
         root_dir: current_test_path.join("db"),
         rocksdb_lru_capacity: ByteSize::kb(1024 * 1024),
+        cells_db_limit: ByteSize::gb(1),
         cells_cache_size: ByteSize::kb(1024 * 1024),
         rocksdb_enable_metrics: false,
         archives_gc: Some(ArchivesGcConfig::default()),

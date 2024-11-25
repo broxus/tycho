@@ -1501,6 +1501,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e9489c2807c139ffd9c1794f4af0ebe86a828db53ecdc7fea2111d0fed085d1"
 
 [[package]]
+name = "liblmdb"
+version = "0.9.70"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fc3ce6e16e4f8d24892634ad66b6b0eb0dee063c5d42f8f40920c8225824984"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2607,6 +2616,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3cb5ba0dc43242ce17de99c180e96db90b235b8a9fdc9543c96d2209116bd9f"
 
 [[package]]
+name = "saferlmdb"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3cba8a844ce09753ccf853fab7a9ea28295bc4ce1c9a65f74735f885c4c07e0"
+dependencies = [
+ "bitflags",
+ "libc",
+ "liblmdb",
+ "supercow",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2843,6 +2864,12 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "supercow"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "171758edb47aa306a78dfa4ab9aeb5167405bd4e3dc2b64e88f6a84bbe98bd63"
 
 [[package]]
 name = "syn"
@@ -3774,6 +3801,7 @@ dependencies = [
  "quick_cache",
  "rand",
  "rlimit",
+ "saferlmdb",
  "scopeguard",
  "serde",
  "sha2",

@@ -11,10 +11,10 @@ use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashMap;
 
-use crate::db::{BaseDb, FileDb};
+use crate::db::{CellDb, FileDb};
 
 pub struct ShardStateWriter<'a> {
-    db: &'a BaseDb,
+    db: &'a CellDb,
     states_dir: &'a FileDb,
     block_id: &'a BlockId,
 }
@@ -35,7 +35,7 @@ impl<'a> ShardStateWriter<'a> {
         PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
-    pub fn new(db: &'a BaseDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
+    pub fn new(db: &'a CellDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
         Self {
             db,
             states_dir,
@@ -92,7 +92,7 @@ impl<'a> ShardStateWriter<'a> {
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
         let mut intermediate = self
-            .write_rev(&root_hash.0, cancelled)
+            .write_rev(root_hash, cancelled)
             .context("Failed to write reversed cells data")?;
         tracing::info!("finished loading cells");
         let cell_count = intermediate.cell_sizes.len() as u32;
@@ -205,16 +205,16 @@ impl<'a> ShardStateWriter<'a> {
 
     fn write_rev(
         &self,
-        root_hash: &[u8; 32],
+        root_hash: &HashBytes,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<IntermediateState> {
         enum StackItem {
-            New([u8; 32]),
+            New(HashBytes),
             Loaded(LoadedCell),
         }
 
         struct LoadedCell {
-            hash: [u8; 32],
+            hash: HashBytes,
             descriptor: CellDescriptor,
             data: SmallVec<[u8; 128]>,
             indices: SmallVec<[u32; 4]>,
@@ -222,11 +222,7 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut file = self.states_dir.unnamed_file().open()?;
 
-        let raw = self.db.rocksdb().as_ref();
-        let read_options = self.db.cell_data.read_config();
-        let cf = self.db.cell_data.cf();
-
-        let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
+        let mut references_buffer = SmallVec::<[HashBytes; 4]>::with_capacity(4);
 
         let mut indices = FastHashMap::default();
         let mut remap = FastHashMap::default();
@@ -236,6 +232,9 @@ impl<'a> ShardStateWriter<'a> {
         let mut total_size = 0u64;
         let mut iteration = 0u32;
         let mut remap_index = 0u32;
+
+        let tx = self.db.load_big_cell()?;
+        let tx = tx.accessor();
 
         stack.push((iteration, StackItem::New(*root_hash)));
         indices.insert(*root_hash, (iteration, false));
@@ -252,13 +251,10 @@ impl<'a> ShardStateWriter<'a> {
 
             match data {
                 StackItem::New(hash) => {
-                    let value = raw
-                        .get_pinned_cf_opt(&cf, hash, read_options)?
-                        .ok_or(CellWriterError::CellNotFound)?;
+                    let value = tx.get_cell(&hash)?.ok_or(CellWriterError::CellNotFound)?;
 
-                    let (descriptor, data) =
-                        deserialize_cell(value.as_ref(), &mut references_buffer)
-                            .ok_or(CellWriterError::InvalidCell)?;
+                    let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
+                        .ok_or(CellWriterError::InvalidCell)?;
 
                     let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
 
@@ -309,7 +305,7 @@ impl<'a> ShardStateWriter<'a> {
 
                         for i in 0..preload_count {
                             let index = indices_buffer[i];
-                            let hash = unsafe { *keys[i].cast::<[u8; 32]>() };
+                            let hash = unsafe { *keys[i].cast::<HashBytes>() };
                             stack.push((index, StackItem::New(hash)));
                         }
                     }
@@ -369,7 +365,7 @@ struct IntermediateState {
 
 fn deserialize_cell<'a>(
     value: &'a [u8],
-    references_buffer: &mut SmallVec<[[u8; 32]; 4]>,
+    references_buffer: &mut SmallVec<[HashBytes; 4]>,
 ) -> Option<(CellDescriptor, &'a [u8])> {
     let mut index = Index {
         value_len: value.len(),
@@ -395,9 +391,7 @@ fn deserialize_cell<'a>(
 
     for _ in 0..descriptor.reference_count() {
         index.require(32)?;
-        let mut hash = [0; 32];
-        hash.copy_from_slice(&value[*index..*index + 32]);
-        references_buffer.push(hash);
+        references_buffer.push(HashBytes::from_slice(&value[*index..*index + 32]));
         index.advance(32);
     }
 

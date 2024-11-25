@@ -3,7 +3,7 @@ use weedb::rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DBCompressionType, DataBlockIndexType, MergeOperands,
     Options, ReadOptions,
 };
-use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
+use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
 
 // took from
 // https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
@@ -193,95 +193,6 @@ impl ColumnFamilyOptions<Caches> for ShardStates {
     fn options(opts: &mut Options, caches: &mut Caches) {
         default_block_based_table_factory(opts, caches);
         opts.set_compression_type(DBCompressionType::Zstd);
-    }
-}
-
-/// Stores cell data
-/// - Key: `[u8; 32]` (cell repr hash)
-/// - Value: `StorageCell`
-pub struct CellData;
-
-impl ColumnFamily for CellData {
-    const NAME: &'static str = "cell_data";
-}
-
-impl ColumnFamilyOptions<Caches> for CellData {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        opts.set_level_compaction_dynamic_level_bytes(true);
-
-        optimize_for_level_compaction(opts, ByteSize::gib(1u64));
-
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
-
-        block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_block_size(16 * 1024);
-        block_factory.set_format_version(5);
-
-        opts.set_block_based_table_factory(&block_factory);
-        opts.set_optimize_filters_for_hits(true);
-        // option is set for cf
-        opts.set_compression_type(DBCompressionType::Lz4);
-    }
-}
-
-/// Stores cell refs
-/// - Key: `[u8; 32]` (cell repr hash)
-/// - Value: u64 (le)
-pub struct CellRefs;
-
-impl ColumnFamily for CellRefs {
-    const NAME: &'static str = "cell_refs";
-}
-
-impl ColumnFamilyOptions<Caches> for CellRefs {
-    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
-        opts.set_level_compaction_dynamic_level_bytes(true);
-
-        optimize_for_level_compaction(opts, ByteSize::gib(1u64));
-
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
-
-        block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_block_size(16 * 1024);
-        block_factory.set_format_version(5);
-
-        opts.set_block_based_table_factory(&block_factory);
-        opts.set_optimize_filters_for_hits(true);
-        // option is set for cf
-        opts.set_compression_type(DBCompressionType::Lz4);
-    }
-}
-
-/// Stores temp cells data
-/// - Key: `ton_types::UInt256` (cell repr hash)
-/// - Value: `StorageCell`
-pub struct TempCells;
-
-impl ColumnFamily for TempCells {
-    const NAME: &'static str = "temp_cells";
-}
-
-impl ColumnFamilyOptions<Caches> for TempCells {
-    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
-
-        block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_block_size(16 * 1024);
-        block_factory.set_format_version(5);
-
-        opts.set_optimize_filters_for_hits(true);
     }
 }
 

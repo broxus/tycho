@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
 
@@ -29,6 +29,7 @@ mod util {
 pub use util::owned_iterator;
 
 const BASE_DB_SUBDIR: &str = "base";
+const CELL_DB_SUBDIR: &str = "cells";
 const RPC_DB_SUBDIR: &str = "rpc";
 const FILES_SUBDIR: &str = "files";
 const MEMPOOL_SUBDIR: &str = "mempool";
@@ -121,6 +122,13 @@ impl StorageBuilder {
 
         let temp_file_storage = TempFileStorage::new(&file_db)?;
 
+        let cell_db = CellDb::new(
+            root.create_subdir(CELL_DB_SUBDIR)?.path(),
+            self.config.cells_db_limit.as_u64() as _,
+            self.config.cells_cache_size.as_u64(),
+        )
+        .context("failed to open cell db")?;
+
         let blocks_cache_config = self.config.blocks_cache;
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
@@ -132,15 +140,15 @@ impl StorageBuilder {
         ));
         let shard_state_storage = ShardStateStorage::new(
             base_db.clone(),
+            cell_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             temp_file_storage.clone(),
-            self.config.cells_cache_size.as_u64(),
         )?;
         shard_state_storage.preload_cell_refs().await?;
 
         let persistent_state_storage = PersistentStateStorage::new(
-            base_db.clone(),
+            cell_db.clone(),
             &file_db,
             block_handle_storage.clone(),
             block_storage.clone(),

@@ -23,7 +23,7 @@ pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
 use super::{KeyBlocksDirection, ShardStateStorage};
-use crate::db::{BaseDb, FileDb, MappedFile};
+use crate::db::{CellDb, FileDb, MappedFile};
 use crate::store::{BlockHandle, BlockHandleStorage, BlockStorage};
 
 mod queue_state {
@@ -83,7 +83,7 @@ pub struct PersistentStateStorage {
 
 impl PersistentStateStorage {
     pub fn new(
-        db: BaseDb,
+        cell_db: CellDb,
         files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
@@ -95,7 +95,7 @@ impl PersistentStateStorage {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                db,
+                cell_db,
                 storage_dir,
                 block_handles: block_handle_storage,
                 blocks: block_storage,
@@ -336,7 +336,7 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(&this.cell_db, &states_dir, handle.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(()) => {
                     this.block_handles.set_has_persistent_shard_state(&handle);
@@ -389,7 +389,7 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(&this.cell_db, &states_dir, handle.id());
             cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_shard_state(&handle);
             this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
@@ -640,7 +640,7 @@ impl PersistentStateStorage {
 }
 
 struct Inner {
-    db: BaseDb,
+    cell_db: CellDb,
     storage_dir: FileDb,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,

@@ -23,6 +23,11 @@ pub struct StorageConfig {
     /// Default: calculated based on the available memory.
     pub rocksdb_lru_capacity: ByteSize,
 
+    /// Persistent cells db size.
+    ///
+    /// Default: 10 GB.
+    pub cells_db_limit: ByteSize,
+
     /// Runtime cells cache size.
     ///
     /// Default: calculated based on the available memory.
@@ -53,6 +58,7 @@ impl StorageConfig {
         Self {
             root_dir: path.to_owned(),
             rocksdb_lru_capacity: ByteSize::kb(1024),
+            cells_db_limit: ByteSize::gb(1),
             cells_cache_size: ByteSize::kb(1024),
             rocksdb_enable_metrics: false,
             archives_gc: None,
@@ -104,6 +110,7 @@ impl Default for StorageConfig {
 
         Self {
             root_dir: PathBuf::from("./db"),
+            cells_db_limit: ByteSize::gb(10),
             cells_cache_size,
             rocksdb_lru_capacity,
             rocksdb_enable_metrics: true,
