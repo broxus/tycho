@@ -747,6 +747,9 @@ where
                 .store_collated(collation_result.candidate, collation_result.mc_data.clone())?;
 
             if store_res.block_mismatch {
+                let labels = [("workchain", block_id.shard.workchain().to_string())];
+                metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
+
                 self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
 
                 // when master block mismatched then should cancel shard collators as well
@@ -955,6 +958,9 @@ where
         };
 
         if store_res.block_mismatch {
+            let labels = [("workchain", block_id.shard.workchain().to_string())];
+            metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
+
             self.set_collator_state(&block_id.shard, |ac| {
                 ac.state = match ac.state {
                     CollatorState::Waiting | CollatorState::Cancelled => CollatorState::Cancelled,
@@ -1145,6 +1151,7 @@ where
         );
 
         let _histogram = HistogramGuard::begin("tycho_collator_sync_to_applied_mc_block_time");
+        metrics::counter!("tycho_collator_sync_to_applied_mc_block_count").increment(1);
 
         let first_applied_mc_block_key = BlockIdShort {
             shard: ShardIdent::MASTERCHAIN,
@@ -1625,6 +1632,9 @@ where
                         "Current node was not authorized to collate shard {}",
                         shard_id,
                     );
+                    metrics::gauge!("tycho_node_in_current_vset").set(0);
+                } else {
+                    metrics::gauge!("tycho_node_in_current_vset").set(1);
                 }
 
                 match active_collation_sessions_guard.entry(shard_id) {
@@ -1890,9 +1900,7 @@ where
         force_mc_block: ForceMasterCollation,
         mc_block_min_interval_ms: u64,
     ) -> NextCollationStep {
-        let _histogram = HistogramGuard::begin(
-            "tycho_collator_update_last_collated_chain_time_and_check_should_collate_mc_block_time",
-        );
+        let _histogram = HistogramGuard::begin("detect_next_collation_step_time");
 
         let mc_block_latest_chain_time = guard.mc_block_latest_chain_time;
 

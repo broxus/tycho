@@ -974,16 +974,24 @@ def collator_params_metrics() -> RowPanel:
     return create_row("collator: Parameters", metrics)
 
 
-def block_metrics() -> RowPanel:
+def collation_metrics() -> RowPanel:
     metrics = [
+        create_gauge_panel(
+            "tycho_node_in_current_vset",
+            "Node is in current validator set",
+        ),
         create_counter_panel(
-            "tycho_do_collate_blocks_count",
-            "Blocks rate",
-            labels_selectors=['workchain=~"$workchain"'],
+            "tycho_collator_sync_to_applied_mc_block_count",
+            "Number of syncs to applied mc block",
         ),
         create_counter_panel(
             "tycho_do_collate_blocks_with_limits_reached_count",
             "Number of blocks with limits reached",
+            labels_selectors=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_collator_block_mismatch_count",
+            "Number of mismatched blocks",
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
@@ -993,7 +1001,7 @@ def block_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_block_seqno",
-            "Block seqno",
+            "Collated block seqno",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
@@ -1007,15 +1015,25 @@ def block_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_shard_blocks_count_btw_anchors",
+            "tycho_collator_shard_blocks_count_btw_anchors",
             "Number of Shard Blocks before import next anchor",
         ),
         create_gauge_panel(
-            "tycho_do_collate_import_next_anchor_count",
+            "tycho_collator_import_next_anchor_count",
             "Number of imported anchors per tick",
         ),
+        create_counter_panel(
+            "tycho_collator_anchor_import_cancelled_count",
+            "Number of anchor import cancelled",
+            labels_selectors=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_collator_anchor_import_skipped_count",
+            "Number of anchor import skipped",
+            labels_selectors=['workchain=~"$workchain"'],
+        ),
     ]
-    return create_row("collator: Block Metrics", metrics)
+    return create_row("collator: Collation Metrics", metrics)
 
 
 def collator_execution_metrics() -> RowPanel:
@@ -1187,7 +1205,7 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_from_prev_anchor_time",
+            "tycho_collator_from_prev_anchor_time",
             "Time elapsed from prev anchor",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1395,8 +1413,8 @@ def collator_misc_operations_metrics() -> RowPanel:
             "Refresh collation sessions",
         ),
         create_heatmap_panel(
-            "tycho_collator_update_last_collated_chain_time_and_check_should_collate_mc_block_time",
-            "Update last collated chain time and check should collate mc block",
+            "detect_next_collation_step_time",
+            "Detect next collation step",
         ),
         create_heatmap_panel(
             "tycho_collator_enqueue_mc_block_collation_time",
@@ -1980,7 +1998,7 @@ dashboard = Dashboard(
         core_blockchain_rpc(),
         storage(),
         collator_params_metrics(),
-        block_metrics(),
+        collation_metrics(),
         collator_execution_metrics(),
         collator_message_metrics(),
         collator_queue_metrics(),

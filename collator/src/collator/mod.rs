@@ -340,6 +340,8 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         working_state_tx: oneshot::Sender<Result<Box<WorkingState>>>,
     ) -> Result<()> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
         tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
         // init working state
@@ -384,6 +386,7 @@ impl CollatorStdImpl {
                     tracing::info!(target: tracing_targets::COLLATOR,
                         "collation was cancelled by manager on init",
                     );
+                    metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
                     self.listener
                         .on_cancelled(
                             working_state.mc_data.block_id,
@@ -640,6 +643,7 @@ impl CollatorStdImpl {
                         tracing::info!(target: tracing_targets::COLLATOR,
                             "collation was cancelled by manager on resume",
                         );
+                        metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
                         self.listener
                             .on_cancelled(
                                 working_state.mc_data.block_id,
@@ -989,6 +993,7 @@ impl CollatorStdImpl {
         // do not import anchor if mempool may be paused
         // needs to process more anchors in collator first
         if prev_anchor_id.saturating_sub(top_processed_to_anchor) > max_consensus_lag_rounds / 2 {
+            metrics::counter!("tycho_collator_anchor_import_skipped_count", &labels).increment(1);
             return Ok(ImportNextAnchor::Skipped);
         }
 
@@ -1258,6 +1263,7 @@ impl CollatorStdImpl {
         next_chain_time: u64,
     ) -> Result<()> {
         let working_state = self.delayed_working_state.wait().await?;
+
         self.do_collate(working_state, Some(top_shard_blocks_info), next_chain_time)
             .await
     }
@@ -1347,6 +1353,7 @@ impl CollatorStdImpl {
                     last_imported_chain_time,
                     "collation was cancelled by manager on try_collate_next_master_block",
                 );
+                metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
                 self.listener
                     .on_cancelled(
                         working_state.mc_data.block_id,
@@ -1386,7 +1393,7 @@ impl CollatorStdImpl {
                     // time elapsed from prev anchor
                     let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
                     self.anchor_timer = std::time::Instant::now();
-                    metrics::histogram!("tycho_do_collate_from_prev_anchor_time", &labels)
+                    metrics::histogram!("tycho_collator_from_prev_anchor_time", &labels)
                         .record(elapsed_from_prev_anchor);
 
                     working_state.wu_used_from_last_anchor = 0;
@@ -1573,6 +1580,7 @@ impl CollatorStdImpl {
                                 last_imported_chain_time,
                                 "collation was cancelled by manager on try_collate_next_shard_block",
                             );
+                            metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
                             self.listener
                                 .on_cancelled(
                                     working_state.mc_data.block_id,
@@ -1616,12 +1624,12 @@ impl CollatorStdImpl {
                                 let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
                                 self.anchor_timer = std::time::Instant::now();
                                 metrics::histogram!(
-                                    "tycho_do_collate_from_prev_anchor_time",
+                                    "tycho_collator_from_prev_anchor_time",
                                     &labels
                                 )
                                 .record(elapsed_from_prev_anchor);
 
-                                metrics::gauge!("tycho_do_collate_shard_blocks_count_btw_anchors")
+                                metrics::gauge!("tycho_collator_shard_blocks_count_btw_anchors")
                                     .set(self.shard_blocks_count_from_last_anchor);
                                 self.shard_blocks_count_from_last_anchor = 0;
 
@@ -1651,7 +1659,7 @@ impl CollatorStdImpl {
                     }
                 }
 
-                metrics::gauge!("tycho_do_collate_import_next_anchor_count")
+                metrics::gauge!("tycho_collator_import_next_anchor_count")
                     .set(imported_anchors_count);
 
                 if imported_anchors_has_externals {
