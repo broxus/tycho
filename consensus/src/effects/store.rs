@@ -14,10 +14,9 @@ use weedb::rocksdb::{
     DBPinnableSlice, IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch,
 };
 
-use crate::dag::DagFront;
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::CachedConfig;
+use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
@@ -198,20 +197,23 @@ impl MempoolStore {
                 consensus.0
             );
             // collator needs TKA after restart
-            let least_to_keep = if consensus < DagFront::max_history_bottom(top_known_anchor) {
+            let least_to_keep = if consensus + CachedConfig::get().consensus.max_total_rounds()
+                < top_known_anchor
+            {
                 // collator is syncing blocks: need reproducible TKA on restart;
                 // safe to clean uncommitted
-                DagFront::default_back_bottom(top_known_anchor)
+                top_known_anchor - CachedConfig::get().consensus.reset_rounds()
             } else if top_known_anchor <= committed {
                 // collator is collating: keep until commit finished & reproducible TKA on restart
-                DagFront::max_history_bottom(consensus)
-                    .min(DagFront::default_back_bottom(committed))
+                (consensus - CachedConfig::get().consensus.max_total_rounds())
+                    .min(committed - CachedConfig::get().consensus.reset_rounds())
             } else {
                 // tie: collator syncs and does not need committed, but commit may be not finished
-                DagFront::default_back_bottom(committed)
+                committed - CachedConfig::get().consensus.reset_rounds()
             };
-            least_to_keep
-                - least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32
+            let remainder =
+                least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32;
+            Genesis::id().round.max(least_to_keep - remainder)
         }
 
         tokio::spawn(async move {

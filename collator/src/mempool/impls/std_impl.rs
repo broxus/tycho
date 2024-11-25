@@ -117,9 +117,7 @@ impl MempoolAdapterStdImpl {
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = last_state_update
             .mc_processed_to_anchor_id
-            .saturating_sub(mempool_config.consensus.max_consensus_lag_rounds as u32)
-            .saturating_sub(mempool_config.consensus.deduplicate_rounds as u32)
-            .saturating_sub(mempool_config.consensus.commit_history_rounds as u32)
+            .saturating_sub(mempool_config.consensus.reset_rounds())
             .max(mempool_config.genesis.start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
             if last_state_update.prev_validator_set.is_some() {

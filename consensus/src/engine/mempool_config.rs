@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tycho_network::OverlayId;
 
 use crate::dag::align_genesis;
-use crate::models::{Link, Point, PointData, PointId, Round, UnixTime};
+use crate::models::{Link, Point, PointData, PointId, UnixTime};
 
 static CONFIG: OnceLock<MempoolConfig> = OnceLock::new();
 
@@ -23,15 +23,6 @@ impl Genesis {
 }
 
 pub struct CachedConfig;
-
-impl CachedConfig {
-    pub fn pause_at(top_known_anchor: Round) -> Round {
-        // For example in `max_consensus_lag_rounds` comments this will return `217`,
-        // the upper bound of `8..=217`.
-        // Collation will continue across epoch change, so no limit on current genesis round
-        top_known_anchor + Self::get().consensus.max_consensus_lag_rounds
-    }
-}
 
 impl CachedConfig {
     pub fn get() -> &'static MempoolConfig {

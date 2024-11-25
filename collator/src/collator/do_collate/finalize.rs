@@ -13,6 +13,7 @@ use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
+use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
 
 use super::phase::{Phase, PhaseState};
@@ -785,10 +786,7 @@ impl Phase<FinalizeState> {
                             // because mempool has to re-validate historical points during sync,
                             // and can hold just one previous vset to check peer authority
                             let full_history_round = consensus_info.prev_vset_switch_round
-                                + consensus_config.max_consensus_lag_rounds as u32
-                                + consensus_config.sync_support_rounds as u32
-                                + consensus_config.deduplicate_rounds as u32
-                                + consensus_config.commit_history_rounds as u32;
+                                + consensus_config.max_total_rounds();
                             mempool_last_round_to_create.max(full_history_round)
                         } else {
                             // mempool history does not span across genesis,
