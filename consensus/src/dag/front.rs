@@ -1,6 +1,6 @@
 use crate::dag::{Committer, DagHead, DagRound};
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::{CachedConfig, Genesis};
+use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
@@ -24,37 +24,6 @@ impl Default for DagFront {
 }
 
 impl DagFront {
-    pub fn default_front_bottom(top_round: Round) -> Round {
-        // to validate for commit;
-        // notice that procedure happens at round start, before new local point's dependencies
-        // finished their validation, a new 'next' dag round will appear and so no `-1` below
-        let min_front_rounds = 3 // new current, includes and witness rounds to validate
-            + CachedConfig::get().consensus.commit_history_rounds; // all committable history for every point
-
-        Genesis::id().round.max(top_round - min_front_rounds)
-    }
-
-    pub fn default_back_bottom(top_round: Round) -> Round {
-        // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
-        // but collator may re-request TKA from collator, not only the next one
-        let reset_rounds = CachedConfig::get().consensus.max_consensus_lag_rounds // to collate
-            + CachedConfig::get().consensus.deduplicate_rounds  // to discard full anchor history after restart
-            + CachedConfig::get().consensus.commit_history_rounds; // to discard incomplete anchor history after restart
-
-        Genesis::id().round.max(top_round - reset_rounds)
-    }
-
-    pub fn max_history_bottom(top_round: Round) -> Round {
-        // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
-        // but collator may re-request TKA from collator, not only the next one
-        let max_total_rounds = CachedConfig::get().consensus.max_consensus_lag_rounds
-            + CachedConfig::get().consensus.sync_support_rounds // to follow consensus during sync
-            + CachedConfig::get().consensus.deduplicate_rounds // to discard full anchor history after restart
-            + CachedConfig::get().consensus.commit_history_rounds; // to discard incomplete anchor history after restart
-
-        Genesis::id().round.max(top_round - max_total_rounds)
-    }
-
     pub fn init(&mut self, dag_bottom_round: DagRound) -> Committer {
         assert!(self.rounds.is_empty(), "DAG already initialized");
         let mut committer = Committer::default();
@@ -88,45 +57,15 @@ impl DagFront {
         }
     }
 
-    /// returns new bottom after an unrecoverable gap, and `None` otherwise
+    /// Returns new bottom after an unrecoverable gap, and `None` otherwise.
+    ///
+    /// See [`ConsensusConfigExt`] for logic description
     pub fn fill_to_top(
         &mut self,
         new_top: Round,
         committer: Option<&mut Committer>,
         peer_schedule: &PeerSchedule,
     ) -> Option<Round> {
-        //    RESET_ROUNDS      front.top()
-        //         ↓               ↓
-        // |       :        =======|
-        // ↑                   ↑
-        // MAX_TOTAL_ROUNDS     MIN_FRONT_ROUNDS for front.len()
-
-        // Normal: everything committed
-        // |       :        =======| front: must never be shorter than MIN_FRONT_ROUNDS
-        // |       :          ---  | back: may be shorter than front and have older top
-
-        // Normal: back is syncing to commit
-        // |       :        =======| front: must be ahead of back without a gap (or may overlap)
-        // |     --:----------     | back: total len does not exceed MAX_TOTAL_ROUNDS
-
-        // Normal: gap recovered by extending front
-        // |     --:--------=======| front: len may exceed MIN_FRONT_ROUNDS and MAX_RESET_ROUNDS
-        // |  ---  :               | back: total len does not exceed MAX_TOTAL_ROUNDS
-        // => should become (preserving data)
-        // |       :        =======| front: shrinks itself
-        // |  -----:---------------| back: of total len
-
-        // Unrecoverable gap: total len reaches MAX_TOTAL_ROUNDS (any scenario)
-        // (assume back is still lagging to commit if we don't know its status)
-        // |       :   -----=======| front: no matter if overlaps or has a gap with back
-        // |-------:---            | back: front.top() - back.bottom() >= MAX_TOTAL_ROUNDS
-        // => should become (with reset of back bottom to drop trailing dag rounds and free mem)
-        // |       :        =======| front: creates new dag round chain for back and shrinks itself
-        // |       :---------------| back: chain of MAX_RESET_ROUNDS passed from front
-        // Dropped tail gives local node time to download other's points as
-        // every node cleans its storage with advance of consensus rounds
-        // and points far behind consensus will not be downloaded after some time.
-
         if let Some(ref committer) = committer {
             // update if we can; if None - use old value;
             // in a rare case committer may have finished its sync, but front decided to have a gap
@@ -140,10 +79,11 @@ impl DagFront {
         //   as dag bottom must be moved and old rounds dropped before subset is forgotten
         peer_schedule.apply_scheduled(new_top);
 
-        if Self::max_history_bottom(new_top) > self.last_back_bottom {
+        if new_top > self.last_back_bottom + CachedConfig::get().consensus.max_total_rounds() {
             // should drop validation tasks and restart them with new bottom to free memory
             self.rounds.clear();
-            let new_bottom_round = Self::default_back_bottom(new_top);
+            let new_bottom_round =
+                (Genesis::id().round).max(new_top - CachedConfig::get().consensus.reset_rounds());
             self.rounds
                 .push(DagRound::new_bottom(new_bottom_round, peer_schedule));
             self.has_pending_back_reset = true;
@@ -170,7 +110,9 @@ impl DagFront {
                 );
                 new_full_history_bottom = Some(full_history_bottom);
             }
-            committer.extend_from_ahead(&self.drain_upto(Self::default_front_bottom(new_top)));
+            committer.extend_from_ahead(
+                &self.drain_upto(new_top - CachedConfig::get().consensus.min_front_rounds()),
+            );
             committer.extend_from_ahead(&self.rounds);
         }
 
@@ -187,7 +129,7 @@ impl DagFront {
 
         assert_eq!(
             self.bottom_round(),
-            new_bottom_round,
+            new_bottom_round.max(bottom),
             "new bottom does not match expected; drained {:?}; modified dag {:?}",
             result.iter().map(|p| p.round()).collect::<Vec<_>>(),
             self.rounds.iter().map(|p| p.round()).collect::<Vec<_>>(),

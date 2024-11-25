@@ -211,7 +211,7 @@ impl Engine {
             .max(Genesis::id().round.next());
         self.consensus_round.set_max(consensus_round);
         let round_effects = Effects::<EngineContext>::new(&self.effects, consensus_round);
-        let dag_bottom_round = Genesis::id().round.max(
+        let dag_bottom_round = (Genesis::id().round).max(
             top_known_anchor
                 - CachedConfig::get().consensus.deduplicate_rounds
                 - CachedConfig::get().consensus.commit_history_rounds,
@@ -476,7 +476,8 @@ fn wait_collator(
     round_effects: &Effects<EngineContext>,
 ) -> Option<impl Future<Output = ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
-    let pause_at = CachedConfig::pause_at(top_known_anchor);
+    // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
+    let pause_at = top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
     // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
     //  (the next after next engine round), while vset switch round is exactly pause bound + 1
     if current_round >= pause_at {
@@ -495,7 +496,8 @@ fn wait_collator(
             loop {
                 let top_known_anchor = top_known_anchor_recv.next().await;
                 //  exit if ready to produce point: collator synced enough
-                let pause_at = CachedConfig::pause_at(top_known_anchor);
+                let pause_at =
+                    top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
                 let exit = current_round < pause_at;
                 tracing::debug!(
                     top_known_anchor = top_known_anchor.0,

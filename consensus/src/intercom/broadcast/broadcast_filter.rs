@@ -5,11 +5,11 @@ use dashmap::mapref::entry::Entry as DashMapEntry;
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::dag::{DagFront, DagHead, Verifier, VerifyError};
+use crate::dag::{DagHead, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::round_watch::{Consensus, RoundWatch};
-use crate::engine::CachedConfig;
+use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
 
@@ -266,7 +266,8 @@ impl BroadcastFilterInner {
         effects: &Effects<EngineContext>,
     ) {
         // Engine round task is not running while collator is syncing blocks
-        let history_bottom = DagFront::max_history_bottom(self.consensus_round.get());
+        let history_bottom = (Genesis::id().round)
+            .max(self.consensus_round.get() - CachedConfig::get().consensus.max_total_rounds());
 
         // Drain points in historical order that cannot be neither included nor signed,
         // thus out of Collector's interest and needed for validation and commit only.

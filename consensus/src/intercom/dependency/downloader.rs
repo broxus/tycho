@@ -17,10 +17,10 @@ use tycho_network::{PeerId, Request};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagFront, Verifier, VerifyError};
+use crate::dag::{Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::CachedConfig;
+use crate::engine::{CachedConfig, ConsensusConfigExt};
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId, Round};
@@ -170,8 +170,9 @@ impl Downloader {
             }
         }
 
-        let consensus_round = self.inner.consensus_round.get();
-        let result = if point_id.round >= DagFront::default_front_bottom(consensus_round) {
+        let result = if point_id.round + CachedConfig::get().consensus.min_front_rounds()
+            >= self.inner.consensus_round.get()
+        {
             // for validation
             self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, effects)
                 .await
