@@ -1,5 +1,6 @@
 use std::mem;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::future::BoxFuture;
@@ -167,7 +168,9 @@ impl Broadcaster {
     }
 
     pub async fn run_continue(mut self) {
-        let mut retry_interval = tokio::time::interval(CachedConfig::broadcast_retry());
+        let mut retry_interval = tokio::time::interval(Duration::from_millis(
+            CachedConfig::get().consensus.broadcast_retry_millis as _,
+        ));
         retry_interval.reset_immediately();
         for peer in mem::take(&mut self.bcast_peers) {
             self.broadcast(&peer);

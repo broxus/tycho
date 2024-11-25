@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::iter;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
@@ -50,8 +51,9 @@ struct ExponentialQuery;
 impl DownloadType for ExponentialQuery {
     fn next_peers(attempt: u8, available_peers: usize) -> usize {
         // result increases exponentially
-        CachedConfig::download_peers()
-            .saturating_mul(CachedConfig::download_peers().saturating_pow(attempt as u32))
+        let download_peers = CachedConfig::get().consensus.download_peers as usize;
+        download_peers
+            .saturating_mul(download_peers.saturating_pow(attempt as u32))
             .min(available_peers)
     }
 }
@@ -60,8 +62,9 @@ impl DownloadType for ExponentialQuery {
 struct LinearQuery;
 impl DownloadType for LinearQuery {
     fn next_peers(attempt: u8, available_peers: usize) -> usize {
-        CachedConfig::download_peers()
-            .saturating_add(CachedConfig::download_peers().saturating_mul(attempt as usize))
+        let download_peers = CachedConfig::get().consensus.download_peers as usize;
+        download_peers
+            .saturating_add(download_peers.saturating_mul(attempt as usize))
             .min(available_peers)
     }
 }
@@ -75,7 +78,7 @@ struct Limiter {
 impl Limiter {
     fn enter(&mut self, round: Round) -> Option<Arc<Semaphore>> {
         // cannot be strict equality: at least one is always allowed, others are concurrent to it
-        if self.running <= CachedConfig::download_tasks() {
+        if self.running <= CachedConfig::get().consensus.download_tasks {
             self.running += 1;
             None
         } else {
@@ -144,6 +147,11 @@ impl Downloader {
         }
     }
 
+    /// 2F "point not found" responses lead to invalidation of all referencing points;
+    /// failed network queries are retried after all peers were queried the same amount of times,
+    /// and only successful responses that point is not found are taken into account.
+    ///
+    /// Reliable peers respond immediately with successfully validated points, or return `None`.
     pub async fn run(
         &self,
         point_id: &PointId,
@@ -230,7 +238,9 @@ impl Downloader {
             undone_peers,
             downloading: FuturesUnordered::new(),
             attempt: 0,
-            interval: tokio::time::interval(CachedConfig::download_retry()),
+            interval: tokio::time::interval(Duration::from_millis(
+                CachedConfig::get().consensus.download_retry_millis as _,
+            )),
         };
         let downloaded = task
             .run(dependers_rx, broadcast_result)

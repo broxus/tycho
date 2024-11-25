@@ -206,7 +206,7 @@ mod stub {
             }
             let step =
                 (self.fetch_count.get() / self.payload_step).min(self.steps_until_full.get());
-            let msg_count = (CachedConfig::payload_batch_bytes() * step)
+            let msg_count = (CachedConfig::get().consensus.payload_batch_bytes as usize * step)
                 / self.steps_until_full
                 / EXTERNAL_MSG_MAX_BYTES;
             let mut result = Vec::with_capacity(msg_count);

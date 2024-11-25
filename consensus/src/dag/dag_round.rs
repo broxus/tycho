@@ -53,7 +53,7 @@ impl DagRound {
     fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
         let peers = peer_schedule.atomic().peers_for(round).clone();
 
-        let peer_count = match round.cmp(&Genesis::round()) {
+        let peer_count = match round.cmp(&Genesis::id().round) {
             cmp::Ordering::Less => panic!(
                 "Coding error: DAG round {} not allowed before genesis",
                 round.0

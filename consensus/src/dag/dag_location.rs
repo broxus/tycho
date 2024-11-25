@@ -107,7 +107,9 @@ impl Signable {
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if valid.info.data().time < (UnixTime::now() + CachedConfig::clock_skew()) {
+            if valid.info.data().time - UnixTime::now()
+                < UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _)
+            {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signature::new(key_pair, valid.info.digest()))

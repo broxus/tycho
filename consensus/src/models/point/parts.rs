@@ -143,22 +143,14 @@ impl UnixTime {
         Self(millis)
     }
     pub fn now() -> Self {
-        Self(
-            u64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("current time since unix epoch")
-                    .as_millis(),
-            )
-            .expect("current Unix time in millis as u64"),
-        )
+        Self(tycho_util::time::now_millis())
     }
 
     pub fn next(&self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
-    pub fn as_u64(&self) -> u64 {
+    pub fn millis(&self) -> u64 {
         self.0
     }
 }

@@ -6,7 +6,7 @@ use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
 use crate::effects::AltFormat;
-use crate::engine::{Genesis, InputBuffer};
+use crate::engine::{CachedConfig, Genesis, InputBuffer};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
     Through, UnixTime,
@@ -73,9 +73,10 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        let (time, anchor_time, payload) = if finished_round.round() == Genesis::round() {
+        let (time, anchor_time, payload) = if finished_round.round() == Genesis::id().round {
             // first produced point is reproducible
-            (Genesis::time().next(), Genesis::time(), Vec::new())
+            let time = UnixTime::from_millis(CachedConfig::get().genesis.time_millis);
+            (time.next(), time, Vec::new())
         } else {
             let (time, anchor_time) =
                 Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);

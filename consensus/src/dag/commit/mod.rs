@@ -46,7 +46,8 @@ impl Committer {
             "already initialized"
         );
         self.dag.init(bottom_round);
-        self.full_history_bottom = bottom_round.round() + CachedConfig::commit_history_rounds();
+        self.full_history_bottom =
+            bottom_round.round() + CachedConfig::get().consensus.commit_history_rounds;
         self.full_history_bottom // hidden in other cases
     }
 
@@ -70,7 +71,8 @@ impl Committer {
         let actual_bottom = new_bottom_round.min(self.dag.top().round());
         self.dag.drop_upto(actual_bottom);
         self.anchor_chain.drop_upto(actual_bottom);
-        self.full_history_bottom = actual_bottom + CachedConfig::commit_history_rounds();
+        self.full_history_bottom =
+            actual_bottom + CachedConfig::get().consensus.commit_history_rounds;
         if actual_bottom == new_bottom_round {
             Ok(self.full_history_bottom)
         } else {
@@ -177,8 +179,9 @@ impl Committer {
 
         while let Some(next) = self.anchor_chain.next() {
             // in case previous anchor was triggered directly - rounds are already dropped
-            self.dag
-                .drop_upto(next.anchor.round() - CachedConfig::commit_history_rounds());
+            self.dag.drop_upto(
+                next.anchor.round() - CachedConfig::get().consensus.commit_history_rounds,
+            );
             let uncommitted = match self
                 .dag
                 .gather_uncommitted(self.full_history_bottom, &next.anchor)
@@ -229,7 +232,7 @@ impl Committer {
                 .collect::<Vec<_>>();
             ordered.push(AnchorData {
                 prev_anchor: Some(next.anchor.anchor_round(AnchorStageRole::Proof))
-                    .filter(|r| *r > Genesis::round())
+                    .filter(|r| *r > Genesis::id().round)
                     .map(|r| r.prev()),
                 anchor: next.anchor,
                 history: committed,

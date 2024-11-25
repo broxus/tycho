@@ -18,13 +18,11 @@ pub trait Source: Clone {}
 /// if collator is left too far behind, it has to catchup by itself.
 ///
 /// ### Atomic-style usage
-/// Allows the collator to put local mempool into silent mode:
-/// with the start of a new round it will keep collecting and signing broadcasts,
-/// downloading and uploading dependencies, validating and committing points,
-/// but creation and broadcast of new points is forbidden.
+/// Allows the collator to put local mempool into pause mode, so its round will not advance:
+/// dag growth, putting new broadcasts into dag, validating and signing them are put on hold.
 ///
 /// ### Channel-style usage
-/// Collator signals mempool to exit silent mode immediately and keep producing new points.
+/// Collator signals mempool to exit pause mode immediately and keep producing new points.
 #[derive(Clone)]
 pub struct TopKnownAnchor;
 impl Source for TopKnownAnchor {}
