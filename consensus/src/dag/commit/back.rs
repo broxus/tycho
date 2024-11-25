@@ -406,9 +406,9 @@ impl DagBack {
         }
         // do not commit genesis - we may place some arbitrary payload in it,
         // also mempool adapter does not expect it, and collator cannot use it too
-        let history_limit = Genesis::round().next().max(Round(
-            (anchor.round().0).saturating_sub(CachedConfig::commit_history_rounds()),
-        ));
+        let history_limit = Genesis::round()
+            .next()
+            .max(anchor.round() - CachedConfig::commit_history_rounds());
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], &anchor.data().includes); // points @ r+0

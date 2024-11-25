@@ -80,7 +80,7 @@ impl CachedConfig {
     }
     pub fn silent_after(top_known_anchor: Round) -> Round {
         // collation will continue across epoch change, so no limit on current genesis round
-        Round((top_known_anchor.0).saturating_add(Self::get().max_consensus_lag_rounds))
+        top_known_anchor + Self::get().max_consensus_lag_rounds
     }
 
     // == Configs above must be globally same for consensus to run

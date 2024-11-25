@@ -210,11 +210,7 @@ impl MempoolStore {
                 // tie: collator syncs and does not need committed, but commit may be not finished
                 DagFront::default_back_bottom(committed)
             };
-            Round(
-                (least_to_keep.0)
-                    .saturating_div(CachedConfig::clean_rocks_period())
-                    .saturating_mul(CachedConfig::clean_rocks_period()),
-            )
+            least_to_keep - least_to_keep.0 % CachedConfig::clean_rocks_period()
         }
 
         tokio::spawn(async move {
@@ -232,15 +228,15 @@ impl MempoolStore {
 
                 metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_top_known")
-                    .set((consensus.0 as f64) - (top_known.0 as f64));
+                    .set(consensus - top_known);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
-                    .set((consensus.0 as f64) - (committed.0 as f64));
+                    .set(consensus - committed);
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
-                    .set((committed.0 as f64) - (top_known.0 as f64));
+                    .set(committed - top_known);
 
                 let new_least_to_keep = least_to_keep(consensus, committed, top_known);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
-                    .set((consensus.0 as f64) - (new_least_to_keep.0 as f64));
+                    .set(consensus - new_least_to_keep);
 
                 if new_least_to_keep > prev_least_to_keep {
                     let inner = inner.clone();

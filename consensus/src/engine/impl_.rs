@@ -185,8 +185,7 @@ impl Engine {
         // wait collator to load blocks and update peer schedule
 
         let top_known_anchor = {
-            let min_top_known_anchor =
-                Round((last_db_round.0).saturating_sub(CachedConfig::max_consensus_lag_rounds()));
+            let min_top_known_anchor = last_db_round - CachedConfig::max_consensus_lag_rounds();
 
             // NOTE collator have to apply mc state update to mempool first,
             //  and pass its top known anchor only after completion
@@ -210,12 +209,11 @@ impl Engine {
             .max(Genesis::round().next());
         self.consensus_round.set_max(consensus_round);
         let round_effects = Effects::<EngineContext>::new(&self.effects, consensus_round);
-        let dag_bottom_round = Round(
-            (top_known_anchor.0)
-                .saturating_sub(CachedConfig::deduplicate_rounds())
-                .saturating_sub(CachedConfig::commit_history_rounds()),
-        )
-        .max(Genesis::round());
+        let dag_bottom_round = Genesis::round().max(
+            top_known_anchor
+                - CachedConfig::deduplicate_rounds()
+                - CachedConfig::commit_history_rounds(),
+        );
 
         let mut committer = take_committer(&mut self.committer_run).expect("init");
         (self.dag).fill_to_top(
@@ -232,7 +230,7 @@ impl Engine {
         {
             let task = tokio::task::spawn_blocking({
                 // last 3 rounds is enough to create point at last round with all witness deps
-                let preload_bottom = Round(last_db_round.0.saturating_sub(2)).max(Genesis::round());
+                let preload_bottom = Genesis::round().max(last_db_round - 2_u8);
                 let store = self.round_task.state.store.clone();
                 move || {
                     let mut map = BTreeMap::<cmp::Reverse<Round>, Vec<PointInfo>>::new();
@@ -392,7 +390,7 @@ impl Engine {
                 };
 
                 metrics::gauge!("tycho_mempool_engine_rounds_skipped")
-                    .increment((current_round.0 as f64) - (top_round.0 as f64));
+                    .increment(current_round - top_round);
 
                 metrics::gauge!("tycho_mempool_engine_current_round").set(current_round.0);
 

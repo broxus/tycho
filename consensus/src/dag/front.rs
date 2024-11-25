@@ -31,7 +31,7 @@ impl DagFront {
         let min_front_rounds = 3 // new current, includes and witness rounds to validate
             + CachedConfig::commit_history_rounds(); // all committable history for every point
 
-        Round((top_round.0).saturating_sub(min_front_rounds)).max(Genesis::round())
+        Genesis::round().max(top_round - min_front_rounds)
     }
 
     pub fn default_back_bottom(top_round: Round) -> Round {
@@ -41,7 +41,7 @@ impl DagFront {
             + CachedConfig::deduplicate_rounds()  // to discard full anchor history after restart
             + CachedConfig::commit_history_rounds(); // to discard incomplete anchor history after restart
 
-        Round((top_round.0).saturating_sub(reset_rounds)).max(Genesis::round())
+        Genesis::round().max(top_round - reset_rounds)
     }
 
     pub fn max_history_bottom(top_round: Round) -> Round {
@@ -52,7 +52,7 @@ impl DagFront {
             + CachedConfig::deduplicate_rounds() // to discard full anchor history after restart
             + CachedConfig::commit_history_rounds(); // to discard incomplete anchor history after restart
 
-        Round((top_round.0).saturating_sub(max_total_rounds)).max(Genesis::round())
+        Genesis::round().max(top_round - max_total_rounds)
     }
 
     pub fn init(&mut self, dag_bottom_round: DagRound) -> Committer {
@@ -180,7 +180,7 @@ impl DagFront {
     fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
         let bottom = self.bottom_round();
 
-        let amount = new_bottom_round.0.saturating_sub(bottom.0) as usize;
+        let amount = (new_bottom_round - bottom.0).0 as usize;
 
         // leaves bottom round in place
         let result = self.rounds.drain(..amount).collect::<Vec<_>>();
