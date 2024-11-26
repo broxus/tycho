@@ -100,6 +100,8 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         current_reader_position,
+        count_expired_anchors,
+        count_expired_messages,
         ..
     } = CollatorStdImpl::read_next_externals(
         &shard_id,
@@ -114,6 +116,8 @@ fn test_read_next_externals() {
 
     assert_eq!(externals.len(), 3);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(count_expired_anchors, 1);
+    assert_eq!(count_expired_messages, 3);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (4, 0));
     assert_eq!(ext_processed_upto.read_to, (8, 3));
@@ -124,7 +128,7 @@ fn test_read_next_externals() {
     // check stop_on_prev_read_to
     collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
         processed_to: (8, 3),
-        read_to: (12, 1),
+        read_to: (8, 8),
     });
 
     // on 1st read should start reading from processed_to
@@ -132,11 +136,12 @@ fn test_read_next_externals() {
     let ParsedExternals {
         ext_messages: externals,
         current_reader_position,
+        was_stopped_on_prev_read_to_reached,
         ..
     } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
-        3,
+        2,
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         None,
@@ -144,20 +149,22 @@ fn test_read_next_externals() {
     )
     .unwrap();
 
-    assert_eq!(externals.len(), 3);
+    assert_eq!(externals.len(), 2);
     assert!(anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
-    assert_eq!(ext_processed_upto.read_to, (12, 1));
-    assert_eq!(current_reader_position, Some((8, 8)));
+    assert_eq!(ext_processed_upto.read_to, (8, 8));
+    assert_eq!(current_reader_position, Some((8, 6)));
+    assert!(!was_stopped_on_prev_read_to_reached);
     let kv = anchors_cache.get(0).unwrap();
-    assert_eq!(kv.0, 12);
+    assert_eq!(kv.0, 8);
 
     // on 2d read should start reading from current_reader_position
     // should stop reading on read_to and exit before 3 messages collected
     let ParsedExternals {
         ext_messages: externals,
         current_reader_position,
+        was_stopped_on_prev_read_to_reached,
         ..
     } = CollatorStdImpl::read_next_externals(
         &shard_id,
@@ -174,12 +181,48 @@ fn test_read_next_externals() {
     assert!(anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
-    assert_eq!(ext_processed_upto.read_to, (12, 1));
-    assert_eq!(current_reader_position, Some((12, 1)));
+    assert_eq!(ext_processed_upto.read_to, (8, 8));
+    assert_eq!(current_reader_position, Some((8, 8)));
+    assert!(was_stopped_on_prev_read_to_reached);
     let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 12);
 
-    // continue reading
+    // try to read more on refill
+    // should read 0 messages
+    let ParsedExternals {
+        ext_messages: externals,
+        current_reader_position,
+        was_stopped_on_prev_read_to_reached,
+        ..
+    } = CollatorStdImpl::read_next_externals(
+        &shard_id,
+        &mut anchors_cache,
+        3,
+        collation_data.get_gen_chain_time(),
+        &mut collation_data.processed_upto.externals,
+        current_reader_position,
+        ReadNextExternalsMode::ToPreviuosReadTo,
+    )
+    .unwrap();
+
+    println!("externals.len() = {}", externals.len());
+    println!("current_reader_position = {:?}", current_reader_position);
+    println!(
+        "was_stopped_on_prev_read_to_reached = {}",
+        was_stopped_on_prev_read_to_reached
+    );
+
+    assert_eq!(externals.len(), 0);
+    assert!(anchors_cache.has_pending_externals());
+    let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
+    assert_eq!(ext_processed_upto.processed_to, (8, 3));
+    assert_eq!(ext_processed_upto.read_to, (8, 8));
+    assert_eq!(current_reader_position, Some((8, 8)));
+    assert!(was_stopped_on_prev_read_to_reached);
+    let kv = anchors_cache.get(0).unwrap();
+    assert_eq!(kv.0, 12);
+
+    // continue reading without refill
     let ParsedExternals {
         ext_messages: externals,
         current_reader_position,
@@ -187,7 +230,7 @@ fn test_read_next_externals() {
     } = CollatorStdImpl::read_next_externals(
         &shard_id,
         &mut anchors_cache,
-        9,
+        10,
         collation_data.get_gen_chain_time(),
         &mut collation_data.processed_upto.externals,
         current_reader_position,
@@ -195,7 +238,7 @@ fn test_read_next_externals() {
     )
     .unwrap();
 
-    assert_eq!(externals.len(), 9);
+    assert_eq!(externals.len(), 10);
     assert!(anchors_cache.has_pending_externals());
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));

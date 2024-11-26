@@ -31,8 +31,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, DisplayExternalsProcessedUpto, McData,
-    TopBlockDescription,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, TopBlockDescription,
 };
 
 #[cfg(test)]
@@ -382,9 +381,13 @@ impl CollatorStdImpl {
         let mut has_pending_externals_in_last_read_anchor = false;
 
         let mut anchors_cache_fully_read = false;
-        let next_idx = 0;
         let mut last_read_to_anchor_chain_time = None;
-        let mut was_stopped_on_prev_read_to_reached = false;
+        let mut prev_read_to_reached = false;
+
+        let mut count_expired_anchors = 0_u32;
+        let mut count_expired_messages = 0_u64;
+
+        let next_idx = 0;
         loop {
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 "try read next anchor from cache",
@@ -425,6 +428,37 @@ impl CollatorStdImpl {
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 "last_read_anchor_id: {}", anchor_id,
             );
+
+            // detect messages read offset for current anchor
+            if anchor_id == was_read_to_anchor_id {
+                // read first anchor from offset in processed upto
+                msgs_read_offset_in_last_anchor = was_read_to_msgs_offset;
+            } else {
+                // read every next anchor from 0
+                msgs_read_offset_in_last_anchor = 0;
+            }
+
+            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                "next anchor externals count: {}, msgs_read_offset_in_last_anchor: {}",
+                anchor.externals.len(), msgs_read_offset_in_last_anchor,
+            );
+
+            // possibly previous read_to already reached
+            if read_mode == ReadNextExternalsMode::ToPreviuosReadTo
+                && ((anchor_id == prev_read_to_anchor_id
+                    && msgs_read_offset_in_last_anchor == prev_read_to_msgs_offset)
+                    || anchor_id > prev_read_to_anchor_id)
+            {
+                // then do not read externals
+                return Ok(ParsedExternals {
+                    ext_messages: vec![],
+                    current_reader_position,
+                    last_read_to_anchor_chain_time: None,
+                    was_stopped_on_prev_read_to_reached: true,
+                    count_expired_anchors: 0,
+                    count_expired_messages: 0,
+                });
+            }
 
             // skip and remove fully read anchor
             if anchor_id == was_read_to_anchor_id
@@ -472,29 +506,11 @@ impl CollatorStdImpl {
                     "anchor with id {} fully skipped due to expiration, removed from anchors cache", anchor_id,
                 );
 
+                count_expired_anchors = count_expired_anchors.saturating_add(1);
+                count_expired_messages = count_expired_messages.saturating_add(expired_msgs_count);
+
                 // try read next anchor
                 continue;
-            }
-
-            if anchor_id == was_read_to_anchor_id {
-                // read first anchor from offset in processed upto
-                msgs_read_offset_in_last_anchor = was_read_to_msgs_offset;
-            } else {
-                // read every next anchor from 0
-                msgs_read_offset_in_last_anchor = 0;
-            }
-
-            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "next anchor externals count: {}, msgs_read_offset_in_last_anchor: {}",
-                anchor.externals.len(), msgs_read_offset_in_last_anchor,
-            );
-
-            // possibly previous read_to already reached
-            if read_mode == ReadNextExternalsMode::ToPreviuosReadTo
-                && anchor_id == prev_read_to_anchor_id
-                && msgs_read_offset_in_last_anchor == prev_read_to_msgs_offset
-            {
-                was_stopped_on_prev_read_to_reached = true;
             }
 
             // get iterator and read messages
@@ -506,11 +522,11 @@ impl CollatorStdImpl {
                     "read ext_msg dst: {}", ext_msg.info.dst,
                 );
 
-                if total_msgs_collected < count && !was_stopped_on_prev_read_to_reached {
+                if total_msgs_collected < count && !prev_read_to_reached {
                     msgs_read_offset_in_last_anchor += 1;
                 }
                 let stop_reading = if shard_id.contains_address(&ext_msg.info.dst) {
-                    if total_msgs_collected < count && !was_stopped_on_prev_read_to_reached {
+                    if total_msgs_collected < count && !prev_read_to_reached {
                         // get msgs for target shard until target count reached
                         ext_messages.push(Box::new(ParsedMessage {
                             info: MsgInfo::ExtIn(ext_msg.info.clone()),
@@ -541,7 +557,7 @@ impl CollatorStdImpl {
                     && anchor_id == prev_read_to_anchor_id
                     && msgs_read_offset_in_last_anchor == prev_read_to_msgs_offset
                 {
-                    was_stopped_on_prev_read_to_reached = true;
+                    prev_read_to_reached = true;
                 }
 
                 if stop_reading {
@@ -566,7 +582,7 @@ impl CollatorStdImpl {
                 );
             }
 
-            if was_stopped_on_prev_read_to_reached {
+            if prev_read_to_reached {
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "stopped reading externals when prev read_to reached: ({}, {})",
                     prev_read_to_anchor_id, prev_read_to_msgs_offset,
@@ -649,7 +665,9 @@ impl CollatorStdImpl {
             ext_messages,
             current_reader_position,
             last_read_to_anchor_chain_time,
-            was_stopped_on_prev_read_to_reached,
+            was_stopped_on_prev_read_to_reached: prev_read_to_reached,
+            count_expired_anchors,
+            count_expired_messages,
         })
     }
 
@@ -1000,22 +1018,6 @@ impl CollatorStdImpl {
         )?;
 
         let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
-
-        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
-            collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
-        );
-
-        // show internals processed upto
-        collation_data
-            .processed_upto
-            .internals
-            .iter()
-            .for_each(|(shard_ident, processed_upto)| {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "initial processed_upto.internals for shard {}: {}",
-                    shard_ident, processed_upto,
-                );
-            });
 
         // compute created / minted / recovered / from_prev_block
         let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;

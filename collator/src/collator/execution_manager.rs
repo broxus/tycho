@@ -293,6 +293,17 @@ impl MessagesReader {
                 GetNextMessageGroupMode::Refill => ReadNextExternalsMode::ToPreviuosReadTo,
             };
 
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                ?read_next_externals_mode,
+                externals_reader_position = ?msgs_buffer.current_ext_reader_position,
+                processed_upto_externals = ?processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+                "start reading next externals",
+            );
+
+            let mut stopped_on_prev_read_to_reached;
+
+            let mut expired_anchors_count = 0_u32;
+            let mut expired_ext_msgs_count = 0_u64;
             let mut externals_read_count = 0;
             loop {
                 let ParsedExternals {
@@ -300,6 +311,8 @@ impl MessagesReader {
                     current_reader_position,
                     last_read_to_anchor_chain_time,
                     was_stopped_on_prev_read_to_reached,
+                    count_expired_anchors,
+                    count_expired_messages,
                 } = CollatorStdImpl::read_next_externals(
                     &self.shard_id,
                     anchors_cache,
@@ -310,8 +323,17 @@ impl MessagesReader {
                     read_next_externals_mode,
                 )?;
                 msgs_buffer.current_ext_reader_position = current_reader_position;
-                self.last_read_to_anchor_chain_time = last_read_to_anchor_chain_time;
 
+                // update last read_to anchor chain time only when next anchor was read
+                if let Some(ct) = last_read_to_anchor_chain_time {
+                    self.last_read_to_anchor_chain_time = Some(ct);
+                }
+
+                stopped_on_prev_read_to_reached = was_stopped_on_prev_read_to_reached;
+
+                expired_anchors_count = expired_anchors_count.saturating_add(count_expired_anchors);
+                expired_ext_msgs_count =
+                    expired_ext_msgs_count.saturating_add(count_expired_messages);
                 externals_read_count += ext_messages.len() as u64;
 
                 let timer_add_to_groups = std::time::Instant::now();
@@ -335,7 +357,7 @@ impl MessagesReader {
                     break;
                 }
 
-                if was_stopped_on_prev_read_to_reached {
+                if stopped_on_prev_read_to_reached {
                     break;
                 }
 
@@ -346,9 +368,17 @@ impl MessagesReader {
             self.read_ext_msgs_count += externals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
+                ?read_next_externals_mode,
+                externals_reader_position = ?msgs_buffer.current_ext_reader_position,
+                processed_upto_externals = ?processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+                stopped_on_prev_read_to_reached,
+                expired_anchors_count,
+                expired_ext_msgs_count,
+                has_pending_externals = anchors_cache.has_pending_externals(),
                 "externals_read_count={}, buffer int={}, ext={}",
                 externals_read_count,
-                msgs_buffer.message_groups.int_messages_count(), msgs_buffer.message_groups.ext_messages_count(),
+                msgs_buffer.message_groups.int_messages_count(),
+                msgs_buffer.message_groups.ext_messages_count(),
             );
 
             group_opt = msgs_buffer.message_groups.extract_first_group();

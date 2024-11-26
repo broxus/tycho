@@ -16,7 +16,7 @@ use crate::collator::types::AnchorsCache;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::CollatorConfig;
+use crate::types::{CollatorConfig, DisplayExternalsProcessedUpto};
 
 pub struct PrepareState {
     config: Arc<CollatorConfig>,
@@ -44,6 +44,25 @@ impl Phase<PrepareState> {
     }
 
     pub fn run(mut self) -> Result<Phase<ExecuteState>> {
+        // show initial processed upto
+        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.offset = {}",
+            self.state.collation_data.processed_upto.processed_offset,
+        );
+        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
+            self.state.collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+        );
+        self.state
+            .collation_data
+            .processed_upto
+            .internals
+            .iter()
+            .for_each(|(shard_ident, processed_upto)| {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "initial processed_upto.internals for shard {}: {}",
+                    shard_ident, processed_upto,
+                );
+            });
+
         // init executor
         let executor = MessagesExecutor::new(
             self.state.shard_id,
@@ -130,15 +149,25 @@ impl Phase<PrepareState> {
         // refill messages buffer and skip groups upto offset (on node restart)
         let prev_processed_offset = self.state.collation_data.processed_upto.processed_offset;
         if !self.state.msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
+            // when refill messages buffer on init or resume
+            // we should check externals expiration
+            // against previous block chain time
+
+            // TODO: But this will not work when there are uprocessed
+            //      externals in messages buffer from blocks before previous.
+            //      We need to redesing how to store exhaustive processed_upto
+            let prev_chain_time = self.state.prev_shard_data.gen_chain_time();
+
             tracing::debug!(target: tracing_targets::COLLATOR,
                 prev_processed_offset,
-                "refill messages buffer and skip groups upto",
+                prev_chain_time,
+                "start: refill messages buffer and skip groups upto",
             );
 
             while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
                 let msg_group = messages_reader.get_next_message_group(
                     GetNextMessageGroupContext {
-                        next_chain_time: self.state.collation_data.get_gen_chain_time(),
+                        next_chain_time: prev_chain_time,
                         max_new_message_key_to_current_shard,
                         mode: GetNextMessageGroupMode::Refill,
                     },
@@ -153,6 +182,13 @@ impl Phase<PrepareState> {
                     break;
                 }
             }
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                prev_processed_offset,
+                prev_chain_time,
+                actual_offset = self.state.msgs_buffer.message_groups_offset(),
+                "finished: refill messages buffer and skip groups upto",
+            );
 
             // next time we should read next message group like we did not make refill before
             // so we need to reset flags that control from where to read messages

@@ -440,7 +440,7 @@ impl CollatorStdImpl {
         &mut self,
         working_state: &WorkingState,
         anchors_proc_info: AnchorsProcessingInfo,
-    ) -> Result<Vec<AnchorInfo>, CollatorError> {
+    ) -> Result<Vec<InitAnchorSource>, CollatorError> {
         let import_init_anchors = match &self.mempool_config_override {
             // There may be cases when processed to anchor in shard is before anchor in master.
             // We can produce incorrect shard block, then ignore it, take correct from bc and try to collate next one.
@@ -1004,10 +1004,9 @@ impl CollatorStdImpl {
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
                 let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
+                anchors_cache.insert(next_anchor.clone(), our_exts_count);
 
                 let has_externals = our_exts_count > 0;
-
-                anchors_cache.insert(next_anchor.clone(), our_exts_count);
 
                 metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
                     .increment(our_exts_count as _);
@@ -1019,7 +1018,7 @@ impl CollatorStdImpl {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     elapsed = timer.elapsed().as_millis(),
                     chain_time_elapsed,
-                    "imported next anchor (id: {}, chain_time: {}, total_exts: {}, our_exts: {})",
+                    "imported next anchor (id: {}, chain_time: {}, all_exts: {}, our_exts: {})",
                     next_anchor.id,
                     next_anchor.chain_time,
                     next_anchor.externals.len(),
@@ -1049,7 +1048,7 @@ impl CollatorStdImpl {
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
         top_processed_to_anchor: MempoolAnchorId,
-    ) -> Result<Vec<AnchorInfo>, CollatorError> {
+    ) -> Result<Vec<InitAnchorSource>, CollatorError> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         let mut anchors_info = vec![];
@@ -1057,31 +1056,47 @@ impl CollatorStdImpl {
         let mut all_anchors_are_taken_from_cache = false;
         let mut processed_to_anchor_exists_in_cache = false;
 
-        let mut removed_our_exts_count_total: usize = 0;
+        // we count our messages for processed_to with existing offset
+        let mut offset = processed_to_msgs_offset as usize;
 
         // first look for required anchors in cache
         let mut idx = 0;
         while let Some((_, anchor)) = anchors_cache.get(idx) {
-            // remove all other anchors after last_block_chain_time
-            if all_anchors_are_taken_from_cache {
-                let our_exts_count = anchor.count_externals_for(&shard_id, 0);
-                removed_our_exts_count_total =
-                    removed_our_exts_count_total.saturating_add(our_exts_count);
-                anchors_cache.remove(idx);
-                continue;
-            }
-            // check if processed_to_anchor_id exists in cache
-            if anchor.id == processed_to_anchor_id {
-                processed_to_anchor_exists_in_cache = true;
-            }
-            // use anchors from cache only when processed_to_anchor_id exists in cache
-            // otherwise we should clear the cache
-            if processed_to_anchor_exists_in_cache && anchor.id >= processed_to_anchor_id {
+            if anchor.id >= processed_to_anchor_id {
+                // check if processed_to anchor exists in cache
+                if anchor.id == processed_to_anchor_id {
+                    processed_to_anchor_exists_in_cache = true;
+                }
+
+                // use anchors from cache only when processed_to anchor exists in cache
+                if !processed_to_anchor_exists_in_cache {
+                    break;
+                }
+
                 // when we found anchor with last_block_chain_time
                 // it means that we have all required anchors in the cache
                 if anchor.chain_time == last_block_chain_time {
                     all_anchors_are_taken_from_cache = true;
                 }
+
+                // remove all next anchors after last_block_chain_time
+                if anchor.chain_time > last_block_chain_time {
+                    let our_exts_count = anchor.count_externals_for(&shard_id, 0);
+                    anchors_cache.remove(idx);
+                    metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                        .decrement(our_exts_count as f64);
+                    continue;
+                }
+
+                // and keep others
+                let our_exts_count = anchor.count_externals_for(&shard_id, offset);
+                anchors_info.push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
+                    anchor.clone(),
+                    our_exts_count,
+                )));
+
+                // in next anchors after processed_to will count from 0
+                offset = 0;
 
                 last_anchor = Some(anchor);
             }
@@ -1091,16 +1106,12 @@ impl CollatorStdImpl {
         // we have all required anchors in cache
         if all_anchors_are_taken_from_cache {
             // update last imported anchor info
-            let last_anchor = last_anchor.unwrap();
-            let our_exts_count = last_anchor.count_externals_for(&shard_id, 0);
-            anchors_cache.set_last_imported_anchor_info(AnchorInfo::from_anchor(
-                last_anchor,
-                our_exts_count,
-            ));
-
-            // decrease queue size
-            metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                .decrement(removed_our_exts_count_total as f64);
+            let Some(InitAnchorSource::FromCache(anchor_info)) = anchors_info.last() else {
+                return Err(CollatorError::Anyhow(anyhow::anyhow!(
+                    "`anchors_info` should contain almost one `FromCache` here"
+                )));
+            };
+            anchors_cache.set_last_imported_anchor_info(anchor_info.clone());
 
             return Ok(anchors_info);
         }
@@ -1110,8 +1121,6 @@ impl CollatorStdImpl {
             anchors_cache.clear();
             metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).set(0);
         }
-
-        let mut our_exts_count_total: usize = 0;
 
         let mut prev_anchor_id;
         let mut last_imported_anchor_ct;
@@ -1136,19 +1145,23 @@ impl CollatorStdImpl {
             }
         };
 
-        // we count our messages for the first anchor from processed_to offset
-        let mut offset = processed_to_msgs_offset as usize;
-
         loop {
             // add loaded anchor to cache
             if let Some(anchor) = next_anchor {
                 let our_exts_count = anchor.count_externals_for(&shard_id, offset);
-                our_exts_count_total = our_exts_count_total.saturating_add(our_exts_count);
                 anchors_cache.insert(anchor.clone(), our_exts_count);
-                anchors_info.push(AnchorInfo::from_anchor(anchor, our_exts_count));
+                anchors_info.push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
+                    anchor,
+                    our_exts_count,
+                )));
+
+                metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
+                    .increment(our_exts_count as u64);
+                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                    .increment(our_exts_count as f64);
             }
 
-            // in other anchors will count from 0
+            // in next anchors after processed_to will count from 0
             offset = 0;
 
             // import next anchor if last block chain time not reached
@@ -1169,11 +1182,6 @@ impl CollatorStdImpl {
 
             next_anchor = Some(anchor);
         }
-
-        metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
-            .increment(our_exts_count_total as u64);
-        metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-            .increment(our_exts_count_total as f64);
 
         Ok(anchors_info)
     }
@@ -1937,4 +1945,11 @@ enum ImportNextAnchor {
         has_our_externals: bool,
     },
     Skipped,
+}
+
+#[derive(Debug)]
+enum InitAnchorSource {
+    FromCache(AnchorInfo),
+    #[allow(dead_code)]
+    Imported(AnchorInfo),
 }

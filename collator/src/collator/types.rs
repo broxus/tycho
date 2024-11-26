@@ -1262,6 +1262,8 @@ pub struct ParsedExternals {
     pub current_reader_position: Option<(u32, u64)>,
     pub last_read_to_anchor_chain_time: Option<u64>,
     pub was_stopped_on_prev_read_to_reached: bool,
+    pub count_expired_anchors: u32,
+    pub count_expired_messages: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
