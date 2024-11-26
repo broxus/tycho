@@ -10,7 +10,7 @@ use everscale_types::models::{
 use tycho_block_util::state::MinRefMcStateTracker;
 
 use crate::collator::types::AnchorsCache;
-use crate::collator::CollatorStdImpl;
+use crate::collator::{CollatorStdImpl, InitAnchorSource};
 use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener};
 use crate::test_utils::try_init_test_tracing;
 use crate::types::{McData, ProcessedUptoInfoStuff, ShardDescriptionShort};
@@ -41,6 +41,16 @@ async fn test_import_init_anchors() {
         MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
     let mpool_adapter = adapter;
 
+    let filter_imported = |init_anchors_info: Vec<InitAnchorSource>| {
+        init_anchors_info
+            .into_iter()
+            .filter_map(|item| match item {
+                InitAnchorSource::Imported(info) => Some(info),
+                InitAnchorSource::FromCache(_) => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
     // =========================================================================
     // Get all anchors from mempool
     // =========================================================================
@@ -59,6 +69,8 @@ async fn test_import_init_anchors() {
     )
     .await
     .unwrap();
+
+    let anchors_info = filter_imported(anchors_info);
 
     tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
 
@@ -94,6 +106,8 @@ async fn test_import_init_anchors() {
     .await
     .unwrap();
 
+    let anchors_info = filter_imported(anchors_info);
+
     tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
 
     assert_eq!(anchors_info.len(), 4);
@@ -126,6 +140,8 @@ async fn test_import_init_anchors() {
     )
     .await
     .unwrap();
+
+    let anchors_info = filter_imported(anchors_info);
 
     tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
 
@@ -160,6 +176,8 @@ async fn test_import_init_anchors() {
     .await
     .unwrap();
 
+    let anchors_info = filter_imported(anchors_info);
+
     tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
 
     assert_eq!(anchors_info.len(), 0);
@@ -191,6 +209,8 @@ async fn test_import_init_anchors() {
     )
     .await
     .unwrap();
+
+    let anchors_info = filter_imported(anchors_info);
 
     tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
 
@@ -224,6 +244,8 @@ async fn test_import_init_anchors() {
     )
     .await
     .unwrap();
+
+    let anchors_info = filter_imported(anchors_info);
 
     tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
 

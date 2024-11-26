@@ -12,6 +12,7 @@ use crate::collator::execution_manager::{
 };
 use crate::collator::types::{AnchorsCache, BlockLimitsLevel, ExecuteResult};
 use crate::tracing_targets;
+use crate::types::DisplayExternalsProcessedUpto;
 
 pub struct ExecuteState {
     pub messages_reader: MessagesReader,
@@ -218,6 +219,25 @@ impl Phase<ExecuteState> {
             add_to_message_groups_elapsed,
             last_read_to_anchor_chain_time,
         });
+
+        // show updated processed upto
+        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
+            self.state.collation_data.processed_upto.processed_offset,
+        );
+        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
+            self.state.collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+        );
+        self.state
+            .collation_data
+            .processed_upto
+            .internals
+            .iter()
+            .for_each(|(shard_ident, processed_upto)| {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "updated processed_upto.internals for shard {}: {}",
+                    shard_ident, processed_upto,
+                );
+            });
 
         Ok(())
     }
