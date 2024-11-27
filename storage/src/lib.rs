@@ -99,11 +99,15 @@ impl StorageBuilder {
             fdlimit = std::cmp::max(256, fdlimit / 3);
 
             tracing::debug!(threads, fdlimit, subdir = RPC_DB_SUBDIR);
-            RpcDb::builder_prepared(self.config.root_dir.join(RPC_DB_SUBDIR), caches.clone())
-                .with_metrics_enabled(self.config.rocksdb_enable_metrics)
-                .with_options(|opts, _| update_options(opts, threads, fdlimit))
-                .build()
-                .map(Some)?
+            let rpc_db =
+                RpcDb::builder_prepared(self.config.root_dir.join(RPC_DB_SUBDIR), caches.clone())
+                    .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+                    .with_options(|opts, _| update_options(opts, threads, fdlimit))
+                    .build()?;
+
+            rpc_db.apply_migrations().await?;
+
+            Some(rpc_db)
         } else {
             // TODO: Is it ok to use exactly half?
             threads = std::cmp::max(2, threads / 2);
@@ -118,6 +122,7 @@ impl StorageBuilder {
                 .with_metrics_enabled(self.config.rocksdb_enable_metrics)
                 .with_options(|opts, _| update_options(opts, threads, fdlimit))
                 .build()?;
+        base_db.apply_migrations().await?;
 
         let temp_file_storage = TempFileStorage::new(&file_db)?;
 

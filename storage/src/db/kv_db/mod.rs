@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::path::Path;
 
+use tycho_util::sync::CancellationFlag;
 use weedb::{
     Caches, MigrationError, Semver, Tables, VersionProvider, WeeDb, WeeDbBuilder, WeeDbRaw,
 };
@@ -10,10 +12,10 @@ pub mod tables;
 pub trait WeeDbExt<T: Tables>: Sized {
     fn builder_prepared<P: AsRef<Path>>(path: P, context: T::Context) -> WeeDbBuilder<T>;
 
-    fn apply_migrations(&self) -> Result<(), MigrationError>;
+    fn apply_migrations(&self) -> impl Future<Output = Result<(), MigrationError>> + Send;
 }
 
-impl<T: Tables> WeeDbExt<T> for WeeDb<T>
+impl<T: Tables + 'static> WeeDbExt<T> for WeeDb<T>
 where
     Self: WithMigrations,
 {
@@ -24,15 +26,41 @@ where
         WeeDbBuilder::new(path, context).with_name(Self::NAME)
     }
 
-    fn apply_migrations(&self) -> Result<(), MigrationError> {
-        let mut migrations = Migrations::<Self>::with_target_version_and_provider(
-            Self::VERSION,
-            StateVersionProvider {
-                db_name: Self::NAME,
-            },
-        );
-        Self::register_migrations(&mut migrations)?;
-        self.apply(migrations)
+    #[tracing::instrument(skip_all, fields(db = Self::NAME))]
+    async fn apply_migrations(&self) -> Result<(), MigrationError> {
+        let cancelled = CancellationFlag::new();
+
+        tracing::info!("started");
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
+        let span = tracing::Span::current();
+
+        let this = self.clone();
+        let cancelled = cancelled.clone();
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
+
+            let mut migrations = Migrations::<Self>::with_target_version_and_provider(
+                Self::VERSION,
+                StateVersionProvider {
+                    db_name: Self::NAME,
+                },
+            );
+            Self::register_migrations(&mut migrations, cancelled)?;
+            this.apply(migrations)?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+            tracing::info!("finished");
+            Ok(())
+        })
+        .await
+        .map_err(|e| MigrationError::Custom(e.into()))?
     }
 }
 
@@ -42,11 +70,15 @@ pub type BaseDb = WeeDb<BaseTables>;
 
 impl WithMigrations for BaseDb {
     const NAME: &'static str = "base";
-    const VERSION: Semver = [0, 0, 1];
+    const VERSION: Semver = [0, 0, 2];
 
-    fn register_migrations(_migrations: &mut Migrations<Self>) -> Result<(), MigrationError> {
-        // TODO: register migrations here
-        Ok(())
+    fn register_migrations(
+        migrations: &mut Migrations<Self>,
+        cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
+        migrations.register([0, 0, 1], [0, 0, 2], move |db| {
+            base_migrations::v0_0_1_to_0_0_2(db, cancelled.clone())
+        })
     }
 }
 
@@ -69,6 +101,66 @@ weedb::tables! {
     }
 }
 
+mod base_migrations {
+    use std::time::Instant;
+
+    use everscale_types::boc::Boc;
+    use tycho_block_util::archive::ArchiveEntryType;
+
+    use super::*;
+    use crate::util::StoredValue;
+
+    pub fn v0_0_1_to_0_0_2(db: &BaseDb, cancelled: CancellationFlag) -> Result<(), MigrationError> {
+        let mut block_data_iter = db.package_entries.raw_iterator();
+        block_data_iter.seek_to_first();
+
+        tracing::info!("stated migrating package entries");
+
+        let started_at = Instant::now();
+        let mut total_processed = 0usize;
+        let mut block_ids_created = 0usize;
+
+        let full_block_ids_cf = &db.full_block_ids.cf();
+        let mut batch = weedb::rocksdb::WriteBatch::default();
+        let mut cancelled = cancelled.debounce(10);
+        loop {
+            let (key, value) = match block_data_iter.item() {
+                Some(item) if !cancelled.check() => item,
+                Some(_) => return Err(MigrationError::Custom(anyhow::anyhow!("cancelled").into())),
+                None => {
+                    block_data_iter.status()?;
+                    break;
+                }
+            };
+
+            'item: {
+                let key = crate::PackageEntryKey::from_slice(key);
+                if key.ty != ArchiveEntryType::Block {
+                    break 'item;
+                }
+
+                let file_hash = Boc::file_hash_blake(value);
+                batch.put_cf(full_block_ids_cf, key.block_id.to_vec(), file_hash);
+                block_ids_created += 1;
+            }
+
+            block_data_iter.next();
+            total_processed += 1;
+        }
+
+        db.rocksdb()
+            .write_opt(batch, db.full_block_ids.write_config())?;
+
+        tracing::info!(
+            elapsed = %humantime::format_duration(started_at.elapsed()),
+            total_processed,
+            block_ids_created,
+            "finished migrating package entries"
+        );
+        Ok(())
+    }
+}
+
 // === RPC DB ===
 
 pub type RpcDb = WeeDb<RpcTables>;
@@ -77,7 +169,10 @@ impl WithMigrations for RpcDb {
     const NAME: &'static str = "rpc";
     const VERSION: Semver = [0, 0, 1];
 
-    fn register_migrations(_migrations: &mut Migrations<Self>) -> Result<(), MigrationError> {
+    fn register_migrations(
+        _migrations: &mut Migrations<Self>,
+        _cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
         // TODO: register migrations here
         Ok(())
     }
@@ -102,7 +197,10 @@ impl WithMigrations for MempoolDb {
     const NAME: &'static str = "mempool";
     const VERSION: Semver = [0, 0, 1];
 
-    fn register_migrations(_migrations: &mut Migrations<Self>) -> Result<(), MigrationError> {
+    fn register_migrations(
+        _migrations: &mut Migrations<Self>,
+        _cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
         // TODO: register migrations here
         Ok(())
     }
@@ -126,7 +224,10 @@ trait WithMigrations: Sized {
     const NAME: &'static str;
     const VERSION: Semver;
 
-    fn register_migrations(migrations: &mut Migrations<Self>) -> Result<(), MigrationError>;
+    fn register_migrations(
+        migrations: &mut Migrations<Self>,
+        cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError>;
 }
 
 type Migrations<D> = weedb::Migrations<StateVersionProvider, D>;
