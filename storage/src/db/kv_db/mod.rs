@@ -68,6 +68,39 @@ where
 
 pub type BaseDb = WeeDb<BaseTables>;
 
+pub trait BaseDbExt {
+    fn normalize_version(&self) -> anyhow::Result<()>;
+}
+
+impl BaseDbExt for BaseDb {
+    // TEMP: Set a proper version on start. Remove on testnet reset.
+    fn normalize_version(&self) -> anyhow::Result<()> {
+        let provider = StateVersionProvider {
+            db_name: Self::NAME,
+        };
+
+        // Check if there is NO VERSION
+        if provider.get_version(self.raw())?.is_some() {
+            return Ok(());
+        }
+
+        // Check if the DB is NOT EMPTY
+        {
+            let mut package_entires_iter = self.package_entries.raw_iterator();
+            package_entires_iter.seek_to_first();
+            package_entires_iter.status()?;
+            if package_entires_iter.item().is_none() {
+                return Ok(());
+            }
+        }
+
+        // Set the initial version
+        tracing::warn!("normalizing DB version");
+        provider.set_version(self.raw(), [0, 0, 1])?;
+        Ok(())
+    }
+}
+
 impl WithMigrations for BaseDb {
     const NAME: &'static str = "base";
     const VERSION: Semver = [0, 0, 2];

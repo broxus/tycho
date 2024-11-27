@@ -122,6 +122,8 @@ impl StorageBuilder {
                 .with_metrics_enabled(self.config.rocksdb_enable_metrics)
                 .with_options(|opts, _| update_options(opts, threads, fdlimit))
                 .build()?;
+
+        base_db.normalize_version()?; // TODO: Remove on testnet reset
         base_db.apply_migrations().await?;
 
         let temp_file_storage = TempFileStorage::new(&file_db)?;
