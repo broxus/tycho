@@ -280,7 +280,7 @@ mod test {
     use super::*;
     use crate::dag::dag_location::DagLocation;
     use crate::dag::DagFront;
-    use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
+    use crate::effects::{AltFormat, EngineCtx, MempoolStore, RoundCtx};
     use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::test_utils;
     use crate::test_utils::default_test_config;
@@ -301,8 +301,8 @@ mod test {
         let (genesis_round, peer_schedule, stub_downloader) =
             test_utils::make_dag_parts(&peers, &genesis, &stub_store);
 
-        let chained_effects = Effects::<ChainedRoundsContext>::new(genesis.round());
-        let mut engine_effects;
+        let engine_ctx = EngineCtx::new(genesis.round());
+        let mut round_ctx;
 
         let mut dag = DagFront::default();
         let mut committer = dag.init(genesis_round);
@@ -313,7 +313,7 @@ mod test {
             if round <= genesis.round() {
                 continue;
             }
-            engine_effects = Effects::<EngineContext>::new(&chained_effects, round);
+            round_ctx = RoundCtx::new(&engine_ctx, round);
 
             if let Some(skip_to) = dag.fill_to_top(round, Some(&mut committer), &peer_schedule) {
                 println!("gap: next anchor with full history not earlier than {skip_to:?}");
@@ -328,7 +328,7 @@ mod test {
                 &peer_schedule,
                 &stub_downloader,
                 &stub_store,
-                &engine_effects,
+                &round_ctx,
                 0,
                 0,
             )

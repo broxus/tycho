@@ -7,7 +7,7 @@ use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::dag::{DagHead, Verifier, VerifyError};
 use crate::dyn_event;
-use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
+use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::intercom::{Downloader, PeerSchedule};
@@ -36,10 +36,10 @@ impl BroadcastFilter {
         head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
         self.inner
-            .add(sender, point, head, downloader, store, effects);
+            .add(sender, point, head, downloader, store, round_ctx);
     }
 
     pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
@@ -54,10 +54,9 @@ impl BroadcastFilter {
         head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
-        round_effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
-        self.inner
-            .advance_round(head, downloader, store, round_effects);
+        self.inner.advance_round(head, downloader, store, round_ctx);
     }
 }
 
@@ -93,7 +92,7 @@ impl BroadcastFilterInner {
         head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
         let PointId {
             author,
@@ -189,7 +188,7 @@ impl BroadcastFilterInner {
                     match &verified {
                         Ok(()) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
-                                dag_round.add_broadcast_exact(point, downloader, store, effects);
+                                dag_round.add_broadcast_exact(point, downloader, store, round_ctx);
                             }
                         }
                         Err(
@@ -198,7 +197,7 @@ impl BroadcastFilterInner {
                             | VerifyError::UnknownPeers(_),
                         ) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
-                                dag_round.add_ill_formed_broadcast_exact(point, store, effects);
+                                dag_round.add_ill_formed_broadcast_exact(point, store, round_ctx);
                             }
                         }
                         Err(VerifyError::BadSig) => {
@@ -234,7 +233,7 @@ impl BroadcastFilterInner {
             tracing::Level::DEBUG
         };
         dyn_event!(
-            parent: effects.span(),
+            parent: round_ctx.span(),
             level,
             author = display(author.alt()),
             round = round.0,
@@ -253,7 +252,7 @@ impl BroadcastFilterInner {
             self.consensus_round.set_max(round);
             // must not apply peer schedule changes as DagBack may be not ready validating smth old
             // but threshold can be reached only when peer schedule is defined, so it's safe
-            self.advance_round(head, downloader, store, effects);
+            self.advance_round(head, downloader, store, round_ctx);
         }
     }
 
@@ -263,7 +262,7 @@ impl BroadcastFilterInner {
         head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
         // Engine round task is not running while collator is syncing blocks
         let history_bottom = (Genesis::id().round)
@@ -301,7 +300,7 @@ impl BroadcastFilterInner {
             };
             // preserve order by round to not create excessive download tasks
             for point in points {
-                point_round.add_broadcast_exact(&point, downloader, store, effects);
+                point_round.add_broadcast_exact(&point, downloader, store, round_ctx);
             }
             released.push(round.0);
         }
@@ -319,11 +318,11 @@ impl BroadcastFilterInner {
             for (peer_id, (point_or_digest, _)) in map_by_peer {
                 match point_or_digest {
                     Ok(point) => {
-                        dag_round.add_broadcast_exact(point, downloader, store, effects);
+                        dag_round.add_broadcast_exact(point, downloader, store, round_ctx);
                     }
                     Err(digest) => {
                         dag_round.add_evicted_broadcast_exact(
-                            peer_id, digest, downloader, store, effects,
+                            peer_id, digest, downloader, store, round_ctx,
                         );
                     }
                 }
@@ -334,7 +333,7 @@ impl BroadcastFilterInner {
         }
 
         tracing::debug!(
-            parent: effects.span(),
+            parent: round_ctx.span(),
             to = head.next().round().0,
             released = debug(released),
             missed = debug(missed),

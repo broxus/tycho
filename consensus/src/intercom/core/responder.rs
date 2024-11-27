@@ -6,7 +6,7 @@ use futures_util::future;
 use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
-use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
+use crate::effects::{AltFormat, MempoolStore, RoundCtx};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::dto::{
     BroadcastMpResponse, BroadcastQuery, PointMpResponse, PointQuery, SignatureMpResponse,
@@ -24,7 +24,7 @@ struct ResponderInner {
     head: DagHead,
     downloader: Downloader,
     store: MempoolStore,
-    effects: Effects<EngineContext>,
+    round_ctx: RoundCtx,
 }
 
 impl Responder {
@@ -34,9 +34,9 @@ impl Responder {
         head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
-        round_effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
-        broadcast_filter.advance_round(head, downloader, store, round_effects);
+        broadcast_filter.advance_round(head, downloader, store, round_ctx);
         // Note that `next_dag_round` for Signer should be advanced _after_ new points
         //  are moved from BroadcastFilter into DAG. Then Signer will look for points
         //  (of rounds greater than local engine round, including top dag round exactly)
@@ -51,7 +51,7 @@ impl Responder {
             head: head.clone(),
             downloader: downloader.clone(),
             store: store.clone(),
-            effects: round_effects.clone(),
+            round_ctx: round_ctx.clone(),
         })));
     }
 }
@@ -103,11 +103,11 @@ impl Responder {
                         &inner.head,
                         &inner.downloader,
                         &inner.store,
-                        &inner.effects,
+                        &inner.round_ctx,
                     ),
                 };
                 let response = Response::from_tl(&BroadcastMpResponse);
-                EngineContext::broadcast_response_metrics(task_start.elapsed());
+                RoundCtx::broadcast_response_metrics(task_start.elapsed());
                 response
             },
             PointQuery as r => {
@@ -118,12 +118,12 @@ impl Responder {
                         &r.0,
                         &inner.head,
                         &inner.store,
-                        &inner.effects,
+                        &inner.round_ctx,
                     ),
                 };
                 let response_body = PointMpResponse(response);
                 let response = Response::from_tl(&response_body);
-                EngineContext::point_by_id_response_metrics(response_body, task_start.elapsed());
+                RoundCtx::point_by_id_response_metrics(response_body, task_start.elapsed());
                 response
             },
             SignatureQuery as r => {
@@ -134,12 +134,12 @@ impl Responder {
                         r.0,
                         &inner.head,
                         &inner.broadcast_filter,
-                        &inner.effects,
+                        &inner.round_ctx,
                     ),
                 };
                 let response_body = SignatureMpResponse(response);
                 let response = Response::from_tl(&response_body);
-                EngineContext::signature_response_metrics(response_body, task_start.elapsed());
+                RoundCtx::signature_response_metrics(response_body, task_start.elapsed());
                 response
             }
 
@@ -155,7 +155,7 @@ impl Responder {
     }
 }
 
-impl EngineContext {
+impl RoundCtx {
     fn broadcast_response_metrics(elapsed: Duration) {
         let histogram = metrics::histogram!("tycho_mempool_broadcast_query_responder_time");
         histogram.record(elapsed);

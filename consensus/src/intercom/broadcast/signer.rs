@@ -4,7 +4,7 @@ use tycho_network::PeerId;
 
 use crate::dag::DagHead;
 use crate::dyn_event;
-use crate::effects::{AltFormat, Effects, EngineContext};
+use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::intercom::dto::{SignatureRejectedReason, SignatureResponse};
 use crate::intercom::BroadcastFilter;
 use crate::models::Round;
@@ -16,7 +16,7 @@ impl Signer {
         round: Round,
         head: &DagHead,
         broadcast_filter: &BroadcastFilter,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         let response = Self::make_signature_response(round, author, head, broadcast_filter);
         let level = match response {
@@ -24,7 +24,7 @@ impl Signer {
             _ => tracing::Level::TRACE,
         };
         dyn_event!(
-            parent: effects.span(),
+            parent: round_ctx.span(),
             level,
             author = display(author.alt()),
             round = round.0,
