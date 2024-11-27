@@ -7,174 +7,164 @@ use crate::effects::AltFormat;
 use crate::models::{Digest, PointId, PointInfo, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
-pub trait EffectsContext {}
-
-#[derive(Clone)]
-pub struct Effects<CTX: EffectsContext> {
-    /// generally of `tracing::level::Error` as always visible
-    span: Span,
-    /// Context fields must be private to not affect application logic.
-    context: CTX,
-}
-
-impl<CTX: EffectsContext> Effects<CTX> {
-    /// forbids to create new effects outside the span tree
-    fn new_child<U: EffectsContext, F>(&self, context: U, to_span: F) -> Effects<U>
-    where
-        F: FnOnce() -> Span,
-    {
-        Effects::<U> {
-            span: self.span.in_scope(to_span),
-            context,
-        }
-    }
-    fn ctx(&self) -> &CTX {
-        &self.context
-    }
-    pub fn span(&self) -> &Span {
-        &self.span
-    }
+pub trait Ctx {
+    fn span(&self) -> &Span;
 }
 
 /// Root context for uninterrupted sequence of engine rounds
-pub struct ChainedRoundsContext;
-impl EffectsContext for ChainedRoundsContext {}
-impl Effects<ChainedRoundsContext> {
+pub struct EngineCtx {
+    span: Span,
+}
+impl Ctx for EngineCtx {
+    fn span(&self) -> &Span {
+        &self.span
+    }
+}
+impl EngineCtx {
     pub fn new(since: Round) -> Self {
         Self {
             span: tracing::error_span!("rounds", "since" = since.0),
-            context: ChainedRoundsContext,
         }
     }
 }
 
 #[derive(Clone)]
-pub struct EngineContext {
+pub struct RoundCtx(Arc<RoundCtxInner>);
+struct RoundCtxInner {
     current_round: Round,
-    download_max_depth: Arc<AtomicU32>,
+    download_max_depth: AtomicU32,
+    span: Span,
 }
-impl EffectsContext for EngineContext {}
-impl Effects<EngineContext> {
-    pub fn new(parent: &Effects<ChainedRoundsContext>, current_round: Round) -> Self {
-        let new_context = EngineContext {
+impl Ctx for RoundCtx {
+    fn span(&self) -> &Span {
+        &self.0.span
+    }
+}
+impl RoundCtx {
+    pub fn new(parent: &EngineCtx, current_round: Round) -> Self {
+        Self(Arc::new(RoundCtxInner {
             current_round,
             download_max_depth: Default::default(),
-        };
-        parent.new_child(new_context, || {
-            tracing::error_span!("round", "current" = current_round.0)
-        })
+            span: parent
+                .span()
+                .in_scope(|| tracing::error_span!("round", "current" = current_round.0)),
+        }))
     }
     pub fn depth(&self, round: Round) -> u32 {
-        (self.context.current_round - round.0).0
+        (self.0.current_round - round.0).0
     }
 }
 
-pub struct CollectorContext;
-impl EffectsContext for CollectorContext {}
-
-impl Effects<CollectorContext> {
-    pub fn new(parent: &Effects<EngineContext>) -> Self {
-        parent.new_child(CollectorContext, || tracing::error_span!("collector"))
+pub struct CollectCtx {
+    span: Span,
+}
+impl Ctx for CollectCtx {
+    fn span(&self) -> &Span {
+        &self.span
+    }
+}
+impl CollectCtx {
+    pub fn new(parent: &RoundCtx) -> Self {
+        Self {
+            span: parent.span().in_scope(|| tracing::error_span!("collect")),
+        }
     }
 }
 
-pub struct BroadcasterContext;
-impl EffectsContext for BroadcasterContext {}
-
-impl Effects<BroadcasterContext> {
-    pub fn new(parent: &Effects<EngineContext>, digest: &Digest) -> Self {
-        parent.new_child(BroadcasterContext, || {
-            tracing::error_span!("broadcaster", digest = display(digest.alt()))
-        })
+pub struct BroadcastCtx {
+    span: Span,
+}
+impl Ctx for BroadcastCtx {
+    fn span(&self) -> &Span {
+        &self.span
+    }
+}
+impl BroadcastCtx {
+    pub fn new(parent: &RoundCtx, digest: &Digest) -> Self {
+        Self {
+            span: parent
+                .span()
+                .in_scope(|| tracing::error_span!("broadcast", digest = display(digest.alt()))),
+        }
     }
 }
 
-pub struct DownloadContext {
-    current_round: Round,
-    download_max_depth: Arc<AtomicU32>,
+pub struct DownloadCtx {
+    parent: RoundCtx,
+    span: Span,
 }
-impl EffectsContext for DownloadContext {}
-impl Effects<DownloadContext> {
-    pub fn new<'a, T>(parent: &'a Effects<T>, point_id: &PointId) -> Self
+impl Ctx for DownloadCtx {
+    fn span(&self) -> &Span {
+        &self.span
+    }
+}
+impl DownloadCtx {
+    pub fn new<'a, T>(parent: &'a T, point_id: &PointId) -> Self
     where
-        T: EffectsContext,
-        &'a T: Into<DownloadContext>,
+        T: Ctx,
+        &'a T: Into<RoundCtx>,
     {
-        let context = parent.ctx().into();
-        parent.new_child(context, || {
-            tracing::error_span!(
-                "download",
-                author = display(point_id.author.alt()),
-                round = point_id.round.0,
-                digest = display(point_id.digest.alt()),
-            )
-        })
+        Self {
+            parent: parent.into(),
+            span: parent.span().in_scope(|| {
+                tracing::error_span!(
+                    "download",
+                    author = display(point_id.author.alt()),
+                    round = point_id.round.0,
+                    digest = display(point_id.digest.alt()),
+                )
+            }),
+        }
     }
     // per round
     pub fn download_max_depth(&self, round: Round) -> u32 {
-        let depth = (self.context.current_round - round.0).0;
-        let old = self
-            .context
+        let parent = &self.parent.0;
+        let depth = (parent.current_round - round.0).0;
+        let old = parent
             .download_max_depth
             .fetch_max(depth, Ordering::Relaxed);
         depth.max(old)
     }
 }
 
-impl From<&EngineContext> for DownloadContext {
-    fn from(parent: &EngineContext) -> Self {
-        Self {
-            current_round: parent.current_round,
-            download_max_depth: parent.download_max_depth.clone(),
-        }
+impl From<&RoundCtx> for RoundCtx {
+    fn from(ctx: &RoundCtx) -> Self {
+        ctx.clone()
     }
 }
-impl From<&ValidateContext> for DownloadContext {
-    fn from(parent: &ValidateContext) -> Self {
-        Self {
-            current_round: parent.parent_effects.context.current_round,
-            download_max_depth: parent.parent_effects.context.download_max_depth.clone(),
-        }
+impl From<&ValidateCtx> for RoundCtx {
+    fn from(ctx: &ValidateCtx) -> Self {
+        ctx.0.parent.clone()
     }
 }
 
 #[derive(Clone)]
-pub struct ValidateContext {
-    parent_effects: Effects<EngineContext>,
+pub struct ValidateCtx(Arc<ValidateCtxInner>);
+struct ValidateCtxInner {
+    parent: RoundCtx,
+    span: Span,
 }
-impl EffectsContext for ValidateContext {}
-impl Effects<ValidateContext> {
-    pub fn new<'a, T>(parent: &'a Effects<T>, info: &PointInfo) -> Self
+impl Ctx for ValidateCtx {
+    fn span(&self) -> &Span {
+        &self.0.span
+    }
+}
+impl ValidateCtx {
+    pub fn new<'a, T>(parent: &'a T, info: &PointInfo) -> Self
     where
-        T: EffectsContext,
-        &'a Effects<T>: Into<ValidateContext>,
+        T: Ctx,
+        &'a T: Into<RoundCtx>,
     {
-        let context = parent.into();
-        let span = tracing::error_span!(
-            parent: context.parent_effects.span(),
-            "validate",
-            author = display(info.data().author.alt()),
-            round = info.round().0,
-            digest = display(info.digest().alt()),
-        );
-        Effects { span, context }
-    }
-}
-
-// Root validation
-impl From<&Effects<EngineContext>> for ValidateContext {
-    fn from(parent: &Effects<EngineContext>) -> Self {
-        ValidateContext {
-            parent_effects: parent.clone(),
-        }
-    }
-}
-// Links every recursive validation to the same engine context
-// to produce shorter logs (skip intermediate validation spans).
-// Notice that current engine round may advance while this spans
-// will still report the round that initialized the current chain
-impl From<&Effects<ValidateContext>> for ValidateContext {
-    fn from(neighbour: &Effects<ValidateContext>) -> Self {
-        neighbour.context.clone()
+        Self(Arc::new(ValidateCtxInner {
+            parent: parent.into(),
+            span: parent.span().in_scope(|| {
+                tracing::error_span!(
+                    "validate",
+                    author = display(info.data().author.alt()),
+                    round = info.round().0,
+                    digest = display(info.digest().alt()),
+                )
+            }),
+        }))
     }
 }

@@ -5,7 +5,7 @@ use tokio::sync::{oneshot, watch};
 
 use crate::dag::DagHead;
 use crate::dyn_event;
-use crate::effects::{CollectorContext, Effects};
+use crate::effects::{CollectCtx, Ctx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::CachedConfig;
 use crate::intercom::BroadcasterSignal;
@@ -30,16 +30,16 @@ impl Collector {
 
     pub async fn run(
         self,
-        effects: Effects<CollectorContext>,
+        ctx: CollectCtx,
         head: DagHead,
         collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Self {
-        let span_guard = effects.span().clone().entered();
+        let span_guard = ctx.span().clone().entered();
 
         let mut task = CollectorTask {
             consensus_round: self.consensus_round,
-            effects,
+            ctx,
             next_round: head.next().round(),
             is_includes_ready: false,
             collector_signal,
@@ -58,7 +58,7 @@ impl Collector {
 struct CollectorTask {
     consensus_round: RoundWatcher<Consensus>,
     // for node running @ r+0:
-    effects: Effects<CollectorContext>,
+    ctx: CollectCtx,
 
     next_round: Round,
 
@@ -131,7 +131,7 @@ impl CollectorTask {
             BroadcasterSignal::Err => true,
         };
         tracing::debug!(
-            parent: self.effects.span(),
+            parent: self.ctx.span(),
             result = result,
             bcaster_signal = debug(signal),
             "should fail?",
@@ -146,7 +146,7 @@ impl CollectorTask {
             _ = self.collector_signal.send_replace(CollectorSignal::Finish); // last signal
         }
         tracing::debug!(
-            parent: self.effects.span(),
+            parent: self.ctx.span(),
             includes = self.is_includes_ready,
             result = result,
             "ready?",
@@ -170,7 +170,7 @@ impl CollectorTask {
             tracing::Level::TRACE
         };
         dyn_event!(
-            parent: self.effects.span(),
+            parent: self.ctx.span(),
             level,
             round = consensus_round.0,
             "from bcast filter",

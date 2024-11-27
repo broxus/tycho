@@ -10,7 +10,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
-use crate::effects::{AltFmt, AltFormat, Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, Round};
@@ -177,7 +177,7 @@ impl DagRound {
         &self,
         point: &Point,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
         assert_eq!(
             point.round(),
@@ -189,7 +189,7 @@ impl DagRound {
                 .entry(*point.digest())
                 .and_modify(|first| first.resolve_download(point, false))
                 .or_insert_with(|| {
-                    DagPointFuture::new_ill_formed_broadcast(point, &loc.state, store, effects)
+                    DagPointFuture::new_ill_formed_broadcast(point, &loc.state, store, round_ctx)
                 });
         });
     }
@@ -200,9 +200,9 @@ impl DagRound {
         point: &Point,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
-        let _guard = effects.span().enter();
+        let _guard = round_ctx.span().enter();
         assert_eq!(
             point.round(),
             self.round(),
@@ -217,7 +217,7 @@ impl DagRound {
                 }
                 btree_map::Entry::Vacant(vacant) => {
                     vacant.insert(DagPointFuture::new_broadcast(
-                        self, point, &loc.state, downloader, store, effects,
+                        self, point, &loc.state, downloader, store, round_ctx,
                     ));
                 }
             }
@@ -232,12 +232,12 @@ impl DagRound {
         digest: &Digest,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) {
         self.edit(author, |loc| {
             loc.versions.entry(*digest).or_insert_with(|| {
                 DagPointFuture::new_load(
-                    self, author, digest, None, &loc.state, downloader, store, effects,
+                    self, author, digest, None, &loc.state, downloader, store, round_ctx,
                 )
             });
         });
@@ -252,7 +252,7 @@ impl DagRound {
         depender: &PeerId,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<ValidateContext>,
+        validate_ctx: &ValidateCtx,
     ) -> DagPointFuture {
         self.edit(author, |loc| {
             loc.versions
@@ -267,7 +267,7 @@ impl DagRound {
                         &loc.state,
                         downloader,
                         store,
-                        effects,
+                        validate_ctx,
                     )
                 })
                 .clone()

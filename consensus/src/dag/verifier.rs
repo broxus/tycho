@@ -15,7 +15,7 @@ use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::dyn_event;
-use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
+use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
@@ -117,7 +117,7 @@ impl Verifier {
             Err(VerifyError::BeforeGenesis)
         };
 
-        ValidateContext::verified(&result);
+        ValidateCtx::verified(&result);
         result
     }
 
@@ -140,10 +140,10 @@ impl Verifier {
         downloader: Downloader,
         store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
-        effects: Effects<ValidateContext>,
+        ctx: ValidateCtx,
     ) -> DagPoint {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
-        let span_guard = effects.span().enter();
+        let span_guard = ctx.span().enter();
 
         match info.round().cmp(&Genesis::id().round.next()) {
             cmp::Ordering::Less => {
@@ -154,14 +154,14 @@ impl Verifier {
             }
             cmp::Ordering::Equal => {
                 // dependency check for first point is a part of well-formness check
-                return ValidateContext::validated(DagPoint::Trusted(ValidPoint::new(info)));
+                return ValidateCtx::validated(DagPoint::Trusted(ValidPoint::new(info)));
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
         let Some(r_0_pre) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG");
-            return ValidateContext::validated(DagPoint::Invalid(Cert {
+            return ValidateCtx::validated(DagPoint::Invalid(Cert {
                 inner: info,
                 is_certified: certified_rx.try_recv() != Err(TryRecvError::Empty),
             }));
@@ -173,14 +173,14 @@ impl Verifier {
         );
 
         if !Self::is_self_links_ok(&info, &r_0_pre) {
-            return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
+            return ValidateCtx::validated(DagPoint::IllFormed(Arc::new(info.id())));
         }
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
             .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre))
         {
-            return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
+            return ValidateCtx::validated(DagPoint::IllFormed(Arc::new(info.id())));
         };
 
         drop(r_0_pre);
@@ -207,18 +207,18 @@ impl Verifier {
                 }
             };
             if certified.is_err() {
-                return ValidateContext::validated(DagPoint::IllFormed(Arc::new(info.id())));
+                return ValidateCtx::validated(DagPoint::IllFormed(Arc::new(info.id())));
             }
             certified.ok()
         } else {
             None
         };
 
-        let span_guard = effects.span().enter();
+        let span_guard = ctx.span().enter();
 
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ValidateContext::validated(DagPoint::Invalid(Cert {
+            return ValidateCtx::validated(DagPoint::Invalid(Cert {
                 inner: info,
                 is_certified: proven_by_cert.unwrap_or_default(),
             }));
@@ -226,7 +226,7 @@ impl Verifier {
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot validate point's 'includes', no round in local DAG");
-            return ValidateContext::validated(DagPoint::Invalid(Cert {
+            return ValidateCtx::validated(DagPoint::Invalid(Cert {
                 inner: info,
                 is_certified: proven_by_cert.unwrap_or_default(),
             }));
@@ -235,14 +235,13 @@ impl Verifier {
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.data().witness.is_empty() {
             tracing::debug!("cannot validate point's 'witness', no round in local DAG");
-            return ValidateContext::validated(DagPoint::Invalid(Cert {
+            return ValidateCtx::validated(DagPoint::Invalid(Cert {
                 inner: info,
                 is_certified: proven_by_cert.unwrap_or_default(),
             }));
         }
 
-        let direct_deps =
-            Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &effects);
+        let direct_deps = Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
 
         let (proven_vertex_dep, prev_other_versions) = r_1
             .view(&info.data().author, |loc| {
@@ -271,7 +270,7 @@ impl Verifier {
                 (loc.bad_sig_in_broadcast, other_versions)
             })
         )
-        .instrument(effects.span().clone()));
+        .instrument(ctx.span().clone()));
 
         let mut is_valid_fut = std::pin::pin!({
             let deps_and_prev = direct_deps
@@ -281,7 +280,7 @@ impl Verifier {
                 // do not add same prev_digest twice - it is added as one of 'includes'
                 // do not extend listed dependencies as they may become trusted by consensus
                 .chain(prev_other_versions.into_iter());
-            Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(effects.span().clone())
+            Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(ctx.span().clone())
         });
 
         // drop strong links before await
@@ -334,7 +333,7 @@ impl Verifier {
                 tracing::Level::ERROR,
             ),
             (false, true, None) => {
-                let _guard = effects.span().enter();
+                let _guard = ctx.span().enter();
                 unreachable!(
                     "unexpected pattern in loop break: \
                      proven_by_cert={proven_by_cert:?} valid={valid:?} \
@@ -343,7 +342,7 @@ impl Verifier {
             }
         };
         dyn_event!(
-            parent: effects.span(),
+            parent: ctx.span(),
             level,
             result = display(dag_point.alt()),
             proven_by_cert = debug(proven_by_cert),
@@ -351,7 +350,7 @@ impl Verifier {
             unique_in_loc = debug(unique_in_loc),
             "validated",
         );
-        ValidateContext::validated(dag_point)
+        ValidateCtx::validated(dag_point)
     }
 
     fn is_self_links_ok(
@@ -441,7 +440,7 @@ impl Verifier {
         r_2_opt: Option<DagRound>, // r-2
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<ValidateContext>,
+        ctx: &ValidateCtx,
     ) -> Vec<DagPointFuture> {
         let mut dependencies =
             Vec::with_capacity(info.data().includes.len() + info.data().witness.len());
@@ -467,7 +466,7 @@ impl Verifier {
                 &info.data().author,
                 downloader,
                 store,
-                effects,
+                ctx,
             );
 
             dependencies.push(shared);
@@ -754,7 +753,7 @@ impl Verifier {
     }
 }
 
-impl ValidateContext {
+impl ValidateCtx {
     const KIND: &'static str = "kind";
 
     const VERIFY_LABELS: [(&'static str, &'static str); 3] = [

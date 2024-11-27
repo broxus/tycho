@@ -14,9 +14,7 @@ use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
-use crate::effects::{
-    DownloadContext, Effects, EffectsContext, EngineContext, MempoolStore, ValidateContext,
-};
+use crate::effects::{Ctx, DownloadCtx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{Cert, DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
 
@@ -92,7 +90,7 @@ impl DagPointFuture {
         point: &Point,
         state: &InclusionState,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> Self {
         let store_fut = tokio::task::spawn_blocking({
             let point = point.clone();
@@ -112,7 +110,7 @@ impl DagPointFuture {
             task.inspect(move |dag_point| {
                 state.init(dag_point);
             })
-            .instrument(effects.span().clone()),
+            .instrument(round_ctx.span().clone()),
         ))))
     }
 
@@ -122,14 +120,14 @@ impl DagPointFuture {
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> Self {
         let point_dag_round = point_dag_round.downgrade();
         let info = PointInfo::from(point);
         let point = point.clone();
         let downloader = downloader.clone();
         let store = store.clone();
-        let validate_effects = Effects::<ValidateContext>::new(effects, &info);
+        let validate_ctx = ValidateCtx::new(round_ctx, &info);
 
         let (certified_tx, certified_rx) = oneshot::channel();
         let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
@@ -148,7 +146,7 @@ impl DagPointFuture {
                 downloader,
                 store.clone(),
                 certified_rx,
-                validate_effects,
+                validate_ctx,
             );
             // do not abort store if not valid
             let dag_point = match tokio::join!(stored_fut, validated_fut) {
@@ -174,7 +172,7 @@ impl DagPointFuture {
                 task.inspect(move |dag_point| {
                     state.init(dag_point);
                 })
-                .instrument(effects.span().clone()),
+                .instrument(round_ctx.span().clone()),
             )),
             certified: once_certified_tx,
         })
@@ -189,12 +187,11 @@ impl DagPointFuture {
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
-        effects: &Effects<T>,
+        into_round_ctx: &T,
     ) -> Self
     where
-        T: EffectsContext + Clone + Send + 'static,
-        for<'a> &'a T: Into<DownloadContext>,
-        for<'a> &'a Effects<T>: Into<ValidateContext>,
+        T: Ctx + Clone + Send + 'static,
+        for<'a> &'a T: Into<RoundCtx>,
     {
         let point_id = PointId {
             author: *author,
@@ -204,8 +201,8 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.downgrade();
         let downloader = downloader.clone();
         let store = store.clone();
-        let span = effects.span().clone();
-        let effects = effects.clone();
+        let span = into_round_ctx.span().clone();
+        let into_round_ctx = into_round_ctx.clone();
 
         let (dependers_tx, dependers_rx) = mpsc::unbounded_channel();
         _ = dependers_tx.send(*author);
@@ -268,9 +265,9 @@ impl DagPointFuture {
                     return dag_point;
                 }
                 None => {
-                    let download_effects = Effects::<DownloadContext>::new(&effects, &point_id);
+                    let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
                     let downloaded = downloader
-                        .run(&point_id, dependers_rx, broadcast_rx, download_effects)
+                        .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
                         .await;
                     let verified = match downloaded {
                         Some(DownloadResult::Verified(point)) => point,
@@ -309,9 +306,9 @@ impl DagPointFuture {
             };
 
             // this may be root validation or child one
-            let validate_effects = Effects::<ValidateContext>::new(&effects, &verified);
+            let validate_ctx = ValidateCtx::new(&into_round_ctx, &verified);
             tracing::trace!(
-                parent: validate_effects.span(),
+                parent: validate_ctx.span(),
                 "loaded, start validating",
             );
 
@@ -330,7 +327,7 @@ impl DagPointFuture {
                 downloader,
                 store.clone(),
                 certified_rx,
-                validate_effects,
+                validate_ctx,
             );
             // do not abort store if not valid
             let dag_point = match tokio::join!(storage_fut, validated_fut) {

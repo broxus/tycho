@@ -4,7 +4,7 @@ use weedb::rocksdb::DBPinnableSlice;
 
 use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
-use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
+use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
 use crate::intercom::dto::PointByIdResponse;
 use crate::models::PointId;
 
@@ -22,7 +22,7 @@ impl Uploader {
         point_id: &PointId,
         head: &DagHead,
         store: &'a MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> PointByIdResponse<DBPinnableSlice<'a>> {
         // TODO add logs
         let status = if point_id.round > head.next().round() {
@@ -31,10 +31,10 @@ impl Uploader {
             // may be in mem, but not guaranteed
             head.next()
                 .scan(point_id.round)
-                .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, effects))
-                .or(Self::from_store(peer_id, point_id, store, effects))
+                .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, round_ctx))
+                .or(Self::from_store(peer_id, point_id, store, round_ctx))
         } else {
-            Self::from_store(peer_id, point_id, store, effects)
+            Self::from_store(peer_id, point_id, store, round_ctx)
         };
         match status {
             Some(SearchStatus::None) | None => PointByIdResponse::DefinedNone,
@@ -54,7 +54,7 @@ impl Uploader {
         peer_id: &PeerId,
         point_id: &PointId,
         dag_round: &DagRound,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> Option<SearchStatus> {
         let found = dag_round
             .view(&point_id.author, |loc| {
@@ -79,7 +79,7 @@ impl Uploader {
             tracing::Level::DEBUG
         };
         dyn_event!(
-            parent: effects.span(),
+            parent: round_ctx.span(),
             level,
             from = display("dag"),
             task_found = task_found,
@@ -107,7 +107,7 @@ impl Uploader {
         peer_id: &PeerId,
         point_id: &PointId,
         store: &MempoolStore,
-        effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> Option<SearchStatus> {
         let status = store.get_status(point_id.round, &point_id.digest)?;
         let result = if status.is_valid || status.is_trusted || status.is_certified {
@@ -116,7 +116,7 @@ impl Uploader {
             None
         };
         tracing::debug!(
-            parent: effects.span(),
+            parent: round_ctx.span(),
             from = display("store"),
             trusted = status.is_trusted,
             certified = status.is_certified,

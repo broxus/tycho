@@ -13,7 +13,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
-use crate::effects::{AltFormat, BroadcasterContext, Effects, EngineContext};
+use crate::effects::{AltFormat, BroadcastCtx, Ctx, RoundCtx};
 use crate::engine::CachedConfig;
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
@@ -27,7 +27,7 @@ pub enum BroadcasterSignal {
 }
 
 pub struct Broadcaster {
-    effects: Effects<BroadcasterContext>,
+    ctx: BroadcastCtx,
     dispatcher: Dispatcher,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
@@ -60,7 +60,7 @@ impl Broadcaster {
         peer_schedule: PeerSchedule,
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
         collector_signal: watch::Receiver<CollectorSignal>,
-        round_effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> Self {
         let (signers, bcast_peers, peer_updates) = {
             let guard = peer_schedule.read();
@@ -76,7 +76,7 @@ impl Broadcaster {
             PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
 
         Self {
-            effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
+            ctx: BroadcastCtx::new(round_ctx, point.digest()),
             dispatcher,
             bcaster_signal: Some(bcaster_signal),
             collector_signal,
@@ -119,7 +119,7 @@ impl Broadcaster {
         // * rejected to sign our point (incl. rejection of the point itself and incorrect sig)
         // * successfully signed our point and dequeued
         tracing::debug!(
-            parent: self.effects.span(),
+            parent: self.ctx.span(),
             current_peers = self.bcast_peers.len(),
             "start",
         );
@@ -151,7 +151,7 @@ impl Broadcaster {
                     self.match_signature_result(&peer_id, after_bcast, result);
                 },
                 else => {
-                    let _guard = self.effects.span().enter();
+                    let _guard = self.ctx.span().enter();
                     panic!("unhandled match arm in Broadcaster::run tokio::select");
                 }
             }
@@ -198,7 +198,7 @@ impl Broadcaster {
                     self.match_signature_result(&peer_id, after_bcast, result);
                 },
                 else => {
-                    let _guard = self.effects.span().enter();
+                    let _guard = self.ctx.span().enter();
                     panic!("unhandled match arm in Broadcaster::run_continue tokio::select");
                 }
             }
@@ -229,7 +229,7 @@ impl Broadcaster {
             }
         };
         tracing::debug!(
-            parent: self.effects.span(),
+            parent: self.ctx.span(),
             result = result,
             collector_signal = debug(collector_signal),
             signatures = self.signatures.len(),
@@ -246,7 +246,7 @@ impl Broadcaster {
             Err(error) => {
                 self.sig_peers.insert(*peer_id); // lighter weight retry loop
                 tracing::warn!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     peer = display(peer_id.alt()),
                     error = display(error),
                     "failed to send broadcast to"
@@ -256,7 +256,7 @@ impl Broadcaster {
                 // self.sig_peers.insert(*peer_id); // give some time to validate
                 self.request_signature(true, peer_id); // fast nodes may have delivered it as a dependency
                 tracing::trace!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     peer = display(peer_id.alt()),
                     "finished broadcast to"
                 );
@@ -274,7 +274,7 @@ impl Broadcaster {
             Err(error) => {
                 self.sig_peers.insert(*peer_id); // let it retry
                 tracing::warn!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     peer = display(peer_id.alt()),
                     error = display(error),
                     "failed to query signature from"
@@ -286,7 +286,7 @@ impl Broadcaster {
                     _ => tracing::Level::DEBUG,
                 };
                 dyn_event!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     level,
                     peer = display(peer_id.alt()),
                     response = display(response.alt()),
@@ -329,13 +329,13 @@ impl Broadcaster {
                     .query_broadcast(peer_id, &self.bcast_request),
             );
             tracing::trace!(
-                parent: self.effects.span(),
+                parent: self.ctx.span(),
                 peer = display(peer_id.alt()),
                 "sending broadcast to"
             );
         } else {
             tracing::warn!(
-                parent: self.effects.span(),
+                parent: self.ctx.span(),
                 peer = display(peer_id.alt()),
                 "will not broadcast to"
             );
@@ -350,13 +350,13 @@ impl Broadcaster {
                 &self.sig_request,
             ));
             tracing::trace!(
-                parent: self.effects.span(),
+                parent: self.ctx.span(),
                 peer = display(peer_id.alt()),
                 "requesting signature from"
             );
         } else {
             tracing::warn!(
-                parent: self.effects.span(),
+                parent: self.ctx.span(),
                 peer = display(peer_id.alt()),
                 "will not request signature from"
             );
@@ -370,7 +370,7 @@ impl Broadcaster {
         match result {
             Ok((peer_id, new_state)) => {
                 tracing::info!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     peer = display(peer_id.alt()),
                     new_state = debug(new_state),
                     "peer state update",
@@ -388,7 +388,7 @@ impl Broadcaster {
             }
             Err(err @ RecvError::Lagged(_)) => {
                 tracing::error!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     error = display(err),
                     "peer state update"
                 );
@@ -396,7 +396,7 @@ impl Broadcaster {
             }
             Err(err @ RecvError::Closed) => {
                 tracing::error!(
-                    parent: self.effects.span(),
+                    parent: self.ctx.span(),
                     error = display(err),
                     "peer state update"
                 );

@@ -16,9 +16,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
-use crate::effects::{
-    AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolAdapterStore, MempoolStore,
-};
+use crate::effects::{AltFormat, Ctx, EngineCtx, MempoolAdapterStore, MempoolStore, RoundCtx};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -32,7 +30,7 @@ pub struct Engine {
     committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
-    effects: Effects<ChainedRoundsContext>,
+    ctx: EngineCtx,
     init_task: Option<JoinTask<()>>,
 }
 
@@ -79,7 +77,7 @@ impl Engine {
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(Genesis::id().round);
         top_known_anchor.set_max(Genesis::id().round);
-        let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
+        let engine_ctx = EngineCtx::new(consensus_round.get());
         let responder = Responder::default();
 
         let private_overlay = PrivateOverlay::builder(overlay_id)
@@ -151,7 +149,7 @@ impl Engine {
             committed_info_tx,
             consensus_round,
             round_task,
-            effects,
+            ctx: engine_ctx,
             init_task: Some(init_task),
         }
     }
@@ -181,7 +179,7 @@ impl Engine {
         .await
         .expect("load last round from db");
 
-        self.effects = Effects::<ChainedRoundsContext>::new(last_db_round);
+        self.ctx = EngineCtx::new(last_db_round);
 
         // wait collator to load blocks and update peer schedule
 
@@ -210,7 +208,7 @@ impl Engine {
             .max(top_known_anchor)
             .max(Genesis::id().round.next());
         self.consensus_round.set_max(consensus_round);
-        let round_effects = Effects::<EngineContext>::new(&self.effects, consensus_round);
+        let round_ctx = RoundCtx::new(&self.ctx, consensus_round);
         let dag_bottom_round = (Genesis::id().round).max(
             top_known_anchor
                 - CachedConfig::get().consensus.deduplicate_rounds
@@ -265,7 +263,7 @@ impl Engine {
                     info.digest(),
                     &self.round_task.state.downloader,
                     &self.round_task.state.store,
-                    &round_effects,
+                    &round_ctx,
                 );
             }
 
@@ -353,7 +351,7 @@ impl Engine {
         }
         if let Some(prev) = prev_bcast {
             // prev broadcast may belong only to the prev to top dag round
-            self.round_task.init_prev_broadcast(prev, &round_effects);
+            self.round_task.init_prev_broadcast(prev, &round_ctx);
         }
         // last broadcast may belong to any of the last 2 dag rounds
         last_bcast
@@ -369,7 +367,7 @@ impl Engine {
             // commit may take longer than a round if it ends with a jump to catch up with consensus
             let mut ready_committer = take_committer(&mut self.committer_run);
 
-            let (current_round, round_effects) = {
+            let (current_round, round_ctx) = {
                 let top_round = self.dag.top().round();
 
                 let current_round = if let Some(start_point) = &start_point {
@@ -396,13 +394,13 @@ impl Engine {
 
                 metrics::gauge!("tycho_mempool_engine_current_round").set(current_round.0);
 
-                let round_effects = if current_round == top_round {
-                    Effects::<EngineContext>::new(&self.effects, current_round)
+                let round_ctx = if current_round == top_round {
+                    RoundCtx::new(&self.ctx, current_round)
                 } else {
-                    self.effects = Effects::<ChainedRoundsContext>::new(current_round);
-                    Effects::<EngineContext>::new(&self.effects, current_round)
+                    self.ctx = EngineCtx::new(current_round);
+                    RoundCtx::new(&self.ctx, current_round)
                 };
-                (current_round, round_effects)
+                (current_round, round_ctx)
             };
 
             if let Some(collator_sync) = wait_collator(
@@ -410,7 +408,7 @@ impl Engine {
                 current_round,
                 &mut is_paused,
                 &self.committed_info_tx,
-                &round_effects,
+                &round_ctx,
             ) {
                 collator_sync.await;
                 if let Some(committer) = ready_committer {
@@ -418,7 +416,7 @@ impl Engine {
                         committer,
                         full_history_bottom.take(),
                         self.committed_info_tx.clone(),
-                        round_effects.clone(),
+                        round_ctx.clone(),
                     );
                 }
                 continue;
@@ -439,13 +437,13 @@ impl Engine {
                 None => self.round_task.own_point_task(
                     &head,
                     collector_signal_tx.subscribe(),
-                    &round_effects,
+                    &round_ctx,
                 ),
             };
 
             let round_task_run = self
                 .round_task
-                .run(own_point_fut, collector_signal_tx, &head, &round_effects)
+                .run(own_point_fut, collector_signal_tx, &head, &round_ctx)
                 .until_ready();
 
             if let Some(committer) = ready_committer {
@@ -453,7 +451,7 @@ impl Engine {
                     committer,
                     full_history_bottom.take(),
                     self.committed_info_tx.clone(),
-                    round_effects.clone(),
+                    round_ctx.clone(),
                 );
             }
 
@@ -473,7 +471,7 @@ fn wait_collator(
     current_round: Round,
     is_paused: &mut bool,
     committed_info_tx: &mpsc::UnboundedSender<MempoolOutput>,
-    round_effects: &Effects<EngineContext>,
+    round_ctx: &RoundCtx,
 ) -> Option<impl Future<Output = ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
@@ -483,7 +481,7 @@ fn wait_collator(
     if current_round >= pause_at {
         if !*is_paused {
             tracing::info!(
-                parent: round_effects.span(),
+                parent: round_ctx.span(),
                 top_known_anchor = top_known_anchor.0,
                 pause_at = pause_at.0,
                 "enter pause by collator feedback",
@@ -512,14 +510,14 @@ fn wait_collator(
         };
         let task = tokio::time::timeout(
             Duration::from_millis(CachedConfig::get().consensus.broadcast_retry_millis as _),
-            collator_sync.instrument(round_effects.span().clone()),
+            collator_sync.instrument(round_ctx.span().clone()),
         )
         .map(|_| ());
 
         Some(task)
     } else if *is_paused {
         tracing::info!(
-            parent: round_effects.span(),
+            parent: round_ctx.span(),
             top_known_anchor = top_known_anchor.0,
             pause_at = pause_at.0,
             "exit from pause by collator feedback",
@@ -551,11 +549,11 @@ fn committer_task(
     mut committer: Committer,
     full_history_bottom: Option<Round>,
     committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-    round_effects: Effects<EngineContext>,
+    round_ctx: RoundCtx,
 ) -> JoinHandle<Committer> {
     tokio::task::spawn_blocking(move || {
         // may run for long several times in a row and commit nothing, because of missed points
-        let _span = round_effects.span().enter();
+        let _span = round_ctx.span().enter();
 
         let mut committed = None;
         let mut new_full_history_bottom = None;
@@ -601,9 +599,9 @@ fn committer_task(
         }
 
         if let Some(committed) = committed {
-            round_effects.log_committed(&committed);
+            round_ctx.log_committed(&committed);
             for data in committed {
-                round_effects.commit_metrics(&data.anchor);
+                round_ctx.commit_metrics(&data.anchor);
                 committed_info_tx
                     .send(MempoolOutput::NextAnchor(data)) // not recoverable
                     .expect("Failed to send anchor history info to mpsc channel");
@@ -614,7 +612,7 @@ fn committer_task(
     })
 }
 
-impl Effects<EngineContext> {
+impl RoundCtx {
     fn commit_metrics(&self, anchor: &PointInfo) {
         metrics::counter!("tycho_mempool_commit_anchors").increment(1);
         metrics::gauge!("tycho_mempool_commit_latency_rounds").set(self.depth(anchor.round()));

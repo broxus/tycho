@@ -18,7 +18,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use crate::dag::{Verifier, VerifyError};
-use crate::effects::{AltFormat, DownloadContext, Effects};
+use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{CachedConfig, ConsensusConfigExt};
 use crate::intercom::dto::{PeerState, PointByIdResponse};
@@ -157,7 +157,7 @@ impl Downloader {
         point_id: &PointId,
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<DownloadResult>,
-        effects: Effects<DownloadContext>,
+        ctx: DownloadCtx,
     ) -> Option<DownloadResult> {
         let semaphore_opt = {
             let mut limiter = self.inner.limiter.lock();
@@ -174,11 +174,11 @@ impl Downloader {
             >= self.inner.consensus_round.get()
         {
             // for validation
-            self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, effects)
+            self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, ctx)
                 .await
         } else {
             // for sync
-            self.run_task::<LinearQuery>(point_id, dependers_rx, verified_broadcast, effects)
+            self.run_task::<LinearQuery>(point_id, dependers_rx, verified_broadcast, ctx)
                 .await
         };
 
@@ -194,11 +194,11 @@ impl Downloader {
         point_id: &PointId,
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         broadcast_result: oneshot::Receiver<DownloadResult>,
-        effects: Effects<DownloadContext>,
+        ctx: DownloadCtx,
     ) -> Option<DownloadResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_download_task_time");
-        effects.meter_start(point_id);
-        let span_guard = effects.span().enter();
+        ctx.meter_start(point_id);
+        let span_guard = ctx.span().enter();
         // request point from its signers (any depender is among them as point is already verified)
         let (undone_peers, author_state, updates) = {
             let guard = self.inner.peer_schedule.read();
@@ -245,10 +245,10 @@ impl Downloader {
         };
         let downloaded = task
             .run(dependers_rx, broadcast_result)
-            .instrument(effects.span().clone())
+            .instrument(ctx.span().clone())
             .await;
 
-        DownloadContext::meter_task::<T>(&task);
+        DownloadCtx::meter_task::<T>(&task);
 
         downloaded
     }
@@ -532,7 +532,7 @@ impl<T: DownloadType> DownloadTask<T> {
         }
     }
 }
-impl DownloadContext {
+impl DownloadCtx {
     fn meter_task<T>(task: &DownloadTask<T>) {
         metrics::counter!("tycho_mempool_download_not_found_responses")
             .increment(task.reliably_not_found as _);
@@ -541,8 +541,7 @@ impl DownloadContext {
         // metrics::histogram!("tycho_mempool_download_unreliable_responses")
         //     .set(task.unreliable_peers);
     }
-}
-impl Effects<DownloadContext> {
+
     fn meter_start(&self, point_id: &PointId) {
         metrics::counter!("tycho_mempool_download_task_count").increment(1);
 

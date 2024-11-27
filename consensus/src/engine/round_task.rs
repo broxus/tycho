@@ -10,9 +10,7 @@ use tracing::Instrument;
 use tycho_util::futures::JoinTask;
 
 use crate::dag::{DagHead, LastOwnPoint, Producer, Verifier, WeakDagRound};
-use crate::effects::{
-    AltFormat, CollectorContext, Effects, EngineContext, MempoolStore, ValidateContext,
-};
+use crate::effects::{AltFormat, CollectCtx, Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::intercom::{
@@ -72,11 +70,7 @@ impl RoundTaskReady {
         }
     }
 
-    pub fn init_prev_broadcast(
-        &mut self,
-        prev_last_point: Point,
-        round_effects: &Effects<EngineContext>,
-    ) {
+    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
         assert!(
             self.prev_broadcast.is_none(),
             "previous broadcast is already set"
@@ -90,7 +84,7 @@ impl RoundTaskReady {
             self.state.peer_schedule.clone(),
             bcaster_ready_tx,
             collector_signal_rx,
-            round_effects,
+            round_ctx,
         );
         let task = async move {
             broadcaster.run_continue().await;
@@ -104,7 +98,7 @@ impl RoundTaskReady {
         &self,
         head: &DagHead,
         mut collector_signal_rx: watch::Receiver<CollectorSignal>,
-        round_effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> BoxFuture<'static, Option<Point>> {
         let current_round = head.current().round();
 
@@ -185,7 +179,7 @@ impl RoundTaskReady {
                 }
             }
         }
-        .instrument(round_effects.span().clone())
+        .instrument(round_ctx.span().clone())
         .boxed()
     }
 
@@ -194,7 +188,7 @@ impl RoundTaskReady {
         own_point_fut: BoxFuture<'static, Option<Point>>,
         collector_signal_tx: watch::Sender<CollectorSignal>,
         head: &DagHead,
-        round_effects: &Effects<EngineContext>,
+        round_ctx: &RoundCtx,
     ) -> RoundTaskRunning {
         let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
 
@@ -205,13 +199,13 @@ impl RoundTaskReady {
             head,
             &self.state.downloader,
             &self.state.store,
-            round_effects,
+            round_ctx,
         );
 
         let broadcaster_run = tokio::spawn({
             let own_point_round = head.current().downgrade();
             let collector_signal_rx = collector_signal_tx.subscribe();
-            let round_effects = round_effects.clone();
+            let round_ctx = round_ctx.clone();
             let peer_schedule = self.state.peer_schedule.clone();
             let prev_bcast = self.prev_broadcast;
             let dispatcher = self.state.dispatcher.clone();
@@ -219,7 +213,7 @@ impl RoundTaskReady {
             let store = self.state.store.clone();
             async move {
                 let own_point = own_point_fut.await;
-                round_effects.own_point(own_point.as_ref());
+                round_ctx.own_point(own_point.as_ref());
 
                 if let Some(own_point) = own_point {
                     let self_check = Self::expect_own_trusted_point(
@@ -228,7 +222,7 @@ impl RoundTaskReady {
                         peer_schedule.clone(),
                         downloader,
                         store,
-                        round_effects.clone(),
+                        round_ctx.clone(),
                     );
                     let mut broadcaster = Broadcaster::new(
                         dispatcher,
@@ -236,7 +230,7 @@ impl RoundTaskReady {
                         peer_schedule,
                         bcaster_ready_tx,
                         collector_signal_rx,
-                        &round_effects,
+                        &round_ctx,
                     );
                     let new_last_own_point = broadcaster.run().await;
                     prev_bcast.inspect(|task| task.abort());
@@ -256,12 +250,12 @@ impl RoundTaskReady {
         let collector_run = tokio::spawn({
             let collector = self.collector;
             let consensus_round = self.state.consensus_round.clone();
-            let effects = Effects::<CollectorContext>::new(round_effects);
+            let collector_ctx = CollectCtx::new(round_ctx);
             let head = head.clone();
             async move {
                 let next_round = head.next().round();
                 let collector = collector
-                    .run(effects, head, collector_signal_tx, bcaster_ready_rx)
+                    .run(collector_ctx, head, collector_signal_tx, bcaster_ready_rx)
                     .await;
                 consensus_round.set_max(next_round);
                 collector
@@ -282,18 +276,18 @@ impl RoundTaskReady {
         peer_schedule: PeerSchedule,
         downloader: Downloader,
         store: MempoolStore,
-        effects: Effects<EngineContext>,
+        round_ctx: RoundCtx,
     ) -> JoinTask<()> {
         JoinTask::new(async move {
             point.verify_hash().expect("Failed to verify own point");
 
             if let Err(error) = Verifier::verify(&point, &peer_schedule) {
-                let _guard = effects.span().enter();
+                let _guard = round_ctx.span().enter();
                 panic!("Failed to verify own point: {error}, {:?}", point)
             }
             let (_do_not_drop_or_send, do_not_certify_tx) = oneshot::channel();
             let info = PointInfo::from(&point);
-            let validate_effects = Effects::<ValidateContext>::new(&effects, &info);
+            let validate_ctx = ValidateCtx::new(&round_ctx, &info);
             let dag_point = Verifier::validate(
                 info,
                 point.prev_proof(),
@@ -301,11 +295,11 @@ impl RoundTaskReady {
                 downloader,
                 store,
                 do_not_certify_tx,
-                validate_effects,
+                validate_ctx,
             )
             .await;
             if dag_point.trusted().is_none() {
-                let _guard = effects.span().enter();
+                let _guard = round_ctx.span().enter();
                 panic!(
                     "Failed to validate own point: {} {:?}",
                     dag_point.alt(),
@@ -347,7 +341,7 @@ impl RoundTaskRunning {
     }
 }
 
-impl Effects<EngineContext> {
+impl RoundCtx {
     fn own_point(&self, own_point: Option<&Point>) {
         // refresh counters with zeros every round
         metrics::counter!("tycho_mempool_engine_produce_skipped")

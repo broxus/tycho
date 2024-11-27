@@ -13,7 +13,7 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, Verifier};
-use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::effects::{MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
@@ -64,7 +64,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     peer_schedule: &PeerSchedule,
     downloader: &Downloader,
     store: &MempoolStore,
-    effects: &Effects<EngineContext>,
+    round_ctx: &RoundCtx,
     msg_count: usize,
     msg_bytes: usize,
 ) {
@@ -132,7 +132,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         Verifier::verify(point, peer_schedule).expect("well-formed point");
         let info = PointInfo::from(point);
         let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
-        let effects = Effects::<ValidateContext>::new(effects, &info);
+        let validate_ctx = ValidateCtx::new(round_ctx, &info);
         Verifier::validate(
             info,
             point.prev_proof(),
@@ -140,7 +140,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             downloader.clone(),
             store.clone(),
             certified_tx,
-            effects,
+            validate_ctx,
         )
         .await
         .trusted()
