@@ -1281,9 +1281,7 @@ where
                 self.blocks_cache.reset_top_shard_blocks_additional_info()?;
 
                 let mc_data = McData::load_from_state(state)?;
-
-                // handle top processed to anchor in mempool
-                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
+                let top_processed_to_anchor = mc_data.top_processed_to_anchor;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1300,6 +1298,9 @@ where
                     .remove_next_collated_blocks_from_cache(&to_block_keys);
 
                 self.process_mc_state_update(mc_data, true).await?;
+
+                // handle top processed to anchor in mempool
+                self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)?;
 
                 break;
             }
