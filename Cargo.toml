@@ -115,7 +115,7 @@ tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 trait-variant = "0.1.2"
 triomphe = "0.1.11"
-weedb = "0.3.4"
+weedb = "0.3.8"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
