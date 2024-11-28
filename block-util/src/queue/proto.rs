@@ -78,30 +78,31 @@ impl TlWrite for QueueDiff {
 impl<'tl> TlRead<'tl> for QueueDiff {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(data: &'tl [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
-        let offset_before = *offset;
-
-        if u32::read_from(data, offset)? != Self::TL_ID {
+    fn read_from(data: &mut &'tl [u8]) -> tl_proto::TlResult<Self> {
+        let data_before = *data;
+        if u32::read_from(data)? != Self::TL_ID {
             return Err(tl_proto::TlError::UnknownConstructor);
         }
 
         let mut result = Self {
             hash: HashBytes::ZERO,
-            prev_hash: tl::hash_bytes::read(data, offset)?,
-            shard_ident: tl::shard_ident::read(data, offset)?,
-            seqno: u32::read_from(data, offset)?,
-            processed_upto: processed_upto_map::read(data, offset)?,
-            min_message: QueueKey::read_from(data, offset)?,
-            max_message: QueueKey::read_from(data, offset)?,
-            messages: messages_list::read(data, offset)?,
+            prev_hash: tl::hash_bytes::read(data)?,
+            shard_ident: tl::shard_ident::read(data)?,
+            seqno: u32::read_from(data)?,
+            processed_upto: processed_upto_map::read(data)?,
+            min_message: QueueKey::read_from(data)?,
+            max_message: QueueKey::read_from(data)?,
+            messages: messages_list::read(data)?,
         };
 
         if result.max_message < result.min_message {
             return Err(tl_proto::TlError::InvalidData);
         }
 
+        let result_bytes = data_before.len() - data.len();
+
         // Compute the hash of the diff
-        result.hash = Self::compute_hash(&data[offset_before..*offset]);
+        result.hash = Self::compute_hash(&data_before[..result_bytes]);
 
         Ok(result)
     }
@@ -228,8 +229,8 @@ mod processed_upto_map {
         }
     }
 
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<BTreeMap<ShardIdent, QueueKey>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<ShardIdent, QueueKey>> {
+        let len = u32::read_from(data)? as usize;
         if len > MAX_SIZE {
             return Err(tl_proto::TlError::InvalidData);
         }
@@ -237,7 +238,7 @@ mod processed_upto_map {
         let mut items = BTreeMap::new();
         let mut prev_shard = None;
         for _ in 0..len {
-            let shard_ident = tl::shard_ident::read(data, offset)?;
+            let shard_ident = tl::shard_ident::read(data)?;
 
             // Require that shards are sorted in ascending order.
             if let Some(prev_shard) = prev_shard {
@@ -248,7 +249,7 @@ mod processed_upto_map {
             prev_shard = Some(shard_ident);
 
             // Read the rest of the entry.
-            items.insert(shard_ident, QueueKey::read_from(data, offset)?);
+            items.insert(shard_ident, QueueKey::read_from(data)?);
         }
 
         Ok(items)
@@ -284,14 +285,14 @@ mod queue_diffs_list {
         }
     }
 
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<Vec<QueueDiff>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read(data: &mut &[u8]) -> TlResult<Vec<QueueDiff>> {
+        let len = u32::read_from(data)? as usize;
         if len > MAX_SIZE || len == 0 {
             return Err(tl_proto::TlError::InvalidData);
         }
 
         let mut items = Vec::with_capacity(len);
-        items.push(QueueDiff::read_from(data, offset)?);
+        items.push(QueueDiff::read_from(data)?);
 
         let (mut latest_seqno, mut prev_hash) = {
             let latest = items.first().expect("always not empty");
@@ -299,7 +300,7 @@ mod queue_diffs_list {
         };
 
         for _ in 1..len {
-            let diff = QueueDiff::read_from(data, offset)?;
+            let diff = QueueDiff::read_from(data)?;
 
             // Require that diffs are sorted by descending seqno.
             if latest_seqno <= diff.seqno || prev_hash != diff.hash {
@@ -340,8 +341,8 @@ mod messages_list {
         }
     }
 
-    pub fn read(data: &[u8], offset: &mut usize) -> tl_proto::TlResult<Vec<HashBytes>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read(data: &mut &[u8]) -> tl_proto::TlResult<Vec<HashBytes>> {
+        let len = u32::read_from(data)? as usize;
         if len > MAX_SIZE {
             return Err(tl_proto::TlError::InvalidData);
         }
@@ -351,7 +352,7 @@ mod messages_list {
         let mut prev_hash = HashBytes::ZERO;
         for _ in 0..len {
             // NOTE: Assume that there are no messages with zero hash.
-            let hash = tl::hash_bytes::read(data, offset)?;
+            let hash = tl::hash_bytes::read(data)?;
 
             // Require that messages are sorted by ascending hash.
             if hash <= prev_hash {
@@ -387,15 +388,15 @@ mod state_messages_list {
         }
     }
 
-    pub fn read(data: &[u8], offset: &mut usize) -> tl_proto::TlResult<Vec<Bytes>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read(data: &mut &[u8]) -> tl_proto::TlResult<Vec<Bytes>> {
+        let len = u32::read_from(data)? as usize;
         if len > MAX_CHUNKS {
             return Err(tl_proto::TlError::InvalidData);
         }
 
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
-            items.push(BigBytes::read(data, offset)?);
+            items.push(BigBytes::read(data)?);
         }
 
         Ok(items)
@@ -419,15 +420,15 @@ mod state_messages_list_ref {
         }
     }
 
-    pub fn read<'tl>(data: &'tl [u8], offset: &mut usize) -> tl_proto::TlResult<Vec<&'tl [u8]>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read<'tl>(data: &mut &'tl [u8]) -> tl_proto::TlResult<Vec<&'tl [u8]>> {
+        let len = u32::read_from(data)? as usize;
         if len > MAX_CHUNKS {
             return Err(tl_proto::TlError::InvalidData);
         }
 
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
-            items.push(BigBytesRef::read(data, offset)?);
+            items.push(BigBytesRef::read(data)?);
         }
 
         Ok(items)

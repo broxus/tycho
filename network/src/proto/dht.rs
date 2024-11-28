@@ -241,12 +241,11 @@ impl TlWrite for Value {
 impl<'a> TlRead<'a> for Value {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
-        let id = u32::read_from(packet, offset)?;
-        *offset -= 4;
+    fn read_from(packet: &mut &'a [u8]) -> tl_proto::TlResult<Self> {
+        let id = u32::read_from(&mut std::convert::identity(packet))?;
         match id {
-            PeerValue::TL_ID => PeerValue::read_from(packet, offset).map(Self::Peer),
-            MergedValue::TL_ID => MergedValue::read_from(packet, offset).map(Self::Merged),
+            PeerValue::TL_ID => PeerValue::read_from(packet).map(Self::Peer),
+            MergedValue::TL_ID => MergedValue::read_from(packet).map(Self::Merged),
             _ => Err(tl_proto::TlError::UnknownConstructor),
         }
     }
@@ -296,12 +295,11 @@ impl TlWrite for ValueRef<'_> {
 impl<'a> TlRead<'a> for ValueRef<'a> {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
-        let id = u32::read_from(packet, offset)?;
-        *offset -= 4;
+    fn read_from(packet: &mut &'a [u8]) -> tl_proto::TlResult<Self> {
+        let id = u32::read_from(&mut std::convert::identity(packet))?;
         match id {
-            PeerValue::TL_ID => PeerValueRef::read_from(packet, offset).map(Self::Peer),
-            MergedValue::TL_ID => MergedValueRef::read_from(packet, offset).map(Self::Merged),
+            PeerValue::TL_ID => PeerValueRef::read_from(packet).map(Self::Peer),
+            MergedValue::TL_ID => MergedValueRef::read_from(packet).map(Self::Merged),
             _ => Err(tl_proto::TlError::UnknownConstructor),
         }
     }

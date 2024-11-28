@@ -38,11 +38,11 @@ impl<'a> TlRead<'a> for &'a PeerId {
     type Repr = tl_proto::Boxed;
 
     #[inline]
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
-        if u32::read_from(packet, offset)? != PeerId::TL_ID {
+    fn read_from(packet: &mut &'a [u8]) -> tl_proto::TlResult<Self> {
+        if u32::read_from(packet)? != PeerId::TL_ID {
             return Err(tl_proto::TlError::UnknownConstructor);
         }
-        <_>::read_from(packet, offset).map(PeerId::wrap)
+        <_>::read_from(packet).map(PeerId::wrap)
     }
 }
 
