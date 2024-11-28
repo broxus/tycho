@@ -258,7 +258,7 @@ impl<'a> std::ops::Deref for DhtQueryWithDataBuilder<'a> {
     }
 }
 
-impl<'a> std::ops::DerefMut for DhtQueryWithDataBuilder<'a> {
+impl std::ops::DerefMut for DhtQueryWithDataBuilder<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner

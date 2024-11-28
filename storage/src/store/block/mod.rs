@@ -1523,7 +1523,7 @@ struct FullBlockDataGuard<'a> {
     data: rocksdb::DBPinnableSlice<'a>,
 }
 
-impl<'a> AsRef<[u8]> for FullBlockDataGuard<'a> {
+impl AsRef<[u8]> for FullBlockDataGuard<'_> {
     fn as_ref(&self) -> &[u8] {
         self.data.as_ref()
     }

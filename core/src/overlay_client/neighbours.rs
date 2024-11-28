@@ -65,7 +65,7 @@ impl Neighbours {
         index
             .indices_with_weights
             .sort_by(|(_, lw), (_, rw)| rw.cmp(lw));
-        return Vec::from(index.indices_with_weights.as_slice());
+        Vec::from(index.indices_with_weights.as_slice())
     }
 
     pub async fn get_active_neighbours(&self) -> Vec<Neighbour> {

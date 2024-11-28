@@ -47,7 +47,7 @@ impl CellStorage {
             remaining_refs: u8,
         }
 
-        impl<'a> Iterator for CellHashesIter<'a> {
+        impl Iterator for CellHashesIter<'_> {
             type Item = HashBytes;
 
             fn next(&mut self) -> Option<Self::Item> {
@@ -684,7 +684,7 @@ impl StorageCell {
             new_state: u8,
         }
 
-        impl<'a> Drop for Guard<'a> {
+        impl Drop for Guard<'_> {
             fn drop(&mut self) {
                 self.state.store(self.new_state, Ordering::Release);
                 unsafe {

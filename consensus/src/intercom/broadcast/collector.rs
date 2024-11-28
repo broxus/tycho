@@ -140,7 +140,6 @@ struct CollectorTask {
 
 impl CollectorTask {
     /// includes @ r+0 must include own point @ r+0 iff the one is produced
-
     /// returns includes for our point at the next round
     async fn run(
         &mut self,

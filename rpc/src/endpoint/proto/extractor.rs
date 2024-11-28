@@ -58,7 +58,7 @@ where
 
 pub struct ProtobufRef<'a, T>(pub &'a T);
 
-impl<'a, T> IntoResponse for ProtobufRef<'a, T>
+impl<T> IntoResponse for ProtobufRef<'_, T>
 where
     T: Message,
 {

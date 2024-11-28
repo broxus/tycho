@@ -175,7 +175,7 @@ pub struct TopBlocksShortIdsIter<'a> {
     shards_iter: Option<std::collections::hash_map::Iter<'a, ShardIdent, u32>>,
 }
 
-impl<'a> Iterator for TopBlocksShortIdsIter<'a> {
+impl Iterator for TopBlocksShortIdsIter<'_> {
     type Item = BlockIdShort;
 
     fn next(&mut self) -> Option<Self::Item> {

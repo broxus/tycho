@@ -103,7 +103,7 @@ pub struct SlotSubscription<'a, K: Eq + Hash, V> {
     rx: oneshot::Receiver<V>,
 }
 
-impl<'a, K: Eq + Hash, V> Future for SlotSubscription<'a, K, V> {
+impl<K: Eq + Hash, V> Future for SlotSubscription<'_, K, V> {
     type Output = V;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -120,7 +120,7 @@ impl<'a, K: Eq + Hash, V> Future for SlotSubscription<'a, K, V> {
     }
 }
 
-impl<'a, K: Eq + Hash, V> Drop for SlotSubscription<'a, K, V> {
+impl<K: Eq + Hash, V> Drop for SlotSubscription<'_, K, V> {
     fn drop(&mut self) {
         let Some(index) = self.index else {
             return;

@@ -153,7 +153,7 @@ pub struct ZstdCompressStream<'s> {
     resize_by: usize,
 }
 
-impl<'s> ZstdCompressStream<'s> {
+impl ZstdCompressStream<'_> {
     /// # Arguments
     /// * `compression_level` - The compression level to use.
     /// * `resize_by` - The amount to resize the buffer by when it runs out of space.
@@ -249,7 +249,7 @@ pub struct ZstdDecompressStream<'s> {
     finished: bool,
 }
 
-impl<'s> ZstdDecompressStream<'s> {
+impl ZstdDecompressStream<'_> {
     pub fn new(resize_by: usize) -> Result<Self> {
         let mut dctx = DCtx::create();
         dctx.init().map_err(ZstdError::from_raw)?;
