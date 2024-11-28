@@ -621,20 +621,18 @@ impl DhtInner {
 
         // NOTE: read constructor without advancing the body
         let mut constructor = std::convert::identity(body).get_u32_le();
-        let mut offset = 0;
 
         if constructor == rpc::WithPeerInfo::TL_ID {
             metrics::counter!(METRIC_IN_REQ_WITH_PEER_INFO_TOTAL).increment(1);
 
-            let peer_info = rpc::WithPeerInfo::read_from(body, &mut offset)?.peer_info;
+            let peer_info = rpc::WithPeerInfo::read_from(&mut body)?.peer_info;
             anyhow::ensure!(
                 peer_info.id == req.metadata.peer_id,
                 "suggested peer ID does not belong to the sender"
             );
-            self.announced_peers.send(Arc::new(peer_info)).ok();
 
-            body = &body[offset..];
             anyhow::ensure!(body.len() >= 4, tl_proto::TlError::UnexpectedEof);
+            self.announced_peers.send(Arc::new(peer_info)).ok();
 
             // NOTE: read constructor without advancing the body
             constructor = std::convert::identity(body).get_u32_le();

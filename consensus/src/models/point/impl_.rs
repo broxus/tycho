@@ -31,16 +31,15 @@ pub(crate) struct ShortPoint {
 }
 
 impl ShortPoint {
-    fn read_from_bytes(data: &[u8]) -> Result<Self, TlError> {
-        let mut offset: usize = 0;
-        let tag = u32::read_from(data, &mut offset)?;
+    fn read_from_bytes(mut data: &[u8]) -> Result<Self, TlError> {
+        let tag = u32::read_from(&mut data)?;
         if tag != Point::TL_ID {
             return Err(TlError::UnknownConstructor);
         }
-        // skip 36 + 64 bytes of digest and signature
-        offset += 96;
+        // skip 32 + 64 bytes of digest and signature
+        <[u8; 32 + 64]>::read_from(&mut data)?;
         Ok(ShortPoint {
-            body: ShortPointBody::read_from(data, &mut offset)?,
+            body: ShortPointBody::read_from(&mut data)?,
         })
     }
 

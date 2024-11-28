@@ -23,16 +23,16 @@ pub(crate) mod points_btree_map {
         }
     }
 
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<BTreeMap<PeerId, Digest>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<PeerId, Digest>> {
+        let len = u32::read_from(data)? as usize;
         if len > PeerCount::MAX.full() {
             return Err(tl_proto::TlError::InvalidData);
         }
 
         let mut items = BTreeMap::new();
         for _ in 0..len {
-            let peer_id = PeerId::read_from(data, offset)?;
-            let digest = <Digest>::read_from(data, offset)?;
+            let peer_id = PeerId::read_from(data)?;
+            let digest = <Digest>::read_from(data)?;
             if items.insert(peer_id, digest).is_some() {
                 tracing::error!(peer_id = %peer_id, "Map already contains data for this author");
                 return Err(TlError::InvalidData);
@@ -65,16 +65,16 @@ pub(crate) mod evidence_btree_map {
         }
     }
 
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<BTreeMap<PeerId, Signature>> {
-        let len = u32::read_from(data, offset)? as usize;
+    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<PeerId, Signature>> {
+        let len = u32::read_from(data)? as usize;
         if len > PeerCount::MAX.full() {
             return Err(tl_proto::TlError::InvalidData);
         }
 
         let mut items = BTreeMap::new();
         for _ in 0..len {
-            let peer_id = PeerId::read_from(data, offset)?;
-            let inner = <Signature>::read_from(data, offset)?;
+            let peer_id = PeerId::read_from(data)?;
+            let inner = <Signature>::read_from(data)?;
             if items.insert(peer_id, inner).is_some() {
                 tracing::error!(peer_id = %peer_id, "Map already contains data for this author");
                 return Err(TlError::InvalidData);

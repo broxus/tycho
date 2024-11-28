@@ -1,6 +1,5 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
-use crate::engine::CachedConfig;
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
@@ -14,29 +13,23 @@ impl BroadcastQuery {
 impl<'a> TlRead<'a> for BroadcastQuery {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
-        if u32::read_from(packet, offset)? != Self::TL_ID {
+    fn read_from(packet: &mut &'a [u8]) -> TlResult<Self> {
+        if u32::read_from(packet)? != Self::TL_ID {
             return Err(TlError::UnknownConstructor);
         }
 
-        let size = packet.len();
-        if size > CachedConfig::get().point_max_bytes + 4usize {
-            tracing::error!(size = %size, "Point max size exceeded");
+        if packet.len() < 4 {
+            tracing::error!(size = %packet.len(), "Point does not contain any useful data");
             return Err(TlError::InvalidData);
         }
 
-        if size < 8 {
-            tracing::error!(size = %size, "Point does not contain any useful data");
-            return Err(TlError::InvalidData);
-        }
-
-        // skip 4+4 bytes of BroadcastQuery tag and Point tag
-        if !Point::verify_hash_inner(&packet[*offset + 4..]) {
+        // skip 4 bytes of PointInner tag
+        if !Point::verify_hash_inner(&packet[4..]) {
             tracing::error!("Point hash is invalid");
             return Err(TlError::InvalidData);
         }
 
-        Point::read_from(packet, offset).map(Self)
+        Point::read_from(packet).map(Self)
     }
 }
 
@@ -100,31 +93,25 @@ where
 {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(packet: &'tl [u8], offset: &mut usize) -> TlResult<Self> {
-        if u32::read_from(packet, offset)? != Self::TL_ID {
+    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
+        if u32::read_from(packet)? != Self::TL_ID {
             return Err(TlError::UnknownConstructor);
         }
 
-        let size = packet.len();
-        if size > CachedConfig::get().point_max_bytes + 4usize {
-            tracing::error!(size = %size, "Point max size exceeded");
-            return Err(TlError::InvalidData);
-        }
-
-        if packet.len() < *offset + 4usize {
-            tracing::error!(size = %size, "PointByIdResponse size is too low");
+        if packet.len() < 8usize {
+            tracing::error!(size = %packet.len(), "PointByIdResponse size is too low");
             return Err(TlError::InvalidData);
         }
 
         let point_by_id_response_tag = {
             let mut prefix = [0_u8; 4];
-            prefix.copy_from_slice(&packet[*offset..*offset + 4usize]);
+            prefix.copy_from_slice(&packet[..4usize]);
             u32::from_be_bytes(prefix)
         };
 
         match point_by_id_response_tag {
             PointByIdResponse::<T>::DEFINED_TL_ID => {
-                // skip 4+4 bytes of PointByIdResponse and Point tag prefixes
+                // skip 4 bytes of Point tag prefixe
                 if !Point::verify_hash_inner(&packet[8..]) {
                     tracing::error!("Point hash is invalid");
                     return Err(TlError::InvalidData);
@@ -138,7 +125,7 @@ where
             }
         }
 
-        PointByIdResponse::<T>::read_from(packet, offset).map(Self)
+        PointByIdResponse::<T>::read_from(packet).map(Self)
     }
 }
 

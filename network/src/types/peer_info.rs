@@ -81,17 +81,17 @@ mod tl_address_list {
         address_list.write_to(packet);
     }
 
-    pub fn read(packet: &[u8], offset: &mut usize) -> tl_proto::TlResult<Box<[Address]>> {
+    pub fn read(packet: &mut &[u8]) -> tl_proto::TlResult<Box<[Address]>> {
         use tl_proto::TlError;
 
-        let len = u32::read_from(packet, offset)? as usize;
+        let len = u32::read_from(packet)? as usize;
         if len == 0 || len > PeerInfo::MAX_ADDRESSES {
             return Err(TlError::InvalidData);
         }
 
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
-            items.push(Address::read_from(packet, offset)?);
+            items.push(Address::read_from(packet)?);
         }
 
         Ok(items.into_boxed_slice())

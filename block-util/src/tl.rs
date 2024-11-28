@@ -17,8 +17,8 @@ pub mod hash_bytes {
     }
 
     #[inline]
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<HashBytes> {
-        <&[u8; 32]>::read_from(data, offset).map(|bytes| HashBytes::from(*bytes))
+    pub fn read(data: &mut &[u8]) -> TlResult<HashBytes> {
+        <&[u8; 32]>::read_from(data).map(|bytes| HashBytes(*bytes))
     }
 }
 
@@ -40,9 +40,9 @@ pub mod shard_ident {
     }
 
     #[inline]
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<ShardIdent> {
-        let workchain = i32::read_from(data, offset)?;
-        let prefix = u64::read_from(data, offset)?;
+    pub fn read(data: &mut &[u8]) -> TlResult<ShardIdent> {
+        let workchain = i32::read_from(data)?;
+        let prefix = u64::read_from(data)?;
         ShardIdent::new(workchain, prefix).ok_or(TlError::InvalidData)
     }
 }
@@ -66,10 +66,10 @@ pub mod block_id {
         block_id.file_hash.0.write_to(packet);
     }
 
-    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<BlockId> {
-        let workchain = i32::read_from(packet, offset)?;
-        let prefix = u64::read_from(packet, offset)?;
-        let seqno = u32::read_from(packet, offset)?;
+    pub fn read(packet: &mut &[u8]) -> TlResult<BlockId> {
+        let workchain = i32::read_from(packet)?;
+        let prefix = u64::read_from(packet)?;
+        let seqno = u32::read_from(packet)?;
 
         let shard = ShardIdent::new(workchain, prefix);
 
@@ -78,8 +78,8 @@ pub mod block_id {
             Some(shard) => shard,
         };
 
-        let root_hash = HashBytes(<[u8; 32]>::read_from(packet, offset)?);
-        let file_hash = HashBytes(<[u8; 32]>::read_from(packet, offset)?);
+        let root_hash = HashBytes(<[u8; 32]>::read_from(packet)?);
+        let file_hash = HashBytes(<[u8; 32]>::read_from(packet)?);
 
         Ok(BlockId {
             shard,
@@ -107,15 +107,15 @@ pub mod block_id_vec {
         }
     }
 
-    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<Vec<BlockId>> {
-        let len = u32::read_from(packet, offset)?;
-        if *offset + len as usize * block_id::SIZE_HINT > packet.len() {
+    pub fn read(packet: &mut &[u8]) -> TlResult<Vec<BlockId>> {
+        let len = u32::read_from(packet)?;
+        if packet.len() < len as usize * block_id::SIZE_HINT {
             return Err(TlError::UnexpectedEof);
         }
 
         let mut ids = Vec::with_capacity(len as usize);
         for _ in 0..len {
-            ids.push(block_id::read(packet, offset)?);
+            ids.push(block_id::read(packet)?);
         }
         Ok(ids)
     }

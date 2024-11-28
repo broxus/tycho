@@ -305,7 +305,7 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
         // Read (CONSUME) the next constructor.
         match req.body.get_u32_le() {
             MessageBroadcastRef::TL_ID => {
-                match BytesMeta::read_from(&req.body, &mut 0) {
+                match BytesMeta::read_from(&mut req.body.as_ref()) {
                     // NOTE: `len` is 24bit integer
                     Ok(meta) if req.body.len() == meta.prefix_len + meta.len + meta.padding => {
                         req.body.advance(meta.prefix_len);

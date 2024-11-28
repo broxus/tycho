@@ -7,20 +7,13 @@ use crate::archive::proto::{ArchiveEntryHeader, ARCHIVE_ENTRY_HEADER_LEN, ARCHIV
 /// Stateful archive package reader.
 pub struct ArchiveReader<'a> {
     data: &'a [u8],
-    offset: usize,
 }
 
 impl<'a> ArchiveReader<'a> {
     /// Starts reading archive package
-    pub fn new(data: &'a [u8]) -> Result<Self, ArchiveReaderError> {
-        let mut offset = 0;
-        read_archive_prefix(data, &mut offset)?;
-        Ok(Self { data, offset })
-    }
-
-    #[inline]
-    pub fn offset(&self) -> usize {
-        self.offset
+    pub fn new(mut data: &'a [u8]) -> Result<Self, ArchiveReaderError> {
+        read_archive_prefix(&mut data)?;
+        Ok(Self { data })
     }
 }
 
@@ -29,44 +22,36 @@ impl<'a> Iterator for ArchiveReader<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        read_next_entry(self.data, &mut self.offset)
+        read_next_entry(&mut self.data)
     }
 }
 
 fn read_next_entry<'a>(
-    data: &'a [u8],
-    offset: &mut usize,
+    data: &mut &'a [u8],
 ) -> Option<Result<ArchiveEntry<'a>, ArchiveReaderError>> {
-    if data.len() < *offset + 8 {
+    if data.len() < 8 {
         return None;
     }
 
     Some('item: {
         // Read archive entry header
-        let Ok(header) = ArchiveEntryHeader::read_from(data, offset) else {
+        let Ok(header) = ArchiveEntryHeader::read_from(data) else {
             break 'item Err(ArchiveReaderError::InvalidArchiveEntryHeader);
         };
         let data_len = header.data_len as usize;
 
-        // Check if data has enough space for the entry
-        let Some(target_size) = offset.checked_add(data_len) else {
-            // Handle overflow
+        // Read data
+        let Some((head, tail)) = data.split_at_checked(data_len) else {
             break 'item Err(ArchiveReaderError::UnexpectedEntryEof);
         };
 
-        if data.len() < target_size {
-            break 'item Err(ArchiveReaderError::UnexpectedEntryEof);
-        }
-
-        // Read data
-        let data = &data[*offset..*offset + data_len];
-        *offset += data_len;
+        *data = tail;
 
         // Done
         Ok(ArchiveEntry {
             block_id: header.block_id,
             ty: header.ty,
-            data,
+            data: head,
         })
     })
 }
@@ -94,17 +79,16 @@ pub enum ArchiveVerifier {
 
 impl ArchiveVerifier {
     /// Verifies next archive chunk.
-    pub fn write_verify(&mut self, part: &[u8]) -> Result<(), ArchiveReaderError> {
-        let mut offset = 0;
-
-        let part_len = part.len();
-
-        while offset < part_len {
-            let remaining = part_len - offset;
+    pub fn write_verify(&mut self, mut part: &[u8]) -> Result<(), ArchiveReaderError> {
+        loop {
+            let part_len = part.len();
+            if part_len == 0 {
+                return Ok(());
+            }
 
             match self {
                 Self::Start if part_len >= 4 => {
-                    read_archive_prefix(part, &mut offset)?;
+                    read_archive_prefix(&mut part)?;
                     *self = Self::EntryHeader {
                         buffer: [0; ARCHIVE_ENTRY_HEADER_LEN],
                         filled: 0,
@@ -112,7 +96,7 @@ impl ArchiveVerifier {
                 }
                 Self::Start => return Err(ArchiveReaderError::TooSmallInitialBatch),
                 Self::EntryHeader { buffer, filled } => {
-                    let remaining = std::cmp::min(remaining, ARCHIVE_ENTRY_HEADER_LEN - *filled);
+                    let remaining = std::cmp::min(part_len, ARCHIVE_ENTRY_HEADER_LEN - *filled);
 
                     // SAFETY:
                     // - `offset < part.len()`
@@ -120,17 +104,18 @@ impl ArchiveVerifier {
                     // - `offset + remaining < part.len() && `
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            part.as_ptr().add(offset),
+                            part.as_ptr(),
                             buffer.as_mut_ptr().add(*filled),
                             remaining,
                         );
                     };
 
-                    offset += remaining;
+                    part = part.split_at(remaining).1;
                     *filled += remaining;
 
                     if *filled == ARCHIVE_ENTRY_HEADER_LEN {
-                        let Ok(header) = ArchiveEntryHeader::read_from(buffer, &mut 0) else {
+                        let Ok(header) = ArchiveEntryHeader::read_from(&mut buffer.as_slice())
+                        else {
                             return Err(ArchiveReaderError::InvalidArchiveEntryHeader);
                         };
                         *self = Self::EntryData {
@@ -139,9 +124,9 @@ impl ArchiveVerifier {
                     }
                 }
                 Self::EntryData { data_len } => {
-                    let remaining = std::cmp::min(remaining, *data_len);
+                    let remaining = std::cmp::min(part_len, *data_len);
                     *data_len -= remaining;
-                    offset += remaining;
+                    part = part.split_at(remaining).1;
 
                     if *data_len == 0 {
                         *self = Self::EntryHeader {
@@ -152,8 +137,6 @@ impl ArchiveVerifier {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Ensures that the verifier is in the correct state.
@@ -166,20 +149,13 @@ impl ArchiveVerifier {
     }
 }
 
-fn read_archive_prefix(buf: &[u8], offset: &mut usize) -> Result<(), ArchiveReaderError> {
-    let end = *offset;
-
-    // NOTE: `end > end + 4` is needed here because it eliminates useless
-    // bounds check with panic. It is not even included into result assembly
-    if buf.len() < end + 4 || end > end.wrapping_add(4) {
-        return Err(ArchiveReaderError::UnexpectedArchiveEof);
-    }
-
-    if buf[end..end + 4] == ARCHIVE_PREFIX {
-        *offset += 4;
-        Ok(())
-    } else {
-        Err(ArchiveReaderError::InvalidArchiveHeader)
+fn read_archive_prefix(buf: &mut &[u8]) -> Result<(), ArchiveReaderError> {
+    match buf.split_first_chunk() {
+        Some((header, tail)) if header == &ARCHIVE_PREFIX => {
+            *buf = tail;
+            Ok(())
+        }
+        _ => Err(ArchiveReaderError::InvalidArchiveHeader),
     }
 }
 

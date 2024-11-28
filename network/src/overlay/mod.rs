@@ -128,15 +128,13 @@ impl Service<ServiceRequest> for OverlayService {
     )]
     fn on_query(&self, mut req: ServiceRequest) -> Self::OnQueryFuture {
         let e = 'req: {
-            if req.body.len() < 4 {
+            let mut req_body = req.body.as_ref();
+            if req_body.len() < 4 {
                 break 'req TlError::UnexpectedEof;
             }
 
-            // NOTE: `req.body` is untouched while reading the constructor
-            // and `as_ref` here is exactly for that.
-            let mut offset = 0;
-            let overlay_id = match req.body.as_ref().get_u32_le() {
-                rpc::Prefix::TL_ID => match rpc::Prefix::read_from(&req.body, &mut offset) {
+            let overlay_id = match std::convert::identity(req_body).get_u32_le() {
+                rpc::Prefix::TL_ID => match rpc::Prefix::read_from(&mut req_body) {
                     Ok(rpc::Prefix { overlay_id }) => overlay_id,
                     Err(e) => break 'req e,
                 },
@@ -157,10 +155,11 @@ impl Service<ServiceRequest> for OverlayService {
                 _ => break 'req TlError::UnknownConstructor,
             };
 
-            if req.body.len() < offset + 4 {
+            if req_body.len() < 4 {
                 // Definitely an invalid request (not enough bytes for the constructor)
                 break 'req TlError::UnexpectedEof;
             }
+            let offset = req.body.len() - req_body.len();
 
             if let Some(private_overlay) = self.0.private_overlays.get(overlay_id) {
                 req.body.advance(offset);
@@ -191,25 +190,24 @@ impl Service<ServiceRequest> for OverlayService {
         // TODO: somehow refactor with one method for both query and message
 
         let e = 'req: {
-            if req.body.len() < 4 {
+            let mut req_body = req.body.as_ref();
+            if req_body.len() < 4 {
                 break 'req TlError::UnexpectedEof;
             }
 
-            // NOTE: `req.body` is untouched while reading the constructor
-            // and `as_ref` here is exactly for that.
-            let mut offset = 0;
-            let overlay_id = match req.body.as_ref().get_u32_le() {
-                rpc::Prefix::TL_ID => match rpc::Prefix::read_from(&req.body, &mut offset) {
+            let overlay_id = match std::convert::identity(req_body).get_u32_le() {
+                rpc::Prefix::TL_ID => match rpc::Prefix::read_from(&mut req_body) {
                     Ok(rpc::Prefix { overlay_id }) => overlay_id,
                     Err(e) => break 'req e,
                 },
                 _ => break 'req TlError::UnknownConstructor,
             };
 
-            if req.body.len() < offset + 4 {
+            if req_body.len() < 4 {
                 // Definitely an invalid request (not enough bytes for the constructor)
                 break 'req TlError::UnexpectedEof;
             }
+            let offset = req.body.len() - req_body.len();
 
             if let Some(private_overlay) = self.0.private_overlays.get(overlay_id) {
                 req.body.advance(offset);
