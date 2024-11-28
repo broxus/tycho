@@ -222,7 +222,7 @@ impl BlockchainRpcClient {
     ) -> Result<BlockDataFullWithNeighbour, Error> {
         let overlay_client = self.inner.overlay_client.clone();
 
-        let Some(neighbour) = overlay_client.neighbours().choose().await else {
+        let Some(neighbour) = overlay_client.neighbours().choose() else {
             return Err(Error::NoNeighbours);
         };
 
@@ -242,7 +242,7 @@ impl BlockchainRpcClient {
     ) -> Result<BlockDataFullWithNeighbour, Error> {
         let overlay_client = self.inner.overlay_client.clone();
 
-        let Some(neighbour) = overlay_client.neighbours().choose().await else {
+        let Some(neighbour) = overlay_client.neighbours().choose() else {
             return Err(Error::NoNeighbours);
         };
 
@@ -312,8 +312,7 @@ impl BlockchainRpcClient {
         let neighbours = self
             .overlay_client()
             .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT)
-            .await;
+            .choose_multiple(NEIGHBOUR_COUNT);
 
         let req = match kind {
             PersistentStateKind::Shard => Request::from_tl(rpc::GetPersistentShardStateInfo {
@@ -425,8 +424,7 @@ impl BlockchainRpcClient {
         let neighbours = self
             .overlay_client()
             .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT)
-            .await;
+            .choose_multiple(NEIGHBOUR_COUNT);
 
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {

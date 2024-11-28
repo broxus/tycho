@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::Rng;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 
 use crate::overlay_client::neighbour::Neighbour;
-
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Neighbours {
@@ -31,7 +31,7 @@ impl Neighbours {
         loop {
             let changed = self.inner.changed.notified();
 
-            if self.inner.entries.lock().await.len() >= count {
+            if self.inner.entries.lock().len() >= count {
                 break;
             }
 
@@ -43,41 +43,44 @@ impl Neighbours {
         &self.inner.changed
     }
 
-    pub async fn choose(&self) -> Option<Neighbour> {
-        let selection_index = self.inner.selection_index.lock().await;
+    pub fn choose(&self) -> Option<Neighbour> {
+        let selection_index = self.inner.selection_index.lock();
         selection_index.choose(&mut rand::thread_rng())
     }
 
-    pub async fn choose_multiple(&self, n: usize) -> Vec<Neighbour> {
-        let selection_index = self.inner.selection_index.lock().await;
+    pub fn choose_multiple(&self, n: usize) -> Vec<Neighbour> {
+        let selection_index = self.inner.selection_index.lock();
         selection_index.choose_multiple(&mut rand::thread_rng(), n)
     }
 
-    pub async fn update_selection_index(&self) {
-        let mut guard = self.inner.entries.lock().await;
-        guard.retain(|x| x.is_reliable());
-        let mut lock = self.inner.selection_index.lock().await;
-        lock.update(guard.as_slice());
+    pub fn update_selection_index(&self) {
+        let reliable_entries = {
+            let mut guard = self.inner.entries.lock();
+            guard.retain(|x| x.is_reliable());
+            guard.to_vec()
+        };
+        let mut lock = self.inner.selection_index.lock();
+        lock.update(&reliable_entries);
     }
 
-    pub async fn get_sorted_neighbours(&self) -> Vec<(Neighbour, u32)> {
-        let mut index = self.inner.selection_index.lock().await;
+    pub fn get_sorted_neighbours(&self) -> Vec<(Neighbour, u32)> {
+        let mut index = self.inner.selection_index.lock();
         index
             .indices_with_weights
             .sort_by(|(_, lw), (_, rw)| rw.cmp(lw));
-        Vec::from(index.indices_with_weights.as_slice())
+        index.indices_with_weights.clone()
     }
 
-    pub async fn get_active_neighbours(&self) -> Vec<Neighbour> {
-        self.inner.entries.lock().await.as_slice().to_vec()
+    pub fn get_active_neighbours(&self) -> Vec<Neighbour> {
+        self.inner.entries.lock().clone()
     }
 
-    pub async fn update(&self, new: Vec<Neighbour>) {
+    pub fn update(&self, new: Vec<Neighbour>) {
         let now = tycho_util::time::now_sec();
 
         let mut changed = false;
 
-        let mut guard = self.inner.entries.lock().await;
+        let mut guard = self.inner.entries.lock();
         // remove unreliable and expired neighbours
         guard.retain(|x| {
             let retain = x.is_reliable() && x.expires_at_secs() > now;
@@ -109,7 +112,7 @@ impl Neighbours {
         }
 
         drop(guard);
-        self.update_selection_index().await;
+        self.update_selection_index();
 
         if changed {
             self.inner.changed.notify_waiters();
@@ -119,11 +122,11 @@ impl Neighbours {
     pub async fn remove_outdated_neighbours(&self) {
         let now = tycho_util::time::now_sec();
 
-        let mut guard = self.inner.entries.lock().await;
+        let mut guard = self.inner.entries.lock();
         // remove unreliable and expired neighbours
         guard.retain(|x| x.expires_at_secs() > now);
         drop(guard);
-        self.update_selection_index().await;
+        self.update_selection_index();
     }
 }
 

@@ -198,7 +198,7 @@ impl Inner {
         loop {
             interval.tick().await;
 
-            let Some(neighbour) = self.neighbours.choose().await else {
+            let Some(neighbour) = self.neighbours.choose() else {
                 continue;
             };
 
@@ -250,7 +250,7 @@ impl Inner {
                 interval.tick().await;
             }
 
-            let active_neighbours = self.neighbours.get_active_neighbours().await.len();
+            let active_neighbours = self.neighbours.get_active_neighbours().len();
             let neighbours_to_get = max_neighbours + (max_neighbours - active_neighbours);
 
             let neighbours = {
@@ -260,7 +260,7 @@ impl Inner {
                     .map(|x| Neighbour::new(x.entry.peer_id, x.expires_at(ttl), &default_roundtrip))
                     .collect::<Vec<_>>()
             };
-            self.neighbours.update(neighbours).await;
+            self.neighbours.update(neighbours);
         }
     }
 
@@ -275,7 +275,7 @@ impl Inner {
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
-        let Some(neighbour) = self.neighbours.choose().await else {
+        let Some(neighbour) = self.neighbours.choose() else {
             return Err(Error::NoNeighbours);
         };
 
@@ -295,7 +295,7 @@ impl Inner {
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
-        let Some(neighbour) = self.neighbours.choose().await else {
+        let Some(neighbour) = self.neighbours.choose() else {
             return Err(Error::NoNeighbours);
         };
 

@@ -29,7 +29,7 @@ pub async fn test() {
     println!("{}", initial_peers.len());
 
     let neighbours = Neighbours::new(initial_peers.clone(), max_neighbours);
-    println!("{}", neighbours.get_active_neighbours().await.len());
+    println!("{}", neighbours.get_active_neighbours().len());
 
     let first_success_rate = [0.2, 0.8];
     let second_success_rate = [1.0, 0.0];
@@ -50,7 +50,7 @@ pub async fn test() {
     let slice = initial_peers.as_slice();
     while i < 1000 {
         // let start = Instant::now();
-        let n_opt = neighbours.choose().await;
+        let n_opt = neighbours.choose();
         // let end = Instant::now();
 
         if let Some(n) = n_opt {
@@ -67,7 +67,7 @@ pub async fn test() {
                 n.track_request(&Duration::from_millis(200), false);
             }
 
-            neighbours.update_selection_index().await;
+            neighbours.update_selection_index();
         }
         i += 1;
     }
@@ -82,13 +82,11 @@ pub async fn test() {
     .into_iter()
     .map(|peer_id| Neighbour::new(peer_id, u32::MAX, &default_roundtrip))
     .collect::<Vec<_>>();
-    neighbours.update(new_neighbours).await;
+    neighbours.update(new_neighbours);
 
-    let active = neighbours.get_active_neighbours().await;
+    let active = neighbours.get_active_neighbours();
     println!("active neighbours {}", active.len());
     for i in active {
         println!("peer {} score {}", i.peer_id(), i.get_stats().score);
     }
-
-    // assert_ne!(peers.len(), 5);
 }
