@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::{cmp, mem};
 
 use everscale_crypto::ed25519::KeyPair;
-use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt, StreamExt};
 use itertools::Itertools;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -404,20 +405,14 @@ impl Engine {
                 (current_round, round_effects)
             };
 
-            if let Some(collator_lag) = wait_collator(
+            if let Some(collator_sync) = wait_collator(
                 self.round_task.state.top_known_anchor.receiver(),
                 current_round,
+                &mut is_paused,
+                &self.committed_info_tx,
                 &round_effects,
             ) {
-                tokio::time::timeout(CachedConfig::broadcast_retry(), collator_lag)
-                    .await
-                    .ok();
-
-                if !is_paused {
-                    is_paused = true;
-                    self.committed_info_tx.send(MempoolOutput::Paused).ok();
-                }
-
+                collator_sync.await;
                 if let Some(committer) = ready_committer {
                     self.committer_run = committer_task(
                         committer,
@@ -426,13 +421,7 @@ impl Engine {
                         round_effects.clone(),
                     );
                 }
-
                 continue;
-            }
-
-            if is_paused {
-                is_paused = false;
-                self.committed_info_tx.send(MempoolOutput::Running).ok();
             }
 
             *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
@@ -482,30 +471,33 @@ impl Engine {
 fn wait_collator(
     mut top_known_anchor_recv: RoundWatcher<TopKnownAnchor>,
     current_round: Round,
+    is_paused: &mut bool,
+    committed_info_tx: &mpsc::UnboundedSender<MempoolOutput>,
     round_effects: &Effects<EngineContext>,
-) -> Option<BoxFuture<'static, ()>> {
+) -> Option<impl Future<Output = ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
     let silent_after = CachedConfig::silent_after(top_known_anchor);
-    // Note silence bound is exclusive with `<` because new vset must be known for dag top
-    //  (the next after engine round), while vset switch round is exactly silence bound + 1
-    if current_round < silent_after {
-        None
-    } else {
-        tracing::info!(
-            parent: round_effects.span(),
-            top_known_anchor = top_known_anchor.0,
-            silent_after = silent_after.0,
-            "enter silent mode by collator feedback",
-        );
-        let round_effects = round_effects.clone();
-        let task = async move {
+    // Note silence bound is inclusive with `>=` because new vset may be unknown for next dag top
+    //  (the next after next engine round), while vset switch round is exactly silence bound + 1
+    if current_round >= silent_after {
+        if !*is_paused {
+            tracing::info!(
+                parent: round_effects.span(),
+                top_known_anchor = top_known_anchor.0,
+                silent_after = silent_after.0,
+                "enter pause by collator feedback",
+            );
+            *is_paused = true;
+            committed_info_tx.send(MempoolOutput::Paused).ok();
+        }
+
+        let collator_sync = async move {
             loop {
                 let top_known_anchor = top_known_anchor_recv.next().await;
                 //  exit if ready to produce point: collator synced enough
                 let silent_after = CachedConfig::silent_after(top_known_anchor);
                 let exit = current_round < silent_after;
-                tracing::info!(
-                    parent: round_effects.span(),
+                tracing::debug!(
                     top_known_anchor = top_known_anchor.0,
                     silent_after = silent_after.0,
                     exit = exit,
@@ -516,7 +508,25 @@ fn wait_collator(
                 }
             }
         };
-        Some(task.boxed())
+        let task = tokio::time::timeout(
+            CachedConfig::broadcast_retry(),
+            collator_sync.instrument(round_effects.span().clone()),
+        )
+        .map(|_| ());
+
+        Some(task)
+    } else if *is_paused {
+        tracing::info!(
+            parent: round_effects.span(),
+            top_known_anchor = top_known_anchor.0,
+            silent_after = silent_after.0,
+            "exit from pause by collator feedback",
+        );
+        *is_paused = false;
+        committed_info_tx.send(MempoolOutput::Running).ok();
+        None
+    } else {
+        None
     }
 }
 
