@@ -144,31 +144,31 @@ impl TlWrite for Address {
 impl<'a> TlRead<'a> for Address {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
+    fn read_from(packet: &mut &'a [u8]) -> tl_proto::TlResult<Self> {
         use tl_proto::TlError;
 
-        Ok(match u32::read_from(packet, offset)? {
+        Ok(match u32::read_from(packet)? {
             ADDRESS_V4_TL_ID => {
-                let ip = u32::read_from(packet, offset)?;
-                let Ok(port) = u32::read_from(packet, offset)?.try_into() else {
+                let ip = u32::read_from(packet)?;
+                let Ok(port) = u32::read_from(packet)?.try_into() else {
                     return Err(TlError::InvalidData);
                 };
                 Self::Ip(SocketAddr::V4(SocketAddrV4::new(ip.into(), port)))
             }
             ADDRESS_V6_TL_ID => {
-                let octets = <[u8; 16]>::read_from(packet, offset)?;
-                let Ok(port) = u32::read_from(packet, offset)?.try_into() else {
+                let octets = <[u8; 16]>::read_from(packet)?;
+                let Ok(port) = u32::read_from(packet)?.try_into() else {
                     return Err(TlError::InvalidData);
                 };
                 Self::Ip(SocketAddr::V6(SocketAddrV6::new(octets.into(), port, 0, 0)))
             }
             ADDRESS_DNS_TL_ID => {
-                let hostname = <&[u8]>::read_from(packet, offset)?;
+                let hostname = <&[u8]>::read_from(packet)?;
                 let Some(hostname) = validate_hostname(hostname) else {
                     return Err(TlError::InvalidData);
                 };
 
-                let Ok(port) = u32::read_from(packet, offset)?.try_into() else {
+                let Ok(port) = u32::read_from(packet)?.try_into() else {
                     return Err(TlError::InvalidData);
                 };
 

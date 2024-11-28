@@ -45,7 +45,7 @@ dashmap = "5.5.3"
 dirs = "5.0.1"
 ed25519 = "2.0"
 ed25519-dalek = "2.1"
-everscale-crypto = { version = "0.2", features = ["tl-proto", "serde"] }
+everscale-crypto = { version = "0.3", features = ["tl-proto", "serde"] }
 everscale-types = { version = "0.1.2", features = ["tycho"] }
 exponential-backoff = "1"
 fdlimit = "0.3.0"
@@ -66,10 +66,7 @@ pkcs8 = "0.10"
 prost = "0.13"
 prost-build = "0.13"
 quick_cache = "0.6.0"
-quinn = { version = "0.11", default-features = false, features = [
-    "runtime-tokio",
-    "rustls",
-] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls"] }
 rand = "0.8"
 rand_pcg = { version = "0.3" }
 rayon = "1.10"
@@ -102,7 +99,7 @@ tikv-jemallocator = { version = "0.6.0", features = [
     "background_threads",
 ] }
 tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
-tl-proto = "0.4.11"
+tl-proto = "0.5"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.15"
 tokio-util = { version = "0.7.10", features = ["codec"] }
@@ -121,7 +118,7 @@ zstd-sys = "2.0"
 
 # TODO: RIIR
 ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = "bc09b6072def8e91d1844b834967c90840b778c1" }
-ton_vm = { git = "https://github.com/broxus/ton-labs-vm.git", rev = "b279cccd93caf4f1edc843a81c8ba2d205632ec4" }
+ton_vm = { git = "https://github.com/broxus/ton-labs-vm.git", rev = "06401e4d2b8222c98c696a0c1e48a9e556219d1c" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.1.5" }
@@ -136,7 +133,7 @@ tycho-util = { path = "./util", version = "0.1.5" }
 
 [patch.crates-io]
 weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "59728ea0c8703dd28a4c37dee05c1321cd81b966" }
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "488e42786c84dcf66a329d446a7612d0636096b6" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "8cb2789228c54eff73cb150c8fb5a1d61aeb136d" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

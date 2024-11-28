@@ -874,9 +874,9 @@ dependencies = [
 
 [[package]]
 name = "everscale-crypto"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b0304a55e328ca4f354e59e6816bccb43b03f681b85b31c6bd10ea7233d62b5"
+checksum = "0da807f69d3d795921a2aaf4bd9b449e3d280d28b104e4909890a50c40a33950"
 dependencies = [
  "curve25519-dalek",
  "generic-array",
@@ -890,7 +890,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=488e42786c84dcf66a329d446a7612d0636096b6#488e42786c84dcf66a329d446a7612d0636096b6"
+source = "git+https://github.com/broxus/everscale-types.git?rev=8cb2789228c54eff73cb150c8fb5a1d61aeb136d#8cb2789228c54eff73cb150c8fb5a1d61aeb136d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -919,7 +919,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=488e42786c84dcf66a329d446a7612d0636096b6#488e42786c84dcf66a329d446a7612d0636096b6"
+source = "git+https://github.com/broxus/everscale-types.git?rev=8cb2789228c54eff73cb150c8fb5a1d61aeb136d#8cb2789228c54eff73cb150c8fb5a1d61aeb136d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3084,9 +3084,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.4.11"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32253fd484586f01479781e46dd147005d314844d00303df6100f130435b2e8d"
+checksum = "d4a5337f0a73f14ff69265aa9a4b8ff61a27910f889ad22c136c700f969db638"
 dependencies = [
  "bytes",
  "digest",
@@ -3098,9 +3098,9 @@ dependencies = [
 
 [[package]]
 name = "tl-proto-proc"
-version = "0.4.7"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "140da3028e6bc0a46b168845e3f5252e906d0fbdcc6074f96424fe830c86b9ae"
+checksum = "1972929aad3bf0683b741f99c85886666b9665b9f4a1437659ebc2bc0a526f7e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3218,7 +3218,7 @@ dependencies = [
 [[package]]
 name = "ton_vm"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-vm.git?branch=new_cells#b279cccd93caf4f1edc843a81c8ba2d205632ec4"
+source = "git+https://github.com/broxus/ton-labs-vm.git?branch=new_cells#06401e4d2b8222c98c696a0c1e48a9e556219d1c"
 dependencies = [
  "ahash",
  "anyhow",

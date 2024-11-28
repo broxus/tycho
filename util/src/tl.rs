@@ -14,8 +14,8 @@ pub mod signature_ref {
         signature.as_slice().write_to(packet);
     }
 
-    pub fn read<'a>(packet: &'a [u8], offset: &mut usize) -> TlResult<&'a [u8; 64]> {
-        <&tl_proto::BoundedBytes<64>>::read_from(packet, offset)
+    pub fn read<'a>(packet: &mut &'a [u8]) -> TlResult<&'a [u8; 64]> {
+        <&tl_proto::BoundedBytes<64>>::read_from(packet)
             .and_then(|bytes| bytes.as_ref().try_into().map_err(|_e| TlError::InvalidData))
     }
 }
@@ -33,8 +33,8 @@ pub mod signature_owned {
         signature.as_slice().write_to(packet);
     }
 
-    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<Box<[u8; 64]>> {
-        <&tl_proto::BoundedBytes<64>>::read_from(packet, offset).and_then(|bytes| {
+    pub fn read(packet: &mut &[u8]) -> TlResult<Box<[u8; 64]>> {
+        <&tl_proto::BoundedBytes<64>>::read_from(packet).and_then(|bytes| {
             let Ok::<[u8; 64], _>(bytes) = bytes.as_ref().try_into() else {
                 return Err(TlError::InvalidData);
             };
@@ -58,8 +58,8 @@ pub mod signature_arc {
         signature.as_slice().write_to(packet);
     }
 
-    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<Arc<[u8; 64]>> {
-        <&tl_proto::BoundedBytes<64>>::read_from(packet, offset).and_then(|bytes| {
+    pub fn read(packet: &mut &[u8]) -> TlResult<Arc<[u8; 64]>> {
+        <&tl_proto::BoundedBytes<64>>::read_from(packet).and_then(|bytes| {
             let Ok::<[u8; 64], _>(bytes) = bytes.as_ref().try_into() else {
                 return Err(TlError::InvalidData);
             };
@@ -81,18 +81,18 @@ impl<const N: usize> VecWithMaxLen<N> {
         value.write_to(packet);
     }
 
-    pub fn read<'tl, T>(packet: &'tl [u8], offset: &mut usize) -> TlResult<Vec<T>>
+    pub fn read<'tl, T>(packet: &mut &'tl [u8]) -> TlResult<Vec<T>>
     where
         T: tl_proto::TlRead<'tl>,
     {
-        let len = u32::read_from(packet, offset)? as usize;
+        let len = u32::read_from(packet)? as usize;
         if len > N {
             return Err(TlError::InvalidData);
         }
 
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
-            items.push(T::read_from(packet, offset)?);
+            items.push(T::read_from(packet)?);
         }
 
         Ok(items)
@@ -115,8 +115,8 @@ impl<const MAX_SIZE: usize> BigBytes<MAX_SIZE> {
     }
 
     #[inline]
-    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<Bytes> {
-        BigBytesRef::<MAX_SIZE>::read(packet, offset).map(Bytes::copy_from_slice)
+    pub fn read(packet: &mut &[u8]) -> TlResult<Bytes> {
+        BigBytesRef::<MAX_SIZE>::read(packet).map(Bytes::copy_from_slice)
     }
 }
 
@@ -141,19 +141,19 @@ impl<const MAX_SIZE: usize> BigBytesRef<MAX_SIZE> {
         }
     }
 
-    pub fn read<'tl>(packet: &'tl [u8], offset: &mut usize) -> TlResult<&'tl [u8]> {
-        let len = u32::read_from(packet, offset)? as usize;
+    pub fn read<'tl>(packet: &mut &'tl [u8]) -> TlResult<&'tl [u8]> {
+        let len = u32::read_from(packet)? as usize;
         if len > Self::MAX_SIZE {
             return Err(tl_proto::TlError::InvalidData);
         }
         let padding = big_bytes_padding(len);
 
-        if offset.saturating_add(len + padding) > packet.len() {
+        if packet.len() < len + padding {
             return Err(tl_proto::TlError::UnexpectedEof);
         }
 
-        let bytes = &packet[*offset..*offset + len];
-        *offset += len + padding;
+        let bytes = &packet[..len];
+        *packet = &packet[len + padding..];
 
         Ok(bytes)
     }
@@ -183,13 +183,13 @@ mod tests {
             // Must be aligned by 4
             assert_eq!(serialized.len() % 4, 0);
 
-            let mut offset = 0;
-            let deserialized = BigEnough::read(&serialized, &mut offset).unwrap();
+            let packet = &mut serialized.as_slice();
+            let deserialized = BigEnough::read(packet).unwrap();
             // Must be equal
             assert_eq!(big_bytes, deserialized);
 
             // Must consume all bytes
-            assert_eq!(offset, serialized.len());
+            assert!(packet.is_empty());
         }
     }
 }
