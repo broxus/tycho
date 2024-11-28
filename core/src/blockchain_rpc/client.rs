@@ -109,7 +109,7 @@ impl BlockchainRpcClient {
             data: &'a [u8],
         }
 
-        impl<'a> tl_proto::TlWrite for ExternalMessage<'a> {
+        impl tl_proto::TlWrite for ExternalMessage<'_> {
             type Repr = tl_proto::Boxed;
 
             fn max_size_hint(&self) -> usize {

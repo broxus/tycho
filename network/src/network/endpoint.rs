@@ -112,7 +112,7 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<'a> Future for Accept<'a> {
+impl Future for Accept<'_> {
     type Output = Option<Connecting>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

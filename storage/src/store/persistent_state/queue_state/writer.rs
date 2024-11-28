@@ -97,7 +97,7 @@ impl<'a> QueueStateWriter<'a> {
             cell_count += diff.messages.len();
         }
 
-        let chunk_count = (cell_count + MAX_ROOTS_PER_CHUNK - 1) / MAX_ROOTS_PER_CHUNK;
+        let chunk_count = cell_count.div_ceil(MAX_ROOTS_PER_CHUNK);
         buffer.write_all(&(chunk_count as u32).to_le_bytes())?;
 
         let mut bump = Bump::new();

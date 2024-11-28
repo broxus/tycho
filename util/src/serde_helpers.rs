@@ -77,7 +77,7 @@ pub mod humantime {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Serde<Duration>, D::Error> {
             struct V;
 
-            impl<'de2> Visitor<'de2> for V {
+            impl Visitor<'_> for V {
                 type Value = Duration;
 
                 fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,7 +98,7 @@ pub mod humantime {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Serde<SystemTime>, D::Error> {
             struct V;
 
-            impl<'de2> Visitor<'de2> for V {
+            impl Visitor<'_> for V {
                 type Value = SystemTime;
 
                 fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -133,7 +133,7 @@ pub mod humantime {
         }
     }
 
-    impl<'a> Serialize for Serde<&'a Duration> {
+    impl Serialize for Serde<&Duration> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             serializer.collect_str(&::humantime::format_duration(*self.0))
         }
@@ -145,7 +145,7 @@ pub mod humantime {
         }
     }
 
-    impl<'a> Serialize for Serde<&'a SystemTime> {
+    impl Serialize for Serde<&SystemTime> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             serializer.collect_str(&::humantime::format_rfc3339(*self.0))
         }
@@ -159,7 +159,7 @@ pub mod humantime {
         }
     }
 
-    impl<'a> Serialize for Serde<&'a Option<Duration>> {
+    impl Serialize for Serde<&Option<Duration>> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             match *self.0 {
                 Some(v) => serializer.serialize_some(&Serde(v)),
@@ -174,7 +174,7 @@ pub mod humantime {
         }
     }
 
-    impl<'a> Serialize for Serde<&'a Option<SystemTime>> {
+    impl Serialize for Serde<&Option<SystemTime>> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             match *self.0 {
                 Some(v) => serializer.serialize_some(&Serde(v)),
@@ -307,7 +307,7 @@ impl<S> Default for StrVisitor<S> {
     }
 }
 
-impl<'de, S: FromStr> Visitor<'de> for StrVisitor<S>
+impl<S: FromStr> Visitor<'_> for StrVisitor<S>
 where
     <S as FromStr>::Err: std::fmt::Display,
 {

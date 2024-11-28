@@ -174,7 +174,7 @@ impl ControlClient {
 
         let target_size = info.size.get();
         let chunk_size = info.chunk_size.get() as u64;
-        let chunk_num = (info.size.get() + chunk_size - 1) / chunk_size;
+        let chunk_num = info.size.get().div_ceil(chunk_size);
 
         let (chunks_tx, mut chunks_rx) = mpsc::channel::<ArchiveSliceResponse>(PARALLEL_CHUNKS);
 

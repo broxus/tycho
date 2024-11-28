@@ -164,7 +164,7 @@ struct JrpcRequest<'a, T> {
     params: &'a T,
 }
 
-impl<'a, T: Serialize> Serialize for JrpcRequest<'a, T> {
+impl<T: Serialize> Serialize for JrpcRequest<'_, T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,

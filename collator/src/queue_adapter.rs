@@ -36,10 +36,11 @@ where
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
     ) -> Result<()>;
+
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-
     fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
+
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,

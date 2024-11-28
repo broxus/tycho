@@ -106,7 +106,7 @@ impl CachedConfig {
         Self::get().broadcast_retry
     }
 
-    /// hard limit on cached external messages ring buffer, see [`Self::payload_batch_bytes`]
+    // hard limit on cached external messages ring buffer, see [`Self::payload_batch_bytes`]
     // pub fn payload_buffer_bytes() -> usize {
     //     Self::get().payload_buffer_bytes
     // }
