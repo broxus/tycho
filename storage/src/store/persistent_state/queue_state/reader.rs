@@ -15,10 +15,10 @@ pub struct QueueStateReader<'a> {
 
 impl<'a> QueueStateReader<'a> {
     pub fn begin_from_mapped(data: &'a [u8], top_update: &OutMsgQueueUpdates) -> Result<Self> {
-        let mut offset = 0;
-        let state = QueueStateRef::<'a>::read_from(data, &mut offset)?;
+        let packet = &mut std::convert::identity(data);
+        let state = QueueStateRef::<'a>::read_from(packet)?;
         // TODO: Does this check really needed?
-        anyhow::ensure!(offset == data.len(), "data not fully read");
+        anyhow::ensure!(packet.is_empty(), "data not fully read");
 
         let Some(top_queue_diff) = state.header.queue_diffs.first() else {
             // NOTE: It is also checked by the TL

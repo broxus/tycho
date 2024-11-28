@@ -144,13 +144,13 @@ impl QueueDiffStuff {
     }
 
     pub fn deserialize(block_id: &BlockId, data: &[u8]) -> Result<Self> {
-        let mut offset = 0;
-        let mut diff = QueueDiff::read_from(data, &mut offset)?;
+        let packet = &mut std::convert::identity(data);
+        let mut diff = QueueDiff::read_from(packet)?;
         anyhow::ensure!(
             block_id.shard == diff.shard_ident && block_id.seqno == diff.seqno,
             "short block id mismatch"
         );
-        anyhow::ensure!(offset == data.len(), "unexpected data after the diff");
+        anyhow::ensure!(packet.is_empty(), "unexpected data after the diff");
 
         diff.hash = QueueDiff::compute_hash(data);
 

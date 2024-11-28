@@ -76,12 +76,10 @@ impl TlWrite for PointByIdResponse<Point> {
 impl<'a> TlRead<'a> for PointByIdResponse<Point> {
     type Repr = tl_proto::Boxed;
 
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
-        let id = u32::read_from(packet, offset)?;
+    fn read_from(packet: &mut &'a [u8]) -> TlResult<Self> {
+        let id = u32::read_from(packet)?;
         match id {
-            Self::DEFINED_TL_ID => Ok(PointByIdResponse::Defined(Point::read_from(
-                packet, offset,
-            )?)),
+            Self::DEFINED_TL_ID => Ok(PointByIdResponse::Defined(Point::read_from(packet)?)),
             Self::DEFINED_NONE_TL_ID => Ok(PointByIdResponse::DefinedNone),
             Self::TRY_LATER_TL_ID => Ok(PointByIdResponse::TryLater),
             _ => Err(TlError::InvalidData),

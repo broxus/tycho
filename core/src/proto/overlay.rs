@@ -59,10 +59,10 @@ where
     type Repr = T::Repr;
 
     #[inline(always)]
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> TlResult<Self> {
-        Ok(match u32::read_from(packet, offset)? {
-            Self::OK_ID => Response::Ok(T::read_from(packet, offset)?),
-            Self::ERR_ID => Response::Err(u32::read_from(packet, offset)?),
+    fn read_from(packet: &mut &'a [u8]) -> TlResult<Self> {
+        Ok(match u32::read_from(packet)? {
+            Self::OK_ID => Response::Ok(T::read_from(packet)?),
+            Self::ERR_ID => Response::Err(u32::read_from(packet)?),
             _ => return Err(TlError::UnknownConstructor),
         })
     }

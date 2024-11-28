@@ -36,8 +36,8 @@ impl<'a> TlRead<'a> for &'a OverlayId {
     type Repr = tl_proto::Boxed;
 
     #[inline]
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
-        <_>::read_from(packet, offset).map(OverlayId::wrap)
+    fn read_from(packet: &mut &'a [u8]) -> tl_proto::TlResult<Self> {
+        <_>::read_from(packet).map(OverlayId::wrap)
     }
 }
 
