@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::Rng;
 use tokio::sync::Notify;
+use tycho_util::FastHashSet;
 
 use crate::overlay_client::neighbour::Neighbour;
 #[derive(Clone)]
@@ -20,7 +22,7 @@ impl Neighbours {
         Self {
             inner: Arc::new(Inner {
                 max_neighbours,
-                entries: Mutex::new(entries),
+                entries: ArcSwap::new(Arc::new(entries)),
                 selection_index: Mutex::new(selection_index),
                 changed: Notify::new(),
             }),
@@ -31,7 +33,7 @@ impl Neighbours {
         loop {
             let changed = self.inner.changed.notified();
 
-            if self.inner.entries.lock().len() >= count {
+            if self.inner.entries.load().len() >= count {
                 break;
             }
 
@@ -53,14 +55,43 @@ impl Neighbours {
         selection_index.choose_multiple(&mut rand::thread_rng(), n)
     }
 
-    pub fn update_selection_index(&self) {
-        let reliable_entries = {
-            let mut guard = self.inner.entries.lock();
-            guard.retain(|x| x.is_reliable());
-            guard.to_vec()
-        };
+    /// Tries to apply neighbours score to selection index.
+    /// Returns `true` if new values were stored. Did nothing otherwise.
+    pub fn try_apply_score(&self, now: u32) -> bool {
+        let entires_arc = self.inner.entries.load_full();
+
+        let mut entries = entires_arc.as_ref().clone();
+        let mut entries_changed = false;
+        entries.retain(|x| {
+            let retain = x.is_reliable() && x.expires_at_secs() > now;
+            entries_changed |= !retain;
+            retain
+        });
+        let new_entries_arc = Arc::new(entries);
+
         let mut lock = self.inner.selection_index.lock();
-        lock.update(&reliable_entries);
+
+        {
+            let prev_entires_arc = self
+                .inner
+                .entries
+                .compare_and_swap(&entires_arc, new_entries_arc.clone());
+
+            if !Arc::ptr_eq(&prev_entires_arc, &entires_arc) {
+                // Entires were already changed, we must not overwrite the index
+                return false;
+            }
+        }
+
+        // Recompute distribution
+        lock.update(new_entries_arc.as_ref());
+
+        if entries_changed {
+            // Notify waiters if some peers were removed
+            self.inner.changed.notify_waiters();
+        }
+
+        true
     }
 
     pub fn get_sorted_neighbours(&self) -> Vec<(Neighbour, u32)> {
@@ -71,68 +102,74 @@ impl Neighbours {
         index.indices_with_weights.clone()
     }
 
-    pub fn get_active_neighbours(&self) -> Vec<Neighbour> {
-        self.inner.entries.lock().clone()
+    pub fn get_active_neighbours(&self) -> Arc<Vec<Neighbour>> {
+        self.inner.entries.load_full()
     }
 
     pub fn update(&self, new: Vec<Neighbour>) {
         let now = tycho_util::time::now_sec();
 
-        let mut changed = false;
+        let mut new_peer_ids = new
+            .iter()
+            .map(|neighbour| *neighbour.peer_id())
+            .collect::<FastHashSet<_>>();
 
-        let mut guard = self.inner.entries.lock();
-        // remove unreliable and expired neighbours
-        guard.retain(|x| {
+        let mut entries = self.inner.entries.load().as_slice().to_vec();
+
+        // Remove unreliable and expired neighbours.
+        let mut changed = false;
+        entries.retain(|x| {
+            // Remove the existing peer from the `new_peers` list to prevent it
+            // from appearing in the same list again (especially if it was unreliable).
+            new_peer_ids.remove(x.peer_id());
+
             let retain = x.is_reliable() && x.expires_at_secs() > now;
             changed |= !retain;
             retain
         });
 
-        // if all neighbours are reliable and valid then remove the worst
-        if guard.len() >= self.inner.max_neighbours {
-            if let Some(worst) = guard
+        // If all neighbours are reliable and valid then remove the worst
+        if entries.len() >= self.inner.max_neighbours {
+            if let Some((worst_index, _)) = entries
                 .iter()
-                .min_by(|l, r| l.get_stats().score.cmp(&r.get_stats().score))
+                .enumerate()
+                .min_by(|(_, l), (_, r)| l.cmp_score(r))
             {
-                if let Some(index) = guard.iter().position(|x| x.peer_id() == worst.peer_id()) {
-                    guard.remove(index);
-                    changed = true;
-                }
-            }
-        }
-
-        for n in new {
-            if guard.iter().any(|x| x.peer_id() == n.peer_id()) {
-                continue;
-            }
-            if guard.len() < self.inner.max_neighbours {
-                guard.push(n);
+                entries.swap_remove(worst_index);
                 changed = true;
             }
         }
 
-        drop(guard);
-        self.update_selection_index();
+        for neighbour in new {
+            if entries.len() >= self.inner.max_neighbours {
+                break;
+            }
+            if !new_peer_ids.contains(neighbour.peer_id()) {
+                continue;
+            }
+
+            entries.push(neighbour);
+            changed = true;
+        }
+
+        let new_entries_arc = Arc::new(entries);
+        let mut lock = self.inner.selection_index.lock();
+
+        // Overwrite current entries
+        self.inner.entries.store(new_entries_arc.clone());
+        // Recompute distribution
+        lock.update(new_entries_arc.as_ref());
 
         if changed {
+            // Notify waiter if some peers were added or removed
             self.inner.changed.notify_waiters();
         }
-    }
-
-    pub async fn remove_outdated_neighbours(&self) {
-        let now = tycho_util::time::now_sec();
-
-        let mut guard = self.inner.entries.lock();
-        // remove unreliable and expired neighbours
-        guard.retain(|x| x.expires_at_secs() > now);
-        drop(guard);
-        self.update_selection_index();
     }
 }
 
 struct Inner {
     max_neighbours: usize,
-    entries: Mutex<Vec<Neighbour>>,
+    entries: ArcSwap<Vec<Neighbour>>,
     selection_index: Mutex<SelectionIndex>,
     changed: Notify,
 }

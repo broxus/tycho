@@ -67,7 +67,7 @@ pub async fn test() {
                 n.track_request(&Duration::from_millis(200), false);
             }
 
-            neighbours.update_selection_index();
+            neighbours.try_apply_score(0);
         }
         i += 1;
     }
@@ -86,7 +86,7 @@ pub async fn test() {
 
     let active = neighbours.get_active_neighbours();
     println!("active neighbours {}", active.len());
-    for i in active {
+    for i in active.iter() {
         println!("peer {} score {}", i.peer_id(), i.get_stats().score);
     }
 }

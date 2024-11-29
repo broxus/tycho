@@ -28,6 +28,12 @@ pub struct NeighborsConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub ping_interval: Duration,
 
+    /// The interval at which neighbours score is applied to selection index.
+    ///
+    /// Default: 10 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub apply_score_interval: Duration,
+
     /// The maximum number of neighbours to keep.
     ///
     /// Default: 5.
@@ -60,6 +66,7 @@ impl Default for NeighborsConfig {
         Self {
             update_interval: Duration::from_secs(2 * 60),
             ping_interval: Duration::from_secs(30),
+            apply_score_interval: Duration::from_secs(10),
             keep: 5,
             max_ping_tasks: 5,
             default_roundtrip: Duration::from_millis(300),

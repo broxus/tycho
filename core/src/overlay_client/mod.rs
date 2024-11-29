@@ -57,6 +57,7 @@ impl PublicOverlayClient {
             validators_resolver: subscriber,
             ping_task: None,
             update_task: None,
+            score_task: None,
             cleanup_task: None,
         };
 
@@ -64,6 +65,7 @@ impl PublicOverlayClient {
         // NOTE: Clone does not clone the tasks
         res.ping_task = Some(tokio::spawn(res.clone().ping_neighbours_task()).abort_handle());
         res.update_task = Some(tokio::spawn(res.clone().update_neighbours_task()).abort_handle());
+        res.score_task = Some(tokio::spawn(res.clone().apply_score_task()).abort_handle());
         res.cleanup_task = Some(tokio::spawn(res.clone().cleanup_neighbours_task()).abort_handle());
 
         Self {
@@ -171,6 +173,7 @@ struct Inner {
 
     ping_task: Option<AbortHandle>,
     update_task: Option<AbortHandle>,
+    score_task: Option<AbortHandle>,
     cleanup_task: Option<AbortHandle>,
 }
 
@@ -184,6 +187,7 @@ impl Clone for Inner {
             validators_resolver: self.validators_resolver.clone(),
             ping_task: None,
             update_task: None,
+            score_task: None,
             cleanup_task: None,
         }
     }
@@ -264,10 +268,29 @@ impl Inner {
         }
     }
 
+    async fn apply_score_task(self) {
+        let mut interval = tokio::time::interval(self.config.neighbors.apply_score_interval);
+
+        loop {
+            interval.tick().await;
+
+            let now = tycho_util::time::now_sec();
+            let applied = self.neighbours.try_apply_score(now);
+            tracing::debug!(now, applied, "tried to apply neighbours score");
+        }
+    }
+
     async fn cleanup_neighbours_task(self) {
         loop {
             self.overlay.entries_removed().notified().await;
-            self.neighbours.remove_outdated_neighbours().await;
+
+            let now = tycho_util::time::now_sec();
+            let applied = self.neighbours.try_apply_score(now);
+            tracing::debug!(
+                now,
+                applied,
+                "tried to apply neighbours score after some overlay entry was removed"
+            );
         }
     }
 
