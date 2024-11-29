@@ -139,10 +139,7 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
     }
 
     fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, QueueKey>) -> Result<()> {
-        let ranges = ranges
-            .iter()
-            .map(|(shard, key)| (*shard, *key))
-            .collect::<FastHashMap<_, _>>();
+        let ranges = ranges.iter().map(|(shard, key)| (*shard, *key)).collect();
         self.storage.internal_queue_storage().commit(ranges)
     }
 

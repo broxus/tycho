@@ -130,7 +130,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         // fill processed_upto
         for (shard_id, message_key) in self.last_processed_message.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
-            diff.processed_upto.insert(*shard_id, *message_key);
+            diff.processed_to.insert(*shard_id, *message_key);
         }
 
         // move new messages
@@ -162,7 +162,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
 
         for (shard_id, message_key) in self.last_processed_message.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
-            diff.processed_upto.insert(*shard_id, *message_key);
+            diff.processed_to.insert(*shard_id, *message_key);
         }
 
         diff.messages = self.new_messages.clone();
