@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,7 +98,7 @@ impl Phase<FinalizeState> {
         )
         .with_processed_upto(
             diff_with_messages
-                .processed_upto
+                .processed_to
                 .iter()
                 .map(|(k, v)| (*k, v.lt, &v.hash)),
         )
@@ -109,7 +109,7 @@ impl Phase<FinalizeState> {
         )
         .serialize();
 
-        let processed_upto = diff_with_messages.processed_upto.clone();
+        let diff_processed_to = diff_with_messages.processed_to.clone();
 
         let queue_diff_hash = *queue_diff.hash();
         tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
@@ -146,7 +146,7 @@ impl Phase<FinalizeState> {
                 has_unprocessed_messages,
                 diff_messages_len,
                 create_queue_diff_elapsed,
-                processed_upto,
+                processed_to: diff_processed_to,
             },
             update_queue_task,
         ))
@@ -175,13 +175,16 @@ impl Phase<FinalizeState> {
             .finalize
             .clone();
 
-        let mut processed_upto = FastHashMap::default();
-
-        for (shard_ident, processed_upto_stuff) in
-            &self.state.collation_data.processed_upto.internals
-        {
-            processed_upto.insert(*shard_ident, processed_upto_stuff.processed_to_msg);
-        }
+        let processed_to = self
+            .state
+            .collation_data
+            .processed_upto
+            .internals
+            .iter()
+            .map(|(shard_ident, processed_upto_stuff)| {
+                (*shard_ident, processed_upto_stuff.processed_to_msg)
+            })
+            .collect();
 
         let shard = self.state.collation_data.block_id_short.shard;
 
@@ -590,7 +593,7 @@ impl Phase<FinalizeState> {
                     self.state.collation_data.processed_upto.externals.as_ref(),
                 );
 
-                let mut shards_processed_upto = HashMap::default();
+                let mut shards_processed_to = FastHashMap::default();
 
                 for (shard_id, shard_data) in shards.iter() {
                     if !shard_data.top_sc_block_updated {
@@ -598,25 +601,23 @@ impl Phase<FinalizeState> {
                     }
 
                     // Extract processed information for updated shards
-                    let processed_upto = self
+                    let shard_processed_to = self
                         .state
                         .collation_data
                         .top_shard_blocks
                         .iter()
                         .find(|top_block_info| top_block_info.block_id.shard == *shard_id)
-                        .map(|top_block_info| {
-                            FastHashMap::from(top_block_info.processed_upto.clone())
-                        })
+                        .map(|top_block_info| top_block_info.processed_to.clone())
                         .or_else(|| {
                             self.state
                                 .mc_data
-                                .shards_processed_upto
+                                .shards_processed_to
                                 .get(shard_id)
                                 .cloned()
                         });
 
-                    if let Some(processed_upto) = processed_upto {
-                        shards_processed_upto.insert(*shard_id, processed_upto);
+                    if let Some(value) = shard_processed_to {
+                        shards_processed_to.insert(*shard_id, value);
                     }
                 }
 
@@ -639,7 +640,7 @@ impl Phase<FinalizeState> {
                     processed_upto: self.state.collation_data.processed_upto.clone(),
                     top_processed_to_anchor,
                     ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
-                    shards_processed_upto,
+                    shards_processed_to,
                 }))
             }
         };
@@ -671,7 +672,7 @@ impl Phase<FinalizeState> {
                 || self.state.mc_data.consensus_info,
                 |mcd| mcd.consensus_info,
             ),
-            processed_upto,
+            processed_to,
         });
 
         let total_elapsed = histogram.finish();

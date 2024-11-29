@@ -433,7 +433,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
 
     let diff_with_messages = QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msg)?;
 
-    assert_eq!(diff_with_messages.processed_upto, diff.processed_upto,);
+    assert_eq!(diff_with_messages.processed_to, diff.processed_upto,);
 
     assert_eq!(
         diff_with_messages
