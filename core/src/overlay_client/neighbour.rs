@@ -46,6 +46,12 @@ impl Neighbour {
         }
     }
 
+    pub fn cmp_score(&self, other: &Neighbour) -> std::cmp::Ordering {
+        let own_stats = self.inner.stats.read().score;
+        let other_stats = other.inner.stats.read().score;
+        own_stats.cmp(&other_stats)
+    }
+
     pub fn is_reliable(&self) -> bool {
         self.inner.stats.read().higher_than_threshold()
     }
