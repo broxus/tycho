@@ -190,10 +190,8 @@ impl CmdRun {
             }
 
             // Sleep with the requested interval
-            if interval > 0 {
-                interval = std::cmp::max(interval, 10);
-                tokio::time::sleep(Duration::from_secs(interval as u64)).await;
-            }
+            interval = std::cmp::max(interval, 10);
+            tokio::time::sleep(Duration::from_secs(interval as u64)).await;
 
             // Create a client
             let client = f.create().await?;
