@@ -1371,7 +1371,7 @@ where
 
                 // reset top shard blocks info
                 // because next we will start to collate new shard blocks after the sync
-                self.blocks_cache.reset_top_shard_blocks_additional_info()?;
+                self.blocks_cache.reset_top_shard_blocks_additional_info();
 
                 let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
                 let top_processed_to_anchor = mc_data.top_processed_to_anchor;

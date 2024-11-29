@@ -1242,8 +1242,6 @@ impl CollatorStdImpl {
             .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
             .set(collation_data.block_id_short.seqno);
-        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
-            .set(collation_data.block_id_short.seqno);
         metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
             .set(collation_data.diff_tail_len);
     }
