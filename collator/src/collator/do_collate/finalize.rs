@@ -334,7 +334,7 @@ impl Phase<FinalizeState> {
 
         // build block info
         let mut new_block_info = BlockInfo {
-            version: 0,
+            version: 1,
             key_block: matches!(&mc_state_extra, Some(extra) if extra.after_key_block),
             shard: self.state.collation_data.block_id_short.shard,
             seqno: self.state.collation_data.block_id_short.seqno,

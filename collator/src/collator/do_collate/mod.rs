@@ -304,7 +304,7 @@ impl CollatorStdImpl {
             // Iterate through shards for non-masterchain
             for (iter_shard_ident, shard_processed_upto) in &mc_data.shards_processed_upto {
                 let processed_upto = if iter_shard_ident == &shard_id {
-                    current_processed_upto.clone()
+                    current_processed_upto
                 } else {
                     shard_processed_upto.get(&shard_id).cloned()
                 };
