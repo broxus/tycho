@@ -113,7 +113,7 @@ impl CmdRun {
             .await
             .context("failed to init mempool")?;
 
-        anchor_consumer.top_known_anchor().set_max_raw(
+        anchor_consumer.top_known_anchor.set_max_raw(
             self.top_known_anchor
                 .unwrap_or_default()
                 .unwrap_or_default(),
@@ -253,11 +253,11 @@ impl Mempool {
             &self.overlay_service,
             &MempoolAdapterStore::new(
                 self.storage.mempool_storage().clone(),
-                anchor_consumer.commit_round().clone(),
+                anchor_consumer.commit_round.clone(),
             ),
             input_buffer,
             committed_tx,
-            anchor_consumer.top_known_anchor(),
+            &anchor_consumer.top_known_anchor,
             &self.config_builder.build()?,
         );
 

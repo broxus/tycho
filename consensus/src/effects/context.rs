@@ -155,16 +155,18 @@ impl ValidateCtx {
         T: Ctx,
         &'a T: Into<RoundCtx>,
     {
+        let round_ctx = parent.into();
+        let span = round_ctx.span().in_scope(|| {
+            tracing::error_span!(
+                "validate",
+                author = display(info.data().author.alt()),
+                round = info.round().0,
+                digest = display(info.digest().alt()),
+            )
+        });
         Self(Arc::new(ValidateCtxInner {
-            parent: parent.into(),
-            span: parent.span().in_scope(|| {
-                tracing::error_span!(
-                    "validate",
-                    author = display(info.data().author.alt()),
-                    round = info.round().0,
-                    digest = display(info.digest().alt()),
-                )
-            }),
+            parent: round_ctx,
+            span,
         }))
     }
 }
