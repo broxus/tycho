@@ -1419,21 +1419,16 @@ where
                 Some(processed_to) => processed_to,
                 None => {
                     // try get from storage
-                    let loaded = utils::load_only_queue_diff_stuff(
+                    utils::load_only_queue_diff_stuff(
                         self.state_node_adapter.as_ref(),
                         &top_block_id,
                     )
-                    .await?;
-
-                    let loaded = loaded.as_ref().processed_upto.clone();
-
-                    let mut processed_to = FastHashMap::default();
-
-                    for (shard_id, to_key) in loaded {
-                        processed_to.insert(shard_id, to_key);
-                    }
-
-                    processed_to
+                    .await?
+                    .as_ref()
+                    .processed_upto
+                    .clone()
+                    .into_iter()
+                    .collect()
                 }
             };
 
