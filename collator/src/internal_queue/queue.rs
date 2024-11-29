@@ -118,7 +118,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 }
 
 struct ShortQueueDiff {
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
     pub end_key: QueueKey,
     pub hash: HashBytes,
 }
@@ -131,7 +131,6 @@ where
 {
     session_state: Arc<S>,
     persistent_state: Arc<P>,
-    // diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
     session_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
     persistent_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
     gc: GcManager,
@@ -206,7 +205,7 @@ where
         }
 
         let short_diff = ShortQueueDiff {
-            processed_upto: diff.processed_upto,
+            processed_to: diff.processed_to,
             end_key,
             hash: *hash,
         };
@@ -238,15 +237,15 @@ where
                             *current_last_key = shard_diff.end_key;
                         }
 
-                        // find min processed_upto for each shard for GC
+                        // find min processed_to for each shard for GC
                         if *block_seqno == block_id_short.seqno && *top_shard_block_changed {
-                            for processed_upto in shard_diff.processed_upto.iter() {
+                            for (shard_ident, processed_to_key) in shard_diff.processed_to.iter() {
                                 let last_key = gc_ranges
-                                    .entry(*processed_upto.0)
-                                    .or_insert_with(|| *processed_upto.1);
+                                    .entry(*shard_ident)
+                                    .or_insert_with(|| *processed_to_key);
 
-                                if processed_upto.1 < last_key {
-                                    *last_key = *processed_upto.1;
+                                if processed_to_key < last_key {
+                                    *last_key = *processed_to_key;
                                 }
                             }
                         }
@@ -295,6 +294,7 @@ where
             .persistent_diffs
             .get(shard_ident)
             .map_or(0, |diffs| diffs.len());
+
         session_count + persistent_count
     }
 

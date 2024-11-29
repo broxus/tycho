@@ -109,7 +109,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
-        let processed_upto = diff.processed_upto.clone();
+        let processed_upto = diff.processed_to.clone();
         self.queue.apply_diff(diff, block_id_short, hash, end_key)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,

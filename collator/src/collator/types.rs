@@ -1292,7 +1292,7 @@ pub struct UpdateQueueDiffResult {
     pub has_unprocessed_messages: bool,
     pub diff_messages_len: usize,
     pub create_queue_diff_elapsed: Duration,
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
 }
 
 pub struct FinalizedCollationResult {
