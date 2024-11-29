@@ -92,11 +92,10 @@ impl BlocksCache {
         Ok(consensus_info)
     }
 
-    pub fn reset_top_shard_blocks_additional_info(&self) -> Result<()> {
+    pub fn reset_top_shard_blocks_additional_info(&self) {
         for mut shard_cache in self.shards.iter_mut() {
-            shard_cache.data.reset_top_shard_block_additional_info()?;
+            shard_cache.data.reset_top_shard_block_additional_info();
         }
-        Ok(())
     }
 
     /// Find shard block in cache and then get containing master block id if link exists
@@ -874,7 +873,6 @@ impl BlocksCacheData for MasterBlocksCacheData {
     type NewCollated = ();
     type NewReceived = ();
 
-    // TODO !!! remove result
     fn on_update_collated(&mut self, candidate: &BlockCandidate) -> Result<()> {
         self.update_last_collated_block_id(candidate.block.id());
         Ok(())
@@ -921,14 +919,12 @@ impl ShardBlocksCacheData {
         Ok(())
     }
 
-    fn reset_top_shard_block_additional_info(&mut self) -> Result<()> {
+    fn reset_top_shard_block_additional_info(&mut self) {
         self.value_flow = Default::default();
         self.proof_funds = Default::default();
 
         #[cfg(feature = "block-creator-stats")]
         self.creators.clear();
-
-        Ok(())
     }
 }
 
