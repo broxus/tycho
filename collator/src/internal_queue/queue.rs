@@ -109,7 +109,8 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
         QueueImpl {
             session_state: Arc::new(session_state),
             persistent_state,
-            diffs: Default::default(),
+            session_diffs: Default::default(),
+            persistent_diffs: Default::default(),
             gc,
             _phantom_data: Default::default(),
         }
@@ -121,6 +122,7 @@ struct ShortQueueDiff {
     pub end_key: QueueKey,
     pub hash: HashBytes,
 }
+
 pub struct QueueImpl<S, P, V>
 where
     S: SessionState<V>,
@@ -129,7 +131,9 @@ where
 {
     session_state: Arc<S>,
     persistent_state: Arc<P>,
-    diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
+    // diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
+    session_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
+    persistent_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
     gc: GcManager,
     _phantom_data: PhantomData<V>,
 }
@@ -162,7 +166,7 @@ where
         end_key: QueueKey,
     ) -> Result<()> {
         // Get or insert the shard diffs for the given block_id_short.shard
-        let mut shard_diffs = self.diffs.entry(block_id_short.shard).or_default();
+        let mut shard_diffs = self.session_diffs.entry(block_id_short.shard).or_default();
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = shard_diffs.get(&block_id_short.seqno);
@@ -177,7 +181,7 @@ where
             }
         }
 
-        let last_applied_seqno = shard_diffs.last_key_value().map(|(key, _)| *key);
+        let last_applied_seqno = shard_diffs.keys().next_back().cloned();
 
         if let Some(last_applied_seqno) = last_applied_seqno {
             // Check if the diff is already applied
@@ -214,18 +218,17 @@ where
     }
 
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
-        let mut diffs_for_commit = vec![];
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();
 
         for (block_id_short, top_shard_block_changed) in mc_top_blocks {
-            let prev_shard_diffs = self.diffs.get_mut(&block_id_short.shard);
+            let mut diffs_to_commit = vec![];
 
-            if let Some(shard_diffs) = prev_shard_diffs {
-                shard_diffs
-                    .range(..=block_id_short.seqno)
-                    .for_each(|(block_seqno, shard_diff)| {
-                        diffs_for_commit.push(*block_id_short);
+            let prev_shard_session_diffs = self.session_diffs.get_mut(&block_id_short.shard);
+            if let Some(mut shard_session_diffs) = prev_shard_session_diffs {
+                shard_session_diffs.range(..=block_id_short.seqno).for_each(
+                    |(block_seqno, shard_diff)| {
+                        diffs_to_commit.push(*block_seqno);
 
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
@@ -247,13 +250,27 @@ where
                                 }
                             }
                         }
-                    });
+                    },
+                );
+
+                for seqno in diffs_to_commit {
+                    if let Some(diff) = shard_session_diffs.remove(&seqno) {
+                        // Move the diff to persistent_diffs
+                        let mut shard_persistent_diffs = self
+                            .persistent_diffs
+                            .entry(block_id_short.shard)
+                            .or_default();
+                        shard_persistent_diffs.insert(seqno, diff);
+                    }
+                }
             }
         }
 
         self.session_state.commit_messages(&shards_to_commit)?;
 
-        let uncommitted_diffs_count: usize = self.diffs.iter().map(|r| r.value().len()).sum();
+        let uncommitted_diffs_count: usize =
+            self.session_diffs.iter().map(|r| r.value().len()).sum();
+
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
 
@@ -265,17 +282,29 @@ where
     }
 
     fn clear_session_state(&self) -> Result<()> {
+        self.session_diffs.clear();
         self.session_state.truncate()
     }
 
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
-        self.diffs.get(shard_ident).map_or(0, |diffs| diffs.len())
+        let session_count = self
+            .session_diffs
+            .get(shard_ident)
+            .map_or(0, |diffs| diffs.len());
+        let persistent_count = self
+            .persistent_diffs
+            .get(shard_ident)
+            .map_or(0, |diffs| diffs.len());
+        session_count + persistent_count
     }
 
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
-        let shard_diffs = self.diffs.get_mut(source_shard);
-
-        if let Some(mut shard_diffs) = shard_diffs {
+        if let Some(mut shard_diffs) = self.session_diffs.get_mut(source_shard) {
+            shard_diffs
+                .value_mut()
+                .retain(|_, diff| &diff.end_key > inclusive_until);
+        }
+        if let Some(mut shard_diffs) = self.persistent_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
                 .retain(|_, diff| &diff.end_key > inclusive_until);

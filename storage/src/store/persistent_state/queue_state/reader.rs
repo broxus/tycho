@@ -30,7 +30,10 @@ impl<'a> QueueStateReader<'a> {
             "top queue diff hash mismatch"
         );
 
-        // TODO: Check `queue_diffs` length (https://github.com/broxus/tycho/issues/358)
+        anyhow::ensure!(
+            state.header.queue_diffs.len() == top_update.tail_len as usize,
+            "queue diffs count mismatch"
+        );
 
         Ok(Self {
             state,
