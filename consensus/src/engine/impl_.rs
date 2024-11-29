@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, mem};
 
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt, StreamExt};
 use itertools::Itertools;
@@ -362,73 +362,92 @@ impl Engine {
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
+        let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
             let mut ready_committer = take_committer(&mut self.committer_run);
 
-            let (current_round, round_ctx) = {
-                let top_round = self.dag.top().round();
+            {
+                let old_dag_top_round = self.dag.top().round();
 
-                let current_round = if let Some(start_point) = &start_point {
+                let consensus_round = if let Some(start_point) = &start_point {
                     assert!(
-                        start_point.round() == top_round || start_point.round() == top_round.prev(),
-                        "can repeat broadcast only from last two dag rounds, top {top_round:?}, {:?}",
+                        start_point.round() == old_dag_top_round
+                            || start_point.round() == old_dag_top_round.prev(),
+                        "can repeat broadcast only from last two dag rounds, \
+                         top {old_dag_top_round:?}, {:?}",
                         start_point.id().alt()
                     );
                     start_point.round()
                 } else {
                     // do not repeat the `get()` - it can give non-reproducible result
-                    let current_round = self.consensus_round.get();
+                    let consensus_round = self.consensus_round.get();
                     assert!(
-                        current_round >= top_round,
-                        "consensus round {} cannot be less than top dag round {}",
-                        current_round.0,
-                        top_round.0,
+                        old_dag_top_round <= consensus_round,
+                        "consensus round {} cannot be less than old top dag round {}",
+                        consensus_round.0,
+                        old_dag_top_round.0,
                     );
-                    current_round
+                    consensus_round
                 };
 
-                metrics::gauge!("tycho_mempool_engine_rounds_skipped")
-                    .increment(current_round - top_round);
+                match collator_feedback(
+                    self.round_task.state.top_known_anchor.receiver(),
+                    old_dag_top_round,
+                    &mut is_paused,
+                    &self.committed_info_tx,
+                    &round_ctx,
+                ) {
+                    Ok(pause_at) => {
+                        *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+                            consensus_round.next().min(pause_at),
+                            ready_committer.as_mut(),
+                            &self.round_task.state.peer_schedule,
+                        ));
+                    }
+                    Err(collator_sync) => {
+                        collator_sync.await;
+                        if let Some(committer) = ready_committer {
+                            self.committer_run = committer_task(
+                                committer,
+                                full_history_bottom.take(),
+                                self.committed_info_tx.clone(),
+                                round_ctx.clone(),
+                            );
+                        }
+                        continue;
+                    }
+                }
 
-                metrics::gauge!("tycho_mempool_engine_current_round").set(current_round.0);
+                let dag_top_round = self.dag.top().round();
 
-                let round_ctx = if current_round == top_round {
-                    RoundCtx::new(&self.ctx, current_round)
-                } else {
-                    self.ctx = EngineCtx::new(current_round);
-                    RoundCtx::new(&self.ctx, current_round)
-                };
-                (current_round, round_ctx)
+                assert!(
+                    dag_top_round <= consensus_round.next(),
+                    "new dag round {} cannot be grater than next consensus round {}",
+                    dag_top_round.0,
+                    consensus_round.0,
+                );
+
+                metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
+                    .increment(consensus_round - dag_top_round);
+
+                assert!(
+                    old_dag_top_round < dag_top_round,
+                    "new dag round {} must be grater than old one {}",
+                    dag_top_round.0,
+                    old_dag_top_round.0,
+                );
+
+                if old_dag_top_round < dag_top_round.prev() {
+                    self.ctx = EngineCtx::new(dag_top_round);
+                }
+                round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
             };
 
-            if let Some(collator_sync) = wait_collator(
-                self.round_task.state.top_known_anchor.receiver(),
-                current_round,
-                &mut is_paused,
-                &self.committed_info_tx,
-                &round_ctx,
-            ) {
-                collator_sync.await;
-                if let Some(committer) = ready_committer {
-                    self.committer_run = committer_task(
-                        committer,
-                        full_history_bottom.take(),
-                        self.committed_info_tx.clone(),
-                        round_ctx.clone(),
-                    );
-                }
-                continue;
-            }
-
-            *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
-                current_round.next(),
-                ready_committer.as_mut(),
-                &self.round_task.state.peer_schedule,
-            ));
-
             let head = self.dag.head(&self.round_task.state.peer_schedule);
+
+            metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
             let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry);
 
@@ -466,19 +485,19 @@ impl Engine {
     }
 }
 
-fn wait_collator(
+fn collator_feedback(
     mut top_known_anchor_recv: RoundWatcher<TopKnownAnchor>,
-    current_round: Round,
+    old_dag_top_round: Round,
     is_paused: &mut bool,
     committed_info_tx: &mpsc::UnboundedSender<MempoolOutput>,
     round_ctx: &RoundCtx,
-) -> Option<impl Future<Output = ()>> {
+) -> Result<Round, BoxFuture<'static, ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
     let pause_at = top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
     // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
     //  (the next after next engine round), while vset switch round is exactly pause bound + 1
-    if current_round >= pause_at {
+    if old_dag_top_round >= pause_at {
         if !*is_paused {
             tracing::info!(
                 parent: round_ctx.span(),
@@ -496,7 +515,7 @@ fn wait_collator(
                 //  exit if ready to produce point: collator synced enough
                 let pause_at =
                     top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
-                let exit = current_round < pause_at;
+                let exit = old_dag_top_round < pause_at;
                 tracing::debug!(
                     top_known_anchor = top_known_anchor.0,
                     pause_at = pause_at.0,
@@ -512,9 +531,10 @@ fn wait_collator(
             Duration::from_millis(CachedConfig::get().consensus.broadcast_retry_millis as _),
             collator_sync.instrument(round_ctx.span().clone()),
         )
-        .map(|_| ());
+        .map(|_| ())
+        .boxed();
 
-        Some(task)
+        Err(task)
     } else if *is_paused {
         tracing::info!(
             parent: round_ctx.span(),
@@ -524,9 +544,9 @@ fn wait_collator(
         );
         *is_paused = false;
         committed_info_tx.send(MempoolOutput::Running).ok();
-        None
+        Ok(pause_at)
     } else {
-        None
+        Ok(pause_at)
     }
 }
 
@@ -607,6 +627,8 @@ fn committer_task(
                     .expect("Failed to send anchor history info to mpsc channel");
             }
         }
+
+        metrics::gauge!("tycho_mempool_rounds_dag_length").set(committer.dag_len() as u32);
 
         committer
     })

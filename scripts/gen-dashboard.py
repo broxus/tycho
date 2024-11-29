@@ -1678,9 +1678,9 @@ def mempool_engine() -> RowPanel:
     metrics = [
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_engine_rounds_skipped", range_selector="$__interval"
+                "tycho_mempool_rounds_dag_behind_consensus", range_selector="$__interval"
             ),
-            "Engine: skipped rounds (total at moment)",
+            "Dag: rounds behind consensus",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_round_time",

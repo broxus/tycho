@@ -61,7 +61,7 @@ impl Cli {
         check_parking_lot();
 
         let anchor_consumer = AnchorConsumer::default();
-        let common_anchor_count = anchor_consumer.common_anchor_count().clone();
+        let common_anchor_count = anchor_consumer.common_anchor_count.clone();
         let run_guard = RunGuard::default();
 
         heart_beat(self.duration, common_anchor_count, run_guard.clone());
@@ -124,8 +124,8 @@ fn make_network(
         let peer_info = peer_info.clone();
         let run_guard = run_guard.clone();
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let top_known_anchor = anchor_consumer.top_known_anchor().clone();
-        let commit_round = anchor_consumer.commit_round().clone();
+        let top_known_anchor = anchor_consumer.top_known_anchor.clone();
+        let commit_round = anchor_consumer.commit_round.clone();
         let mempool_config = mempool_config.clone();
         let started = started.clone();
         anchor_consumer.add(peer_id, committed_rx);

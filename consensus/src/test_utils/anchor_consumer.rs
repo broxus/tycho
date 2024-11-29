@@ -23,26 +23,18 @@ pub struct AnchorConsumer {
     history: FastHashMap<Round, Vec<PointId>>,
     // simulates feedback from collator, as if anchor committed by all peers
     // is immediately confirmed by a top known block
-    top_known_anchor: RoundWatch<TopKnownAnchor>,
+    pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     // Simulates mempool adapter that commits right after collator feedback (may occur in practice
     // if local collation is a bit lagging and the top known block is received from network)
     // Just because it does not require much code and keeps sender alive to avoid panic
-    commit_round: RoundWatch<Commit>,
-    common_anchor_count: Arc<AtomicUsize>,
+    pub commit_round: RoundWatch<Commit>,
+    pub common_anchor_count: Arc<AtomicUsize>,
 }
 
 impl AnchorConsumer {
     pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
-    }
-
-    pub fn top_known_anchor(&self) -> &RoundWatch<TopKnownAnchor> {
-        &self.top_known_anchor
-    }
-
-    pub fn commit_round(&self) -> &RoundWatch<Commit> {
-        &self.commit_round
     }
 
     pub async fn drain(mut self) {
@@ -52,20 +44,14 @@ impl AnchorConsumer {
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
-            match commit_result {
-                MempoolOutput::Running
-                | MempoolOutput::Paused
-                | MempoolOutput::NewStartAfterGap(_) => {}
-                MempoolOutput::NextAnchor(anchor_data) => {
-                    self.top_known_anchor.set_max(anchor_data.anchor.round());
-                    self.commit_round.set_max(anchor_data.anchor.round());
-                }
-            }
+            let round = match commit_result {
+                MempoolOutput::Running | MempoolOutput::Paused => continue,
+                MempoolOutput::NewStartAfterGap(round) => round,
+                MempoolOutput::NextAnchor(anchor_data) => anchor_data.anchor.round(),
+            };
+            self.top_known_anchor.set_max(round);
+            self.commit_round.set_max(round);
         }
-    }
-
-    pub fn common_anchor_count(&self) -> &Arc<AtomicUsize> {
-        &self.common_anchor_count
     }
 
     pub async fn check(mut self) {
