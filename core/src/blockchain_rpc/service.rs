@@ -10,7 +10,6 @@ use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, Se
 use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::tl::BytesLike;
 
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
@@ -405,10 +404,7 @@ impl<B> Inner<B> {
         }
     }
 
-    async fn handle_get_block_full(
-        &self,
-        req: &rpc::GetBlockFull,
-    ) -> overlay::Response<BlockFull<BytesLike<impl AsRef<[u8]>>>> {
+    async fn handle_get_block_full(&self, req: &rpc::GetBlockFull) -> overlay::Response<BlockFull> {
         let label = [("method", "getBlockFull")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -424,7 +420,7 @@ impl<B> Inner<B> {
     async fn handle_get_next_block_full(
         &self,
         req: &rpc::GetNextBlockFull,
-    ) -> overlay::Response<BlockFull<BytesLike<impl AsRef<[u8]>>>> {
+    ) -> overlay::Response<BlockFull> {
         let label = [("method", "getNextBlockFull")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -451,16 +447,15 @@ impl<B> Inner<B> {
         }
     }
 
-    fn handle_get_block_data_chunk(
-        &self,
-        req: &rpc::GetBlockDataChunk,
-    ) -> overlay::Response<Data<BytesLike<impl AsRef<[u8]>>>> {
+    fn handle_get_block_data_chunk(&self, req: &rpc::GetBlockDataChunk) -> overlay::Response<Data> {
         let label = [("method", "getBlockDataChunk")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
         let block_storage = self.storage.block_storage();
         match block_storage.get_block_data_chunk(&req.block_id, req.offset) {
-            Ok(Some(data)) => overlay::Response::Ok(Data { data: data.into() }),
+            Ok(Some(data)) => overlay::Response::Ok(Data {
+                data: Bytes::from_owner(data),
+            }),
             Ok(None) => overlay::Response::Err(NOT_FOUND_ERROR_CODE),
             Err(e) => {
                 tracing::warn!("get_block_data_chunk failed: {e:?}");
@@ -472,7 +467,7 @@ impl<B> Inner<B> {
     async fn handle_get_key_block_proof(
         &self,
         req: &rpc::GetKeyBlockProof,
-    ) -> overlay::Response<KeyBlockProof<BytesLike<impl AsRef<[u8]>>>> {
+    ) -> overlay::Response<KeyBlockProof> {
         let label = [("method", "getKeyBlockProof")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -483,7 +478,9 @@ impl<B> Inner<B> {
             match block_handle_storage.load_handle(&req.block_id) {
                 Some(handle) if handle.has_proof() => {
                     let data = block_storage.load_block_proof_raw(&handle).await?;
-                    Ok::<_, anyhow::Error>(KeyBlockProof::Found { proof: data.into() })
+                    Ok::<_, anyhow::Error>(KeyBlockProof::Found {
+                        proof: Bytes::from_owner(data),
+                    })
                 }
                 _ => Ok(KeyBlockProof::NotFound),
             }
@@ -542,7 +539,7 @@ impl<B> Inner<B> {
     async fn handle_get_archive_chunk(
         &self,
         req: &rpc::GetArchiveChunk,
-    ) -> overlay::Response<Data<BytesLike<impl AsRef<[u8]>>>> {
+    ) -> overlay::Response<Data> {
         let label = [("method", "getArchiveChunk")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
@@ -557,7 +554,9 @@ impl<B> Inner<B> {
         };
 
         match get_archive_chunk().await {
-            Ok(data) => overlay::Response::Ok(Data { data: data.into() }),
+            Ok(data) => overlay::Response::Ok(Data {
+                data: Bytes::from_owner(data),
+            }),
             Err(e) => {
                 tracing::warn!("get_archive_chunk failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
@@ -607,10 +606,7 @@ impl<B> Inner<B> {
 }
 
 impl<B> Inner<B> {
-    async fn get_block_full(
-        &self,
-        block_id: &BlockId,
-    ) -> anyhow::Result<BlockFull<BytesLike<impl AsRef<[u8]>>>> {
+    async fn get_block_full(&self, block_id: &BlockId) -> anyhow::Result<BlockFull> {
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
@@ -636,7 +632,7 @@ impl<B> Inner<B> {
         };
 
         let block = BlockData {
-            data: data.into(),
+            data: Bytes::from_owner(data),
             size: NonZeroU32::new(data_size).expect("shouldn't happen"),
             chunk_size: data_chunk_size,
         };
@@ -649,8 +645,8 @@ impl<B> Inner<B> {
         Ok(BlockFull::Found {
             block_id: *block_id,
             block,
-            proof: proof?.into(),
-            queue_diff: queue_diff?.into(),
+            proof: Bytes::from_owner(proof?),
+            queue_diff: Bytes::from_owner(queue_diff?),
         })
     }
 

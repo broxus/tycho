@@ -14,8 +14,8 @@ pub struct OverlayIdData {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "blockchain.data", scheme = "proto.tl")]
-pub struct Data<T = Bytes> {
-    pub data: T,
+pub struct Data {
+    pub data: Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -28,14 +28,14 @@ pub struct KeyBlockIds {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
-pub enum BlockFull<T = Bytes> {
+pub enum BlockFull {
     #[tl(id = "blockchain.blockFull.found")]
     Found {
         #[tl(with = "tl_block_id")]
         block_id: everscale_types::models::BlockId,
-        block: BlockData<T>,
-        proof: T,
-        queue_diff: T,
+        block: BlockData,
+        proof: Bytes,
+        queue_diff: Bytes,
     },
     #[tl(id = "blockchain.blockFull.notFound")]
     NotFound,
@@ -43,9 +43,9 @@ pub enum BlockFull<T = Bytes> {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
-pub enum KeyBlockProof<T = Bytes> {
+pub enum KeyBlockProof {
     #[tl(id = "blockchain.keyBlockProof.found")]
-    Found { proof: T },
+    Found { proof: Bytes },
     #[tl(id = "blockchain.keyBlockProof.notFound")]
     NotFound,
 }
