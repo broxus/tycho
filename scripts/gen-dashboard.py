@@ -1103,7 +1103,8 @@ def collation_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_collator_anchor_import_skipped_count",
             "Number of anchor import skipped",
-            labels_selectors=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"']
+        ),
         create_gauge_panel(
             "tycho_do_collate_block_diff_tail_len",
             "Diff tail length",
