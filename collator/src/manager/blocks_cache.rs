@@ -44,11 +44,11 @@ impl BlocksCache {
         for mut shard_cache in self.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
-                    let processed_upto = entry
+                    let processed_to = entry
                         .int_processed_to()
                         .iter()
                         .map(|(shard, queue_key)| (*shard, *queue_key))
-                        .collect::<FastHashMap<_, _>>();
+                        .collect();
 
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
@@ -61,7 +61,7 @@ impl BlocksCache {
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
                             #[cfg(feature = "block-creator-stats")]
                             creators: std::mem::take(&mut shard_cache.data.creators),
-                            processed_upto,
+                            processed_to,
                         });
                         break;
                     }
@@ -156,14 +156,11 @@ impl BlocksCache {
                 )
             };
 
-            let mut processed_to = FastHashMap::default();
-
-            mc_block_entry
+            let processed_to = mc_block_entry
                 .int_processed_to()
                 .iter()
-                .for_each(|(shard, queue_key)| {
-                    processed_to.insert(*shard, *queue_key);
-                });
+                .map(|(shard, queue_key)| (*shard, *queue_key))
+                .collect();
 
             updated_top_shard_block_ids = mc_block_entry
                 .top_shard_blocks_info
