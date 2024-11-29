@@ -13,14 +13,14 @@ use super::state::state_iterator::MessageExt;
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
     pub fn new() -> Self {
         Self {
             messages: BTreeMap::new(),
-            processed_upto: BTreeMap::new(),
+            processed_to: BTreeMap::new(),
         }
     }
 }
@@ -31,7 +31,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
         let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
-        let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
+        let processed_to: BTreeMap<ShardIdent, QueueKey> = processed_upto
             .iter()
             .map(|(shard_ident, key)| (*shard_ident, *key))
             .collect();
@@ -51,7 +51,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
 
         Ok(Self {
             messages,
-            processed_upto,
+            processed_to,
         })
     }
 }

@@ -238,7 +238,7 @@ fn gen_stub_working_state(
             },
             top_processed_to_anchor: 0,
             ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
-            shards_processed_upto: Default::default(),
+            shards_processed_to: Default::default(),
         }),
         collation_config: Arc::new(Default::default()),
         wu_used_from_last_anchor: 0,

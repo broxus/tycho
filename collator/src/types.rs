@@ -217,7 +217,7 @@ pub struct McData {
 
     pub ref_mc_state_handle: RefMcStateHandle,
 
-    pub shards_processed_upto: FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>,
+    pub shards_processed_to: FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>,
 }
 
 impl McData {
@@ -265,7 +265,7 @@ impl McData {
             top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
-            shards_processed_upto,
+            shards_processed_to: shards_processed_upto,
         }))
     }
 
@@ -298,7 +298,7 @@ pub struct BlockCandidate {
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub consensus_info: ConsensusInfo,
-    pub processed_upto: FastHashMap<ShardIdent, QueueKey>,
+    pub processed_to: FastHashMap<ShardIdent, QueueKey>,
 }
 
 #[derive(Default, Clone)]
@@ -440,7 +440,7 @@ pub struct TopBlockDescription {
     pub proof_funds: ProofFunds,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
-    pub processed_upto: FastHashMap<ShardIdent, QueueKey>,
+    pub processed_to: FastHashMap<ShardIdent, QueueKey>,
 }
 
 #[derive(Debug)]
@@ -682,5 +682,5 @@ where
 #[derive(Debug, Clone)]
 pub struct TopShardBlockInfo {
     pub block_id: BlockId,
-    pub processed_upto: FastHashMap<ShardIdent, QueueKey>,
+    pub processed_to: FastHashMap<ShardIdent, QueueKey>,
 }
