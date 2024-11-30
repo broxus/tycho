@@ -85,7 +85,7 @@ impl InternalQueueStorage {
         self.db.owned_snapshot()
     }
 
-    pub fn build_iterator_persistent(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
+    pub fn build_iterator_committed(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
         self.build_iterator(
             self.db.shards_internal_messages.cf(),
             self.db.shards_internal_messages.new_read_config(),
@@ -93,10 +93,12 @@ impl InternalQueueStorage {
         )
     }
 
-    pub fn build_iterator_session(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
+    pub fn build_iterator_uncommitted(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
         self.build_iterator(
-            self.db.shards_internal_messages_session.cf(),
-            self.db.shards_internal_messages_session.new_read_config(),
+            self.db.shards_internal_messages_uncommitted.cf(),
+            self.db
+                .shards_internal_messages_uncommitted
+                .new_read_config(),
             snapshot,
         )
     }
@@ -113,12 +115,12 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn clear_session_queue(&self) -> Result<()> {
-        let cf = self.db.shards_internal_messages_session.cf();
+    pub fn clear_uncommitted_queue(&self) -> Result<()> {
+        let cf = self.db.shards_internal_messages_uncommitted.cf();
         self.clear_queue(&cf)
     }
 
-    pub fn clear_persistent_queue(&self) -> Result<()> {
+    pub fn clear_committed_queue(&self) -> Result<()> {
         let cf = self.db.shards_internal_messages.cf();
         self.clear_queue(&cf)
     }
@@ -132,14 +134,14 @@ impl InternalQueueStorage {
         WriteBatch::default()
     }
 
-    pub fn insert_message_session(
+    pub fn insert_message_uncommitted(
         &self,
         batch: &mut WriteBatch,
         key: ShardsInternalMessagesKey,
         dest: &IntAddr,
         value: &[u8],
     ) -> Result<()> {
-        let cf = self.db.shards_internal_messages_session.cf();
+        let cf = self.db.shards_internal_messages_uncommitted.cf();
         Self::insert_message(batch, cf, key, dest.workchain() as i8, dest.prefix(), value)
     }
 
@@ -226,15 +228,19 @@ impl InternalQueueStorage {
                 internal_message_key: range.1,
             };
 
-            let mut readopts = self.db.shards_internal_messages_session.new_read_config();
+            let mut readopts = self
+                .db
+                .shards_internal_messages_uncommitted
+                .new_read_config();
             readopts.set_snapshot(&snapshot);
 
-            let internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
+            let internal_messages_uncommitted_cf =
+                self.db.shards_internal_messages_uncommitted.cf();
             let internal_messages_cf = self.db.shards_internal_messages.cf();
             let mut iter = self
                 .db
                 .rocksdb()
-                .raw_iterator_cf_opt(&internal_messages_session_cf, readopts);
+                .raw_iterator_cf_opt(&internal_messages_uncommitted_cf, readopts);
 
             iter.seek(from.to_vec().as_slice());
 
@@ -254,7 +260,7 @@ impl InternalQueueStorage {
                 let dest_prefix = u64::from_be_bytes(value[1..9].try_into().unwrap());
                 let cell_bytes = &value[9..];
 
-                batch.delete_cf(&internal_messages_session_cf, current_position.to_vec());
+                batch.delete_cf(&internal_messages_uncommitted_cf, current_position.to_vec());
                 Self::insert_message(
                     &mut batch,
                     internal_messages_cf,

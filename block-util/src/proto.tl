@@ -34,7 +34,7 @@ block.shardProcessedUpto
 * @param prev_queue_diff_hash   hash of the TL repr of the previous queue diff
 * @param shard_ident            shard identifier of the corresponding block
 * @param seqno                  seqno of the corresponding block
-* @param processed_upto         collator boundaries (sorted ASC by unique `shard_ident`)
+* @param processed_upto           collator boundaries (sorted ASC by unique `shard_ident`)
 * @param min_message            min message queue key
 * @param max_message            max message queue key
 * @param messages               list of message hashes (sorted ASC)
