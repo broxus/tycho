@@ -508,7 +508,7 @@ async fn test_queue_tail() -> anyhow::Result<()> {
         )?,
     ];
 
-    if let Some(stored_object) = stored_objects.iter().next() {
+    if let Some(stored_object) = stored_objects.first() {
         diff_mc1
             .messages
             .insert(stored_object.key(), stored_object.clone());
