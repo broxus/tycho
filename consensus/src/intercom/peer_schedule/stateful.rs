@@ -97,11 +97,13 @@ impl PeerScheduleStateful {
                     PeerState::Unknown => _ = self.broadcast_receivers.remove(peer_id),
                     PeerState::Resolved => _ = self.broadcast_receivers.insert(*peer_id),
                 }
+                meter_bcast_receivers(self.broadcast_receivers.len());
             }
             match state {
                 PeerState::Unknown => _ = self.all_resolved.remove(peer_id),
                 PeerState::Resolved => _ = self.all_resolved.insert(*peer_id),
             }
+            meter_all_resolved(self.all_resolved.len());
         }
         is_applied
     }
@@ -135,6 +137,7 @@ impl PeerScheduleStateful {
             .collect();
         self.validator_set[2] = validator_set;
         self.all_resolved = all_resolved;
+        meter_all_resolved(self.all_resolved.len());
         to_forget
     }
 
@@ -157,6 +160,7 @@ impl PeerScheduleStateful {
             .filter(|(_, state)| **state == PeerState::Resolved)
             .map(|(peer_id, _)| *peer_id)
             .collect();
+        meter_bcast_receivers(self.broadcast_receivers.len());
     }
 
     /// on epoch change
@@ -196,11 +200,21 @@ impl PeerScheduleStateful {
                 to_forget.push(*peer_id);
                 if *state == PeerState::Resolved {
                     self.all_resolved.remove(peer_id);
+                    meter_all_resolved(self.all_resolved.len());
+
                     self.broadcast_receivers.remove(peer_id);
+                    meter_bcast_receivers(self.broadcast_receivers.len());
                 }
             }
         }
         self.active_subset[0] = Default::default();
         to_forget
     }
+}
+
+fn meter_all_resolved(len: usize) {
+    metrics::gauge!("tycho_mempool_peers_resolved").set(len as u32);
+}
+fn meter_bcast_receivers(len: usize) {
+    metrics::gauge!("tycho_mempool_bcast_receivers").set(len as u32);
 }

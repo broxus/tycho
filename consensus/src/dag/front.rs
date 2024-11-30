@@ -1,5 +1,5 @@
 use crate::dag::{Committer, DagHead, DagRound};
-use crate::effects::{AltFmt, AltFormat};
+use crate::effects::{AltFmt, AltFormat, EngineCtx};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
@@ -114,6 +114,7 @@ impl DagFront {
                 &self.drain_upto(new_top - CachedConfig::get().consensus.min_front_rounds()),
             );
             committer.extend_from_ahead(&self.rounds);
+            EngineCtx::meter_dag_len(committer.dag_len());
         }
 
         new_full_history_bottom

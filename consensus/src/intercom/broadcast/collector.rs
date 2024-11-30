@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 
-use crate::dag::DagHead;
+use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
 use crate::effects::{CollectCtx, Ctx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
@@ -40,6 +40,7 @@ impl Collector {
         let mut task = CollectorTask {
             consensus_round: self.consensus_round,
             ctx,
+            current_dag_round: head.current().clone(),
             next_round: head.next().round(),
             is_includes_ready: false,
             collector_signal,
@@ -48,8 +49,10 @@ impl Collector {
 
         drop(span_guard);
 
-        task.run(head, bcaster_signal).await;
+        task.run(bcaster_signal).await;
 
+        metrics::counter!("tycho_mempool_collected_broadcasts_count")
+            .increment(head.current().threshold().count() as u64);
         Self {
             consensus_round: task.consensus_round,
         }
@@ -60,6 +63,7 @@ struct CollectorTask {
     // for node running @ r+0:
     ctx: CollectCtx,
 
+    current_dag_round: DagRound,
     next_round: Round,
 
     is_includes_ready: bool,
@@ -71,15 +75,12 @@ struct CollectorTask {
 impl CollectorTask {
     /// includes @ r+0 must include own point @ r+0 iff the one is produced
     /// returns includes for our point at the next round
-    async fn run(
-        &mut self,
-        head: DagHead,
-        mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
-    ) {
+    async fn run(&mut self, mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>) {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             CachedConfig::get().consensus.broadcast_retry_millis as _,
         ));
-        let mut threshold = std::pin::pin!(head.current().threshold().reached());
+        let current_dag_round = self.current_dag_round.clone();
+        let mut threshold = std::pin::pin!(current_dag_round.threshold().reached());
 
         loop {
             tokio::select! {
@@ -147,7 +148,8 @@ impl CollectorTask {
         }
         tracing::debug!(
             parent: self.ctx.span(),
-            includes = self.is_includes_ready,
+            includes = self.current_dag_round.threshold().count(),
+            "2F+1" = self.current_dag_round.peer_count().majority(),
             result = result,
             "ready?",
         );
@@ -167,7 +169,7 @@ impl CollectorTask {
         let level = if should_fail {
             tracing::Level::INFO
         } else {
-            tracing::Level::TRACE
+            tracing::Level::DEBUG
         };
         dyn_event!(
             parent: self.ctx.span(),

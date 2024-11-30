@@ -178,11 +178,9 @@ impl Producer {
                 loc.state
                     .signable()
                     .and_then(|signable| match signable.signed() {
-                        Some(Ok(_sig)) => signable.first_completed.valid().map(|v| v.info.clone()),
-                        _ if include_certified
-                            && signable.first_completed.certified().is_some() =>
-                        {
-                            signable.first_completed.certified().map(|v| v.info.clone())
+                        Some(Ok(_sig)) => signable.first_resolved.valid().map(|v| v.info.clone()),
+                        _ if include_certified && signable.first_resolved.certified().is_some() => {
+                            signable.first_resolved.certified().map(|v| v.info.clone())
                         }
                         None if key_pair.is_some() => {
                             last_references.push(loc.state.clone());
@@ -204,7 +202,7 @@ impl Producer {
                 state.signable().and_then(|signable| {
                     signable.sign(round, key_pair);
                     match signable.signed() {
-                        Some(Ok(_sig)) => signable.first_completed.valid().map(|v| v.info.clone()),
+                        Some(Ok(_sig)) => signable.first_resolved.valid().map(|v| v.info.clone()),
                         Some(Err(_)) | None => None,
                     }
                 })

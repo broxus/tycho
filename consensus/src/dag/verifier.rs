@@ -780,20 +780,34 @@ impl ValidateCtx {
             Err(VerifyError::BadSig | VerifyError::IllFormed | VerifyError::LackOfPeers(_)) => {
                 (&Self::VERIFY_LABELS[2..=2], 1)
             }
-            Ok(_) => (&Self::VERIFY_LABELS[..], 0),
+            Ok(_) => (&Self::VERIFY_LABELS[..0], 0),
         };
         metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
     }
 
-    fn validated(result: DagPoint) -> DagPoint {
-        let (labels, count) = match result {
+    fn validated_labels(dag_point: &DagPoint) -> (&'static [(&'static str, &'static str)], u64) {
+        match dag_point {
             DagPoint::NotFound(_) => (&Self::VALIDATE_LABELS[0..=0], 1),
             DagPoint::IllFormed(_) => (&Self::VALIDATE_LABELS[1..=1], 1),
             DagPoint::Invalid(_) => (&Self::VALIDATE_LABELS[2..=2], 1),
             DagPoint::Suspicious(_) => (&Self::VALIDATE_LABELS[3..=3], 1),
-            DagPoint::Certified(_) | DagPoint::Trusted(_) => (&Self::VALIDATE_LABELS[..], 0),
-        };
+            DagPoint::Certified(_) | DagPoint::Trusted(_) => (&Self::VALIDATE_LABELS[..0], 0),
+        }
+    }
+
+    fn validated(result: DagPoint) -> DagPoint {
+        let (labels, count) = Self::validated_labels(&result);
         metrics::counter!("tycho_mempool_verifier_validate", labels).increment(count);
         result
+    }
+
+    pub fn first_resolved(dag_point: &DagPoint) {
+        let (labels, count) = Self::validated_labels(dag_point);
+        metrics::counter!("tycho_mempool_points_first_resolved", labels).increment(count);
+    }
+
+    pub fn alt_resolved(dag_point: &DagPoint) {
+        let (labels, _) = Self::validated_labels(dag_point);
+        metrics::counter!("tycho_mempool_alt_points_resolved", labels).increment(1);
     }
 }

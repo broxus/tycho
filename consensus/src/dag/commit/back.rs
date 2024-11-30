@@ -88,8 +88,6 @@ impl DagBack {
                 .insert(source_dag_round.round(), source_dag_round.clone());
         }
         self.assert_len();
-
-        metrics::gauge!("tycho_mempool_rounds_dag_length").set(self.rounds.len() as u32);
     }
 
     fn assert_len(&self) {

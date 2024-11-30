@@ -243,6 +243,8 @@ impl PeerSchedule {
             impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
         >,
     ) -> Option<JoinTask<()>> {
+        let gauge = metrics::gauge!("tycho_mempool_peers_resolving");
+        gauge.set(resolved_waiters.len() as u32);
         if resolved_waiters.is_empty() {
             tracing::info!("peer schedule resolve task not started: all peers resolved");
             None
@@ -254,6 +256,7 @@ impl PeerSchedule {
                     _ = self
                         .write()
                         .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
+                    gauge.decrement(1);
                 }
             });
             Some(join_task)
