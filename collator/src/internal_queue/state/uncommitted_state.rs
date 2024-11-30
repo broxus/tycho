@@ -17,53 +17,53 @@ use crate::internal_queue::types::InternalMessageValue;
 
 // CONFIG
 
-pub struct SessionStateConfig {
+pub struct UncommittedStateConfig {
     pub storage: Storage,
 }
 
 // FACTORY
 
-impl<F, R, V> SessionStateFactory<V> for F
+impl<F, R, V> UncommittedStateFactory<V> for F
 where
     F: Fn() -> R,
-    R: SessionState<V>,
+    R: UncommittedState<V>,
     V: InternalMessageValue,
 {
-    type SessionState = R;
+    type UncommittedState = R;
 
-    fn create(&self) -> Self::SessionState {
+    fn create(&self) -> Self::UncommittedState {
         self()
     }
 }
 
-pub struct SessionStateImplFactory {
+pub struct UncommittedStateImplFactory {
     pub storage: Storage,
 }
 
-impl SessionStateImplFactory {
+impl UncommittedStateImplFactory {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
 }
 
-impl<V: InternalMessageValue> SessionStateFactory<V> for SessionStateImplFactory {
-    type SessionState = SessionStateStdImpl;
+impl<V: InternalMessageValue> UncommittedStateFactory<V> for UncommittedStateImplFactory {
+    type UncommittedState = UncommittedStateStdImpl;
 
-    fn create(&self) -> Self::SessionState {
-        SessionStateStdImpl::new(self.storage.clone())
+    fn create(&self) -> Self::UncommittedState {
+        UncommittedStateStdImpl::new(self.storage.clone())
     }
 }
 
-pub trait SessionStateFactory<V: InternalMessageValue> {
-    type SessionState: LocalSessionState<V>;
+pub trait UncommittedStateFactory<V: InternalMessageValue> {
+    type UncommittedState: LocalUncommittedState<V>;
 
-    fn create(&self) -> Self::SessionState;
+    fn create(&self) -> Self::UncommittedState;
 }
 
 // TRAIT
 
-#[trait_variant::make(SessionState: Send)]
-pub trait LocalSessionState<V: InternalMessageValue> {
+#[trait_variant::make(UncommittedState: Send)]
+pub trait LocalUncommittedState<V: InternalMessageValue> {
     fn add_messages(&self, source: ShardIdent, messages: &BTreeMap<QueueKey, Arc<V>>)
         -> Result<()>;
 
@@ -80,17 +80,17 @@ pub trait LocalSessionState<V: InternalMessageValue> {
 
 // IMPLEMENTATION
 
-pub struct SessionStateStdImpl {
+pub struct UncommittedStateStdImpl {
     storage: Storage,
 }
 
-impl SessionStateStdImpl {
+impl UncommittedStateStdImpl {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
 }
 
-impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
+impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
     /// write new messages to storage
     fn add_messages(
         &self,
@@ -102,7 +102,7 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
         for (internal_message_key, message) in messages.iter() {
             self.storage
                 .internal_queue_storage()
-                .insert_message_session(
+                .insert_message_uncommitted(
                     &mut batch,
                     tycho_storage::model::ShardsInternalMessagesKey::new(
                         source,
@@ -130,7 +130,7 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
             let iter = self
                 .storage
                 .internal_queue_storage()
-                .build_iterator_session(snapshot);
+                .build_iterator_uncommitted(snapshot);
 
             shard_iters_with_ranges.insert(shard, ShardIteratorWithRange::new(iter, *start, *end));
         }
@@ -144,6 +144,8 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
     }
 
     fn truncate(&self) -> Result<()> {
-        self.storage.internal_queue_storage().clear_session_queue()
+        self.storage
+            .internal_queue_storage()
+            .clear_uncommitted_queue()
     }
 }
