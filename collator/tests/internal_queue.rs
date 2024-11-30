@@ -16,13 +16,13 @@ use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
 use tycho_collator::internal_queue::queue::{
     Queue, QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
 };
-use tycho_collator::internal_queue::state::persistent_state::{
-    PersistentStateImplFactory, PersistentStateStdImpl,
-};
-use tycho_collator::internal_queue::state::session_state::{
-    SessionStateImplFactory, SessionStateStdImpl,
+use tycho_collator::internal_queue::state::commited_state::{
+    CommittedStateImplFactory, CommittedStateStdImpl,
 };
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
+use tycho_collator::internal_queue::state::uncommitted_state::{
+    UncommittedStateImplFactory, UncommittedStateStdImpl,
+};
 use tycho_collator::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
@@ -94,16 +94,16 @@ async fn test_queue() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let queue_factory = QueueFactoryStdImpl {
-        session_state_factory: SessionStateImplFactory {
+        uncommitted_state_factory: UncommittedStateImplFactory {
             storage: storage.clone(),
         },
-        persistent_state_factory: PersistentStateImplFactory { storage },
+        committed_state_factory: CommittedStateImplFactory { storage },
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, StoredObject> =
+    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
         queue_factory.create();
     let block = BlockIdShort {
         shard: ShardIdent::new_full(0),
@@ -229,16 +229,16 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
     let queue_factory = QueueFactoryStdImpl {
-        session_state_factory: SessionStateImplFactory {
+        uncommitted_state_factory: UncommittedStateImplFactory {
             storage: storage.clone(),
         },
-        persistent_state_factory: PersistentStateImplFactory { storage },
+        committed_state_factory: CommittedStateImplFactory { storage },
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, StoredObject> =
+    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
         queue_factory.create();
     let block = BlockIdShort {
         shard: ShardIdent::new_full(0),
@@ -280,7 +280,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next().ok().is_some());
 
-    queue.clear_session_state()?;
+    queue.clear_uncommitted_state()?;
 
     let iterators = queue.iterator(&ranges, ShardIdent::new_full(1));
 
