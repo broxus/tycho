@@ -7,15 +7,15 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
-use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
-use crate::internal_queue::state::session_state::SessionStateStdImpl;
+use crate::internal_queue::state::commited_state::CommittedStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
+use crate::internal_queue::state::uncommitted_state::UncommittedStateStdImpl;
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTuple, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
-    queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>,
+    queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>,
 }
 
 pub trait MessageQueueAdapter<V>: Send + Sync
@@ -29,7 +29,7 @@ where
         shards_from: FastHashMap<ShardIdent, QueueKey>,
         shards_to: FastHashMap<ShardIdent, QueueKey>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
-    /// Apply diff to the current queue session state (waiting for the operation to complete)
+    /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -38,7 +38,7 @@ where
         end_key: QueueKey,
     ) -> Result<()>;
 
-    /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
+    /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
     fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
 
@@ -56,7 +56,7 @@ where
         messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()>;
 
-    fn clear_session_state(&self) -> Result<()>;
+    fn clear_uncommitted_state(&self) -> Result<()>;
     /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
 
@@ -65,7 +65,7 @@ where
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
-    pub fn new(queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>) -> Self {
+    pub fn new(queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>) -> Self {
         Self { queue }
     }
 }
@@ -157,8 +157,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         iterator.commit(messages)
     }
 
-    fn clear_session_state(&self) -> Result<()> {
-        self.queue.clear_session_state()
+    fn clear_uncommitted_state(&self) -> Result<()> {
+        self.queue.clear_uncommitted_state()
     }
 
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {

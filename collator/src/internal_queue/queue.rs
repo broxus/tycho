@@ -11,13 +11,13 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
 
 use crate::internal_queue::gc::GcManager;
-use crate::internal_queue::state::persistent_state::{
-    PersistentState, PersistentStateFactory, PersistentStateImplFactory, PersistentStateStdImpl,
-};
-use crate::internal_queue::state::session_state::{
-    SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
+use crate::internal_queue::state::commited_state::{
+    CommittedState, CommittedStateFactory, CommittedStateImplFactory, CommittedStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::StateIterator;
+use crate::internal_queue::state::uncommitted_state::{
+    UncommittedState, UncommittedStateFactory, UncommittedStateImplFactory, UncommittedStateStdImpl,
+};
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 
 // FACTORY
@@ -56,8 +56,8 @@ where
 }
 
 pub struct QueueFactoryStdImpl {
-    pub session_state_factory: SessionStateImplFactory,
-    pub persistent_state_factory: PersistentStateImplFactory,
+    pub uncommitted_state_factory: UncommittedStateImplFactory,
+    pub committed_state_factory: CommittedStateImplFactory,
     pub config: QueueConfig,
 }
 
@@ -74,7 +74,7 @@ where
         ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator<V>>>;
-    /// Add messages to session state from `diff.messages` and add diff to the cache
+    /// Add messages to uncommitted state from `diff.messages` and add diff to the cache
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -82,10 +82,10 @@ where
         diff_hash: &HashBytes,
         end_key: QueueKey,
     ) -> Result<()>;
-    /// Move messages from session state to persistent state and update gc ranges
+    /// Move messages from uncommitted state to committed state and update gc ranges
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
-    /// remove all data in session state storage
-    fn clear_session_state(&self) -> Result<()>;
+    /// remove all data in uncommitted state storage
+    fn clear_uncommitted_state(&self) -> Result<()>;
     /// returns the number of diffs in cache for the given shard
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
     /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
@@ -95,22 +95,22 @@ where
 // IMPLEMENTATION
 
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
-    type Queue = QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>;
+    type Queue = QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>;
 
     fn create(&self) -> Self::Queue {
-        let session_state = <SessionStateImplFactory as SessionStateFactory<V>>::create(
-            &self.session_state_factory,
+        let uncommitted_state = <UncommittedStateImplFactory as UncommittedStateFactory<V>>::create(
+            &self.uncommitted_state_factory,
         );
-        let persistent_state = <PersistentStateImplFactory as PersistentStateFactory<V>>::create(
-            &self.persistent_state_factory,
+        let committed_state = <CommittedStateImplFactory as CommittedStateFactory<V>>::create(
+            &self.committed_state_factory,
         );
-        let persistent_state = Arc::new(persistent_state);
-        let gc = GcManager::start::<V>(persistent_state.clone(), self.config.gc_interval);
+        let committed_state = Arc::new(committed_state);
+        let gc = GcManager::start::<V>(committed_state.clone(), self.config.gc_interval);
         QueueImpl {
-            session_state: Arc::new(session_state),
-            persistent_state,
-            session_diffs: Default::default(),
-            persistent_diffs: Default::default(),
+            uncommitted_state: Arc::new(uncommitted_state),
+            committed_state,
+            uncommitted_diffs: Default::default(),
+            committed_diffs: Default::default(),
             gc,
             _phantom_data: Default::default(),
         }
@@ -125,22 +125,22 @@ struct ShortQueueDiff {
 
 pub struct QueueImpl<S, P, V>
 where
-    S: SessionState<V>,
-    P: PersistentState<V>,
+    S: UncommittedState<V>,
+    P: CommittedState<V>,
     V: InternalMessageValue,
 {
-    session_state: Arc<S>,
-    persistent_state: Arc<P>,
-    session_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
-    persistent_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
+    uncommitted_state: Arc<S>,
+    committed_state: Arc<P>,
+    uncommitted_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
+    committed_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
     gc: GcManager,
     _phantom_data: PhantomData<V>,
 }
 
 impl<S, P, V> Queue<V> for QueueImpl<S, P, V>
 where
-    S: SessionState<V> + Send + Sync,
-    P: PersistentState<V> + Send + Sync + 'static,
+    S: UncommittedState<V> + Send + Sync,
+    P: CommittedState<V> + Send + Sync + 'static,
     V: InternalMessageValue + Send + Sync,
 {
     fn iterator(
@@ -148,13 +148,15 @@ where
         ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator<V>>> {
-        let snapshot = self.persistent_state.snapshot();
-        let persistent_state_iterator =
-            self.persistent_state
+        let snapshot = self.committed_state.snapshot();
+        let committed_state_iterator =
+            self.committed_state
                 .iterator(&snapshot, for_shard_id, ranges);
-        let session_state_iterator = self.session_state.iterator(&snapshot, for_shard_id, ranges);
+        let uncommitted_state_iterator =
+            self.uncommitted_state
+                .iterator(&snapshot, for_shard_id, ranges);
 
-        vec![persistent_state_iterator, session_state_iterator]
+        vec![committed_state_iterator, uncommitted_state_iterator]
     }
 
     fn apply_diff(
@@ -165,7 +167,10 @@ where
         end_key: QueueKey,
     ) -> Result<()> {
         // Get or insert the shard diffs for the given block_id_short.shard
-        let mut shard_diffs = self.session_diffs.entry(block_id_short.shard).or_default();
+        let mut shard_diffs = self
+            .uncommitted_diffs
+            .entry(block_id_short.shard)
+            .or_default();
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = shard_diffs.get(&block_id_short.seqno);
@@ -198,9 +203,9 @@ where
             }
         }
 
-        // Add messages to session_state if there are any
+        // Add messages to uncommitted_state if there are any
         if !diff.messages.is_empty() {
-            self.session_state
+            self.uncommitted_state
                 .add_messages(block_id_short.shard, &diff.messages)?;
         }
 
@@ -223,10 +228,12 @@ where
         for (block_id_short, top_shard_block_changed) in mc_top_blocks {
             let mut diffs_to_commit = vec![];
 
-            let prev_shard_session_diffs = self.session_diffs.get_mut(&block_id_short.shard);
-            if let Some(mut shard_session_diffs) = prev_shard_session_diffs {
-                shard_session_diffs.range(..=block_id_short.seqno).for_each(
-                    |(block_seqno, shard_diff)| {
+            let prev_shard_uncommitted_diffs =
+                self.uncommitted_diffs.get_mut(&block_id_short.shard);
+            if let Some(mut shard_uncommitted_diffs) = prev_shard_uncommitted_diffs {
+                shard_uncommitted_diffs
+                    .range(..=block_id_short.seqno)
+                    .for_each(|(block_seqno, shard_diff)| {
                         diffs_to_commit.push(*block_seqno);
 
                         let current_last_key = shards_to_commit
@@ -249,26 +256,25 @@ where
                                 }
                             }
                         }
-                    },
-                );
+                    });
 
                 for seqno in diffs_to_commit {
-                    if let Some(diff) = shard_session_diffs.remove(&seqno) {
-                        // Move the diff to persistent_diffs
-                        let mut shard_persistent_diffs = self
-                            .persistent_diffs
+                    if let Some(diff) = shard_uncommitted_diffs.remove(&seqno) {
+                        // Move the diff to committed_diffs
+                        let mut shard_committed_diffs = self
+                            .committed_diffs
                             .entry(block_id_short.shard)
                             .or_default();
-                        shard_persistent_diffs.insert(seqno, diff);
+                        shard_committed_diffs.insert(seqno, diff);
                     }
                 }
             }
         }
 
-        self.session_state.commit_messages(&shards_to_commit)?;
+        self.uncommitted_state.commit_messages(&shards_to_commit)?;
 
         let uncommitted_diffs_count: usize =
-            self.session_diffs.iter().map(|r| r.value().len()).sum();
+            self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
 
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
@@ -280,31 +286,31 @@ where
         Ok(())
     }
 
-    fn clear_session_state(&self) -> Result<()> {
-        self.session_diffs.clear();
-        self.session_state.truncate()
+    fn clear_uncommitted_state(&self) -> Result<()> {
+        self.uncommitted_diffs.clear();
+        self.uncommitted_state.truncate()
     }
 
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
-        let session_count = self
-            .session_diffs
+        let uncommitted_count = self
+            .uncommitted_diffs
             .get(shard_ident)
             .map_or(0, |diffs| diffs.len());
-        let persistent_count = self
-            .persistent_diffs
+        let committed_count = self
+            .committed_diffs
             .get(shard_ident)
             .map_or(0, |diffs| diffs.len());
 
-        session_count + persistent_count
+        uncommitted_count + committed_count
     }
 
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
-        if let Some(mut shard_diffs) = self.session_diffs.get_mut(source_shard) {
+        if let Some(mut shard_diffs) = self.uncommitted_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
                 .retain(|_, diff| &diff.end_key > inclusive_until);
         }
-        if let Some(mut shard_diffs) = self.persistent_diffs.get_mut(source_shard) {
+        if let Some(mut shard_diffs) = self.committed_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
                 .retain(|_, diff| &diff.end_key > inclusive_until);
