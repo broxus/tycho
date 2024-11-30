@@ -223,7 +223,7 @@ pub struct McData {
 impl McData {
     pub fn load_from_state(
         state_stuff: &ShardStateStuff,
-        shards_processed_upto: FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>,
+        shards_processed_to: FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>,
     ) -> Result<Arc<Self>> {
         let block_id = *state_stuff.block_id();
         let extra = state_stuff.state_extra()?;
@@ -265,7 +265,7 @@ impl McData {
             top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
-            shards_processed_to: shards_processed_upto,
+            shards_processed_to,
         }))
     }
 

@@ -7,7 +7,7 @@ use tokio::time::Duration;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::internal_queue::state::persistent_state::PersistentState;
+use crate::internal_queue::state::commited_state::CommittedState;
 use crate::internal_queue::types::InternalMessageValue;
 use crate::tracing_targets;
 
@@ -18,7 +18,7 @@ pub struct GcManager {
 
 impl GcManager {
     pub fn start<V: InternalMessageValue>(
-        persistent_state: Arc<dyn PersistentState<V>>,
+        committed_state: Arc<dyn CommittedState<V>>,
         execution_interval: Duration,
     ) -> Self {
         let delete_until = Arc::new(Mutex::new(GcRange::new()));
@@ -33,11 +33,12 @@ impl GcManager {
                     interval.tick().await;
 
                     let delete_until = delete_until.lock().unwrap().clone();
-
-                    let gc_state = gc_state.clone();
-                    let persistent_state = persistent_state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        gc_task(gc_state, persistent_state, delete_until);
+                    tokio::task::spawn_blocking({
+                        let gc_state = gc_state.clone();
+                        let committed_state = committed_state.clone();
+                        move || {
+                            gc_task(gc_state, committed_state, delete_until);
+                        }
                     })
                     .await
                     .unwrap();
@@ -65,7 +66,7 @@ impl Drop for GcManager {
 
 fn gc_task<V: InternalMessageValue>(
     gc_state: Arc<Mutex<GcRange>>,
-    persistent_state: Arc<dyn PersistentState<V>>,
+    committed_state: Arc<dyn CommittedState<V>>,
     delete_until: HashMap<ShardIdent, QueueKey>,
 ) {
     let _histogram = HistogramGuard::begin("tycho_internal_queue_gc_execute_task_time");
@@ -78,7 +79,7 @@ fn gc_task<V: InternalMessageValue>(
             .map_or(true, |last_key| *current_last_key > *last_key);
 
         if can_delete {
-            if let Err(e) = persistent_state.delete_messages(*shard, current_last_key) {
+            if let Err(e) = committed_state.delete_messages(*shard, current_last_key) {
                 tracing::error!(target: tracing_targets::MQ, "failed to delete messages: {e:?}");
             }
 

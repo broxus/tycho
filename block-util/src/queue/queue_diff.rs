@@ -27,11 +27,11 @@ impl QueueDiffStuffBuilder {
     }
 
     // TODO: Use iterator of `(ShardIdent, QueueKey)`?
-    pub fn with_processed_upto<'a, I>(mut self, processed_upto: I) -> Self
+    pub fn with_processed_to<'a, I>(mut self, processed_to: I) -> Self
     where
         I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
     {
-        self.inner_mut().diff.processed_upto = processed_upto
+        self.inner_mut().diff.processed_upto = processed_to
             .into_iter()
             .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
             .collect();
