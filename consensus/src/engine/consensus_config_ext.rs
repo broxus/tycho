@@ -38,6 +38,8 @@ use everscale_types::models::ConsensusConfig;
 pub trait ConsensusConfigExt {
     fn min_front_rounds(&self) -> u32;
 
+    fn replay_anchor_rounds(&self) -> u32;
+
     fn reset_rounds(&self) -> u32;
 
     fn max_total_rounds(&self) -> u32;
@@ -52,12 +54,21 @@ impl ConsensusConfigExt for ConsensusConfig {
             + self.commit_history_rounds as u32 // all committable history for every point
     }
 
+    fn replay_anchor_rounds(&self) -> u32 {
+        self.commit_history_rounds as u32 // to take full first anchor history
+            + self.deduplicate_rounds as u32 // to discard full anchor history after restart
+            + 2 // bottommost includes and witness may not have dag round, so dependers are invalid
+            + 2 // invalid but certified dependers are not eligible to be committed
+    }
+
     fn reset_rounds(&self) -> u32 {
         // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
         // but collator may re-request TKA from collator, not only the next one
         self.max_consensus_lag_rounds as u32 // to collate
             + self.commit_history_rounds as u32 // to take full first anchor history
             + self.deduplicate_rounds as u32 // to discard full anchor history after restart
+            + 2 // includes and witness will not have dag round, so dependers are invalid
+            + 2 // invalid but certified dependers are not eligible to be committed
     }
 
     fn max_total_rounds(&self) -> u32 {

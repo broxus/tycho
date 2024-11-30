@@ -20,7 +20,7 @@ use crate::effects::{AltFormat, Ctx, EngineCtx, MempoolAdapterStore, MempoolStor
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{CachedConfig, Genesis, MempoolConfig};
+use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{AnchorData, MempoolOutput, Point, PointInfo, Round};
 
@@ -209,11 +209,8 @@ impl Engine {
             .max(Genesis::id().round.next());
         self.consensus_round.set_max(consensus_round);
         let round_ctx = RoundCtx::new(&self.ctx, consensus_round);
-        let dag_bottom_round = (Genesis::id().round).max(
-            top_known_anchor
-                - CachedConfig::get().consensus.deduplicate_rounds
-                - CachedConfig::get().consensus.commit_history_rounds,
-        );
+        let dag_bottom_round = (Genesis::id().round)
+            .max(top_known_anchor - CachedConfig::get().consensus.replay_anchor_rounds());
 
         let mut committer = take_committer(&mut self.committer_run).expect("init");
         (self.dag).fill_to_top(
