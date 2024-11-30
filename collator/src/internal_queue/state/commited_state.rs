@@ -12,52 +12,52 @@ use crate::internal_queue::types::InternalMessageValue;
 
 // CONFIG
 
-pub struct PersistentStateConfig {
+pub struct CommittedStateConfig {
     pub storage: Storage,
 }
 
 // FACTORY
 
-impl<F, R, V> PersistentStateFactory<V> for F
+impl<F, R, V> CommittedStateFactory<V> for F
 where
     F: Fn() -> R,
-    R: PersistentState<V>,
+    R: CommittedState<V>,
     V: InternalMessageValue,
 {
-    type PersistentState = R;
+    type CommittedState = R;
 
-    fn create(&self) -> Self::PersistentState {
+    fn create(&self) -> Self::CommittedState {
         self()
     }
 }
 
-pub struct PersistentStateImplFactory {
+pub struct CommittedStateImplFactory {
     pub storage: Storage,
 }
 
-impl PersistentStateImplFactory {
+impl CommittedStateImplFactory {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
 }
 
-impl<V: InternalMessageValue> PersistentStateFactory<V> for PersistentStateImplFactory {
-    type PersistentState = PersistentStateStdImpl;
+impl<V: InternalMessageValue> CommittedStateFactory<V> for CommittedStateImplFactory {
+    type CommittedState = CommittedStateStdImpl;
 
-    fn create(&self) -> Self::PersistentState {
-        PersistentStateStdImpl::new(self.storage.clone())
+    fn create(&self) -> Self::CommittedState {
+        CommittedStateStdImpl::new(self.storage.clone())
     }
 }
 
-pub trait PersistentStateFactory<V: InternalMessageValue> {
-    type PersistentState: PersistentState<V>;
+pub trait CommittedStateFactory<V: InternalMessageValue> {
+    type CommittedState: CommittedState<V>;
 
-    fn create(&self) -> Self::PersistentState;
+    fn create(&self) -> Self::CommittedState;
 }
 
 // TRAIT
 
-pub trait PersistentState<V: InternalMessageValue>: Send + Sync {
+pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
     fn snapshot(&self) -> OwnedSnapshot;
 
     fn iterator(
@@ -72,17 +72,17 @@ pub trait PersistentState<V: InternalMessageValue>: Send + Sync {
 
 // IMPLEMENTATION
 
-pub struct PersistentStateStdImpl {
+pub struct CommittedStateStdImpl {
     storage: Storage,
 }
 
-impl PersistentStateStdImpl {
+impl CommittedStateStdImpl {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
 }
 
-impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
+impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
     fn snapshot(&self) -> OwnedSnapshot {
         self.storage.internal_queue_storage().snapshot()
     }
@@ -99,7 +99,7 @@ impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
             let iter = self
                 .storage
                 .internal_queue_storage()
-                .build_iterator_persistent(snapshot);
+                .build_iterator_committed(snapshot);
 
             shard_iters_with_ranges
                 .insert(shard, ShardIteratorWithRange::new(iter, range.0, range.1));
