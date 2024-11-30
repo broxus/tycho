@@ -158,10 +158,17 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     fn clear_uncommitted_state(&self) -> Result<()> {
+        tracing::trace!(target: tracing_targets::MQ_ADAPTER, "Clearing uncommitted state");
         self.queue.clear_uncommitted_state()
     }
 
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
+        tracing::trace!(
+            target: tracing_targets::MQ_ADAPTER,
+            source_shard = %source_shard,
+            inclusive_until = %inclusive_until,
+            "Trimming diffs"
+        );
         self.queue.trim_diffs(source_shard, inclusive_until)
     }
 
