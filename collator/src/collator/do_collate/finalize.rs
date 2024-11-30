@@ -96,7 +96,7 @@ impl Phase<FinalizeState> {
             self.state.collation_data.block_id_short.seqno,
             &prev_hash,
         )
-        .with_processed_upto(
+        .with_processed_to(
             diff_with_messages
                 .processed_to
                 .iter()

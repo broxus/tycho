@@ -123,7 +123,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         unimplemented!()
     }
 
-    fn clear_session_state(&self) -> Result<()> {
+    fn clear_uncommitted_state(&self) -> Result<()> {
         unimplemented!()
     }
 
