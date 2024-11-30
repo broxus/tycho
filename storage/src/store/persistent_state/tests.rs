@@ -241,7 +241,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         let out_msgs = OutMsgDescr::try_from_sorted_slice(&messages)?;
 
         let queue_diff = QueueDiffStuff::builder(shard, seqno, &prev_hash)
-            .with_processed_upto([(shard, 0, &HashBytes::ZERO)])
+            .with_processed_to([(shard, 0, &HashBytes::ZERO)])
             .with_messages(
                 &QueueKey::max_for_lt(0),
                 &QueueKey::max_for_lt(0),
