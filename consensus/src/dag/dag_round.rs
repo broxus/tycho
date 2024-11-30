@@ -68,7 +68,7 @@ impl DagRound {
             peer_count,
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
-            threshold: Threshold::new(peer_count),
+            threshold: Threshold::new(round, peer_count),
             prev,
         }));
 

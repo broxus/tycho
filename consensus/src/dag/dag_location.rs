@@ -6,7 +6,7 @@ use futures_util::FutureExt;
 
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::WeakDagRound;
-use crate::effects::{AltFmt, AltFormat};
+use crate::effects::{AltFmt, AltFormat, ValidateCtx};
 use crate::engine::CachedConfig;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime};
 
@@ -57,28 +57,43 @@ impl InclusionState {
     }
 
     /// Must not be used for downloaded dependencies
-    pub fn init(&self, first_completed: &DagPoint) -> &Signable {
-        self.0.signable.get_or_init(|| {
+    pub fn init(&self, resolved: &DagPoint) -> &Signable {
+        let mut is_first = false;
+        let signable = self.0.signable.get_or_init(|| {
             let signable = Signable {
-                first_completed: first_completed.clone(),
+                first_resolved: resolved.clone(),
                 signed: OnceLock::new(),
             };
-            if first_completed.trusted().is_some() || first_completed.certified().is_some() {
+            is_first = true;
+            ValidateCtx::first_resolved(resolved);
+            if resolved.trusted().is_some() || resolved.certified().is_some() {
                 if let Some(dag_round) = self.0.parent.upgrade() {
                     dag_round.threshold().add();
                 }
             } else {
                 tracing::warn!(
-                    result = display(first_completed.alt()),
-                    author = display(first_completed.author().alt()),
-                    round = first_completed.round().0,
-                    digest = display(first_completed.digest().alt()),
+                    result = display(resolved.alt()),
+                    author = display(resolved.author().alt()),
+                    round = resolved.round().0,
+                    digest = display(resolved.digest().alt()),
                     "resolved dag point",
                 );
                 signable.reject();
             }
             signable
-        })
+        });
+        if !is_first {
+            tracing::warn!(
+                result = display(resolved.alt()),
+                author = display(resolved.author().alt()),
+                round = resolved.round().0,
+                digest = display(resolved.digest().alt()),
+                first_digest = display(signable.first_resolved.digest().alt()),
+                "resolved alternative dag point",
+            );
+            ValidateCtx::alt_resolved(resolved);
+        }
+        signable
     }
     pub fn signable(&self) -> Option<&'_ Signable> {
         self.0.signable.get()
@@ -94,7 +109,7 @@ impl InclusionState {
 // can produce points to be included and committed, but cannot accomplish leader's requirements.
 #[derive(Debug)]
 pub struct Signable {
-    pub first_completed: DagPoint,
+    pub first_resolved: DagPoint,
     // signature cannot be rolled back, the point must be included as next point dependency
     signed: OnceLock<Result<Signature, ()>>,
 }
@@ -106,7 +121,7 @@ impl Signable {
         key_pair: Option<&KeyPair>, // same round for own point and next round for other's
     ) -> bool {
         let mut this_call_signed = false;
-        if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
+        if let Some((valid, key_pair)) = self.first_resolved.trusted().zip(key_pair) {
             if valid.info.data().time - UnixTime::now()
                 < UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _)
             {

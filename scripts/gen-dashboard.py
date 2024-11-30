@@ -1651,12 +1651,16 @@ def mempool_engine_rates() -> RowPanel:
             "Broadcaster: collected signatures in response",
         ),
         create_counter_panel(
-            "tycho_mempool_collected_includes_count",
+            "tycho_mempool_collected_broadcasts_count",
             "Collector: timely received broadcasts",
         ),
         create_counter_panel(
             "tycho_mempool_signing_current_round_count",
             "Current round broadcasts signed",
+        ),
+        create_counter_panel(
+            "tycho_mempool_collected_includes_count",
+            "Round task: collected includes to produce point",
         ),
         create_counter_panel(
             "tycho_mempool_signing_prev_round_count",
@@ -1714,9 +1718,53 @@ def mempool_engine() -> RowPanel:
             "tycho_mempool_commit_anchor_latency_time",
             "Engine committed anchor: time latency (min over batch)",
         ),
-        create_gauge_panel(
-            "tycho_mempool_includes_ready_round_lag",
-            "Engine produce point: rounds lag to last enough collected includes",
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_points_first_resolved",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Engine: resolve first point errors and warnings (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_alt_points_resolved",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Engine: resolved alternative points (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_verifier_verify",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Verifier: verify() errors (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_verifier_validate",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Verifier: validate() errors and warnings (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_verify_time",
+            "Verifier: verify() point structure and author's sig",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_validate_time",
+            "Verifier: validate() point dependencies in DAG and all-1 sigs",
         ),
         create_heatmap_panel(
             "tycho_mempool_adapter_parse_anchor_history_time",
@@ -1735,32 +1783,6 @@ def mempool_intercom() -> RowPanel:
         create_heatmap_panel(
             "tycho_mempool_broadcast_query_responder_time",
             "Responder: Broadcast accept",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_verifier_verify",
-                label_selectors=['kind=~"$kind"'],
-                range_selector="$__interval",
-                by_labels=["kind", "instance"],
-            ),
-            "Verifier: verify() errors (total at moment)",
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_verifier_verify_time",
-            "Verifier: verify() point structure and author's sig",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_verifier_validate",
-                label_selectors=['kind=~"$kind"'],
-                range_selector="$__interval",
-                by_labels=["kind", "instance"],
-            ),
-            "Verifier: validate() errors and warnings (total at moment)",
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_verifier_validate_time",
-            "Verifier: validate() point dependencies in DAG and all-1 sigs",
         ),
         # == Network tasks - multiple per round == #
         create_heatmap_panel(
@@ -1824,10 +1846,29 @@ def mempool_intercom() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
+                "tycho_mempool_download_unreliable_responses",
+                range_selector="$__interval",
+            ),
+            "Downloader: unreliable response (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
                 "tycho_mempool_download_query_failed_count",
                 range_selector="$__interval",
             ),
             "Downloader: queries network error (total at moment)",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_bcast_receivers",
+            "Peers: broadcast receivers",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peers_resolving",
+            "Peers: resolving",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peers_resolved",
+            "Peers: all resolved",
         ),
     ]
     return create_row("Mempool communication", metrics)

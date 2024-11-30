@@ -148,6 +148,8 @@ impl RoundTaskReady {
                     }
                 );
             };
+            metrics::counter!("tycho_mempool_collected_includes_count")
+                .increment(head.prev().threshold().count() as u64);
             if !is_in_time {
                 return None;
             }
@@ -353,12 +355,8 @@ impl RoundCtx {
 
         metrics::counter!("tycho_mempool_point_payload_count")
             .increment(own_point.map_or(0, |point| point.payload().len() as _));
-        let payload_bytes = own_point.map(|point| {
-            point
-                .payload()
-                .iter()
-                .fold(0, |acc, bytes| acc + bytes.len()) as _
-        });
+        let payload_bytes = own_point
+            .map(|point| (point.payload().iter()).fold(0, |acc, bytes| acc + bytes.len()) as _);
         metrics::counter!("tycho_mempool_point_payload_bytes")
             .increment(payload_bytes.unwrap_or_default());
 
@@ -372,6 +370,11 @@ impl RoundCtx {
                 is_proof = Some(own_point.data().anchor_proof == Link::ToSelf).filter(|x| *x),
                 is_trigger = Some(own_point.data().anchor_trigger == Link::ToSelf).filter(|x| *x),
                 "produced point"
+            );
+            tracing::debug!(
+                parent: self.span(),
+                ?own_point,
+                "created point details"
             );
         } else {
             tracing::info!(parent: self.span(), "produce point skipped");

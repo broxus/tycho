@@ -26,6 +26,9 @@ impl EngineCtx {
             span: tracing::error_span!("rounds", "since" = since.0),
         }
     }
+    pub fn meter_dag_len(len: usize) {
+        metrics::gauge!("tycho_mempool_rounds_dag_length").set(len as u32);
+    }
 }
 
 #[derive(Clone)]
@@ -50,8 +53,8 @@ impl RoundCtx {
                 .in_scope(|| tracing::error_span!("round", "current" = current_round.0)),
         }))
     }
-    pub fn depth(&self, round: Round) -> u32 {
-        (self.0.current_round - round.0).0
+    pub fn depth(&self, round: Round) -> f64 {
+        self.0.current_round - round
     }
 }
 

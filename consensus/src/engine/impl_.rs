@@ -439,11 +439,10 @@ impl Engine {
                 if old_dag_top_round < dag_top_round.prev() {
                     self.ctx = EngineCtx::new(dag_top_round);
                 }
-                round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
             };
 
             let head = self.dag.head(&self.round_task.state.peer_schedule);
-
+            round_ctx = RoundCtx::new(&self.ctx, head.current().round());
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
             let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry);
@@ -625,7 +624,7 @@ fn committer_task(
             }
         }
 
-        metrics::gauge!("tycho_mempool_rounds_dag_length").set(committer.dag_len() as u32);
+        EngineCtx::meter_dag_len(committer.dag_len());
 
         committer
     })
