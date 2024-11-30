@@ -30,8 +30,11 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         queue_diff_stuff: &QueueDiffStuff,
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
-        let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
-        let processed_to: BTreeMap<ShardIdent, QueueKey> = processed_upto
+        let QueueDiff {
+            processed_upto: processed_to,
+            ..
+        } = queue_diff_stuff.as_ref();
+        let processed_to = processed_to
             .iter()
             .map(|(shard_ident, key)| (*shard_ident, *key))
             .collect();

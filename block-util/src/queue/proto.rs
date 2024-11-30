@@ -223,9 +223,9 @@ mod processed_upto_map {
     pub fn write<P: TlPacket>(items: &BTreeMap<ShardIdent, QueueKey>, packet: &mut P) {
         packet.write_u32(items.len() as u32);
 
-        for (shard_ident, processed_upto) in items {
+        for (shard_ident, processed_to) in items {
             tl::shard_ident::write(shard_ident, packet);
-            processed_upto.write_to(packet);
+            processed_to.write_to(packet);
         }
     }
 
