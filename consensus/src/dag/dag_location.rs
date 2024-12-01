@@ -71,14 +71,20 @@ impl InclusionState {
                     dag_round.threshold().add();
                 }
             } else {
+                let mut rejected_to_sign = None;
+                signable.signed.get_or_init(|| {
+                    meter_rejected();
+                    rejected_to_sign = Some(true);
+                    Err(())
+                });
                 tracing::warn!(
                     result = display(resolved.alt()),
+                    rejected_to_sign = debug(rejected_to_sign),
                     author = display(resolved.author().alt()),
                     round = resolved.round().0,
                     digest = display(resolved.digest().alt()),
                     "resolved dag point",
                 );
-                signable.reject();
             }
             signable
         });
@@ -121,7 +127,7 @@ impl Signable {
         key_pair: Option<&KeyPair>, // same round for own point and next round for other's
     ) -> bool {
         let mut this_call_signed = false;
-        if let Some((valid, key_pair)) = self.first_resolved.trusted().zip(key_pair) {
+        if let Some((valid, key_pair)) = self.first_resolved.valid().zip(key_pair) {
             if valid.info.data().time - UnixTime::now()
                 < UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _)
             {
@@ -153,17 +159,29 @@ impl Signable {
                 metrics::counter!("tycho_mempool_signing_postponed").increment(1);
             }
         } else {
-            self.reject();
+            _ = self.signed.get_or_init(|| {
+                meter_rejected();
+                if key_pair.is_some() {
+                    tracing::warn!(
+                        result = display(self.first_resolved.alt()),
+                        author = display(self.first_resolved.author().alt()),
+                        round = self.first_resolved.round().0,
+                        digest = display(self.first_resolved.digest().alt()),
+                        "rejected to sign",
+                    );
+                }
+                Err(())
+            });
         }
         this_call_signed
-    }
-    fn reject(&self) {
-        metrics::counter!("tycho_mempool_signing_rejected").increment(1);
-        _ = self.signed.set(Err(()));
     }
     pub fn signed(&self) -> Option<&Result<Signature, ()>> {
         self.signed.get()
     }
+}
+
+fn meter_rejected() {
+    metrics::counter!("tycho_mempool_signing_rejected").increment(1);
 }
 
 impl AltFormat for DagLocation {}
