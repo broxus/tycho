@@ -554,6 +554,10 @@ impl MessagesExecutor {
         &self.params
     }
 
+    pub fn updated_accounts_count(&self) -> usize {
+        self.accounts_cache.items.len()
+    }
+
     pub fn into_accounts_cache_raw(
         self,
     ) -> (

@@ -108,6 +108,16 @@ impl Phase<ExecuteState> {
                 }
                 process_txs_total_elapsed += timer.elapsed();
 
+                // HACK: check if updated accounts count limit reached
+                if self.extra.executor.executor.updated_accounts_count() >= 500 {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "accounts limit in block reached: {}/500",
+                        self.extra.executor.executor.updated_accounts_count(),
+                    );
+                    break;
+                }
+                //
+
                 if self
                     .state
                     .collation_data
