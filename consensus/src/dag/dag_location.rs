@@ -66,7 +66,7 @@ impl InclusionState {
             };
             is_first = true;
             ValidateCtx::first_resolved(resolved);
-            if resolved.trusted().is_some() || resolved.certified().is_some() {
+            if resolved.valid().is_some() {
                 if let Some(dag_round) = self.0.parent.upgrade() {
                     dag_round.threshold().add();
                 }
