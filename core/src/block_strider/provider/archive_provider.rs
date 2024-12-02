@@ -12,8 +12,8 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::AbortHandle;
-use tycho_block_util::archive::{Archive, ArchiveError};
-use tycho_block_util::block::BlockIdRelation;
+use tycho_block_util::archive::Archive;
+use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
 use tycho_storage::Storage;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
@@ -114,57 +114,12 @@ impl ArchiveBlockProvider {
             };
 
             let archive = &archive_info.archive;
-
-            'checks: {
-                {
-                    match (
-                        archive.mc_block_ids.first_key_value(),
-                        archive.mc_block_ids.last_key_value(),
-                    ) {
-                        (Some((first_seqno, _)), Some((last_seqno, _))) => {
-                            if (last_seqno - first_seqno + 1) != archive.mc_block_ids.len() as u32 {
-                                tracing::error!("Archive does not contain some mc blocks");
-                                break 'checks;
-                            }
-                        }
-                        _ => {
-                            tracing::error!("Archive is empty");
-                            break 'checks;
-                        }
-                    }
+            match self.checked_get_entry_by_id(archive, &block_id).await {
+                Ok(block) => break 'main Some(Ok(block.clone())),
+                Err(e) => {
+                    tracing::error!("failed to check archive: {e}");
                 }
-
-                let (ref block, ref proof, ref queue_diff) =
-                    match archive.get_entry_by_id(&block_id) {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            tracing::error!(
-                                "Archive is corrupted {e:?}. Retrying archive downloading."
-                            );
-                            break 'checks;
-                        }
-                    };
-
-                match this
-                    .proof_checker
-                    .check_proof(CheckProof {
-                        mc_block_id: &block_id,
-                        block,
-                        proof,
-                        queue_diff,
-                        store_on_success: true,
-                    })
-                    .await
-                {
-                    Ok(_) => {
-                        break 'main Some(Ok(block.clone()));
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to check block proof {e:?}");
-                        break 'checks;
-                    }
-                };
-            };
+            }
 
             this.remove_archive(archive_key).await;
             archive_info.from.punish(PunishReason::Malicious);
@@ -177,42 +132,41 @@ impl ArchiveBlockProvider {
         let block_id = block_id_relation.block_id;
         let mc_block_id = block_id_relation.mc_block_id;
 
-        let mut entry = None;
+        loop {
+            let (archive_key, archive_info) = 'download: loop {
+                // Looking for block in the archives cache
+                if let Some((key, info)) = this.look_for_archive(mc_block_id.seqno).await {
+                    break 'download (key, info);
+                }
 
-        let guard = this.known_archives.lock().await;
-        for (_, slot) in guard.iter() {
-            if let ArchiveSlot::Downloaded(info) = slot {
-                if let Ok(res) = info.archive.get_entry_by_id(&block_id) {
-                    entry = Some(res);
+                match self.download_archive(mc_block_id.seqno).await {
+                    Ok(Some(archive_info)) => {
+                        break 'download (mc_block_id.seqno, archive_info);
+                    }
+                    Ok(None) => {
+                        tracing::warn!("shard block is too new for archives");
+
+                        // NOTE: This is a strange situation, but if we wait a bit it might go away.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to get archive {e:?}");
+                        continue;
+                    }
+                }
+            };
+
+            let archive = &archive_info.archive;
+            match self.checked_get_entry_by_id(archive, &block_id).await {
+                Ok(block) => return Some(Ok(block.clone())),
+                Err(e) => {
+                    tracing::error!("failed to check archive: {e}");
+                    this.remove_archive(archive_key).await;
+                    archive_info.from.punish(PunishReason::Malicious);
                 }
             }
         }
-        drop(guard);
-
-        let (ref block, ref proof, ref queue_diff) = match entry {
-            Some(entry) => entry,
-            None => {
-                tracing::error!("archive out of range");
-                return Some(Err(ArchiveError::OutOfRange.into()));
-            }
-        };
-
-        if let Err(e) = this
-            .proof_checker
-            .check_proof(CheckProof {
-                mc_block_id: &mc_block_id,
-                block,
-                proof,
-                queue_diff,
-                store_on_success: true,
-            })
-            .await
-        {
-            return Some(Err(e));
-        }
-
-        // NOTE: Always return the block by id even if it's not recent
-        Some(Ok(block.clone()))
     }
 
     async fn download_archive(&self, archive_key: u32) -> Result<Option<ArchiveInfo>> {
@@ -283,6 +237,30 @@ impl ArchiveBlockProvider {
                 }
             }
         }
+    }
+
+    async fn checked_get_entry_by_id(
+        &self,
+        archive: &Archive,
+        block_id: &BlockId,
+    ) -> Result<BlockStuffAug> {
+        let (block, ref proof, ref queue_diff) = match archive.get_entry_by_id(block_id) {
+            Ok(entry) => entry,
+            Err(e) => anyhow::bail!("archive is corrupted: {e:?}"),
+        };
+
+        self.inner
+            .proof_checker
+            .check_proof(CheckProof {
+                mc_block_id: block_id,
+                block: &block,
+                proof,
+                queue_diff,
+                store_on_success: true,
+            })
+            .await?;
+
+        Ok(block)
     }
 
     fn make_next_archive_task(&self, seqno: u32) -> NextArchive {
@@ -362,7 +340,9 @@ impl Inner {
             }
         };
 
-        Archive::new(bytes)
+        let archive = Archive::new(bytes)?;
+        archive.check_mc_blocks_range()?;
+        Ok(archive)
     }
 
     async fn look_for_archive(&self, mc_block_seqno: u32) -> Option<(u32, ArchiveInfo)> {

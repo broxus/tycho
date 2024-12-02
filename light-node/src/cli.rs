@@ -325,6 +325,10 @@ impl<C> Node<C> {
             self.blockchain_block_provider_config.clone(),
         );
 
+        // TODO: Uncomment when archive block provider can initiate downloads for shard blocks.
+        // blockchain_block_provider =
+        //     blockchain_block_provider.with_fallback(archive_block_provider.clone());
+
         let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
 
         let strider_state =
