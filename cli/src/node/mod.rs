@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
+use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::MinRefMcStateTracker;
@@ -491,6 +492,7 @@ struct SetSyncContext {
 impl BlockProvider for SetSyncContext {
     type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
     type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type ResetFut<'a> = futures_util::future::Ready<()>;
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.adapter.set_sync_context(self.ctx);
@@ -499,6 +501,10 @@ impl BlockProvider for SetSyncContext {
 
     fn get_block<'a>(&'a self, _: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         futures_util::future::ready(None)
+    }
+
+    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
+        futures_util::future::ready(())
     }
 }
 
@@ -530,6 +536,7 @@ struct CollatorBlockProvider {
 impl BlockProvider for CollatorBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = future::Ready<()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.adapter.wait_for_block_next(prev_block_id)
@@ -537,6 +544,10 @@ impl BlockProvider for CollatorBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         self.adapter.wait_for_block(&block_id_relation.block_id)
+    }
+
+    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
+        futures_util::future::ready(())
     }
 }
 

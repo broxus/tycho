@@ -61,10 +61,6 @@ impl ArchiveBlockProvider {
         }
     }
 
-    pub async fn clear(&self) {
-        self.inner.clear_known_archives().await;
-    }
-
     async fn get_next_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
         const MAX_OVERLAP_BLOCKS: u32 = 5;
 
@@ -298,6 +294,10 @@ impl ArchiveBlockProvider {
             abort_handle: handle.abort_handle(),
         }
     }
+
+    async fn reset_impl(&self, seqno: u32) {
+        self.inner.clear_outdated_archives(seqno).await;
+    }
 }
 
 struct Inner {
@@ -405,11 +405,6 @@ impl Inner {
         let mut guard = self.known_archives.lock().await;
         guard.retain(|key, _| *key >= bound);
     }
-
-    async fn clear_known_archives(&self) {
-        let mut guard = self.known_archives.lock().await;
-        guard.clear();
-    }
 }
 
 struct ArchiveDownloader {
@@ -483,6 +478,7 @@ enum ArchiveData {
 impl BlockProvider for ArchiveBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(self.get_next_block_impl(prev_block_id))
@@ -490,6 +486,10 @@ impl BlockProvider for ArchiveBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id_relation))
+    }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        Box::pin(self.reset_impl(seqno))
     }
 }
 

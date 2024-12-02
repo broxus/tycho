@@ -29,6 +29,7 @@ impl BoxBlockProvider {
 impl BlockProvider for BoxBlockProvider {
     type GetNextBlockFut<'a> = BlockFut<'a>;
     type GetBlockFut<'a> = BlockFut<'a>;
+    type ResetFut<'a> = ResetFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         unsafe { (self.vtable.get_next_block)(&self.data, prev_block_id) }
@@ -36,6 +37,10 @@ impl BlockProvider for BoxBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         unsafe { (self.vtable.get_block)(&self.data, block_id_relation) }
+    }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        unsafe { (self.vtable.reset)(&self.data, seqno) }
     }
 }
 
@@ -52,6 +57,7 @@ unsafe impl Sync for BoxBlockProvider {}
 struct Vtable {
     get_next_block: GetNextBlockFn,
     get_block: GetBlockFn,
+    reset: ResetFn,
     drop: DropFn,
 }
 
@@ -66,6 +72,10 @@ impl Vtable {
                 let provider = unsafe { &*ptr.load(Ordering::Relaxed).cast::<P>() };
                 provider.get_block(block_id_relation).boxed()
             },
+            reset: |ptr, seqno| {
+                let provider = unsafe { &*ptr.load(Ordering::Relaxed).cast::<P>() };
+                provider.reset(seqno).boxed()
+            },
             drop: |ptr| {
                 drop(unsafe { Box::<P>::from_raw(ptr.get_mut().cast::<P>()) });
             },
@@ -75,9 +85,11 @@ impl Vtable {
 
 type GetNextBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockId) -> BlockFut<'a>;
 type GetBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockIdRelation) -> BlockFut<'a>;
+type ResetFn = for<'a> unsafe fn(&AtomicPtr<()>, u32) -> ResetFut<'_>;
 type DropFn = unsafe fn(&mut AtomicPtr<()>);
 
 type BlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+type ResetFut<'a> = BoxFuture<'a, ()>;
 
 #[cfg(test)]
 mod tests {
@@ -94,6 +106,7 @@ mod tests {
         struct ProviderState {
             get_next_called: AtomicUsize,
             get_called: AtomicUsize,
+            reset: AtomicUsize,
             dropped: AtomicUsize,
         }
 
@@ -110,6 +123,7 @@ mod tests {
         impl BlockProvider for TestProvider {
             type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
             type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+            type ResetFut<'a> = futures_util::future::Ready<()>;
 
             fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
                 self.state.get_next_called.fetch_add(1, Ordering::Relaxed);
@@ -120,11 +134,17 @@ mod tests {
                 self.state.get_called.fetch_add(1, Ordering::Relaxed);
                 futures_util::future::ready(None)
             }
+
+            fn reset(&self, _: u32) -> Self::ResetFut<'_> {
+                self.state.reset.fetch_add(1, Ordering::Relaxed);
+                futures_util::future::ready(())
+            }
         }
 
         let state = Arc::new(ProviderState {
             get_next_called: AtomicUsize::new(0),
             get_called: AtomicUsize::new(0),
+            reset: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
         });
         let boxed = BoxBlockProvider::new(TestProvider {

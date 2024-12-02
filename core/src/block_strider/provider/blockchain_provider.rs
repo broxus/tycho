@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use everscale_types::models::*;
+use futures_util::future;
 use futures_util::future::{BoxFuture, Either};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
@@ -276,6 +277,7 @@ impl BlockchainBlockProvider {
 impl BlockProvider for BlockchainBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = future::Ready<()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(self.get_next_block_impl(prev_block_id))
@@ -283,6 +285,10 @@ impl BlockProvider for BlockchainBlockProvider {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id_relation))
+    }
+
+    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
+        futures_util::future::ready(())
     }
 }
 
