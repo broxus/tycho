@@ -72,6 +72,24 @@ impl Archive {
         Ok(res)
     }
 
+    pub fn check_mc_blocks_range(&self) -> Result<()> {
+        match (
+            self.mc_block_ids.first_key_value(),
+            self.mc_block_ids.last_key_value(),
+        ) {
+            (Some((first_seqno, _)), Some((last_seqno, _))) => {
+                if (last_seqno - first_seqno + 1) != self.mc_block_ids.len() as u32 {
+                    anyhow::bail!("archive does not contain some mc blocks")
+                }
+
+                Ok(())
+            }
+            _ => {
+                anyhow::bail!("archive is empty")
+            }
+        }
+    }
+
     // TODO: Make async
     pub fn get_entry_by_id(
         &self,
