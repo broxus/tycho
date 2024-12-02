@@ -37,14 +37,17 @@ pub type OptionalBlockStuff = Option<Result<BlockStuffAug>>;
 pub trait BlockProvider: Send + Sync + 'static {
     type GetNextBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
     type GetBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
+    type ResetFut<'a>: Future<Output = ()> + Send + 'a;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a>;
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a>;
+    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_>;
 }
 
 impl<T: BlockProvider> BlockProvider for Box<T> {
     type GetNextBlockFut<'a> = T::GetNextBlockFut<'a>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
+    type ResetFut<'a> = T::ResetFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         <T as BlockProvider>::get_next_block(self, prev_block_id)
@@ -52,12 +55,17 @@ impl<T: BlockProvider> BlockProvider for Box<T> {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         <T as BlockProvider>::get_block(self, block_id_relation)
+    }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        <T as BlockProvider>::reset(self, seqno)
     }
 }
 
 impl<T: BlockProvider> BlockProvider for Arc<T> {
     type GetNextBlockFut<'a> = T::GetNextBlockFut<'a>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
+    type ResetFut<'a> = T::ResetFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         <T as BlockProvider>::get_next_block(self, prev_block_id)
@@ -65,6 +73,10 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         <T as BlockProvider>::get_block(self, block_id_relation)
+    }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        <T as BlockProvider>::reset(self, seqno)
     }
 }
 
@@ -114,6 +126,7 @@ pub struct EmptyBlockProvider;
 impl BlockProvider for EmptyBlockProvider {
     type GetNextBlockFut<'a> = future::Ready<OptionalBlockStuff>;
     type GetBlockFut<'a> = future::Ready<OptionalBlockStuff>;
+    type ResetFut<'a> = future::Ready<()>;
 
     fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         future::ready(None)
@@ -121,6 +134,10 @@ impl BlockProvider for EmptyBlockProvider {
 
     fn get_block<'a>(&'a self, _block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         future::ready(None)
+    }
+
+    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
+        future::ready(())
     }
 }
 
@@ -133,6 +150,7 @@ pub struct ChainBlockProvider<T1, T2> {
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
@@ -156,6 +174,16 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
             }
         })
     }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        Box::pin(async move {
+            if self.is_right.load(Ordering::Acquire) {
+                self.right.reset(seqno).await;
+            } else {
+                self.left.reset(seqno).await;
+            }
+        })
+    }
 }
 
 pub struct CycleBlockProvider<T1, T2> {
@@ -167,6 +195,7 @@ pub struct CycleBlockProvider<T1, T2> {
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = BoxFuture<'a, ()>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
@@ -202,6 +231,16 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
             }
         })
     }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        Box::pin(async move {
+            if self.is_right.load(Ordering::Acquire) {
+                self.right.reset(seqno).await;
+            } else {
+                self.left.reset(seqno).await;
+            }
+        })
+    }
 }
 
 pub struct RetryBlockProvider<T> {
@@ -212,6 +251,7 @@ pub struct RetryBlockProvider<T> {
 impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
+    type ResetFut<'a> = T::ResetFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
@@ -234,6 +274,10 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         self.inner.get_block(block_id_relation)
     }
+
+    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+        self.inner.reset(seqno)
+    }
 }
 
 macro_rules! impl_provider_tuple {
@@ -244,6 +288,7 @@ macro_rules! impl_provider_tuple {
         {
             type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
             type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+            type ResetFut<'a> = BoxFuture<'a, ()>;
 
             fn get_next_block<'a>(
                 &'a self,
@@ -263,6 +308,14 @@ macro_rules! impl_provider_tuple {
                 Box::pin(async move {
                     $(let $var = pin!($var));*;
                     SelectNonEmptyFut::from(($($var),*)).await
+                })
+            }
+
+            fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+                $(let $var = self.$n.reset(seqno));*;
+
+                Box::pin(async move {
+                    $( $var.await; )*
                 })
             }
         }
@@ -475,6 +528,7 @@ mod test {
     impl BlockProvider for MockBlockProvider {
         type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
         type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+        type ResetFut<'a> = future::Ready<()>;
 
         fn get_next_block(&self, _prev_block_id: &BlockId) -> Self::GetNextBlockFut<'_> {
             Box::pin(async {
@@ -494,6 +548,10 @@ mod test {
                     None
                 }
             })
+        }
+
+        fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
+            future::ready(())
         }
     }
 
