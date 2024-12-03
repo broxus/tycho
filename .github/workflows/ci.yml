@@ -110,6 +110,18 @@ jobs:
       - uses: extractions/setup-just@v2
       - name: Check dashboard
         run: just check_dashboard
+  msrv:
+    name: Check minimum supported Rust version
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.10.15
+      - uses: extractions/setup-just@v2
+      - name: Install cargo-msrv
+        run: cargo binstall cargo-msrv
+      - name: Check semver
+        run: cargo msrv verify --manifest-path cli/Cargo.toml
 
   check-protos:
     name: Check protos
