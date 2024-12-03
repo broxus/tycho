@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use anyhow::Result;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -27,8 +28,8 @@ impl BoxBlockProvider {
 }
 
 impl BlockProvider for BoxBlockProvider {
-    type GetNextBlockFut<'a> = BlockFut<'a>;
-    type GetBlockFut<'a> = BlockFut<'a>;
+    type GetNextBlockFut<'a> = GetBlockFut<'a>;
+    type GetBlockFut<'a> = GetBlockFut<'a>;
     type ResetFut<'a> = ResetFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
@@ -39,8 +40,8 @@ impl BlockProvider for BoxBlockProvider {
         unsafe { (self.vtable.get_block)(&self.data, block_id_relation) }
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
-        unsafe { (self.vtable.reset)(&self.data, seqno) }
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+        unsafe { (self.vtable.reset)(&self.data, mc_seqno) }
     }
 }
 
@@ -72,9 +73,9 @@ impl Vtable {
                 let provider = unsafe { &*ptr.load(Ordering::Relaxed).cast::<P>() };
                 provider.get_block(block_id_relation).boxed()
             },
-            reset: |ptr, seqno| {
+            reset: |ptr, mc_seqno| {
                 let provider = unsafe { &*ptr.load(Ordering::Relaxed).cast::<P>() };
-                provider.reset(seqno).boxed()
+                provider.reset(mc_seqno).boxed()
             },
             drop: |ptr| {
                 drop(unsafe { Box::<P>::from_raw(ptr.get_mut().cast::<P>()) });
@@ -83,13 +84,13 @@ impl Vtable {
     }
 }
 
-type GetNextBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockId) -> BlockFut<'a>;
-type GetBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockIdRelation) -> BlockFut<'a>;
+type GetNextBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockId) -> GetBlockFut<'a>;
+type GetBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockIdRelation) -> GetBlockFut<'a>;
 type ResetFn = for<'a> unsafe fn(&AtomicPtr<()>, u32) -> ResetFut<'_>;
 type DropFn = unsafe fn(&mut AtomicPtr<()>);
 
-type BlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-type ResetFut<'a> = BoxFuture<'a, ()>;
+type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+type ResetFut<'a> = BoxFuture<'a, Result<()>>;
 
 #[cfg(test)]
 mod tests {
@@ -123,7 +124,7 @@ mod tests {
         impl BlockProvider for TestProvider {
             type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
             type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
-            type ResetFut<'a> = futures_util::future::Ready<()>;
+            type ResetFut<'a> = futures_util::future::Ready<Result<()>>;
 
             fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
                 self.state.get_next_called.fetch_add(1, Ordering::Relaxed);
@@ -137,7 +138,7 @@ mod tests {
 
             fn reset(&self, _: u32) -> Self::ResetFut<'_> {
                 self.state.reset.fetch_add(1, Ordering::Relaxed);
-                futures_util::future::ready(())
+                futures_util::future::ready(Ok(()))
             }
         }
 
