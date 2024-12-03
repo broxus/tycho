@@ -147,8 +147,17 @@ where
             // NOTE: Start fetching the next master block in parallel to the processing of the current one
             next_master_fut = JoinTask::new(self.fetch_next_master_block(next.id()));
 
-            let _histogram = HistogramGuard::begin("tycho_core_process_strider_step_time");
-            self.process_mc_block(next.data, next.archive_data).await?;
+            let mc_seqno = next.id().seqno;
+
+            {
+                let _histogram = HistogramGuard::begin("tycho_core_process_strider_step_time");
+                self.process_mc_block(next.data, next.archive_data).await?;
+            }
+
+            {
+                let _histogram = HistogramGuard::begin("tycho_core_provider_cleanup_time");
+                self.provider.cleanup_until(mc_seqno).await?;
+            }
         }
 
         tracing::info!("block strider loop finished");

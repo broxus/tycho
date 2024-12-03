@@ -1,11 +1,11 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwapAny;
+use arc_swap::{ArcSwapAny, ArcSwapOption};
 use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
 use serde::{Deserialize, Serialize};
@@ -37,20 +37,20 @@ pub type OptionalBlockStuff = Option<Result<BlockStuffAug>>;
 pub trait BlockProvider: Send + Sync + 'static {
     type GetNextBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
     type GetBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
-    type ResetFut<'a>: Future<Output = Result<()>> + Send + 'a;
+    type CleanupFut<'a>: Future<Output = Result<()>> + Send + 'a;
 
     /// Wait for the next block. Mostly used for masterchain blocks.
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a>;
     /// Get the exact block. Provider must return the requested block.
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a>;
-    /// Reset caches until (and including) the specified masterchain block seqno.
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_>;
+    /// Clear resources until (and including) the specified masterchain block seqno.
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_>;
 }
 
 impl<T: BlockProvider> BlockProvider for Box<T> {
     type GetNextBlockFut<'a> = T::GetNextBlockFut<'a>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
-    type ResetFut<'a> = T::ResetFut<'a>;
+    type CleanupFut<'a> = T::CleanupFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         <T as BlockProvider>::get_next_block(self, prev_block_id)
@@ -60,15 +60,15 @@ impl<T: BlockProvider> BlockProvider for Box<T> {
         <T as BlockProvider>::get_block(self, block_id_relation)
     }
 
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
-        <T as BlockProvider>::reset(self, mc_seqno)
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
+        <T as BlockProvider>::cleanup_until(self, mc_seqno)
     }
 }
 
 impl<T: BlockProvider> BlockProvider for Arc<T> {
     type GetNextBlockFut<'a> = T::GetNextBlockFut<'a>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
-    type ResetFut<'a> = T::ResetFut<'a>;
+    type CleanupFut<'a> = T::CleanupFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         <T as BlockProvider>::get_next_block(self, prev_block_id)
@@ -78,8 +78,8 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
         <T as BlockProvider>::get_block(self, block_id_relation)
     }
 
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
-        <T as BlockProvider>::reset(self, mc_seqno)
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
+        <T as BlockProvider>::cleanup_until(self, mc_seqno)
     }
 }
 
@@ -99,11 +99,7 @@ impl<B: BlockProvider> BlockProviderExt for B {
     }
 
     fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T> {
-        ChainBlockProvider {
-            left: self,
-            right: other,
-            is_right: AtomicBool::new(false),
-        }
+        ChainBlockProvider::new(self, other)
     }
 
     fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T> {
@@ -129,7 +125,7 @@ pub struct EmptyBlockProvider;
 impl BlockProvider for EmptyBlockProvider {
     type GetNextBlockFut<'a> = future::Ready<OptionalBlockStuff>;
     type GetBlockFut<'a> = future::Ready<OptionalBlockStuff>;
-    type ResetFut<'a> = future::Ready<Result<()>>;
+    type CleanupFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         future::ready(None)
@@ -139,52 +135,88 @@ impl BlockProvider for EmptyBlockProvider {
         future::ready(None)
     }
 
-    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
         future::ready(Ok(()))
     }
 }
 
 pub struct ChainBlockProvider<T1, T2> {
-    left: T1,
+    left: ArcSwapOption<T1>,
     right: T2,
-    is_right: AtomicBool,
+    cleanup_left_at: AtomicU32,
+}
+
+impl<T1, T2> ChainBlockProvider<T1, T2> {
+    pub fn new(left: T1, right: T2) -> Self {
+        Self {
+            left: ArcSwapAny::new(Some(Arc::new(left))),
+            right,
+            cleanup_left_at: AtomicU32::new(u32::MAX),
+        }
+    }
 }
 
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = BoxFuture<'a, Result<()>>;
+    type CleanupFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async move {
-            if !self.is_right.load(Ordering::Acquire) {
-                let res = self.left.get_next_block(prev_block_id).await;
-                if res.is_some() {
-                    return res;
-                }
-                self.is_right.store(true, Ordering::Release);
+        if self.cleanup_left_at.load(Ordering::Acquire) == u32::MAX {
+            if let Some(left) = self.left.load_full() {
+                return Box::pin(async move {
+                    let res = left.get_next_block(prev_block_id).await;
+                    if res.is_some() {
+                        return res;
+                    }
+
+                    // Schedule left provider cleanup for the next block.
+                    self.cleanup_left_at
+                        .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
+
+                    // Fallback to right
+                    self.right.get_next_block(prev_block_id).await
+                });
             }
-            self.right.get_next_block(prev_block_id).await
-        })
+        }
+
+        Box::pin(self.right.get_next_block(prev_block_id))
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        Box::pin(async {
-            if self.is_right.load(Ordering::Acquire) {
-                self.right.get_block(block_id_relation).await
-            } else {
-                self.left.get_block(block_id_relation).await
+        if self.cleanup_left_at.load(Ordering::Acquire) == u32::MAX {
+            if let Some(left) = self.left.load_full() {
+                return Box::pin(async move { left.get_block(block_id_relation).await });
             }
-        })
+        }
+
+        Box::pin(self.right.get_block(block_id_relation))
     }
 
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
         Box::pin(async move {
-            if self.is_right.load(Ordering::Acquire) {
-                self.right.reset(mc_seqno).await
-            } else {
-                self.left.reset(mc_seqno).await
+            // Read the cleanup flag:
+            // - 0 means that `left` has been reset;
+            // - u32::MAX means that `left` is still in use;
+            // - other seqno indicates when we need to cleanup `left`.
+            let cleanup_left_at = self.cleanup_left_at.load(Ordering::Acquire);
+
+            if cleanup_left_at > 0 && cleanup_left_at <= mc_seqno {
+                // Cleanup and reset `left` if target block has been set.
+                if let Some(left) = self.left.load_full() {
+                    left.cleanup_until(mc_seqno).await?;
+                    self.left.store(None);
+                    self.cleanup_left_at.store(0, Ordering::Release);
+                }
+            } else if cleanup_left_at == u32::MAX {
+                // Cleanup only `left` until we switch to `right`.
+                if let Some(left) = self.left.load_full() {
+                    return left.cleanup_until(mc_seqno).await;
+                }
             }
+
+            // In all other cases just cleanup `right`.
+            self.right.cleanup_until(mc_seqno).await
         })
     }
 }
@@ -198,7 +230,7 @@ pub struct CycleBlockProvider<T1, T2> {
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = BoxFuture<'a, Result<()>>;
+    type CleanupFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
@@ -226,21 +258,20 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        Box::pin(async {
-            if self.is_right.load(Ordering::Acquire) {
-                self.right.get_block(block_id_relation).await
-            } else {
-                self.left.get_block(block_id_relation).await
-            }
-        })
+        if self.is_right.load(Ordering::Acquire) {
+            Box::pin(self.right.get_block(block_id_relation))
+        } else {
+            Box::pin(self.left.get_block(block_id_relation))
+        }
     }
 
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
         Box::pin(async move {
-            if self.is_right.load(Ordering::Acquire) {
-                self.right.reset(mc_seqno).await
-            } else {
-                self.left.reset(mc_seqno).await
+            let cleanup_left = self.left.cleanup_until(mc_seqno);
+            let cleanup_right = self.right.cleanup_until(mc_seqno);
+            match futures_util::future::join(cleanup_left, cleanup_right).await {
+                (Err(e), _) | (_, Err(e)) => Err(e),
+                (Ok(()), Ok(())) => Ok(()),
             }
         })
     }
@@ -254,7 +285,7 @@ pub struct RetryBlockProvider<T> {
 impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = T::GetBlockFut<'a>;
-    type ResetFut<'a> = T::ResetFut<'a>;
+    type CleanupFut<'a> = T::CleanupFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
@@ -278,8 +309,8 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
         self.inner.get_block(block_id_relation)
     }
 
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
-        self.inner.reset(mc_seqno)
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
+        self.inner.cleanup_until(mc_seqno)
     }
 }
 
@@ -293,7 +324,7 @@ macro_rules! impl_provider_tuple {
         {
             type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
             type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-            type ResetFut<'a> = BoxFuture<'a, Result<()>>;
+            type CleanupFut<'a> = BoxFuture<'a, Result<()>>;
 
             fn get_next_block<'a>(
                 &'a self,
@@ -316,8 +347,8 @@ macro_rules! impl_provider_tuple {
                 })
             }
 
-            fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
-                $(let $var = self.$n.reset(mc_seqno));*;
+            fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
+                $(let $var = self.$n.cleanup_until(mc_seqno));*;
 
                 Box::pin(async move {
                     match $join_fn($($var),*).await {
@@ -557,7 +588,7 @@ mod test {
     impl BlockProvider for MockBlockProvider {
         type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
         type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-        type ResetFut<'a> = future::Ready<Result<()>>;
+        type CleanupFut<'a> = future::Ready<Result<()>>;
 
         fn get_next_block(&self, _prev_block_id: &BlockId) -> Self::GetNextBlockFut<'_> {
             Box::pin(async {
@@ -579,7 +610,7 @@ mod test {
             })
         }
 
-        fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+        fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
             future::ready(Ok(()))
         }
     }
@@ -593,11 +624,7 @@ mod test {
             has_block: AtomicBool::new(false),
         });
 
-        let chain_provider = ChainBlockProvider {
-            left: Arc::clone(&left_provider),
-            right: Arc::clone(&right_provider),
-            is_right: AtomicBool::new(false),
-        };
+        let chain_provider = ChainBlockProvider::new(left_provider.clone(), right_provider.clone());
 
         chain_provider
             .get_next_block(&get_default_block_id())
