@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::Span;
 
 use crate::effects::AltFormat;
-use crate::models::{Digest, PointId, PointInfo, Round};
+use crate::models::{Point, PointId, PointInfo, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
 pub trait Ctx {
@@ -83,11 +83,15 @@ impl Ctx for BroadcastCtx {
     }
 }
 impl BroadcastCtx {
-    pub fn new(parent: &RoundCtx, digest: &Digest) -> Self {
+    pub fn new(parent: &RoundCtx, point: &Point) -> Self {
         Self {
-            span: parent
-                .span()
-                .in_scope(|| tracing::error_span!("broadcast", digest = display(digest.alt()))),
+            span: parent.span().in_scope(|| {
+                tracing::error_span!(
+                    "broadcast",
+                    round = point.round().0,
+                    digest = display(point.digest().alt())
+                )
+            }),
         }
     }
 }
