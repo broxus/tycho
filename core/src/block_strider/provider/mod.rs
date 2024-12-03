@@ -37,11 +37,14 @@ pub type OptionalBlockStuff = Option<Result<BlockStuffAug>>;
 pub trait BlockProvider: Send + Sync + 'static {
     type GetNextBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
     type GetBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
-    type ResetFut<'a>: Future<Output = ()> + Send + 'a;
+    type ResetFut<'a>: Future<Output = Result<()>> + Send + 'a;
 
+    /// Wait for the next block. Mostly used for masterchain blocks.
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a>;
+    /// Get the exact block. Provider must return the requested block.
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a>;
-    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_>;
+    /// Reset caches until (and including) the specified masterchain block seqno.
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_>;
 }
 
 impl<T: BlockProvider> BlockProvider for Box<T> {
@@ -57,8 +60,8 @@ impl<T: BlockProvider> BlockProvider for Box<T> {
         <T as BlockProvider>::get_block(self, block_id_relation)
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
-        <T as BlockProvider>::reset(self, seqno)
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+        <T as BlockProvider>::reset(self, mc_seqno)
     }
 }
 
@@ -75,8 +78,8 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
         <T as BlockProvider>::get_block(self, block_id_relation)
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
-        <T as BlockProvider>::reset(self, seqno)
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+        <T as BlockProvider>::reset(self, mc_seqno)
     }
 }
 
@@ -126,7 +129,7 @@ pub struct EmptyBlockProvider;
 impl BlockProvider for EmptyBlockProvider {
     type GetNextBlockFut<'a> = future::Ready<OptionalBlockStuff>;
     type GetBlockFut<'a> = future::Ready<OptionalBlockStuff>;
-    type ResetFut<'a> = future::Ready<()>;
+    type ResetFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         future::ready(None)
@@ -136,8 +139,8 @@ impl BlockProvider for EmptyBlockProvider {
         future::ready(None)
     }
 
-    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
-        future::ready(())
+    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+        future::ready(Ok(()))
     }
 }
 
@@ -150,7 +153,7 @@ pub struct ChainBlockProvider<T1, T2> {
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = BoxFuture<'a, ()>;
+    type ResetFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
@@ -175,12 +178,12 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
         })
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
         Box::pin(async move {
             if self.is_right.load(Ordering::Acquire) {
-                self.right.reset(seqno).await;
+                self.right.reset(mc_seqno).await
             } else {
-                self.left.reset(seqno).await;
+                self.left.reset(mc_seqno).await
             }
         })
     }
@@ -195,7 +198,7 @@ pub struct CycleBlockProvider<T1, T2> {
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = BoxFuture<'a, ()>;
+    type ResetFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
@@ -232,12 +235,12 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
         })
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
         Box::pin(async move {
             if self.is_right.load(Ordering::Acquire) {
-                self.right.reset(seqno).await;
+                self.right.reset(mc_seqno).await
             } else {
-                self.left.reset(seqno).await;
+                self.left.reset(mc_seqno).await
             }
         })
     }
@@ -275,20 +278,22 @@ impl<T: BlockProvider> BlockProvider for RetryBlockProvider<T> {
         self.inner.get_block(block_id_relation)
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
-        self.inner.reset(seqno)
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+        self.inner.reset(mc_seqno)
     }
 }
 
 macro_rules! impl_provider_tuple {
-    ($($n:tt: $var:ident = $ty:ident),*$(,)?) => {
+    ($join_fn:path, |$e:ident| $err_pat:pat$(,)?, {
+        $($n:tt: $var:ident = $ty:ident),*$(,)?
+    }) => {
         impl<$($ty),*> BlockProvider for ($($ty),*)
         where
             $($ty: BlockProvider),*
         {
             type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
             type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-            type ResetFut<'a> = BoxFuture<'a, ()>;
+            type ResetFut<'a> = BoxFuture<'a, Result<()>>;
 
             fn get_next_block<'a>(
                 &'a self,
@@ -311,11 +316,14 @@ macro_rules! impl_provider_tuple {
                 })
             }
 
-            fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
-                $(let $var = self.$n.reset(seqno));*;
+            fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+                $(let $var = self.$n.reset(mc_seqno));*;
 
                 Box::pin(async move {
-                    $( $var.await; )*
+                    match $join_fn($($var),*).await {
+                        $err_pat => Err($e),
+                        _ => Ok(())
+                    }
                 })
             }
         }
@@ -323,26 +331,47 @@ macro_rules! impl_provider_tuple {
 }
 
 impl_provider_tuple! {
-    0: a = T0,
-    1: b = T1,
+    futures_util::future::join,
+    |e| (Err(e), _) | (_, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+    }
 }
 impl_provider_tuple! {
-    0: a = T0,
-    1: b = T1,
-    2: c = T2,
+    futures_util::future::join3,
+    |e| (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+        2: c = T2,
+    }
 }
 impl_provider_tuple! {
-    0: a = T0,
-    1: b = T1,
-    2: c = T2,
-    3: d = T3,
+    futures_util::future::join4,
+    |e| (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+        2: c = T2,
+        3: d = T3,
+    }
 }
 impl_provider_tuple! {
-    0: a = T0,
-    1: b = T1,
-    2: c = T2,
-    3: d = T3,
-    4: e = T4,
+    futures_util::future::join5,
+    |e|
+        (Err(e), _, _, _, _)
+        | (_, Err(e), _, _, _)
+        | (_, _, Err(e), _, _)
+        | (_, _, _, Err(e), _)
+        | (_, _, _, _, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+        2: c = T2,
+        3: d = T3,
+        4: e = T4,
+    }
 }
 
 pub struct CheckProof<'a> {
@@ -528,7 +557,7 @@ mod test {
     impl BlockProvider for MockBlockProvider {
         type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
         type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-        type ResetFut<'a> = future::Ready<()>;
+        type ResetFut<'a> = future::Ready<Result<()>>;
 
         fn get_next_block(&self, _prev_block_id: &BlockId) -> Self::GetNextBlockFut<'_> {
             Box::pin(async {
@@ -550,8 +579,8 @@ mod test {
             })
         }
 
-        fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
-            future::ready(())
+        fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+            future::ready(Ok(()))
         }
     }
 
