@@ -402,6 +402,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     }
                     Err(
                         error @ (VerifyError::IllFormed
+                        | VerifyError::MustBeEmpty(_)
                         | VerifyError::LackOfPeers(_)
                         | VerifyError::UnknownPeers(_)),
                     ) => {
@@ -414,7 +415,6 @@ impl<T: DownloadType> DownloadTask<T> {
                     }
                     Err(
                         error @ (VerifyError::BeforeGenesis
-                        | VerifyError::UnknownRound
                         | VerifyError::UnknownAuthor
                         | VerifyError::Uninit(_)),
                     ) => {

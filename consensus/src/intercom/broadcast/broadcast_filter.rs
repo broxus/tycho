@@ -193,6 +193,7 @@ impl BroadcastFilterInner {
                         }
                         Err(
                             VerifyError::IllFormed
+                            | VerifyError::MustBeEmpty(_)
                             | VerifyError::LackOfPeers(_)
                             | VerifyError::UnknownPeers(_),
                         ) => {
@@ -208,7 +209,6 @@ impl BroadcastFilterInner {
                         Err(
                             VerifyError::BeforeGenesis
                             | VerifyError::UnknownAuthor
-                            | VerifyError::UnknownRound
                             | VerifyError::Uninit(_),
                         ) => {} // nothing to do
                     }
