@@ -70,7 +70,7 @@ impl RoundTaskReady {
         }
     }
 
-    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
+    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: RoundCtx) {
         assert!(
             self.prev_broadcast.is_none(),
             "previous broadcast is already set"
@@ -84,10 +84,10 @@ impl RoundTaskReady {
             self.state.peer_schedule.clone(),
             bcaster_ready_tx,
             collector_signal_rx,
-            round_ctx,
+            &round_ctx,
         );
         let task = async move {
-            broadcaster.run_continue().await;
+            broadcaster.run_continue(round_ctx).await;
             _ = stub_rx;
             _ = stub_tx;
         };
@@ -234,7 +234,8 @@ impl RoundTaskReady {
                     );
                     let new_last_own_point = broadcaster.run().await;
                     prev_bcast.inspect(|task| task.abort());
-                    let new_prev_bcast = tokio::spawn(broadcaster.run_continue()).abort_handle();
+                    let new_prev_bcast =
+                        tokio::spawn(broadcaster.run_continue(round_ctx)).abort_handle();
                     // join the check, just not to miss it; it must have completed already
                     self_check.await;
                     Some((new_prev_bcast, new_last_own_point))

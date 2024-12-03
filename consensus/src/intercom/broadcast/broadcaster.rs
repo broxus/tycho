@@ -76,7 +76,7 @@ impl Broadcaster {
             PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
 
         Self {
-            ctx: BroadcastCtx::new(round_ctx, point.digest()),
+            ctx: BroadcastCtx::new(round_ctx, &point),
             dispatcher,
             bcaster_signal: Some(bcaster_signal),
             collector_signal,
@@ -167,7 +167,9 @@ impl Broadcaster {
         })
     }
 
-    pub async fn run_continue(mut self) {
+    pub async fn run_continue(mut self, round_ctx: RoundCtx) {
+        self.ctx = BroadcastCtx::new(&round_ctx, &self.point);
+
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             CachedConfig::get().consensus.broadcast_retry_millis as _,
         ));
