@@ -130,8 +130,8 @@ impl Broadcaster {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event that may cause immediate completion
-                Ok(()) = self.collector_signal.changed() => {
-                    let signal = *self.collector_signal.borrow_and_update();
+                result = self.collector_signal.changed() => {
+                    let signal = result.map(|_| *self.collector_signal.borrow_and_update());
                     if self.should_finish(signal) {
                         break;
                     }
@@ -205,11 +205,13 @@ impl Broadcaster {
         }
     }
 
-    fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
+    fn should_finish(
+        &mut self,
+        collector_signal: Result<CollectorSignal, watch::error::RecvError>,
+    ) -> bool {
         let result = match collector_signal {
-            // though we return successful result, it will be discarded on Err
-            CollectorSignal::Finish | CollectorSignal::Err => true,
-            CollectorSignal::Retry => {
+            Err(_) => true, // exited
+            Ok(CollectorSignal::Retry { .. }) => {
                 if self.rejections.len() >= self.signers_count.reliable_minority() {
                     if let Some(sender) = mem::take(&mut self.bcaster_signal) {
                         _ = sender.send(BroadcasterSignal::Err);

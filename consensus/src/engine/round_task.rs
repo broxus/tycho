@@ -77,7 +77,7 @@ impl RoundTaskReady {
         );
 
         let (bcaster_ready_tx, stub_rx) = oneshot::channel();
-        let (stub_tx, collector_signal_rx) = watch::channel(CollectorSignal::Finish);
+        let (stub_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry { ready: true });
         let broadcaster = Broadcaster::new(
             self.state.dispatcher.clone(),
             prev_last_point,
@@ -100,11 +100,9 @@ impl RoundTaskReady {
         mut collector_signal_rx: watch::Receiver<CollectorSignal>,
         round_ctx: &RoundCtx,
     ) -> BoxFuture<'static, Option<Point>> {
-        let current_round = head.current().round();
-
         let allowed_to_produce =
             self.last_own_point.as_ref().map_or(true, |prev_own| {
-                match prev_own.round.next().cmp(&current_round) {
+                match prev_own.round.cmp(&head.prev().round()) {
                     cmp::Ordering::Less => true,
                     cmp::Ordering::Equal => {
                         prev_own.evidence.len() >= prev_own.signers.majority_of_others()
@@ -115,7 +113,7 @@ impl RoundTaskReady {
                         prev_own.round,
                         prev_own.evidence.len(),
                         prev_own.signers.majority_of_others(),
-                        current_round
+                        head.current().round()
                     ),
                 }
             });
@@ -142,8 +140,8 @@ impl RoundTaskReady {
                             break false;
                         }
                         match *collector_signal_rx.borrow_and_update() {
-                            CollectorSignal::Err | CollectorSignal::Finish => break false,
-                            CollectorSignal::Retry => continue,
+                            CollectorSignal::Retry {ready: true} => break false,
+                            CollectorSignal::Retry {ready: false} => continue,
                         }
                     }
                 );

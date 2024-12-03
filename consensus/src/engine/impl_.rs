@@ -445,7 +445,7 @@ impl Engine {
             round_ctx = RoundCtx::new(&self.ctx, head.current().round());
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
-            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry);
+            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
 
             let own_point_fut = match start_point.take() {
                 Some(point) => future::ready(Some(point)).boxed(),
