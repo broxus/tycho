@@ -104,7 +104,11 @@ impl Engine {
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
         let mut dag = DagFront::default();
-        let committer = dag.init(DagRound::new_bottom(Genesis::id().round, &peer_schedule));
+        let mut committer = dag.init(DagRound::new_bottom(
+            Genesis::id().round.prev(),
+            &peer_schedule,
+        ));
+        dag.fill_to_top(Genesis::id().round, Some(&mut committer), &peer_schedule);
         let committer_run = tokio::spawn(future::ready(committer));
 
         let init_task = JoinTask::new({

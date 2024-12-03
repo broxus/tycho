@@ -32,13 +32,17 @@ impl Producer {
         let finished_round = head.prev();
         let key_pair = head.keys().to_produce.as_deref()?;
 
-        let proven_vertex = last_own_point
-            // previous round's point needs 2F signatures from peers scheduled for current round
-            .filter(|prev| {
-                // Note: prev point is used only once until weak links are implemented
-                finished_round.round() == prev.round
-                    && prev.evidence.len() >= prev.signers.majority_of_others()
-            });
+        let proven_vertex = match last_own_point {
+            Some(prev) if prev.round == finished_round.round() => {
+                // previous round's point needs 2F signatures from peers scheduled for current round
+                if prev.evidence.len() >= prev.signers.majority_of_others() {
+                    Some(prev) // prev point is used only once
+                } else {
+                    return None; // cannot produce and has to skip round
+                }
+            }
+            _ => None,
+        };
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
             // wave leader must skip new round if it failed to produce 3 points in a row
