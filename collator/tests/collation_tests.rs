@@ -32,7 +32,7 @@ struct StrangeBlockProvider {
 impl BlockProvider for StrangeBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = futures_util::future::Ready<Result<()>>;
+    type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         tracing::info!("Get next block: {:?}", prev_block_id);
@@ -44,7 +44,7 @@ impl BlockProvider for StrangeBlockProvider {
         self.adapter.wait_for_block(&block_id.block_id)
     }
 
-    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
         futures_util::future::ready(Ok(()))
     }
 }
