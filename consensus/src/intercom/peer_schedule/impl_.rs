@@ -47,7 +47,7 @@ impl PeerSchedule {
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
         }));
         // validator set is not defined for genesis
-        this.set_next_subset(&[], Genesis::id().round, &[Genesis::id().author]);
+        this.set_next_subset(&[], Genesis::id().round.prev(), &[Genesis::id().author]);
         this.apply_scheduled(Genesis::id().round);
 
         this
