@@ -368,7 +368,7 @@ impl Engine {
             {
                 let old_dag_top_round = self.dag.top().round();
 
-                let consensus_round = if let Some((start_point, _)) = &replay_bcasts {
+                let next_round = if let Some((start_point, _)) = &replay_bcasts {
                     assert!(
                         start_point.round() == old_dag_top_round
                             || start_point.round() == old_dag_top_round.prev(),
@@ -376,7 +376,8 @@ impl Engine {
                          top {old_dag_top_round:?}, {:?}",
                         start_point.id().alt()
                     );
-                    start_point.round()
+                    // start point must be at current round
+                    start_point.round().next().max(old_dag_top_round)
                 } else {
                     // do not repeat the `get()` - it can give non-reproducible result
                     let consensus_round = self.consensus_round.get();
@@ -386,7 +387,10 @@ impl Engine {
                         consensus_round.0,
                         old_dag_top_round.0,
                     );
-                    consensus_round
+                    metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
+                        .increment(consensus_round - old_dag_top_round);
+                    // if received from BcastFilter - produce point at round before it
+                    consensus_round.max(old_dag_top_round.next())
                 };
 
                 match collator_feedback(
@@ -398,7 +402,7 @@ impl Engine {
                 ) {
                     Ok(pause_at) => {
                         *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
-                            consensus_round.next().min(pause_at),
+                            next_round.min(pause_at),
                             ready_committer.as_mut(),
                             &self.round_task.state.peer_schedule,
                         ));
@@ -420,21 +424,20 @@ impl Engine {
                 let dag_top_round = self.dag.top().round();
 
                 assert!(
-                    dag_top_round <= consensus_round.next(),
-                    "new dag round {} cannot be grater than next consensus round {}",
+                    dag_top_round <= next_round,
+                    "new dag round {} cannot be greater than next expected round {}",
                     dag_top_round.0,
-                    consensus_round.0,
+                    next_round.0,
                 );
 
-                metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
-                    .increment(consensus_round - dag_top_round);
-
-                assert!(
-                    old_dag_top_round < dag_top_round,
-                    "new dag round {} must be grater than old one {}",
-                    dag_top_round.0,
-                    old_dag_top_round.0,
-                );
+                if replay_bcasts.is_none() {
+                    assert!(
+                        old_dag_top_round < dag_top_round,
+                        "new dag round {} must be greater than old one {}",
+                        dag_top_round.0,
+                        old_dag_top_round.0,
+                    );
+                }
 
                 if old_dag_top_round < dag_top_round.prev() {
                     self.ctx = EngineCtx::new(dag_top_round);
