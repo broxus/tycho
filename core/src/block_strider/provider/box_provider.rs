@@ -30,7 +30,7 @@ impl BoxBlockProvider {
 impl BlockProvider for BoxBlockProvider {
     type GetNextBlockFut<'a> = GetBlockFut<'a>;
     type GetBlockFut<'a> = GetBlockFut<'a>;
-    type ResetFut<'a> = ResetFut<'a>;
+    type CleanupFut<'a> = ClenaupFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         unsafe { (self.vtable.get_next_block)(&self.data, prev_block_id) }
@@ -40,8 +40,8 @@ impl BlockProvider for BoxBlockProvider {
         unsafe { (self.vtable.get_block)(&self.data, block_id_relation) }
     }
 
-    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
-        unsafe { (self.vtable.reset)(&self.data, mc_seqno) }
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
+        unsafe { (self.vtable.cleanup_until)(&self.data, mc_seqno) }
     }
 }
 
@@ -58,7 +58,7 @@ unsafe impl Sync for BoxBlockProvider {}
 struct Vtable {
     get_next_block: GetNextBlockFn,
     get_block: GetBlockFn,
-    reset: ResetFn,
+    cleanup_until: CleanupFn,
     drop: DropFn,
 }
 
@@ -73,9 +73,9 @@ impl Vtable {
                 let provider = unsafe { &*ptr.load(Ordering::Relaxed).cast::<P>() };
                 provider.get_block(block_id_relation).boxed()
             },
-            reset: |ptr, mc_seqno| {
+            cleanup_until: |ptr, mc_seqno| {
                 let provider = unsafe { &*ptr.load(Ordering::Relaxed).cast::<P>() };
-                provider.reset(mc_seqno).boxed()
+                provider.cleanup_until(mc_seqno).boxed()
             },
             drop: |ptr| {
                 drop(unsafe { Box::<P>::from_raw(ptr.get_mut().cast::<P>()) });
@@ -86,11 +86,11 @@ impl Vtable {
 
 type GetNextBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockId) -> GetBlockFut<'a>;
 type GetBlockFn = for<'a> unsafe fn(&AtomicPtr<()>, &'a BlockIdRelation) -> GetBlockFut<'a>;
-type ResetFn = for<'a> unsafe fn(&AtomicPtr<()>, u32) -> ResetFut<'_>;
+type CleanupFn = for<'a> unsafe fn(&AtomicPtr<()>, u32) -> ClenaupFut<'_>;
 type DropFn = unsafe fn(&mut AtomicPtr<()>);
 
 type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-type ResetFut<'a> = BoxFuture<'a, Result<()>>;
+type ClenaupFut<'a> = BoxFuture<'a, Result<()>>;
 
 #[cfg(test)]
 mod tests {
@@ -107,7 +107,7 @@ mod tests {
         struct ProviderState {
             get_next_called: AtomicUsize,
             get_called: AtomicUsize,
-            reset: AtomicUsize,
+            cleanup_called: AtomicUsize,
             dropped: AtomicUsize,
         }
 
@@ -124,7 +124,7 @@ mod tests {
         impl BlockProvider for TestProvider {
             type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
             type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
-            type ResetFut<'a> = futures_util::future::Ready<Result<()>>;
+            type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
 
             fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
                 self.state.get_next_called.fetch_add(1, Ordering::Relaxed);
@@ -136,8 +136,8 @@ mod tests {
                 futures_util::future::ready(None)
             }
 
-            fn reset(&self, _: u32) -> Self::ResetFut<'_> {
-                self.state.reset.fetch_add(1, Ordering::Relaxed);
+            fn cleanup_until(&self, _: u32) -> Self::CleanupFut<'_> {
+                self.state.cleanup_called.fetch_add(1, Ordering::Relaxed);
                 futures_util::future::ready(Ok(()))
             }
         }
@@ -145,7 +145,7 @@ mod tests {
         let state = Arc::new(ProviderState {
             get_next_called: AtomicUsize::new(0),
             get_called: AtomicUsize::new(0),
-            reset: AtomicUsize::new(0),
+            cleanup_called: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
         });
         let boxed = BoxBlockProvider::new(TestProvider {
@@ -154,28 +154,45 @@ mod tests {
 
         assert_eq!(state.get_next_called.load(Ordering::Acquire), 0);
         assert_eq!(state.get_called.load(Ordering::Acquire), 0);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 0);
         assert_eq!(state.dropped.load(Ordering::Acquire), 0);
 
         let mc_block_id = BlockId::default();
         assert!(boxed.get_next_block(&mc_block_id).await.is_none());
         assert_eq!(state.get_next_called.load(Ordering::Acquire), 1);
         assert_eq!(state.get_called.load(Ordering::Acquire), 0);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 0);
         assert_eq!(state.dropped.load(Ordering::Acquire), 0);
 
         assert!(boxed.get_next_block(&mc_block_id).await.is_none());
         assert_eq!(state.get_next_called.load(Ordering::Acquire), 2);
         assert_eq!(state.get_called.load(Ordering::Acquire), 0);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 0);
         assert_eq!(state.dropped.load(Ordering::Acquire), 0);
 
         let relation = mc_block_id.relative_to_self();
         assert!(boxed.get_block(&relation).await.is_none());
         assert_eq!(state.get_next_called.load(Ordering::Acquire), 2);
         assert_eq!(state.get_called.load(Ordering::Acquire), 1);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 0);
         assert_eq!(state.dropped.load(Ordering::Acquire), 0);
 
         assert!(boxed.get_block(&relation).await.is_none());
         assert_eq!(state.get_next_called.load(Ordering::Acquire), 2);
         assert_eq!(state.get_called.load(Ordering::Acquire), 2);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 0);
+        assert_eq!(state.dropped.load(Ordering::Acquire), 0);
+
+        boxed.cleanup_until(123).await.unwrap();
+        assert_eq!(state.get_next_called.load(Ordering::Acquire), 2);
+        assert_eq!(state.get_called.load(Ordering::Acquire), 2);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 1);
+        assert_eq!(state.dropped.load(Ordering::Acquire), 0);
+
+        boxed.cleanup_until(321).await.unwrap();
+        assert_eq!(state.get_next_called.load(Ordering::Acquire), 2);
+        assert_eq!(state.get_called.load(Ordering::Acquire), 2);
+        assert_eq!(state.cleanup_called.load(Ordering::Acquire), 2);
         assert_eq!(state.dropped.load(Ordering::Acquire), 0);
 
         assert_eq!(Arc::strong_count(&state), 2);

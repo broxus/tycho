@@ -492,7 +492,7 @@ struct SetSyncContext {
 impl BlockProvider for SetSyncContext {
     type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
     type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
-    type ResetFut<'a> = futures_util::future::Ready<Result<()>>;
+    type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.adapter.set_sync_context(self.ctx);
@@ -503,7 +503,7 @@ impl BlockProvider for SetSyncContext {
         futures_util::future::ready(None)
     }
 
-    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
         futures_util::future::ready(Ok(()))
     }
 }
@@ -536,7 +536,7 @@ struct CollatorBlockProvider {
 impl BlockProvider for CollatorBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = future::Ready<Result<()>>;
+    type CleanupFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         self.adapter.wait_for_block_next(prev_block_id)
@@ -546,7 +546,7 @@ impl BlockProvider for CollatorBlockProvider {
         self.adapter.wait_for_block(&block_id_relation.block_id)
     }
 
-    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
         futures_util::future::ready(Ok(()))
     }
 }

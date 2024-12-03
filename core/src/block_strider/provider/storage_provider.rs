@@ -23,7 +23,7 @@ impl StorageBlockProvider {
 impl BlockProvider for StorageBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = future::Ready<Result<()>>;
+    type CleanupFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
@@ -43,7 +43,7 @@ impl BlockProvider for StorageBlockProvider {
         })
     }
 
-    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+    fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
         futures_util::future::ready(Ok(()))
     }
 }

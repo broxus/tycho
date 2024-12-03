@@ -1,12 +1,13 @@
 use std::future::Future;
-use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::{pin, Pin};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::*;
-use futures_util::future;
 use futures_util::future::{BoxFuture, Either};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockIdRelation, BlockProofStuff, BlockStuff};
@@ -72,6 +73,7 @@ pub struct BlockchainBlockProvider {
     proof_checker: ProofChecker,
     fallback: Option<BoxBlockProvider>,
     use_fallback: AtomicBool,
+    cleanup_fallback_at: AtomicU32,
 }
 
 impl BlockchainBlockProvider {
@@ -88,6 +90,7 @@ impl BlockchainBlockProvider {
             proof_checker,
             fallback: None,
             use_fallback: AtomicBool::new(false),
+            cleanup_fallback_at: AtomicU32::new(u32::MAX),
         }
     }
 
@@ -156,6 +159,10 @@ impl BlockchainBlockProvider {
 
             // Reset fallback
             self.use_fallback.store(false, Ordering::Relaxed);
+
+            // Schedule next cleanup
+            self.cleanup_fallback_at
+                .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
         }
     }
 
@@ -214,6 +221,8 @@ impl BlockchainBlockProvider {
 
             // Reset fallback
             self.use_fallback.store(false, Ordering::Relaxed);
+
+            // NOTE: Don't schedule next cleanup for fallback, get_next is enough for that.
         }
     }
 
@@ -278,7 +287,7 @@ impl BlockchainBlockProvider {
 impl BlockProvider for BlockchainBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = future::Ready<Result<()>>;
+    type CleanupFut<'a> = BlockchainBlockProviderCleanupFut<'a>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(self.get_next_block_impl(prev_block_id))
@@ -288,8 +297,52 @@ impl BlockProvider for BlockchainBlockProvider {
         Box::pin(self.get_block_impl(block_id_relation))
     }
 
-    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
-        futures_util::future::ready(Ok(()))
+    fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
+        match &self.fallback {
+            Some(fallback) if self.cleanup_fallback_at.load(Ordering::Acquire) <= mc_seqno => {
+                BlockchainBlockProviderCleanupFut::Fallback {
+                    fut: fallback.cleanup_until(mc_seqno),
+                    cleanup_fallback_at: &self.cleanup_fallback_at,
+                    mc_seqno,
+                }
+            }
+            _ => BlockchainBlockProviderCleanupFut::Noop,
+        }
+    }
+}
+
+pub enum BlockchainBlockProviderCleanupFut<'a> {
+    Noop,
+    Fallback {
+        fut: BoxFuture<'a, Result<()>>,
+        cleanup_fallback_at: &'a AtomicU32,
+        mc_seqno: u32,
+    },
+}
+
+impl Future for BlockchainBlockProviderCleanupFut<'_> {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Noop => Poll::Ready(Ok(())),
+            Self::Fallback {
+                fut,
+                cleanup_fallback_at,
+                mc_seqno,
+            } => {
+                let res = fut.poll_unpin(cx);
+
+                // Reset `cleanup_fallback_at` when future is ready.
+                if matches!(&res, Poll::Ready(r) if r.is_ok()) {
+                    cleanup_fallback_at
+                        .compare_exchange(*mc_seqno, u32::MAX, Ordering::Release, Ordering::Relaxed)
+                        .ok();
+                }
+
+                res
+            }
+        }
     }
 }
 
