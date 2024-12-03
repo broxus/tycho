@@ -295,8 +295,9 @@ impl ArchiveBlockProvider {
         }
     }
 
-    async fn reset_impl(&self, seqno: u32) {
-        self.inner.clear_outdated_archives(seqno).await;
+    async fn reset_impl(&self, mc_seqno: u32) -> Result<()> {
+        self.inner.clear_outdated_archives(mc_seqno).await;
+        Ok(())
     }
 }
 
@@ -478,7 +479,7 @@ enum ArchiveData {
 impl BlockProvider for ArchiveBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = BoxFuture<'a, ()>;
+    type ResetFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(self.get_next_block_impl(prev_block_id))
@@ -488,8 +489,8 @@ impl BlockProvider for ArchiveBlockProvider {
         Box::pin(self.get_block_impl(block_id_relation))
     }
 
-    fn reset(&self, seqno: u32) -> Self::ResetFut<'_> {
-        Box::pin(self.reset_impl(seqno))
+    fn reset(&self, mc_seqno: u32) -> Self::ResetFut<'_> {
+        Box::pin(self.reset_impl(mc_seqno))
     }
 }
 

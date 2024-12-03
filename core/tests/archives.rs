@@ -73,17 +73,22 @@ impl ArchiveProvider {
 impl BlockProvider for ArchiveProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type ResetFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         let id = match self.archive.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
             Some(id) => id,
-            None => return Box::pin(futures_util::future::ready(None)),
+            None => return Box::pin(future::ready(None)),
         };
         Box::pin(async move { self.get_block(&id.relative_to_self()).await })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id_relation))
+    }
+
+    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+        future::ready(Ok(()))
     }
 }
 

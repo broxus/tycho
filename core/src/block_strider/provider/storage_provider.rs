@@ -1,3 +1,4 @@
+use anyhow::Result;
 use everscale_types::models::BlockId;
 use futures_util::future;
 use futures_util::future::BoxFuture;
@@ -22,32 +23,27 @@ impl StorageBlockProvider {
 impl BlockProvider for StorageBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type ResetFut<'a> = future::Ready<()>;
+    type ResetFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
             let block_storage = self.storage.block_storage();
-            match block_storage.wait_for_next_block(prev_block_id).await {
-                Ok(block) => Some(Ok(block)),
-                Err(e) => Some(Err(e)),
-            }
+            Some(block_storage.wait_for_next_block(prev_block_id).await)
         })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         Box::pin(async {
-            let block_storage = self.storage.block_storage();
-            match block_storage
-                .wait_for_block(&block_id_relation.block_id)
-                .await
-            {
-                Ok(block) => Some(Ok(block)),
-                Err(e) => Some(Err(e)),
-            }
+            Some(
+                self.storage
+                    .block_storage()
+                    .wait_for_block(&block_id_relation.block_id)
+                    .await,
+            )
         })
     }
 
-    fn reset(&self, _seqno: u32) -> Self::ResetFut<'_> {
-        futures_util::future::ready(())
+    fn reset(&self, _mc_seqno: u32) -> Self::ResetFut<'_> {
+        futures_util::future::ready(Ok(()))
     }
 }
