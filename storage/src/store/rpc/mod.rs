@@ -568,11 +568,22 @@ impl RpcStorage {
                 Dict::new()
             } else {
                 let merkle_update = block.as_ref().state_update.load()?;
-                let state = merkle_update
+
+                let old = merkle_update
+                    .old
+                    .virtualize()
+                    .parse::<ShardStateUnsplit>()?;
+
+                let new = merkle_update
                     .new
                     .virtualize()
                     .parse::<ShardStateUnsplit>()?;
-                state.load_accounts()?.dict().clone()
+
+                if old.accounts.inner().repr_hash() == new.accounts.inner().repr_hash() {
+                    Dict::new()
+                } else {
+                    new.load_accounts()?.dict().clone()
+                }
             };
 
             let mut write_batch = rocksdb::WriteBatch::default();
