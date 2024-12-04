@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, VecDeque};
 use std::iter;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -7,10 +6,9 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, StreamExt};
-use parking_lot::Mutex;
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::Instrument;
 use tycho_network::{PeerId, Request};
@@ -21,9 +19,10 @@ use crate::dag::{Verifier, VerifyError};
 use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{CachedConfig, ConsensusConfigExt};
+use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{PeerCount, Point, PointId, Round};
+use crate::models::{PeerCount, Point, PointId};
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -38,7 +37,7 @@ pub enum DownloadResult {
 struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
-    limiter: Mutex<Limiter>,
+    limiter: Limiter,
     consensus_round: RoundWatcher<Consensus>,
 }
 
@@ -66,56 +65,6 @@ impl DownloadType for LinearQuery {
         download_peers
             .saturating_add(download_peers.saturating_mul(attempt as usize))
             .min(available_peers)
-    }
-}
-
-#[derive(Default)]
-struct Limiter {
-    running: u16,
-    waiters: BTreeMap<Round, VecDeque<Arc<Semaphore>>>,
-}
-
-impl Limiter {
-    fn enter(&mut self, round: Round) -> Option<Arc<Semaphore>> {
-        // cannot be strict equality: at least one is always allowed, others are concurrent to it
-        if self.running <= CachedConfig::get().consensus.download_tasks {
-            self.running += 1;
-            None
-        } else {
-            // create locked
-            let semaphore = Arc::new(Semaphore::new(0));
-            self.waiters
-                .entry(round)
-                .or_default()
-                .push_back(semaphore.clone());
-            Some(semaphore)
-        }
-    }
-
-    fn exit(&mut self) {
-        // free the topmost waiter by round
-        if let Some(mut entry) = self.waiters.last_entry() {
-            // fifo among those with the same round
-            match entry.get_mut().pop_front() {
-                Some(semaphore) => {
-                    assert_eq!(
-                        semaphore.available_permits(),
-                        0,
-                        "dequeued semaphore must not have permits"
-                    );
-                    semaphore.add_permits(1); // unlock waiter
-                }
-                None => panic!("downloader limiter: round queue was left empty"),
-            }
-            if entry.get().is_empty() {
-                entry.remove_entry();
-            }
-        } else {
-            self.running = self
-                .running
-                .checked_sub(1)
-                .expect("decrease running downloads counter");
-        }
     }
 }
 
@@ -159,18 +108,11 @@ impl Downloader {
         verified_broadcast: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
     ) -> Option<DownloadResult> {
-        let semaphore_opt = {
-            let mut limiter = self.inner.limiter.lock();
-            limiter.enter(point_id.round)
-        };
-        if let Some(semaphore) = semaphore_opt {
-            match semaphore.acquire().await {
-                Ok(_permit) => {}
-                Err(err) => panic!("downloader limiter: {err}"),
-            }
-        }
+        let _guard = (self.inner.limiter)
+            .enter(point_id.round, &CachedConfig::get().consensus)
+            .await;
 
-        let result = if point_id.round + CachedConfig::get().consensus.min_front_rounds()
+        if point_id.round + CachedConfig::get().consensus.min_front_rounds()
             >= self.inner.consensus_round.get()
         {
             // for validation
@@ -180,13 +122,7 @@ impl Downloader {
             // for sync
             self.run_task::<LinearQuery>(point_id, dependers_rx, verified_broadcast, ctx)
                 .await
-        };
-
-        {
-            let mut limiter = self.inner.limiter.lock();
-            limiter.exit();
         }
-        result
     }
 
     async fn run_task<T: DownloadType>(
