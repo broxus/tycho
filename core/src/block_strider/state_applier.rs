@@ -201,11 +201,17 @@ where
 
         if applied && self.inner.storage.config().archives_gc.is_some() {
             tracing::debug!(block_id = %prepared.handle.id(), "saving block into archive");
-            self.inner
+
+            if let Err(e) = self
+                .inner
                 .storage
                 .block_storage()
                 .move_into_archive(&prepared.handle)
-                .await?;
+                .await
+            {
+                tracing::error!(block_id = %prepared.handle.id(), "saving block into archive: {e}");
+                return Err(e);
+            }
         }
 
         // Done

@@ -148,7 +148,10 @@ where
             next_master_fut = JoinTask::new(self.fetch_next_master_block(next.id()));
 
             let _histogram = HistogramGuard::begin("tycho_core_process_strider_step_time");
-            self.process_mc_block(next.data, next.archive_data).await?;
+            if let Err(e) = self.process_mc_block(next.data, next.archive_data).await {
+                tracing::error!("block strider process_mc_block: {e}");
+                return Err(e);
+            }
         }
 
         tracing::info!("block strider loop finished");
