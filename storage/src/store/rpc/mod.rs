@@ -545,6 +545,8 @@ impl RpcStorage {
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
     pub async fn update(&self, block: BlockStuff) -> Result<()> {
+        tracing::info!(block = ?block.id(), "rpc storage update");
+
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -572,6 +574,8 @@ impl RpcStorage {
                     .new
                     .virtualize()
                     .parse::<ShardStateUnsplit>()?;
+
+                tracing::info!("rpc storage update load accounts");
                 state.load_accounts()?.dict().clone()
             };
 
@@ -712,6 +716,8 @@ impl RpcStorage {
             }
         }
 
+        tracing::info!("rpc storage update finish");
+
         Ok(())
     }
 
@@ -723,6 +729,8 @@ impl RpcStorage {
         remove: bool,
         write_batch: &mut rocksdb::WriteBatch,
     ) -> Result<()> {
+        tracing::info!("rpc storage update code hash");
+
         // Find the new code hash
         let new_code_hash = 'code_hash: {
             if !remove {
@@ -795,6 +803,8 @@ impl RpcStorage {
                 );
             }
         }
+
+        tracing::info!("rpc storage update code hash finish");
 
         Ok(())
     }
@@ -982,6 +992,8 @@ enum ExtractedCodeHash {
 }
 
 fn extract_code_hash(account: &ShardAccount) -> Result<ExtractedCodeHash> {
+    tracing::info!("rpc storage extract code hash");
+
     if account.account.inner().descriptor().is_pruned_branch() {
         return Ok(ExtractedCodeHash::Skip);
     }
@@ -997,6 +1009,8 @@ fn extract_code_hash(account: &ShardAccount) -> Result<ExtractedCodeHash> {
             }
         }
     }
+
+    tracing::info!("rpc storage extract code hash finish");
 
     Ok(ExtractedCodeHash::Exact(None))
 }

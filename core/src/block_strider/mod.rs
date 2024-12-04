@@ -165,7 +165,14 @@ where
 
         let started_at = Instant::now();
 
-        let custom = block.load_custom()?;
+        let custom = match block.load_custom() {
+            Ok(custom) => custom,
+            Err(e) => {
+                tracing::error!("process_mc_block load_custom: {e}");
+                return Err(e.into());
+            }
+        };
+
         let is_key_block = custom.config.is_some();
 
         // Begin preparing master block in the background
@@ -188,7 +195,13 @@ where
         let mut shard_heights = FastHashMap::default();
         let mut download_futures = FuturesUnordered::new();
         for entry in custom.shards.latest_blocks() {
-            let top_block_id = entry?;
+            let top_block_id = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::error!("process_mc_block latest_blocks: {e}");
+                    return Err(e.into());
+                }
+            };
             shard_heights.insert(top_block_id.shard, top_block_id.seqno);
             download_futures.push(Box::pin(
                 self.download_shard_blocks(mc_block_id, top_block_id),
@@ -197,20 +210,49 @@ where
 
         // Start processing shard blocks in parallel
         let mut process_futures = FuturesUnordered::new();
-        while let Some(blocks) = download_futures.next().await.transpose()? {
-            process_futures.push(Box::pin(self.process_shard_blocks(&mc_block_id, blocks)));
+        loop {
+            match download_futures.next().await.transpose() {
+                Ok(Some(blocks)) => {
+                    process_futures.push(Box::pin(self.process_shard_blocks(&mc_block_id, blocks)));
+                    continue;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!("process_mc_block downloading shard block: {e}");
+                    return Err(e);
+                }
+            }
         }
         metrics::histogram!("tycho_core_download_sc_blocks_time").record(started_at.elapsed());
 
         // Wait for all shard blocks to be processed
-        while process_futures.next().await.transpose()?.is_some() {}
+        loop {
+            match process_futures.next().await.transpose() {
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!("process_mc_block processing shard block: {e}");
+                    return Err(e);
+                }
+            }
+        }
+
         metrics::histogram!("tycho_core_process_sc_blocks_time").record(started_at.elapsed());
 
         // Finally handle the masterchain block
         let (cx, prepared) = prepared_master.await;
 
         let _histogram = HistogramGuard::begin("tycho_core_process_mc_block_time");
-        self.subscriber.handle_block(&cx, prepared?).await?;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                tracing::error!("process_mc_block prepare master block: {e}");
+                return Err(e);
+            }
+        };
+        if let Err(e) = self.subscriber.handle_block(&cx, prepared).await {
+            tracing::error!("process_mc_block handle master block: {e}");
+        }
 
         let shard_heights = ShardHeights::from(shard_heights);
         self.state.commit_master(&mc_block_id, &shard_heights);

@@ -254,7 +254,10 @@ impl BlockSubscriber for RpcBlockSubscriber {
         Box::pin(async {
             match prepared.await {
                 Ok(res) => res,
-                Err(e) => Err(e.into()),
+                Err(e) => {
+                    tracing::error!("rcp state handle_block: {e}");
+                    Err(e.into())
+                }
             }
         })
     }
@@ -396,6 +399,8 @@ impl Inner {
     }
 
     async fn update(&self, block: &BlockStuff) -> Result<()> {
+        tracing::info!(block = ?block.id(), "rpc state update");
+
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_time");
 
         let is_masterchain = block.id().is_masterchain();
@@ -415,6 +420,8 @@ impl Inner {
     }
 
     fn update_mc_block_cache(&self, block: &BlockStuff) -> Result<()> {
+        tracing::info!(block = ?block.id(), "rpc state update_mc_block_cache");
+
         // Update timings
         {
             // TODO: Add `OnceLock` for block `info` and `custom``
@@ -442,6 +449,9 @@ impl Inner {
 
         self.jrpc_cache.handle_key_block(block.as_ref());
         self.proto_cache.handle_key_block(block.as_ref());
+
+        tracing::info!(block = ?block.id(), "finish update_mc_block_cache");
+
         Ok(())
     }
 

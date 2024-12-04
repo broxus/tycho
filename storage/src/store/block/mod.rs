@@ -641,24 +641,36 @@ impl BlockStorage {
 
     /// Loads data and proof for the block and appends them to the corresponding archive.
     pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
+        tracing::debug!(block_id = %handle.id(), "move_into_archive");
+
         let _histogram = HistogramGuard::begin("tycho_storage_move_into_archive_time");
 
         // Prepare data
         let block_id_bytes = handle.id().to_vec();
 
+        tracing::debug!(block_id = %handle.id(), "prepare cf");
+
         // Prepare cf
         let archive_block_ids_cf = self.db.archive_block_ids.cf();
         let chunks_cf = self.db.archives.cf();
+
+        tracing::debug!(block_id = %handle.id(), "prepare archive");
 
         // Prepare archive
         let archive_id = self.prepare_archive_id(handle);
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
+        tracing::debug!(block_id = %handle.id(), "create transaction 0");
+
         // 0. Create transaction
         let mut batch = rocksdb::WriteBatch::default();
 
+        tracing::debug!(block_id = %handle.id(), "append archive block id");
+
         // 1. Append archive block id
         batch.merge_cf(&archive_block_ids_cf, archive_id_bytes, &block_id_bytes);
+
+        tracing::debug!(block_id = %handle.id(), "store info that new archive was started");
 
         // 2. Store info that new archive was started
         if archive_id.is_new {
@@ -667,6 +679,9 @@ impl BlockStorage {
             key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
             batch.put_cf(&chunks_cf, key, []);
         }
+
+        tracing::debug!(block_id = %handle.id(), "store info that archive commit is in progress");
+
         // 3. Store info that archive commit is in progress
         if let Some(to_commit) = archive_id.to_commit {
             let mut key = [0u8; tables::Archives::KEY_LEN];
@@ -674,6 +689,9 @@ impl BlockStorage {
             key[4..].copy_from_slice(&ARCHIVE_TO_COMMIT_MAGIC.to_be_bytes());
             batch.put_cf(&chunks_cf, key, []);
         }
+
+        tracing::debug!(block_id = %handle.id(), "execute transaction");
+
         // 4. Execute transaction
         self.db.rocksdb().write(batch)?;
 
