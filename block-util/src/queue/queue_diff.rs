@@ -31,7 +31,7 @@ impl QueueDiffStuffBuilder {
     where
         I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
     {
-        self.inner_mut().diff.processed_upto = processed_to
+        self.inner_mut().diff.processed_to = processed_to
             .into_iter()
             .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
             .collect();
@@ -79,6 +79,14 @@ impl SerializedQueueDiff {
         &self.inner.diff.hash
     }
 
+    pub fn processed_to(&self) -> impl Iterator<Item = (ShardIdent, &QueueKey)> {
+        self.inner
+            .diff
+            .processed_to
+            .iter()
+            .map(|(shard_ident, key)| (*shard_ident, key))
+    }
+
     fn inner_mut(&mut self) -> &mut Inner {
         Arc::get_mut(&mut self.inner).expect("inner is not shared")
     }
@@ -102,7 +110,7 @@ impl QueueDiffStuff {
                     prev_hash: HashBytes::ZERO,
                     shard_ident: block_id.shard,
                     seqno: block_id.seqno,
-                    processed_upto: BTreeMap::from([(block_id.shard, QueueKey::MIN)]),
+                    processed_to: BTreeMap::from([(block_id.shard, QueueKey::MIN)]),
                     min_message: QueueKey::MIN,
                     max_message: QueueKey::MIN,
                     messages: Vec::new(),
@@ -134,7 +142,7 @@ impl QueueDiffStuff {
                     prev_hash: *prev_hash,
                     shard_ident,
                     seqno,
-                    processed_upto: Default::default(),
+                    processed_to: Default::default(),
                     min_message: Default::default(),
                     max_message: Default::default(),
                     messages: Default::default(),
@@ -361,7 +369,7 @@ mod tests {
                     prev_hash: HashBytes::ZERO,
                     shard_ident: ShardIdent::BASECHAIN,
                     seqno: 1,
-                    processed_upto: Default::default(),
+                    processed_to: Default::default(),
                     min_message: QueueKey {
                         lt: 0,
                         hash: message_hashes[0],

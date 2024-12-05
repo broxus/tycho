@@ -23,7 +23,9 @@ use tycho_util::FastHashMap;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
-use crate::types::{BlockCandidate, McData, ProcessedUptoInfoStuff, ProofFunds, TopShardBlockInfo};
+use crate::types::{
+    BlockCandidate, McData, ProcessedTo, ProcessedUptoInfoStuff, ProofFunds, TopShardBlockInfo,
+};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -1291,7 +1293,7 @@ pub struct UpdateQueueDiffResult {
     pub has_unprocessed_messages: bool,
     pub diff_messages_len: usize,
     pub create_queue_diff_elapsed: Duration,
-    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: ProcessedTo,
 }
 
 pub struct FinalizedCollationResult {
