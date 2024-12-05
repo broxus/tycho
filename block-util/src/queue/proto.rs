@@ -22,7 +22,8 @@ pub struct QueueDiff {
     /// Seqno of the corresponding block.
     pub seqno: u32,
     /// collator boundaries.
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    // TODO: should rename field in `proto.tl` on network reset
+    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
     /// Min message queue key.
     pub min_message: QueueKey,
     /// Max message queue key.
@@ -55,7 +56,7 @@ impl TlWrite for QueueDiff {
         4 + tl::hash_bytes::SIZE_HINT
             + tl::shard_ident::SIZE_HINT
             + 4
-            + processed_upto_map::size_hint(&self.processed_upto)
+            + processed_to_map::size_hint(&self.processed_to)
             + 2 * QueueKey::SIZE_HINT
             + messages_list::size_hint(&self.messages)
     }
@@ -68,7 +69,7 @@ impl TlWrite for QueueDiff {
         tl::hash_bytes::write(&self.prev_hash, packet);
         tl::shard_ident::write(&self.shard_ident, packet);
         packet.write_u32(self.seqno);
-        processed_upto_map::write(&self.processed_upto, packet);
+        processed_to_map::write(&self.processed_to, packet);
         self.min_message.write_to(packet);
         self.max_message.write_to(packet);
         messages_list::write(&self.messages, packet);
@@ -89,7 +90,7 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             prev_hash: tl::hash_bytes::read(data)?,
             shard_ident: tl::shard_ident::read(data)?,
             seqno: u32::read_from(data)?,
-            processed_upto: processed_upto_map::read(data)?,
+            processed_to: processed_to_map::read(data)?,
             min_message: QueueKey::read_from(data)?,
             max_message: QueueKey::read_from(data)?,
             messages: messages_list::read(data)?,
@@ -206,7 +207,7 @@ impl std::fmt::Display for QueueKey {
     }
 }
 
-mod processed_upto_map {
+mod processed_to_map {
     use tl_proto::{TlPacket, TlResult};
 
     use super::*;
@@ -446,7 +447,7 @@ mod tests {
             prev_hash: HashBytes::from([0x33; 32]),
             shard_ident: ShardIdent::MASTERCHAIN,
             seqno: 123,
-            processed_upto: BTreeMap::from([
+            processed_to: BTreeMap::from([
                 (ShardIdent::MASTERCHAIN, QueueKey {
                     lt: 1,
                     hash: HashBytes::from([0x11; 32]),
@@ -492,7 +493,7 @@ mod tests {
                 prev_hash,
                 shard_ident: ShardIdent::MASTERCHAIN,
                 seqno,
-                processed_upto: BTreeMap::from([
+                processed_to: BTreeMap::from([
                     (ShardIdent::MASTERCHAIN, QueueKey {
                         lt: 10 * seqno as u64,
                         hash: HashBytes::from([seqno as u8; 32]),

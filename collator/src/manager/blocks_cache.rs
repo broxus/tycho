@@ -6,7 +6,7 @@ use everscale_types::models::{
     BlockId, BlockIdShort, ConsensusInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -18,7 +18,8 @@ use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProofFunds, TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, ProofFunds,
+    TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -139,7 +140,7 @@ impl BlocksCache {
     pub fn get_all_processed_to_by_mc_block_from_cache(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, Option<FastHashMap<ShardIdent, QueueKey>>>> {
+    ) -> Result<FastHashMap<BlockId, Option<ProcessedTo>>> {
         let mut all_processed_to = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
@@ -156,11 +157,7 @@ impl BlocksCache {
                 )
             };
 
-            let processed_to = mc_block_entry
-                .int_processed_to()
-                .iter()
-                .map(|(shard, queue_key)| (*shard, *queue_key))
-                .collect();
+            let processed_to = mc_block_entry.int_processed_to().clone();
 
             updated_top_shard_block_ids = mc_block_entry
                 .top_shard_blocks_info
@@ -177,21 +174,16 @@ impl BlocksCache {
                 continue;
             }
 
-            let mut processed_to = FastHashMap::default();
+            let mut processed_to_opt = None;
 
             // try to find in cache
             if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    sc_block_entry
-                        .int_processed_to()
-                        .iter()
-                        .for_each(|(shard, queue_key)| {
-                            processed_to.insert(*shard, *queue_key);
-                        });
+                    processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
                 }
             }
 
-            all_processed_to.insert(top_sc_block_id, Some(processed_to));
+            all_processed_to.insert(top_sc_block_id, processed_to_opt);
         }
 
         Ok(all_processed_to)
