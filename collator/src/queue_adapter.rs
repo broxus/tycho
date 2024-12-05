@@ -109,13 +109,13 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
-        let processed_upto = diff.processed_to.clone();
+        let processed_to = diff.processed_to.clone();
         self.queue.apply_diff(diff, block_id_short, hash, end_key)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             new_messages_len = len,
             elapsed = ?time.elapsed(),
-            processed_upto = %DisplayIter(processed_upto.iter().map(DisplayTuple)),
+            processed_to = %DisplayIter(processed_to.iter().map(DisplayTuple)),
             "Diff applied",
         );
         Ok(())
