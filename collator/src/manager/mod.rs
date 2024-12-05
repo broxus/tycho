@@ -1725,7 +1725,7 @@ where
 
                     let cancel_collation_notify = Arc::new(Notify::new());
 
-                    let collator = self
+                    match self
                         .collator_factory
                         .start(CollatorContext {
                             mq_adapter: self.mq_adapter.clone(),
@@ -1740,13 +1740,23 @@ where
                             mempool_config_override: self.mempool_config_override.clone(),
                             cancel_collation: cancel_collation_notify.clone(),
                         })
-                        .await;
-
-                    entry.insert(ActiveCollator {
-                        collator: Arc::new(collator),
-                        state: CollatorState::Active,
-                        cancel_collation: cancel_collation_notify,
-                    });
+                        .await
+                    {
+                        Err(err) => {
+                            tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+                                session_id = ?new_session_info.id(),
+                                ?err,
+                                "error starting collator"
+                            );
+                        }
+                        Ok(collator) => {
+                            entry.insert(ActiveCollator {
+                                collator: Arc::new(collator),
+                                state: CollatorState::Active,
+                                cancel_collation: cancel_collation_notify,
+                            });
+                        }
+                    }
                 }
             }
 
