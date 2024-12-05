@@ -400,7 +400,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
         prev_hash: HashBytes::from([0x33; 32]),
         shard_ident: ShardIdent::MASTERCHAIN,
         seqno: 123,
-        processed_upto: BTreeMap::from([
+        processed_to: BTreeMap::from([
             (ShardIdent::MASTERCHAIN, QueueKey {
                 lt: 1,
                 hash: message1_hash,
@@ -433,7 +433,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
 
     let diff_with_messages = QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msg)?;
 
-    assert_eq!(diff_with_messages.processed_to, diff.processed_upto,);
+    assert_eq!(diff_with_messages.processed_to, diff.processed_to,);
 
     assert_eq!(
         diff_with_messages

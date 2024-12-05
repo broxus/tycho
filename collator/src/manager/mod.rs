@@ -12,7 +12,6 @@ use everscale_types::models::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
-use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::metrics::HistogramGuard;
@@ -40,7 +39,7 @@ use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEven
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
-    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
+    ProcessedTo, ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -1228,7 +1227,7 @@ where
 
         // try load required previous queue diffs
         let mut prev_queue_diffs = vec![];
-        for (shard_id, min_processed_to) in min_processed_to_by_shards {
+        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
             let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
                 continue;
             };
@@ -1309,6 +1308,10 @@ where
                 &diff_hash,
                 max_message_key,
             )?;
+        }
+        // trim diffs tails for all shards
+        for (shard_id, min_processed_to) in min_processed_to_by_shards {
+            self.mq_adapter.trim_diffs(shard_id, min_processed_to)?;
         }
 
         // sync all applied blocks
@@ -1405,7 +1408,7 @@ where
     async fn read_min_processed_to_for_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<ShardIdent, FastHashMap<ShardIdent, QueueKey>>> {
+    ) -> Result<FastHashMap<ShardIdent, ProcessedTo>> {
         let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
@@ -1427,7 +1430,7 @@ where
                     )
                     .await?
                     .as_ref()
-                    .processed_upto
+                    .processed_to
                     .clone()
                     .into_iter()
                     .collect()

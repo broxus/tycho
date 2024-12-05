@@ -175,17 +175,7 @@ impl Phase<FinalizeState> {
             .finalize
             .clone();
 
-        let processed_to = self
-            .state
-            .collation_data
-            .processed_upto
-            .internals
-            .iter()
-            .map(|(shard_ident, processed_upto_stuff)| {
-                (*shard_ident, processed_upto_stuff.processed_to_msg)
-            })
-            .collect();
-
+        let processed_to = queue_diff.processed_to().map(|(k, v)| (k, *v)).collect();
         let shard = self.state.collation_data.block_id_short.shard;
 
         let labels = &[("workchain", shard.workchain().to_string())];
@@ -595,11 +585,7 @@ impl Phase<FinalizeState> {
 
                 let mut shards_processed_to = FastHashMap::default();
 
-                for (shard_id, shard_data) in shards.iter() {
-                    if !shard_data.top_sc_block_updated {
-                        continue;
-                    }
-
+                for (shard_id, _) in shards.iter() {
                     // Extract processed information for updated shards
                     let shard_processed_to = self
                         .state
@@ -653,7 +639,13 @@ impl Phase<FinalizeState> {
             block: new_block,
             is_key_block: new_block_info.key_block,
             prev_blocks_ids: self.state.prev_shard_data.blocks_ids().clone(),
-            top_shard_blocks: self.state.collation_data.top_shard_blocks.clone(),
+            top_shard_blocks_ids: self
+                .state
+                .collation_data
+                .top_shard_blocks
+                .iter()
+                .map(|b| b.block_id)
+                .collect(),
             collated_data,
             collated_file_hash: HashBytes::ZERO,
             chain_time: self.state.collation_data.get_gen_chain_time(),

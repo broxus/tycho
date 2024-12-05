@@ -19,7 +19,8 @@ use crate::internal_queue::state::uncommitted_state::{
     UncommittedState, UncommittedStateFactory, UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
-
+use crate::tracing_targets;
+use crate::types::ProcessedTo;
 // FACTORY
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,7 +119,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 }
 
 struct ShortQueueDiff {
-    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: ProcessedTo,
     pub end_key: QueueKey,
     pub hash: HashBytes,
 }
@@ -287,7 +288,16 @@ where
     }
 
     fn clear_uncommitted_state(&self) -> Result<()> {
+        let diffs_before_clear: usize =
+            self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
         self.uncommitted_diffs.clear();
+        let diffs_after_clear: usize = self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
+        tracing::info!(
+            target: tracing_targets::MQ,
+            diffs_before_clear,
+            diffs_after_clear,
+             "Cleared uncommitted diffs.",
+        );
         self.uncommitted_state.truncate()
     }
 
