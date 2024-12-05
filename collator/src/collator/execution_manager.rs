@@ -9,8 +9,8 @@ use everscale_types::models::*;
 use humantime::format_duration;
 use rayon::prelude::*;
 use ton_executor::{
-    ExecuteParams, ExecutorOutput, OrdinaryTransactionExecutor, PreloadedBlockchainConfig,
-    TickTockTransactionExecutor, TransactionExecutor,
+    ExecuteParams, ExecutedTransaction, ExecutorOutput, OrdinaryTransactionExecutor,
+    PreloadedBlockchainConfig, TickTockTransactionExecutor, TransactionExecutor,
 };
 use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
@@ -729,14 +729,14 @@ impl MessagesExecutor {
                 }
             }
 
-            let executor_output = tx.result?;
+            let executed = tx.result?;
 
-            self.min_next_lt = cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
+            self.min_next_lt = cmp::max(self.min_next_lt, executed.next_lt);
 
             current_wu = current_wu
                 .saturating_add(self.wu_params_execute.prepare as u64)
                 .saturating_add(
-                    executor_output
+                    executed
                         .gas_used
                         .saturating_mul(self.wu_params_execute.execute as u64)
                         .saturating_div(self.wu_params_execute.execute_delimiter as u64),
@@ -744,7 +744,7 @@ impl MessagesExecutor {
 
             items.push(ExecutedTickItem {
                 in_message: tx.in_message,
-                executor_output,
+                executed,
             });
         }
 
@@ -811,8 +811,8 @@ impl MessagesExecutor {
         )
         .map(|executed| (account_stuff, executed))?;
 
-        if let Ok(executor_output) = &executed.result {
-            self.min_next_lt = cmp::max(min_next_lt, executor_output.account_last_trans_lt);
+        if let Ok(tx) = &executed.result {
+            self.min_next_lt = cmp::max(min_next_lt, tx.next_lt);
         }
         self.accounts_cache.add_account_stuff(account_stuff);
         Ok(executed)
@@ -823,7 +823,7 @@ impl MessagesExecutor {
         &mut self,
         mut account_stuff: Box<ShardAccountStuff>,
         tick_tock: TickTock,
-    ) -> Result<ExecutorOutput> {
+    ) -> Result<ExecutedTransaction> {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
@@ -837,7 +837,7 @@ impl MessagesExecutor {
         )
         .map(|executed| (account_stuff, executed))?;
 
-        self.min_next_lt = cmp::max(min_next_lt, executed.account_last_trans_lt);
+        self.min_next_lt = cmp::max(min_next_lt, executed.next_lt);
         self.accounts_cache.add_account_stuff(account_stuff);
         Ok(executed)
     }
@@ -909,7 +909,7 @@ pub struct ExecutedGroup {
 
 pub struct ExecutedTickItem {
     pub in_message: Box<ParsedMessage>,
-    pub executor_output: ExecutorOutput,
+    pub executed: ExecutedTransaction,
 }
 
 pub struct ExecutedTransactions {
@@ -920,7 +920,7 @@ pub struct ExecutedTransactions {
 }
 
 pub struct ExecutedOrdinaryTransaction {
-    pub result: Result<ExecutorOutput>,
+    pub result: Result<ExecutedTransaction>,
     pub in_message: Box<ParsedMessage>,
 }
 
@@ -951,10 +951,16 @@ fn execute_ordinary_transaction_impl(
     );
 
     let result = match result {
-        Ok((total_fees, executor_output)) => {
+        Ok((
+            total_fees,
+            ExecutorOutput {
+                account,
+                transaction,
+            },
+        )) => {
             let tx_lt = shard_account.last_trans_lt;
-            account_stuff.add_transaction(tx_lt, total_fees, executor_output.transaction.clone());
-            Ok(executor_output)
+            account_stuff.apply_transaction(tx_lt, total_fees, account, &transaction);
+            Ok(transaction)
         }
         Err(e) => Err(e),
     };
@@ -968,7 +974,7 @@ fn execute_ticktock_transaction(
     min_lt: u64,
     config: &PreloadedBlockchainConfig,
     params: &ExecuteParams,
-) -> Result<ExecutorOutput> {
+) -> Result<ExecutedTransaction> {
     tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
@@ -981,13 +987,24 @@ fn execute_ticktock_transaction(
     let shard_account = &mut account_stuff.shard_account;
 
     // NOTE: Failed (without tx) ticktock execution is considered as a fatal error
-    let (total_fees, executor_output) = TickTockTransactionExecutor::new(tick_tock)
-        .execute_with_libs_and_params(None, shard_account, min_lt, params, config)?;
+    let (
+        total_fees,
+        ExecutorOutput {
+            account,
+            transaction,
+        },
+    ) = TickTockTransactionExecutor::new(tick_tock).execute_with_libs_and_params(
+        None,
+        shard_account,
+        min_lt,
+        params,
+        config,
+    )?;
 
     let tx_lt = shard_account.last_trans_lt;
-    account_stuff.add_transaction(tx_lt, total_fees, executor_output.transaction.clone());
+    account_stuff.apply_transaction(tx_lt, total_fees, account, &transaction);
 
-    Ok(executor_output)
+    Ok(transaction)
 }
 
 #[derive(Clone)]

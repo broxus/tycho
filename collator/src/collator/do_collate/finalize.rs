@@ -933,34 +933,34 @@ impl Phase<FinalizeState> {
                 continue;
             }
 
-            let loaded_account = updated_account.shard_account.load_account()?;
-            match &loaded_account {
-                Some(account) => {
-                    if is_masterchain && &updated_account.account_addr == config_address {
-                        if let AccountState::Active(StateInit {
-                            data: Some(data), ..
-                        }) = &account.state
-                        {
-                            new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
-                        }
-                    }
-
-                    shard_accounts.set_any(
-                        &updated_account.account_addr,
-                        &DepthBalanceInfo {
-                            split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
-                            balance: account.balance.clone(),
-                        },
-                        &updated_account.shard_account,
-                    )?;
-                }
-                None => {
-                    shard_accounts.remove(&updated_account.account_addr)?;
-                }
+            if updated_account.exists {
+                shard_accounts.set_any(
+                    &updated_account.account_addr,
+                    &DepthBalanceInfo {
+                        split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
+                        balance: updated_account.balance.clone(),
+                    },
+                    &updated_account.shard_account,
+                )?;
+            } else {
+                shard_accounts.remove(&updated_account.account_addr)?;
             }
 
             if is_masterchain {
-                updated_account.update_public_libraries(&loaded_account, global_libraries)?;
+                if &updated_account.account_addr == config_address {
+                    if let Some(Account {
+                        state:
+                            AccountState::Active(StateInit {
+                                data: Some(data), ..
+                            }),
+                        ..
+                    }) = updated_account.shard_account.load_account()?
+                    {
+                        new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
+                    }
+                }
+
+                updated_account.update_public_libraries(global_libraries)?;
             }
 
             let account_block = AccountBlock {
