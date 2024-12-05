@@ -33,7 +33,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, TopBlockDescription, TopShardBlockInfo,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
+    TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -294,53 +295,21 @@ impl CollatorStdImpl {
 
         let finalize_block_timer = std::time::Instant::now();
 
-        let mut min_processed_to: Option<QueueKey> = None;
-
         // Get current and masterchain processed values
         let current_processed_to = processed_to.get(&shard_id).cloned();
-        let mc_processed_to = mc_data.processed_upto.internals.get(&shard_id).cloned();
+        let mc_processed_to = mc_data
+            .processed_upto
+            .internals
+            .get(&shard_id)
+            .map(|mc| mc.processed_to_msg);
 
-        if shard_id.is_masterchain() {
-            // Iterate through shards to find the minimum processed value from shards
-            for shard_processed_to in mc_data.shards_processed_to.values() {
-                if let Some(value) = shard_processed_to.get(&shard_id) {
-                    min_processed_to = min_processed_to.map(|current_min| current_min.min(*value));
-                }
-            }
-
-            // Combine with current and masterchain values
-            min_processed_to = [current_processed_to, min_processed_to]
-                .into_iter()
-                .flatten()
-                .min();
-        } else {
-            // Iterate through shards for non-masterchain
-            // replace for current shard processed upto from current collation
-            for (iter_shard_ident, shard_processed_to) in &mc_data.shards_processed_to {
-                let shard_processed_to = if iter_shard_ident == &shard_id {
-                    current_processed_to
-                } else {
-                    shard_processed_to.get(&shard_id).cloned()
-                };
-
-                // find minimum processed upto value
-                if let Some(value) = shard_processed_to {
-                    min_processed_to = match min_processed_to {
-                        Some(current_min) => Some(current_min.min(value)),
-                        None => Some(value),
-                    };
-                }
-            }
-
-            // Combine with masterchain processed value
-            min_processed_to = [
-                min_processed_to,
-                mc_processed_to.map(|mc| mc.processed_to_msg),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
-        }
+        let min_processed_to = calculate_min_processed_to(
+            &shard_id,
+            current_processed_to,
+            mc_processed_to,
+            &mc_data.shards,
+            &mc_data.shards_processed_to,
+        );
 
         if let Some(value) = min_processed_to {
             mq_adapter.trim_diffs(&shard_id, &value)?;
@@ -1380,4 +1349,72 @@ impl CollatorStdImpl {
             "total collation timings"
         );
     }
+}
+
+fn calculate_min_processed_to(
+    shard_id: &ShardIdent,
+    current_processed_to: Option<QueueKey>,
+    mc_processed_to: Option<QueueKey>,
+    mc_data_shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
+    mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+) -> Option<QueueKey> {
+    fn find_min_processed_to(
+        shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
+        shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+        shard_id: &ShardIdent,
+        min_processed_to: &mut Option<QueueKey>,
+        skip_condition: impl Fn(&ShardIdent) -> bool,
+    ) {
+        // Iterate through shards with updated top shard blocks and find min processed_to
+        for (shard, descr) in shards {
+            if skip_condition(shard) {
+                continue;
+            }
+
+            if descr.top_sc_block_updated {
+                if let Some(value) = shards_processed_to.get(shard) {
+                    if let Some(v) = value.get(shard_id) {
+                        *min_processed_to = match *min_processed_to {
+                            Some(current_min) => Some(current_min.min(*v)),
+                            None => Some(*v),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    let mut min_processed_to: Option<QueueKey> = None;
+
+    if shard_id.is_masterchain() {
+        find_min_processed_to(
+            mc_data_shards,
+            mc_data_shards_processed_to,
+            shard_id,
+            &mut min_processed_to,
+            |_| false,
+        );
+
+        // Combine with current and masterchain values
+        min_processed_to = [current_processed_to, min_processed_to]
+            .into_iter()
+            .flatten()
+            .min();
+    } else {
+        find_min_processed_to(
+            mc_data_shards,
+            mc_data_shards_processed_to,
+            shard_id,
+            &mut min_processed_to,
+            |shard| shard == shard_id || shard.is_masterchain(),
+        );
+
+        // Combine with current and masterchain values and shard values
+        min_processed_to = [current_processed_to, min_processed_to, mc_processed_to]
+            .into_iter()
+            .flatten()
+            .min();
+    }
+
+    min_processed_to
 }

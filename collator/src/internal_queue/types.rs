@@ -5,15 +5,16 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
-use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
+use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr};
 use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
 
 use super::state::state_iterator::MessageExt;
+use crate::types::ProcessedTo;
 
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
-    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: ProcessedTo,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -30,10 +31,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         queue_diff_stuff: &QueueDiffStuff,
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
-        let QueueDiff {
-            processed_upto: processed_to,
-            ..
-        } = queue_diff_stuff.as_ref();
+        let QueueDiff { processed_to, .. } = queue_diff_stuff.as_ref();
         let processed_to = processed_to
             .iter()
             .map(|(shard_ident, key)| (*shard_ident, *key))
