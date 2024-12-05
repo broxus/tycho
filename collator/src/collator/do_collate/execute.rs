@@ -101,7 +101,7 @@ impl Phase<ExecuteState> {
                 timer = std::time::Instant::now();
                 for item in group_result.items {
                     self.extra.executor.process_transaction(
-                        item.executor_output,
+                        item.executed,
                         Some(item.in_message),
                         &mut self.state.collation_data,
                     )?;

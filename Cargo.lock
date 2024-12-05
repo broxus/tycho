@@ -3210,7 +3210,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?rev=71cfd0d6c86f947e4e4413c775e1117be2dfa28d#71cfd0d6c86f947e4e4413c775e1117be2dfa28d"
+source = "git+https://github.com/broxus/ton-labs-executor.git?rev=bc09b6072def8e91d1844b834967c90840b778c1#bc09b6072def8e91d1844b834967c90840b778c1"
 dependencies = [
  "ahash",
  "anyhow",

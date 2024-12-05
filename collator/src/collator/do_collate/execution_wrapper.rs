@@ -8,7 +8,7 @@ use everscale_types::models::{
     OutMsgDequeueImmediate, OutMsgExternal, OutMsgImmediate, OutMsgNew, ShardIdent, TickTock,
     Transaction,
 };
-use ton_executor::ExecutorOutput;
+use ton_executor::ExecutedTransaction;
 use tycho_block_util::queue::QueueKey;
 
 use super::BlockCollationData;
@@ -56,12 +56,11 @@ impl ExecutorWrapper {
 
     pub fn process_transaction(
         &mut self,
-        executor_output: ExecutorOutput,
+        executed: ExecutedTransaction,
         in_message: Option<Box<ParsedMessage>>,
         collation_data: &mut BlockCollationData,
     ) -> Result<()> {
-        let new_messages =
-            new_transaction(collation_data, &self.shard_id, executor_output, in_message)?;
+        let new_messages = new_transaction(collation_data, &self.shard_id, executed, in_message)?;
 
         collation_data.new_msgs_created_count += new_messages.len() as u64;
         for new_message in new_messages {
@@ -242,28 +241,28 @@ impl ExecutorWrapper {
 fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
-    executor_output: ExecutorOutput,
+    executed: ExecutedTransaction,
     in_msg: Option<Box<ParsedMessage>>,
 ) -> Result<Vec<Box<ParsedMessage>>> {
     tracing::trace!(
         target: tracing_targets::COLLATOR,
         message_hash = ?in_msg.as_ref().map(|m| m.cell.repr_hash()),
-        transaction_hash = %executor_output.transaction.inner().repr_hash(),
+        transaction_hash = %executed.transaction.inner().repr_hash(),
         "process new transaction from message",
     );
 
     collation_data.execute_count_all += 1;
 
     let gas_used = &mut collation_data.block_limit.gas_used;
-    *gas_used = gas_used.saturating_add(executor_output.gas_used);
+    *gas_used = gas_used.saturating_add(executed.gas_used);
 
     if let Some(in_msg) = in_msg {
-        process_in_message(collation_data, executor_output.transaction.clone(), in_msg)?;
+        process_in_message(collation_data, executed.transaction.clone(), in_msg)?;
     }
 
     let mut out_messages = vec![];
 
-    for out_msg_cell in executor_output.out_msgs.values() {
+    for out_msg_cell in executed.out_msgs.values() {
         let out_msg_cell = out_msg_cell?;
         let out_msg_hash = *out_msg_cell.repr_hash();
         let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
@@ -294,7 +293,7 @@ fn new_transaction(
                         fwd_fee_remaining: *fwd_fee,
                         message: Lazy::from_raw(out_msg_cell.clone()),
                     })?,
-                    transaction: executor_output.transaction.clone(),
+                    transaction: executed.transaction.clone(),
                 });
 
                 collation_data
@@ -302,7 +301,7 @@ fn new_transaction(
                     .insert(out_msg_hash, PreparedOutMsg {
                         out_msg: Lazy::new(&out_msg)?,
                         exported_value: out_msg.compute_exported_value()?,
-                        new_tx: Some(executor_output.transaction.clone()),
+                        new_tx: Some(executed.transaction.clone()),
                     });
 
                 out_messages.push(Box::new(ParsedMessage {
@@ -316,7 +315,7 @@ fn new_transaction(
             MsgInfo::ExtOut(_) => {
                 let out_msg = OutMsg::External(OutMsgExternal {
                     out_msg: Lazy::from_raw(out_msg_cell),
-                    transaction: executor_output.transaction.clone(),
+                    transaction: executed.transaction.clone(),
                 });
 
                 collation_data

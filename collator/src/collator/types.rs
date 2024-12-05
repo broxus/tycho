@@ -7,13 +7,14 @@ use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
-    Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, CollationConfig, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate,
-    ImportFees, InMsg, IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
+    AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits, BlockRef,
+    CollationConfig, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate, ImportFees,
+    InMsg, IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
     ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent,
     ShardIdentFull, ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use rayon::iter::IntoParallelIterator;
+use ton_executor::{AccountMeta, ExecutedTransaction};
 use tycho_block_util::queue::{QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
@@ -567,7 +568,10 @@ pub(super) struct ShardAccountStuff {
     pub shard_account: ShardAccount,
     pub special: SpecialFlags,
     pub initial_state_hash: HashBytes,
+    pub balance: CurrencyCollection,
+    pub initial_libraries: Dict<HashBytes, SimpleLib>,
     pub libraries: Dict<HashBytes, SimpleLib>,
+    pub exists: bool,
     pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
 }
 
@@ -575,27 +579,37 @@ impl ShardAccountStuff {
     pub fn new(account_addr: &AccountId, shard_account: ShardAccount) -> Result<Self> {
         let initial_state_hash = *shard_account.account.inner().repr_hash();
 
-        // TODO: Add intrinsic to everscale_types for a more optimal way to get libraries
-        let (libraries, special) = shard_account
-            .load_account()?
-            .and_then(|account| {
-                if let AccountState::Active(StateInit {
-                    libraries, special, ..
-                }) = account.state
-                {
-                    Some((libraries, special.unwrap_or_default()))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+        let mut libraries = Dict::new();
+        let mut special = SpecialFlags::default();
+        let balance;
+        let exists;
+
+        if let Some(account) = shard_account.load_account()? {
+            if let AccountState::Active(StateInit {
+                libraries: acc_libs,
+                special: acc_flags,
+                ..
+            }) = account.state
+            {
+                libraries = acc_libs;
+                special = acc_flags.unwrap_or_default();
+            }
+            balance = account.balance;
+            exists = true;
+        } else {
+            balance = CurrencyCollection::ZERO;
+            exists = false;
+        }
 
         Ok(Self {
             account_addr: *account_addr,
             shard_account,
             special,
             initial_state_hash,
+            balance,
+            initial_libraries: libraries.clone(),
             libraries,
+            exists,
             transactions: Default::default(),
         })
     }
@@ -618,7 +632,10 @@ impl ShardAccountStuff {
             shard_account,
             special: Default::default(),
             initial_state_hash,
+            balance: CurrencyCollection::ZERO,
+            initial_libraries: Dict::new(),
             libraries: Dict::new(),
+            exists: false,
             transactions: Default::default(),
         }
     }
@@ -635,35 +652,29 @@ impl ShardAccountStuff {
         .unwrap()
     }
 
-    pub fn add_transaction(
+    pub fn apply_transaction(
         &mut self,
         lt: u64,
         total_fees: CurrencyCollection,
-        transaction: Lazy<Transaction>,
+        account_meta: AccountMeta,
+        tx: &ExecutedTransaction,
     ) {
-        self.transactions.insert(lt, (total_fees, transaction));
+        self.transactions
+            .insert(lt, (total_fees, tx.transaction.clone()));
+        self.balance = account_meta.balance;
+        self.libraries = account_meta.libraries;
+        self.exists = account_meta.exists;
     }
 
     pub fn update_public_libraries(
         &self,
-        loaded_account: &Option<Account>,
         global_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<()> {
-        static EMPTY_LIBS: Dict<HashBytes, SimpleLib> = Dict::new();
-
-        let new_libraries = match loaded_account {
-            Some(Account {
-                state: AccountState::Active(s),
-                ..
-            }) => &s.libraries,
-            _ => &EMPTY_LIBS,
-        };
-
-        if new_libraries.root() == self.libraries.root() {
+        if self.libraries.root() == self.initial_libraries.root() {
             return Ok(());
         }
 
-        for entry in new_libraries.iter_union(&self.libraries) {
+        for entry in self.libraries.iter_union(&self.initial_libraries) {
             let (ref key, new_value, old_value) = entry?;
             match (new_value, old_value) {
                 (Some(new), Some(old)) => {
