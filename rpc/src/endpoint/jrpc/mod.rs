@@ -208,7 +208,7 @@ pub struct GetAccountsByCodeHashRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GetTransactionsListRequest {
     pub account: StdAddr,
-    #[serde(with = "serde_helpers::option_string")]
+    #[serde(default, with = "serde_helpers::option_string")]
     pub last_transaction_lt: Option<u64>,
     pub limit: u8,
 }
