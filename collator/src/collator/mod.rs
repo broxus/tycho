@@ -70,19 +70,19 @@ pub struct CollatorContext {
 pub trait CollatorFactory: Send + Sync + 'static {
     type Collator: Collator;
 
-    async fn start(&self, cx: CollatorContext) -> Self::Collator;
+    async fn start(&self, cx: CollatorContext) -> Result<Self::Collator>;
 }
 
 #[async_trait]
 impl<F, FT, R> CollatorFactory for F
 where
     F: Fn(CollatorContext) -> FT + Send + Sync + 'static,
-    FT: Future<Output = R> + Send + 'static,
+    FT: Future<Output = Result<R>> + Send + 'static,
     R: Collator,
 {
     type Collator = R;
 
-    async fn start(&self, cx: CollatorContext) -> Self::Collator {
+    async fn start(&self, cx: CollatorContext) -> Result<Self::Collator> {
         self(cx).await
     }
 }
@@ -145,7 +145,7 @@ pub struct CollatorStdImplFactory;
 impl CollatorFactory for CollatorStdImplFactory {
     type Collator = AsyncQueuedDispatcher<CollatorStdImpl>;
 
-    async fn start(&self, cx: CollatorContext) -> Self::Collator {
+    async fn start(&self, cx: CollatorContext) -> Result<Self::Collator> {
         CollatorStdImpl::start(
             cx.mq_adapter,
             cx.mpool_adapter,
@@ -250,7 +250,7 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         mempool_config_override: Option<MempoolGlobalConfig>,
         cancel_collation: Arc<Notify>,
-    ) -> AsyncQueuedDispatcher<Self> {
+    ) -> Result<AsyncQueuedDispatcher<Self>> {
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -301,7 +301,7 @@ impl CollatorStdImpl {
                 working_state_tx
             ))
             .await
-            .expect("task receiver had to be not closed or dropped here");
+            .context("task receiver had to be not closed or dropped here")?;
         tracing::info!(target: tracing_targets::COLLATOR,
             "(next_block_id={}): collator initialization task enqueued", next_block_info,
         );
@@ -310,7 +310,7 @@ impl CollatorStdImpl {
             "(next_block_id={}): collator started", next_block_info,
         );
 
-        dispatcher
+        Ok(dispatcher)
     }
 
     async fn stop_collator(&mut self, dispatcher_cancel_token: CancellationToken) -> Result<()> {
