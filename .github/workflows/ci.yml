@@ -115,11 +115,13 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v3
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@v1.10.15
-      - uses: extractions/setup-just@v2
-      - name: Install cargo-msrv
-        run: cargo binstall cargo-msrv
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-msrv
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Check semver
         run: cargo msrv verify --manifest-path cli/Cargo.toml
 
