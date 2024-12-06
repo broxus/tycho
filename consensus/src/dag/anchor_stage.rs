@@ -56,10 +56,10 @@ impl AnchorStage {
     fn role(round: Round) -> Option<AnchorStageRole> {
         #[allow(clippy::match_same_arms, reason = "comments")]
         match round.0 % WAVE_ROUNDS {
-            1 => None, // anchor candidate (surprisingly, nothing special about this point)
-            2 => Some(AnchorStageRole::Proof),
-            3 => Some(AnchorStageRole::Trigger),
-            0 => None, // leaderless support round (that actually follows every leader point chain)
+            0 => None, // anchor candidate (surprisingly, nothing special about this point)
+            1 => Some(AnchorStageRole::Proof),
+            2 => Some(AnchorStageRole::Trigger),
+            3 => None, // leaderless support round (that actually follows every leader point chain)
             _ => unreachable!(),
         }
     }
@@ -101,7 +101,7 @@ mod tests {
 
             let role = AnchorStage::role(Round(genesis_round));
             anyhow::ensure!(
-                role == Some(AnchorStageRole::Proof),
+                role == Some(AnchorStageRole::Trigger),
                 "genesis must be aligned to Proof anchor stage; round={genesis_round}",
             );
         }
