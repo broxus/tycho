@@ -932,7 +932,7 @@ impl CollatorStdImpl {
         prev_processed_upto_externals: Option<&ExternalsProcessedUpto>,
     ) -> Option<AnchorsProcessingInfo> {
         // try get from mc data
-        let mut info_opt = None;
+        let mut from_mc_info_opt = None;
         if !shard_id.is_masterchain() {
             if let Some((mc_processed_to_anchor_id, mc_processed_to_msgs_offset)) = mc_data
                 .processed_upto
@@ -946,13 +946,14 @@ impl CollatorStdImpl {
                 // and top shard was not updated in master
                 // it means that no shard blocks were collated between masters
                 // because there were no messages for processing
-                // and we can omit anchors rpocessing info from shard
+                // and we can omit top processed anchor from shard
+                // if it lower then top processed from master
                 for (top_shard_id, top_shard_descr) in mc_data.shards.iter() {
                     if shard_id == top_shard_id
                         && prev_block_id.seqno == top_shard_descr.seqno
                         && !top_shard_descr.top_sc_block_updated
                     {
-                        info_opt = Some(AnchorsProcessingInfo {
+                        from_mc_info_opt = Some(AnchorsProcessingInfo {
                             processed_to_anchor_id: mc_processed_to_anchor_id,
                             processed_to_msgs_offset: mc_processed_to_msgs_offset,
                             last_imported_chain_time: mc_data.gen_chain_time,
@@ -965,8 +966,8 @@ impl CollatorStdImpl {
         }
 
         // try get from prev data
-        if info_opt.is_none() {
-            info_opt = prev_processed_upto_externals
+        let from_prev_info_opt =
+            prev_processed_upto_externals
                 .as_ref()
                 .map(|upto| AnchorsProcessingInfo {
                     processed_to_anchor_id: upto.processed_to.0,
@@ -974,9 +975,24 @@ impl CollatorStdImpl {
                     last_imported_chain_time: prev_gen_chain_time,
                     last_imported_in_block_id: *prev_block_id,
                 });
-        }
 
-        info_opt
+        // choose the higher one
+        match (from_mc_info_opt, from_prev_info_opt) {
+            (Some(from_mc_info), Some(from_prev_info)) => {
+                if from_mc_info.processed_to_anchor_id > from_prev_info.processed_to_anchor_id
+                    || (from_mc_info.processed_to_anchor_id
+                        == from_prev_info.processed_to_anchor_id
+                        && from_mc_info.processed_to_msgs_offset
+                            > from_prev_info.processed_to_msgs_offset)
+                {
+                    Some(from_mc_info)
+                } else {
+                    Some(from_prev_info)
+                }
+            }
+            (from_mc_info_opt, None) => from_mc_info_opt,
+            (None, from_prev_info_opt) => from_prev_info_opt,
+        }
     }
 
     /// 1. Get last imported anchor id from cache
