@@ -106,15 +106,14 @@ impl Verifier {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = ctx.span().enter();
 
-        match info.round().cmp(&Genesis::id().round.next()) {
+        match info.round().cmp(&Genesis::id().round) {
             cmp::Ordering::Less => {
-                // for genesis point it's sufficient to be well-formed and pass integrity check,
-                // it cannot be validated against AnchorStage (as it knows nothing about genesis)
-                // and cannot contain dependencies
                 panic!("Coding error: can only validate points older than genesis")
             }
             cmp::Ordering::Equal => {
-                // dependency check for first point is a part of well-formness check
+                // for genesis point it's sufficient to be well-formed and pass integrity check,
+                // it cannot be validated against AnchorStage (as it knows nothing about genesis)
+                // and cannot contain dependencies
                 return ValidateCtx::validated(DagPoint::Trusted(ValidPoint::new(info)));
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
@@ -350,7 +349,7 @@ impl Verifier {
         if round.round() == Genesis::id().round {
             // notice that point is required to link to the freshest leader point
             // among all its (in)direct dependencies, which is checked later
-            return linked_id == *Genesis::id();
+            return true;
         }
 
         match round.anchor_stage() {
