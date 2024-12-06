@@ -36,7 +36,7 @@ impl Producer {
             Some(prev) if prev.round == finished_round.round() => {
                 // previous round's point needs 2F signatures from peers scheduled for current round
                 if prev.evidence.len() >= prev.signers.majority_of_others() {
-                    Some(prev) // prev point is used only once
+                    Some(&prev.digest) // prev point is used only once
                 } else {
                     return None; // cannot produce and has to skip round
                 }
@@ -44,20 +44,22 @@ impl Producer {
             _ => None,
         };
         let local_id = PeerId::from(key_pair.public_key);
-        match current_round.anchor_stage() {
-            // wave leader must skip new round if it failed to produce 3 points in a row
-            Some(stage) if stage.leader == local_id && proven_vertex.is_none() => return None,
-            _ => {}
-        };
         let includes = Self::includes(finished_round, key_pair);
         let mut anchor_trigger = Self::link_from_includes(
             &local_id,
             current_round,
             &includes,
+            proven_vertex.is_some()
+                && last_own_point.is_some_and(|prev| prev.includes.contains_key(&local_id)),
             AnchorStageRole::Trigger,
         );
-        let mut anchor_proof =
-            Self::link_from_includes(&local_id, current_round, &includes, AnchorStageRole::Proof);
+        let mut anchor_proof = Self::link_from_includes(
+            &local_id,
+            current_round,
+            &includes,
+            proven_vertex.is_some(),
+            AnchorStageRole::Proof,
+        );
         let witness = Self::witness(
             finished_round,
             &local_id,
@@ -92,7 +94,7 @@ impl Producer {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
-            proven_vertex.as_ref().map(|prev| &prev.digest),
+            proven_vertex,
             includes.get(&local_id),
             "must include own point if it exists and vice versa"
         );
@@ -106,7 +108,8 @@ impl Producer {
             key_pair,
             current_round.round(),
             proven_vertex
-                .map(|p| p.evidence.clone())
+                .zip(last_own_point)
+                .map(|(_, p)| p.evidence.clone())
                 .unwrap_or_default(),
             payload,
             PointData {
@@ -214,10 +217,13 @@ impl Producer {
         local_id: &PeerId,
         current_round: &DagRound,
         includes: &[PointInfo],
+        has_candidate: bool,
         link_field: AnchorStageRole,
     ) -> Link {
         match current_round.anchor_stage() {
-            Some(stage) if stage.role == link_field && stage.leader == local_id => {
+            Some(stage)
+                if stage.role == link_field && stage.leader == local_id && has_candidate =>
+            {
                 return Link::ToSelf;
             }
             _ => {}
@@ -274,7 +280,7 @@ impl Producer {
     fn get_time(
         anchor_proof: &Link,
         local_id: &PeerId,
-        proven_vertex: Option<&LastOwnPoint>,
+        proven_vertex: Option<&Digest>,
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
@@ -284,7 +290,7 @@ impl Producer {
 
         assert_eq!(
             prev_info.map(|prev| prev.digest()),
-            proven_vertex.map(|prev| &prev.digest),
+            proven_vertex,
             "included prev point digest does not match broadcasted one"
         );
 
