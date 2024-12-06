@@ -1,12 +1,15 @@
 use std::cell::UnsafeCell;
-use std::collections::hash_map;
+use std::collections::{hash_map, VecDeque};
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
+use crossbeam_deque::{Steal, Stealer, Worker};
+use crossbeam_utils::Backoff;
 use dashmap::mapref::entry::Entry;
+use dashmap::Map;
 use everscale_types::cell::*;
 use parking_lot::Mutex;
 use quick_cache::sync::{Cache, DefaultLifecycle};
@@ -242,40 +245,59 @@ impl CellStorage {
     ) -> Result<(PendingOperation<'_>, usize), CellStorageError> {
         let pending_op = self.pending.begin();
 
+        let walk_hist = HistogramGuard::begin("tycho_storage_walk_tree_time");
         let ctx = StoreContext::new(&self.db, &self.raw_cells_cache, estimated_cell_count);
 
-        // Check root cell
+        let mut queue = VecDeque::new();
+        queue.push_back((root, 0usize));
 
-        let key = root.repr_hash();
-        if !ctx.insert_cell(key, root.as_ref(), 0)? {
-            return Ok((pending_op, 0));
-        }
-
-        let mut stack = Vec::with_capacity(16);
-        stack.push(root.references());
-
-        // Check other cells
-        'outer: loop {
-            let depth = stack.len();
-            let Some(iter) = stack.last_mut() else {
-                break;
-            };
-
-            for child in &mut *iter {
-                let key = child.repr_hash();
-
-                if ctx.insert_cell(key, child, depth)? {
-                    stack.push(child.references());
-                    continue 'outer;
-                }
+        while let Some((current_cell, current_depth)) = queue.pop_front() {
+            if !ctx.insert_cell(
+                current_cell.repr_hash(),
+                current_cell.as_ref(),
+                Some(current_depth),
+            )? {
+                continue;
+            }
+            for next_cell in current_cell.references().cloned() {
+                queue.push_back((next_cell, current_depth + 1));
             }
 
-            stack.pop();
+            if current_depth == 6 {
+                break;
+            }
         }
 
-        // Clear big chunks of data before finalization
-        drop(stack);
+        let num_cpus = std::thread::available_parallelism()
+            .expect("We don't use platforms where it's not supported")
+            .get();
+        if !queue.is_empty() {
+            let queues = (0..num_cpus)
+                .map(|_| Worker::new_lifo())
+                .collect::<Vec<_>>();
 
+            for (idx, cell) in queue.into_iter().enumerate() {
+                queues[idx % num_cpus].push(cell.0);
+            }
+
+            let stealers: Vec<_> = queues.iter().map(|w| w.stealer()).collect();
+
+            std::thread::scope(|s| {
+                for (index, worker) in queues.into_iter().enumerate() {
+                    let mut stealers = stealers.clone();
+                    stealers.remove(index); // we don't want to steal from ourselves
+
+                    let ctxt = ctx.clone();
+                    s.spawn(move || {
+                        process_worker_queue(worker, stealers, &ctxt)
+                            .expect("todo somehow propagate error");
+                    });
+                }
+            });
+        }
+        drop(walk_hist);
+
+        let ctx = Arc::into_inner(ctx).unwrap();
         // Write transaction to the `WriteBatch`
         Ok((pending_op, ctx.finalize(batch)))
     }
@@ -419,6 +441,53 @@ impl CellStorage {
     }
 }
 
+fn process_worker_queue(
+    worker: Worker<Cell>,
+    stealers: Vec<Stealer<Cell>>,
+    ctx: &StoreContext,
+) -> Result<(), CellStorageError> {
+    loop {
+        let Some(cell) = find_task(&worker, &stealers) else {
+            break Ok(());
+        };
+
+        let cell_hash = *cell.repr_hash();
+        if !ctx.insert_cell(&cell_hash, cell.as_ref(), None)? {
+            continue;
+        }
+
+        for c in cell.references().cloned() {
+            worker.push(c);
+        }
+    }
+}
+
+fn find_task<T>(local: &Worker<T>, stealers: &[Stealer<T>]) -> Option<T> {
+    if let Some(task) = local.pop() {
+        return Some(task);
+    };
+
+    let backoff = Backoff::new();
+    for stealer in stealers {
+        'inner: loop {
+            match stealer.steal_batch_and_pop(local) {
+                Steal::Empty => {
+                    // todo : always skip it
+                    break 'inner;
+                }
+                Steal::Success(t) => {
+                    return Some(t);
+                }
+                Steal::Retry => {
+                    backoff.snooze();
+                    continue 'inner;
+                }
+            }
+        }
+    }
+    None
+}
+
 struct CellWithRefs {
     rc: u32,
     data: Option<Vec<u8>>,
@@ -431,8 +500,8 @@ struct StoreContext {
 }
 
 impl StoreContext {
-    fn new(db: &BaseDb, raw_cache: &Arc<RawCellsCache>, capacity: usize) -> Self {
-        Self {
+    fn new(db: &BaseDb, raw_cache: &Arc<RawCellsCache>, capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
             db: db.clone(),
             raw_cache: raw_cache.clone(),
             transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
@@ -440,14 +509,14 @@ impl StoreContext {
                 Default::default(),
                 512,
             ),
-        }
+        })
     }
 
     fn insert_cell(
         &self,
         key: &HashBytes,
         cell: &DynCell,
-        depth: usize,
+        depth: Option<usize>,
     ) -> Result<bool, CellStorageError> {
         let mut buffer = [0; 512];
         Ok(match self.transaction.entry(*key) {
@@ -464,13 +533,16 @@ impl StoreContext {
                 const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
 
                 let (old_rc, has_value) = 'value: {
-                    if depth >= NEW_CELLS_DEPTH_THRESHOLD {
-                        // NOTE: `get` here is used to affect a "hotness" of the value, because
-                        // there is a big chance that we will need it soon during state processing
-                        if let Some(entry) = self.raw_cache.0.get(key) {
-                            let rc = entry.header.header.load(Ordering::Acquire);
-                            break 'value (rc, rc > 0);
+                    match depth {
+                        Some(d) if d >= NEW_CELLS_DEPTH_THRESHOLD => {
+                            // NOTE: `get` here is used to affect a "hotness" of the value, because
+                            // there is a big chance that we will need it soon during state processing
+                            if let Some(entry) = self.raw_cache.0.get(key) {
+                                let rc = entry.header.header.load(Ordering::Acquire);
+                                break 'value (rc, rc > 0);
+                            }
                         }
+                        _ => {}
                     }
 
                     match self.db.cells.get(key).map_err(CellStorageError::Internal)? {
@@ -500,20 +572,47 @@ impl StoreContext {
     }
 
     fn finalize(self, batch: &mut WriteBatch) -> usize {
-        let mut buffer = Vec::with_capacity(512);
-        let total = self.transaction.len();
-        let cells_cf = &self.db.cells.cf();
-        for (key, CellWithRefs { rc, data }) in self.transaction {
-            buffer.clear();
-            refcount::add_positive_refount(rc, data.as_deref(), &mut buffer);
-            if let Some(data) = data {
-                self.raw_cache.insert(&key, rc, &data);
-            } else {
-                self.raw_cache.add_refs(&key, rc);
+        std::thread::scope(|s| {
+            let number_shards = self.transaction._shard_count();
+            // safety: we hold only read locks
+            let shards = unsafe { (0..number_shards).map(|i| self.transaction._get_read_shard(i)) };
+            let cache = &self.raw_cache;
+
+            // todo: clamp to number of cpus x2
+            for shard in shards {
+                // spawned threads will be joined at the end of the scope, so we don't need to store them
+                s.spawn(move || {
+                    for (key, value) in shard {
+                        let value = value.get();
+                        let rc = value.rc;
+                        if let Some(data) = &value.data {
+                            cache.insert(key, rc, data);
+                        } else {
+                            cache.add_refs(key, rc);
+                        }
+                    }
+                });
             }
-            batch.merge_cf(cells_cf, key.as_slice(), &buffer);
-        }
-        total
+
+            let batch_update = s.spawn(|| {
+                let mut buffer = Vec::with_capacity(512);
+                let total = self.transaction.len();
+                let cells_cf = &self.db.cells.cf();
+                for kv in self.transaction.iter() {
+                    let key = kv.key();
+                    let value = kv.value();
+                    let rc = value.rc;
+                    let data = value.data.as_deref();
+
+                    buffer.clear();
+                    refcount::add_positive_refount(rc, data, &mut buffer);
+                    batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                }
+                total
+            });
+
+            batch_update.join().expect("thread panicked")
+        })
     }
 }
 

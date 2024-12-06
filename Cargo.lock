@@ -3760,6 +3760,8 @@ dependencies = [
  "bytes",
  "bytesize",
  "crc32c",
+ "crossbeam-deque",
+ "crossbeam-utils",
  "dashmap",
  "everscale-types",
  "fdlimit",

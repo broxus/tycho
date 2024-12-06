@@ -18,6 +18,8 @@ bumpalo = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 crc32c = { workspace = true }
+crossbeam-deque = { workspace = true }
+crossbeam-utils = { workspace = true }
 dashmap = { workspace = true }
 everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }
