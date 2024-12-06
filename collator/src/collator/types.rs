@@ -1248,6 +1248,7 @@ impl AnchorsCache {
     pub fn clear(&mut self) {
         self.cache.clear();
         self.last_imported_anchor = None;
+        self.has_pending_externals = false;
     }
 
     pub fn len(&self) -> usize {

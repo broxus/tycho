@@ -1065,6 +1065,7 @@ impl CollatorStdImpl {
         let mut last_anchor = None;
         let mut all_anchors_are_taken_from_cache = false;
         let mut processed_to_anchor_exists_in_cache = false;
+        let mut total_our_exts_count: usize = 0;
 
         // we count our messages for processed_to with existing offset
         let mut offset = processed_to_msgs_offset as usize;
@@ -1100,6 +1101,7 @@ impl CollatorStdImpl {
 
                 // and keep others
                 let our_exts_count = anchor.count_externals_for(&shard_id, offset);
+                total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
                 anchors_info.push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
                     anchor.clone(),
                     our_exts_count,
@@ -1122,6 +1124,7 @@ impl CollatorStdImpl {
                 )));
             };
             anchors_cache.set_last_imported_anchor_info(anchor_info.clone());
+            anchors_cache.set_has_pending_externals(total_our_exts_count > 0);
 
             return Ok(anchors_info);
         }
@@ -1159,6 +1162,7 @@ impl CollatorStdImpl {
             // add loaded anchor to cache
             if let Some(anchor) = next_anchor {
                 let our_exts_count = anchor.count_externals_for(&shard_id, offset);
+                total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
                 anchors_cache.insert(anchor.clone(), our_exts_count);
                 anchors_info.push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
                     anchor,
@@ -1192,6 +1196,8 @@ impl CollatorStdImpl {
 
             next_anchor = Some(anchor);
         }
+
+        anchors_cache.set_has_pending_externals(total_our_exts_count > 0);
 
         Ok(anchors_info)
     }
