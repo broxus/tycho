@@ -13,7 +13,7 @@ use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_storage::{BlockHandle, MaybeExistingHandle, NewBlockMeta, Storage};
+use tycho_storage::{BlockHandle, MaybeExistingHandle, NewBlockMeta, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -61,6 +61,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
+        hint: StoreStateHint,
     ) -> Result<bool>;
     /// Return block by its id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
@@ -191,6 +192,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
+        hint: StoreStateHint,
     ) -> Result<bool> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
 
@@ -204,7 +206,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let updated = self
             .storage
             .shard_state_storage()
-            .store_state_root(&handle, state_root)
+            .store_state_root(&handle, state_root, hint)
             .await?;
 
         Ok(updated)

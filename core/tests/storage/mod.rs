@@ -24,7 +24,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &zerostate)
+        .store_state(&handle, &zerostate, Default::default())
         .await?;
 
     // Init blocks

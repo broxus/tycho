@@ -292,7 +292,7 @@ impl Mempool {
 
         self.storage
             .shard_state_storage()
-            .store_state(&mc_zerostate_handle, &mc_zerostate)
+            .store_state(&mc_zerostate_handle, &mc_zerostate, Default::default())
             .await?;
 
         Ok(mc_zerostate)

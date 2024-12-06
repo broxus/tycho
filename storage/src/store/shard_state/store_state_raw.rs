@@ -547,7 +547,7 @@ mod test {
     use bytesize::ByteSize;
     use everscale_types::models::ShardIdent;
     use tycho_util::project_root;
-    use weedb::rocksdb::{IteratorMode, WriteBatch};
+    use weedb::rocksdb::IteratorMode;
 
     use super::*;
     use crate::{Storage, StorageConfig};
@@ -626,9 +626,8 @@ mod test {
             // check that state actually exists
             let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
 
-            let mut batch = WriteBatch::default();
-            let (pending_op, _) =
-                cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
+            let (pending_op, _, batch) =
+                cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
             db.rocksdb().write_opt(batch, db.cells.write_config())?;

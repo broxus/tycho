@@ -103,7 +103,7 @@ impl BaseDbExt for BaseDb {
 
 impl WithMigrations for BaseDb {
     const NAME: &'static str = "base";
-    const VERSION: Semver = [0, 0, 2];
+    const VERSION: Semver = [0, 0, 3];
 
     fn register_migrations(
         migrations: &mut Migrations<Self>,
@@ -111,7 +111,10 @@ impl WithMigrations for BaseDb {
     ) -> Result<(), MigrationError> {
         migrations.register([0, 0, 1], [0, 0, 2], move |db| {
             base_migrations::v0_0_1_to_0_0_2(db, cancelled.clone())
-        })
+        })?;
+        migrations.register([0, 0, 2], [0, 0, 3], base_migrations::v_0_0_2_to_v_0_0_3)?;
+
+        Ok(())
     }
 }
 
@@ -139,6 +142,7 @@ mod base_migrations {
 
     use everscale_types::boc::Boc;
     use tycho_block_util::archive::ArchiveEntryType;
+    use weedb::rocksdb::CompactOptions;
 
     use super::*;
     use crate::util::StoredValue;
@@ -190,6 +194,24 @@ mod base_migrations {
             block_ids_created,
             "finished migrating package entries"
         );
+        Ok(())
+    }
+
+    pub fn v_0_0_2_to_v_0_0_3(db: &BaseDb) -> Result<(), MigrationError> {
+        let mut opts = CompactOptions::default();
+        opts.set_exclusive_manual_compaction(true);
+        let null = Option::<&[u8]>::None;
+
+        let started_at = Instant::now();
+        tracing::info!("started cells compaction");
+        db.cells
+            .db()
+            .compact_range_cf_opt(&db.cells.cf(), null, null, &opts);
+        tracing::info!(
+            elapsed = %humantime::format_duration(started_at.elapsed()),
+            "finished cells compaction"
+        );
+
         Ok(())
     }
 }
