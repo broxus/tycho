@@ -920,7 +920,7 @@ where
                 &collation_result.prev_mc_block_id,
                 block_id.shard,
                 candidate_chain_time,
-                ForceMasterCollation::No,
+                collation_result.force_next_mc_block,
                 Some(block_id),
                 collation_result.collation_config.mc_block_min_interval_ms as _,
             )

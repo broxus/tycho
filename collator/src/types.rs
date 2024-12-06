@@ -14,6 +14,7 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
 use crate::utils::block::detect_top_processed_to_anchor;
 
@@ -69,6 +70,7 @@ pub struct BlockCollationResult {
     pub prev_mc_block_id: BlockId,
     pub mc_data: Option<Arc<McData>>,
     pub collation_config: Arc<CollationConfig>,
+    pub force_next_mc_block: ForceMasterCollation,
 }
 
 /// Processed up to info for externals and internals.
