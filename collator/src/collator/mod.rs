@@ -1396,8 +1396,12 @@ impl CollatorStdImpl {
             }
         }
 
-        self.do_collate(working_state, Some(top_shard_blocks_info))
-            .await
+        self.do_collate(
+            working_state,
+            Some(top_shard_blocks_info),
+            ForceMasterCollation::No,
+        )
+        .await
     }
 
     /// Run collation if there are internals,
@@ -1855,8 +1859,17 @@ impl CollatorStdImpl {
                     "will collate next shard block",
                 );
 
+                // should force next master block collation after this shard block
+                // when anchor import was skipped
+                let force_next_mc_block = if anchor_import_skipped {
+                    ForceMasterCollation::ByAnchorImportSkipped
+                } else {
+                    ForceMasterCollation::No
+                };
+
                 drop(histogram);
-                self.do_collate(working_state, None).await?;
+                self.do_collate(working_state, None, force_next_mc_block)
+                    .await?;
             }
             TryCollateCheck::NoPendingMessages
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
