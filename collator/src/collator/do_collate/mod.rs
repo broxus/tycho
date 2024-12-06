@@ -1283,7 +1283,7 @@ impl CollatorStdImpl {
             read_ext_msgs={}, read_int_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
             total_execute_msgs_time_mc={}, \
-            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}",
+            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}, diffs_tail_len: {}",
             block_id,
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
@@ -1294,7 +1294,7 @@ impl CollatorStdImpl {
             collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
             collation_data.read_new_msgs_from_iterator_count, collation_data.inserted_new_msgs_to_iterator_count, final_result.has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
-            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total
+            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total, collation_data.diff_tail_len,
         );
 
         tracing::debug!(
