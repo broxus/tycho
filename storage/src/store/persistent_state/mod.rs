@@ -436,6 +436,10 @@ impl PersistentStateStorage {
             messages.push(queue_diff.zip(&out_messages));
             queue_diffs.push(queue_diff.diff().clone());
 
+            if tail_len == 1 {
+                break;
+            }
+
             let prev_block_id = match top_block_info.load_prev_ref()? {
                 PrevBlockRef::Single(block_ref) => block_ref.as_block_id(shard_ident),
                 PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
