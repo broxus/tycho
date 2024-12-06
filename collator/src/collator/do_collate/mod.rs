@@ -21,7 +21,7 @@ use super::types::{
     AnchorsCache, BlockCollationDataBuilder, CollationResult, ExecuteResult, FinalizedBlock,
     FinalizedCollationResult, ParsedExternals, PrevData, ReadNextExternalsMode, WorkingState,
 };
-use super::CollatorStdImpl;
+use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::types::{
     AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt,
     UpdateQueueDiffResult,
@@ -45,6 +45,7 @@ mod phase;
 mod prepare;
 
 impl CollatorStdImpl {
+    /// [`force_next_mc_block`] - should force next master block collation after this block
     #[tracing::instrument(
         parent =  None,
         skip_all,
@@ -57,6 +58,7 @@ impl CollatorStdImpl {
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
+        force_next_mc_block: ForceMasterCollation,
     ) -> Result<()> {
         let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
@@ -161,7 +163,12 @@ impl CollatorStdImpl {
         let FinalizedCollationResult {
             handle_block_candidate_elapsed,
         } = self
-            .finalize_collation(final_result.has_unprocessed_messages, finalized, tracker)
+            .finalize_collation(
+                final_result.has_unprocessed_messages,
+                finalized,
+                tracker,
+                force_next_mc_block,
+            )
             .await?;
 
         let total_elapsed = total_collation_histogram.finish();
@@ -1038,6 +1045,7 @@ impl CollatorStdImpl {
         has_unprocessed_messages: bool,
         finalized: FinalizedBlock,
         tracker: MinRefMcStateTracker,
+        force_next_mc_block: ForceMasterCollation,
     ) -> Result<FinalizedCollationResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
@@ -1088,6 +1096,7 @@ impl CollatorStdImpl {
                     prev_mc_block_id: finalized.old_mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
+                    force_next_mc_block,
                 })
                 .await?;
 

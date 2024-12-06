@@ -1035,7 +1035,9 @@ impl CollatorStdImpl {
 
         // do not import anchor if mempool may be paused
         // needs to process more anchors in collator first
-        if prev_anchor_id.saturating_sub(top_processed_to_anchor) > max_consensus_lag_rounds / 2 {
+        if prev_anchor_id.saturating_sub(top_processed_to_anchor)
+            > max_consensus_lag_rounds.saturating_mul(2).saturating_div(3)
+        {
             metrics::counter!("tycho_collator_anchor_import_skipped_count", &labels).increment(1);
             return Ok(ImportNextAnchor::Skipped);
         }
@@ -1413,8 +1415,12 @@ impl CollatorStdImpl {
             }
         }
 
-        self.do_collate(working_state, Some(top_shard_blocks_info))
-            .await
+        self.do_collate(
+            working_state,
+            Some(top_shard_blocks_info),
+            ForceMasterCollation::No,
+        )
+        .await
     }
 
     /// Run collation if there are internals,
@@ -1872,8 +1878,17 @@ impl CollatorStdImpl {
                     "will collate next shard block",
                 );
 
+                // should force next master block collation after this shard block
+                // when anchor import was skipped
+                let force_next_mc_block = if anchor_import_skipped && uncommitted_chain_length > 4 {
+                    ForceMasterCollation::ByAnchorImportSkipped
+                } else {
+                    ForceMasterCollation::No
+                };
+
                 drop(histogram);
-                self.do_collate(working_state, None).await?;
+                self.do_collate(working_state, None, force_next_mc_block)
+                    .await?;
             }
             TryCollateCheck::NoPendingMessages
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
