@@ -4,6 +4,7 @@ use std::sync::atomic;
 use std::{array, mem};
 
 use futures_util::FutureExt;
+use itertools::Itertools;
 use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
@@ -137,7 +138,7 @@ impl DagBack {
             if stage.is_used.load(atomic::Ordering::Relaxed) {
                 break;
             };
-            match Self::any_ready_valid_point(dag_round, &stage.leader) {
+            match Self::any_ready_valid_trigger(dag_round, &stage.leader) {
                 Ok(trigger) => {
                     // iter is from newest to oldest, restore historical order
                     triggers.push_front(trigger.info);
@@ -208,10 +209,11 @@ impl DagBack {
             .info;
 
             let Some(anchor_id) = proof.prev_id() else {
-                panic!(
-                    "verify() is broken: anchor proof without prev id; proof id {:?}",
-                    proof.id()
-                )
+                last_proof = proof.anchor_id(AnchorStageRole::Proof);
+                if last_proof.round <= bottom_round {
+                    return Ok(last_proof.round);
+                }
+                continue;
             };
 
             let Some((_, anchor_dag_round)) = rev_iter.next() else {
@@ -326,10 +328,8 @@ impl DagBack {
             .info;
 
             let Some(anchor_id) = proof.prev_id() else {
-                panic!(
-                    "verify() is broken: anchor proof without prev id; proof id {:?}",
-                    proof.id()
-                )
+                lookup_proof_id = proof.anchor_id(AnchorStageRole::Proof);
+                continue;
             };
 
             let Some((_, anchor_dag_round)) = rev_iter.next() else {
@@ -466,7 +466,7 @@ impl DagBack {
         Ok(uncommitted)
     }
 
-    fn any_ready_valid_point(
+    fn any_ready_valid_trigger(
         dag_round: &DagRound,
         author: &PeerId,
     ) -> Result<ValidPoint, SyncError> {
@@ -477,10 +477,16 @@ impl DagBack {
                     // better try later than wait now if some point is still downloading
                     .filter_map(|version| version.clone().now_or_never())
                     // take any suitable
-                    .find_map(move |dag_point| match dag_point {
+                    .filter_map(move |dag_point| match dag_point {
                         DagPoint::Trusted(valid)
                         | DagPoint::Suspicious(valid)
-                        | DagPoint::Certified(valid) => Some(Ok(valid)),
+                        | DagPoint::Certified(valid) => {
+                            if valid.info.data().anchor_trigger == Link::ToSelf {
+                                Some(Ok(valid))
+                            } else {
+                                None
+                            }
+                        }
                         DagPoint::Invalid(cert) if cert.is_certified => {
                             Some(Err(SyncError::Impossible(cert.inner.round())))
                         }
@@ -491,6 +497,7 @@ impl DagBack {
                             None
                         }
                     })
+                    .find_or_first(|result| result.is_ok())
             })
             .flatten()
             .unwrap_or(Err(SyncError::TryLater))
