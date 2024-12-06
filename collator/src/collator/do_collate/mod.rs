@@ -22,8 +22,8 @@ use super::types::{
     AnchorsCache, BlockCollationDataBuilder, CollationResult, ExecuteResult, FinalizedBlock,
     FinalizedCollationResult, ParsedExternals, PrevData, ReadNextExternalsMode, WorkingState,
 };
-use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
+use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::types::{
     AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt,
     UpdateQueueDiffResult,
