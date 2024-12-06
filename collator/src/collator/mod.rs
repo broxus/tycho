@@ -1692,6 +1692,9 @@ impl CollatorStdImpl {
                             last_imported_chain_time,
                             "there are no pending internals or externals, will import next anchor",
                         );
+
+                        // drop used wu when anchor was not imported by used wu
+                        working_state.wu_used_from_last_anchor = 0;
                     }
                     (_, _, true) => {
                         tracing::info!(target: tracing_targets::COLLATOR,
@@ -1790,6 +1793,7 @@ impl CollatorStdImpl {
 
                                 imported_anchors_has_externals |= has_our_externals;
 
+                                // reduce used wu by one imported anchor
                                 working_state.wu_used_from_last_anchor = working_state
                                     .wu_used_from_last_anchor
                                     .saturating_sub(wu_used_to_import_next_anchor);
@@ -1797,7 +1801,7 @@ impl CollatorStdImpl {
                                 tracing::debug!(target: tracing_targets::COLLATOR,
                                     wu_used_from_last_anchor = working_state.wu_used_from_last_anchor,
                                     force_import_anchor_by_used_wu,
-                                    "wu_used_from_last_anchor dropped to",
+                                    "used wu dropped to",
                                 );
 
                                 if working_state.wu_used_from_last_anchor
