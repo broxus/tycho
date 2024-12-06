@@ -77,9 +77,9 @@ impl PointBody {
 
     pub fn is_well_formed(&self) -> bool {
         let genesis_round = Genesis::id().round;
-        let genesis_round_next = genesis_round.next();
 
-        // any genesis is suitable, round number may be taken from configs
+        // check for being earlier than genesis takes place with other peer checks
+        #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
         let is_special_ok = match self.round.cmp(&genesis_round) {
             cmp::Ordering::Equal => {
                 self.payload.is_empty()
@@ -91,21 +91,10 @@ impl PointBody {
                     && self.data.time == self.data.anchor_time
             }
             cmp::Ordering::Greater => {
-                (self.round > genesis_round_next || (
-                    // first point after genesis is reproducible for node to safely restart
-                    self.payload.is_empty()
-                        && self.evidence.is_empty()
-                        && self.data.includes.len() == PeerCount::GENESIS.full()
-                        && self.data.witness.is_empty()
-                        && self.data.anchor_trigger == self.data.anchor_proof
-                        && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next).is_some_and(|anchor| anchor == *Genesis::id())
-                        && self.data.time == self.data.anchor_time.next()
-                        && self.data.anchor_time.millis() == CachedConfig::get().genesis_info.genesis_millis
-                ))
-                    // leader must maintain its chain of proofs,
-                    // while others must link to previous points (checked at the end of this method);
-                    // its decided later (using dag round data) whether current point belongs to leader
-                    && !(self.data.anchor_proof == Link::ToSelf && self.evidence.is_empty())
+                // leader must maintain its chain of proofs,
+                // while others must link to previous points (checked at the end of this method);
+                // its decided later (using dag round data) whether current point belongs to leader
+                !(self.data.anchor_proof == Link::ToSelf && self.evidence.is_empty())
                     && !(self.data.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
                     && self.data.time > self.data.anchor_time
             }
@@ -137,7 +126,7 @@ impl PointBody {
         }
     }
 
-    pub fn is_link_well_formed(&self, link_field: AnchorStageRole) -> bool {
+    fn is_link_well_formed(&self, link_field: AnchorStageRole) -> bool {
         match self.data.anchor_link(link_field) {
             Link::ToSelf => true,
             Link::Direct(Through::Includes(peer)) => self.data.includes.contains_key(peer),
