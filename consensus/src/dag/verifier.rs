@@ -327,15 +327,24 @@ impl Verifier {
     ) -> bool {
         // existence of proofs in leader points is a part of point's well-form-ness check
         match &dag_round.anchor_stage() {
-            // no one may link to self
-            None => {
+            Some(stage) if stage.leader == info.data().author => {
+                // either Proof directly points on candidate
+                if stage.role == AnchorStageRole::Proof
+                    // or Trigger points on Proof
+                    || info.anchor_round(AnchorStageRole::Proof) == info.round().prev()
+                {
+                    // must link to own point if it did not skip rounds
+                    info.data().prev_digest().is_some()
+                        == (info.anchor_link(stage.role) == &Link::ToSelf)
+                } else {
+                    // skipped either candidate of Proof, but may have prev point
+                    info.anchor_link(stage.role) != &Link::ToSelf
+                }
+            }
+            // others must not pretend to be leaders
+            Some(_) | None => {
                 info.data().anchor_proof != Link::ToSelf
                     && info.data().anchor_trigger != Link::ToSelf
-            }
-            // leader must link to own point while others must not
-            Some(stage) => {
-                (stage.leader == info.data().author)
-                    == (info.anchor_link(stage.role) == &Link::ToSelf)
             }
         }
     }
