@@ -331,7 +331,7 @@ fn test_get_anchors_processing_info() {
 
     // ======
     // collated shard block 0:17, then collated master block 1:967
-    // master block processed all extrenals, so it processed the same anchors
+    // master block processed less externals because of large queue
     let prev_block_id = BlockId {
         shard: shard_id,
         seqno: 17,
@@ -347,8 +347,8 @@ fn test_get_anchors_processing_info() {
     mc_data.block_id.seqno = 967;
     mc_data.gen_chain_time = 1732479499855;
     mc_data.processed_upto.externals = Some(ExternalsProcessedUpto {
-        processed_to: (1764, 23429),
-        read_to: (1764, 23429),
+        processed_to: (1752, 12000),
+        read_to: (1752, 12000),
     });
     let (_, shard_desc) = mc_data.shards.get_mut(0).unwrap();
     shard_desc.seqno = 17;
@@ -387,8 +387,53 @@ fn test_get_anchors_processing_info() {
     assert_eq!(anchors_proc_info.last_imported_in_block_id, prev_block_id);
 
     //======
-    // collated master block 1:1005, it used shard block 0:17
-    // so master processed anchors ahead of shard
+    // collated master block 1:968, it used the same shard block 0:17
+    // master still processed less externals then shard
+    mc_data.block_id.seqno = 968;
+    mc_data.gen_chain_time = 1732479502300;
+    mc_data.processed_upto.externals = Some(ExternalsProcessedUpto {
+        processed_to: (1756, 7000),
+        read_to: (1756, 7000),
+    });
+    let (_, shard_desc) = mc_data.shards.get_mut(0).unwrap();
+    shard_desc.seqno = 17;
+    shard_desc.top_sc_block_updated = false;
+
+    //------
+    // will get anchors processing info from prev shard state
+    // because it is still ahead of master
+    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+        &shard_id,
+        &mc_data,
+        &prev_block_id,
+        prev_gen_chain_time,
+        prev_processed_upto_externals.as_ref(),
+    );
+    assert!(anchors_proc_info_opt.is_some());
+    let anchors_proc_info = anchors_proc_info_opt.unwrap();
+    assert_eq!(
+        anchors_proc_info.processed_to_anchor_id,
+        prev_processed_upto_externals
+            .as_ref()
+            .map(|upto| upto.processed_to.0)
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        anchors_proc_info.processed_to_msgs_offset,
+        prev_processed_upto_externals
+            .as_ref()
+            .map(|upto| upto.processed_to.1)
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_chain_time,
+        prev_gen_chain_time,
+    );
+    assert_eq!(anchors_proc_info.last_imported_in_block_id, prev_block_id);
+
+    //======
+    // collated master block 1:1005, it used the same shard block 0:17
+    // but master processed anchors ahead of shard
     mc_data.block_id.seqno = 1005;
     mc_data.gen_chain_time = 1732479530330;
     mc_data.processed_upto.externals = Some(ExternalsProcessedUpto {
