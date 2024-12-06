@@ -52,6 +52,8 @@ impl StarterInner {
                 .await?;
         }
 
+        println!("LOAD FROM KEYBLOCK {}", last_key_block.id());
+
         self.storage
             .node_state()
             .store_last_mc_block_id(last_key_block.id());

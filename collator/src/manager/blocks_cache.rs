@@ -677,6 +677,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 };
 
                 if entry.block_id != block_id {
+                    println!("!!! 1111111111 {:?}", block_id);
                     return Ok(StoredBlock {
                         received_and_collated: false,
                         block_mismatch: true,
@@ -741,6 +742,9 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 }
 
                 if entry.block_id != block_id {
+                    println!("!!! 2222222222222 {:?}", block_id);
+                    ctx.queue_diff.diff();
+
                     let new_entry = BlockCacheEntry::from_received(
                         ctx.state,
                         ctx.prev_ids,

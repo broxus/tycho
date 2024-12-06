@@ -7,6 +7,7 @@ use futures_util::future::{self, BoxFuture};
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::{BlockHandle, Storage};
 
 pub use self::futures::{OptionHandleFut, OptionPrepareFut};
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
@@ -420,3 +421,259 @@ pub mod test {
         }
     }
 }
+
+async fn find_longest_diffs_tail(mc_seqno: u32, storage: Storage) -> Result<usize> {
+    let mc_block_stuff = load_mc_block_stuff(mc_seqno, &storage).await?;
+
+    let shard_block_handles = load_shard_block_handles(&mc_block_stuff, &storage).await?;
+
+    let mut min_tail_len = None;
+
+    for block_handle in shard_block_handles {
+        let block = storage.block_storage().load_block_data(&block_handle).await?;
+        let tail_len = block.block().out_msg_queue_updates.tail_len as usize;
+
+        min_tail_len = Some(min_tail_len.map_or(tail_len, |min: usize| min.min(tail_len)));
+    }
+
+    let mc_tail_len = mc_block_stuff.block().out_msg_queue_updates.tail_len as usize;
+    let result_tail_len = min_tail_len.map_or(mc_tail_len, |min: usize| mc_tail_len.max(min));
+
+
+    tracing::info!(target: "local_debug", "Longest diffs tail: {result_tail_len}");
+    Ok(result_tail_len)
+}
+
+async fn find_min_mc_seqno_by_diffs_tails(mc_seqno: u32, storage: Storage) -> Result<u32> {
+    let mc_block_stuff = load_mc_block_stuff(mc_seqno, &storage).await?;
+
+    let shard_block_handles = load_shard_block_handles(&mc_block_stuff, &storage).await?;
+
+    let mut min_mc_seqno = mc_seqno;
+
+    for block_handle in shard_block_handles {
+        let block = storage.block_storage().load_block_data(&block_handle).await?;
+        let seqno = find_min_seqno_in_tail(block, &storage).await?;
+        min_mc_seqno = min_mc_seqno.min(seqno);
+    }
+
+    let mc_seqno_in_tail = find_min_seqno_in_tail(mc_block_stuff, &storage).await?;
+    min_mc_seqno = min_mc_seqno.min(mc_seqno_in_tail);
+    tracing::info!(target: "local_debug", "Min MC seqno by diffs tails: {min_mc_seqno}");
+    Ok(min_mc_seqno)
+}
+
+async fn load_mc_block_stuff(mc_seqno: u32, storage: &Storage) -> Result<BlockStuff> {
+    let mc_handle = storage
+        .block_handle_storage()
+        .load_key_block_handle(mc_seqno)
+        .unwrap();
+    let mc_block_stuff = storage.block_storage().load_block_data(&mc_handle).await?;
+    Ok(mc_block_stuff)
+}
+
+async fn load_shard_block_handles(
+    mc_block_stuff: &BlockStuff,
+    storage: &Storage,
+) -> Result<Vec<BlockHandle>> {
+    let block_handles = storage.block_handle_storage();
+    let mut shard_block_handles = Vec::new();
+
+    for entry in mc_block_stuff.load_custom()?.shards.latest_blocks() {
+        let block_id = entry?;
+        if block_id.seqno == 0 {
+            continue;
+        }
+
+        let Some(block_handle) = block_handles.load_handle(&block_id) else {
+            anyhow::bail!("top shard block handle not found: {block_id}");
+        };
+
+        shard_block_handles.push(block_handle);
+    }
+
+    Ok(shard_block_handles)
+}
+
+async fn find_min_seqno_in_tail(block_stuff: BlockStuff, storage: &Storage) -> Result<u32> {
+    let blocks = storage.block_storage();
+    let block_handles = storage.block_handle_storage();
+
+    let mut current_block = block_stuff;
+    let shard_ident = current_block.id().shard;
+    let mut min_seqno = current_block.id().seqno;
+    let mut tail_len = current_block.block().out_msg_queue_updates.tail_len as usize;
+
+    while tail_len > 0 {
+        let top_block_info = current_block.load_info()?;
+
+        let prev_block_id = match top_block_info.load_prev_ref()? {
+            PrevBlockRef::Single(block_ref) => block_ref.as_block_id(shard_ident),
+            PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
+        };
+
+        let Some(prev_block_handle) = block_handles.load_handle(&prev_block_id) else {
+            anyhow::bail!("prev block handle not found for: {prev_block_id}");
+        };
+
+        current_block = blocks.load_block_data(&prev_block_handle).await?;
+        min_seqno = min_seqno.min(current_block.id().seqno);
+        tail_len -= 1;
+    }
+
+    Ok(min_seqno)
+}
+
+
+// async fn find_longest_diffs_tail(mc_seqno: u32, storage: Storage) -> Result<usize> {
+//     let mc_handle = storage.block_handle_storage().load_key_block_handle(mc_seqno).unwrap();
+//     let mc_block_stuff = storage.block_storage().load_block_data(&mc_handle).await.unwrap();
+//     let blocks = storage.block_storage();
+//     let block_handles = storage.block_handle_storage();
+//
+//
+//     let mut shard_block_handles= Vec::new();
+//
+//     for entry in mc_block_stuff.load_custom()?.shards.latest_blocks() {
+//         let block_id = entry?;
+//         if block_id.seqno == 0 {
+//             // No queue states for zerostate.
+//             continue;
+//         }
+//
+//         let Some(block_handle) = block_handles.load_handle(&block_id) else {
+//             anyhow::bail!("top shard block handle not found: {block_id}");
+//         };
+//
+//         // NOTE: We set the flag only here because this part will be executed
+//         //       first, without waiting for other states or queues to be saved.
+//         block_handles.set_block_persistent(&block_handle);
+//
+//         shard_block_handles.push(block_handle);
+//     }
+//
+//     let mut min_tail_len = None;;
+//
+//
+//     for block_handle in shard_block_handles {
+//         let block = blocks.load_block_data(&block_handle).await?;
+//         let mut tail_len = block.block().out_msg_queue_updates.tail_len as usize;
+//
+//         if let Some(min) = min_tail_len {
+//             if tail_len < min {
+//                 min_tail_len = Some(tail_len);
+//             }
+//         } else {
+//             min_tail_len = Some(tail_len);
+//         }
+//
+//     }
+//
+//
+//     let mut tail_len = mc_block_stuff.block().out_msg_queue_updates.tail_len as usize;
+//
+//     if let Some(min) = min_tail_len {
+//         if tail_len < min {
+//             tail_len = min;
+//         }
+//     }
+//
+//     Ok(tail_len)
+// }
+//
+// async fn find_min_mc_seqno_by_diffs_tails(mc_seqno: u32, storage: Storage) -> Result<u32> {
+//     let mc_handle = storage.block_handle_storage().load_key_block_handle(mc_seqno).unwrap();
+//     let mc_block_stuff = storage.block_storage().load_block_data(&mc_handle).await.unwrap();
+//     let blocks = storage.block_storage();
+//     let block_handles = storage.block_handle_storage();
+//
+//
+//     let mut shard_block_handles= Vec::new();
+//
+//     for entry in mc_block_stuff.load_custom()?.shards.latest_blocks() {
+//         let block_id = entry?;
+//         if block_id.seqno == 0 {
+//             // No queue states for zerostate.
+//             continue;
+//         }
+//
+//         let Some(block_handle) = block_handles.load_handle(&block_id) else {
+//             anyhow::bail!("top shard block handle not found: {block_id}");
+//         };
+//
+//         // NOTE: We set the flag only here because this part will be executed
+//         //       first, without waiting for other states or queues to be saved.
+//         block_handles.set_block_persistent(&block_handle);
+//
+//         shard_block_handles.push(block_handle);
+//     }
+//
+//     let mut min_block_handle = None;
+//     let mut min_block;
+//
+//     let mut min_mc_seqno = mc_seqno;
+//
+//
+//     for block_handle in shard_block_handles {
+//
+//         let block = blocks.load_block_data(&block_handle).await?;
+//         let shard_ident = block.id().shard;
+//         let mut tail_len = block.block().out_msg_queue_updates.tail_len as usize;
+//
+//         while tail_len > 0 {
+//             let top_block_info = block.load_info()?;
+//
+//             let prev_block_id = match top_block_info.load_prev_ref()? {
+//                 PrevBlockRef::Single(block_ref) => block_ref.as_block_id(shard_ident),
+//                 PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
+//             };
+//
+//             let Some(prev_block_handle) = storage.block_handle_storage().load_handle(&prev_block_id) else {
+//                 anyhow::bail!("prev block handle not found for: {prev_block_id}");
+//             };
+//             let prev_block = storage.block_storage().load_block_data(&prev_block_handle).await?;
+//
+//             min_block_handle = Some(prev_block_handle);
+//             min_block = prev_block;
+//             tail_len -= 1;
+//         }
+//
+//         if min_block_handle.id().seqno < min_mc_seqno {
+//             min_mc_seqno = min_block_handle.id().seqno;
+//         }
+//     }
+//
+//     let block = blocks.load_block_data(&mc_handle).await?;
+//     let shard_ident = block.id().shard;
+//     let mut tail_len = block.block().out_msg_queue_updates.tail_len as usize;
+//
+//     while tail_len > 0 {
+//         let top_block_info = block.load_info()?;
+//
+//         let prev_block_id = match top_block_info.load_prev_ref()? {
+//             PrevBlockRef::Single(block_ref) => block_ref.as_block_id(shard_ident),
+//             PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
+//         };
+//
+//         let Some(prev_block_handle) = storage.block_handle_storage().load_handle(&prev_block_id) else {
+//             anyhow::bail!("prev block handle not found for: {prev_block_id}");
+//         };
+//         let prev_block = storage.block_storage().load_block_data(&prev_block_handle).await?;
+//
+//         min_block_handle = prev_block_handle;
+//         min_block = prev_block;
+//         tail_len -= 1;
+//     }
+//
+//     if min_block_handle.id().seqno < min_mc_seqno {
+//         min_mc_seqno = min_block_handle.id().seqno;
+//     }
+//
+//
+//     Ok(min_mc_seqno)
+// }
+
+
+
+
+

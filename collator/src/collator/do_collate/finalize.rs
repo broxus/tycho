@@ -761,7 +761,11 @@ impl Phase<FinalizeState> {
         let prev_state_extra = prev_state.state_extra()?;
         let prev_config = &prev_state_extra.config;
         let (config, mut is_key_block) = if let Some(new_config) = config_params {
-            let is_key_block = &new_config != prev_config;
+            let mut is_key_block = &new_config != prev_config;
+
+            if collation_data.block_id_short.seqno % 10 == 0 {
+                is_key_block = true;
+            }
 
             if is_key_block && collator_config.validate_config {
                 new_config

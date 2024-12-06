@@ -188,12 +188,15 @@ impl GcSubscriber {
                 tick.adjust(trigger)
             };
 
-            if let Err(e) = storage
-                .block_storage()
-                .remove_outdated_archives(target_seqno)
-            {
-                tracing::error!("failed to remove outdated archives: {e:?}");
-            }
+
+            tracing::info!(target: "local_debug", target_seqno, "starting archives_gc GC");
+
+            // if let Err(e) = storage
+            //     .block_storage()
+            //     .remove_outdated_archives(target_seqno)
+            // {
+            //     tracing::error!("failed to remove outdated archives: {e:?}");
+            // }
         }
     }
 
@@ -310,13 +313,17 @@ impl GcSubscriber {
                 }
             };
 
-            if let Err(e) = storage
-                .block_storage()
-                .remove_outdated_blocks(target_seqno, config.max_blocks_per_batch)
-                .await
-            {
-                tracing::error!("failed to remove outdated blocks: {e:?}");
-            }
+            tracing::info!(target: "local_debug", target_seqno, "starting blocks_gc GC");
+            // let load_block = storage.block_storage().load
+            // let handle = storage.block_handle_storage().load_handle(target_seqno);
+
+            // if let Err(e) = storage
+            //     .block_storage()
+            //     .remove_outdated_blocks(target_seqno, config.max_blocks_per_batch)
+            //     .await
+            // {
+            //     tracing::error!("failed to remove outdated blocks: {e:?}");
+            // }
         }
     }
 
@@ -399,13 +406,15 @@ impl GcSubscriber {
             tracing::info!("starting GC for target seqno: {}", target_seqno);
 
             let hist = HistogramGuard::begin("tycho_gc_states_time");
-            if let Err(e) = storage
-                .shard_state_storage()
-                .remove_outdated_states(target_seqno)
-                .await
-            {
-                tracing::error!("failed to remove outdated states: {e:?}");
-            }
+
+            tracing::info!(target: "local_debug", "Starting states_gc GC: {}", target_seqno);
+            // if let Err(e) = storage
+            //     .shard_state_storage()
+            //     .remove_outdated_states(target_seqno)
+            //     .await
+            // {
+            //     tracing::error!("failed to remove outdated states: {e:?}");
+            // }
 
             let took = hist.finish();
             tracing::info!(

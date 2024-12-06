@@ -30,6 +30,7 @@ impl<'a> QueueStateReader<'a> {
             "top queue diff hash mismatch"
         );
 
+        println!("!!! top_update.tail_len: {}", top_update.tail_len);
         anyhow::ensure!(
             state.header.queue_diffs.len() == top_update.tail_len as usize,
             "queue diffs count mismatch"

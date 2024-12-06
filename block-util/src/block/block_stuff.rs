@@ -24,7 +24,8 @@ impl BlockStuff {
     pub const BOOT_OFFSET: Duration = Duration::from_secs(12 * 3600);
 
     pub fn compute_is_persistent(block_utime: u32, prev_utime: u32) -> bool {
-        block_utime >> 10 != prev_utime >> 10
+        true
+        // block_utime >> 7 != prev_utime >> 7
     }
 
     pub fn can_use_for_boot(block_utime: u32, now_utime: u32) -> bool {
