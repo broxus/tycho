@@ -46,20 +46,30 @@ pub enum PointMap {
 pub enum VerifyError {
     #[error("point before genesis cannot be verified")]
     BeforeGenesis,
-    #[error("author is not scheduled")]
-    UnknownAuthor,
     #[error("signature does not match author")]
     BadSig,
-    #[error("structure check failed")] // TODO enum for each check
-    IllFormed,
-    #[error("{:?} peer map must be empty", .0)]
-    MustBeEmpty(PointMap),
-    #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
-    LackOfPeers((usize, PeerCount, PointMap)),
-    #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
-    UnknownPeers((Vec<PeerId>, PointMap)),
     #[error("uninit {:?} peer set of {} len at round {}", .0.2, .0.0, .0.1.0)]
     Uninit((usize, Round, PointMap)),
+    #[error("author is not scheduled")]
+    UnknownAuthor,
+    #[error("ill-formed: {0}")]
+    IllFormed(IllFormedReason),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum IllFormedReason {
+    #[error("links anchor across genesis")]
+    LinksAcrossGenesis,
+    #[error("links both anchor roles to same round")]
+    LinksSameRound,
+    #[error("{0:?} peer map must be empty")]
+    MustBeEmpty(PointMap),
+    #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
+    UnknownPeers((Vec<PeerId>, PointMap)),
+    #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
+    LackOfPeers((usize, PeerCount, PointMap)),
+    #[error("some structure issue")]
+    NotDescribed, // TODO enum for each check
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -72,10 +82,8 @@ impl Verifier {
 
         let result = if !point.is_integrity_ok() {
             Err(VerifyError::BadSig)
-        } else if !point.is_well_formed() {
-            Err(VerifyError::IllFormed)
         } else {
-            Self::is_peer_usage_ok(point, peer_schedule).map_or(Ok(()), Err)
+            Self::verify_impl(point, peer_schedule).map_or(Ok(()), Err)
         };
 
         ValidateCtx::verified(&result);
@@ -596,7 +604,7 @@ impl Verifier {
     }
 
     /// blame author and every dependent point's author
-    fn is_peer_usage_ok(
+    fn verify_impl(
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
     ) -> Option<VerifyError> {
@@ -647,6 +655,14 @@ impl Verifier {
             }
         };
 
+        // point belongs to current genesis
+        if let Some(reason) = Self::links_across_genesis(point) {
+            return Some(VerifyError::IllFormed(reason));
+        }
+        if !point.is_well_formed() {
+            return Some(VerifyError::IllFormed(IllFormedReason::NotDescribed));
+        }
+
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
         match same_round_peers {
@@ -660,19 +676,23 @@ impl Verifier {
                 }
                 if !point.evidence().is_empty() {
                     if total == PeerCount::GENESIS {
-                        return Some(VerifyError::MustBeEmpty(PointMap::Evidence));
+                        let reason = IllFormedReason::MustBeEmpty(PointMap::Evidence);
+                        return Some(VerifyError::IllFormed(reason));
                     }
-                    let peers = point.evidence().keys();
-                    if peers.len() < total.majority_of_others() {
-                        let len = scheduled.len();
-                        return Some(VerifyError::LackOfPeers((len, total, PointMap::Evidence)));
-                    }
-                    let unknown = peers
+                    let evidence = point.evidence();
+                    let unknown = evidence
+                        .keys()
                         .filter(|id| !scheduled.contains(id))
                         .copied()
                         .collect::<Vec<_>>();
                     if !unknown.is_empty() {
-                        return Some(VerifyError::UnknownPeers((unknown, PointMap::Evidence)));
+                        let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
+                        return Some(VerifyError::IllFormed(reason));
+                    }
+                    if evidence.len() < total.majority_of_others() {
+                        let len = scheduled.len();
+                        let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
+                        return Some(VerifyError::IllFormed(reason));
                     }
                 }
             }
@@ -685,21 +705,25 @@ impl Verifier {
             }
             None => {
                 if !point.data().includes.is_empty() {
-                    return Some(VerifyError::MustBeEmpty(PointMap::Includes));
+                    let reason = IllFormedReason::MustBeEmpty(PointMap::Includes);
+                    return Some(VerifyError::IllFormed(reason));
                 }
             }
             Some((Ok(total), scheduled)) => {
-                let peers = point.data().includes.keys();
-                if peers.len() < total.majority() {
-                    let len = scheduled.len();
-                    return Some(VerifyError::LackOfPeers((len, total, PointMap::Includes)));
-                }
-                let unknown = peers
+                let includes = &point.data().includes;
+                let unknown = includes
+                    .keys()
                     .filter(|id| !scheduled.contains(id))
                     .copied()
                     .collect::<Vec<_>>();
                 if !unknown.is_empty() {
-                    return Some(VerifyError::UnknownPeers((unknown, PointMap::Includes)));
+                    let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Includes));
+                    return Some(VerifyError::IllFormed(reason));
+                }
+                if includes.len() < total.majority() {
+                    let len = scheduled.len();
+                    let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Includes));
+                    return Some(VerifyError::IllFormed(reason));
                 }
             }
         }
@@ -711,7 +735,8 @@ impl Verifier {
             }
             None => {
                 if !point.data().witness.is_empty() {
-                    return Some(VerifyError::MustBeEmpty(PointMap::Witness));
+                    let reason = IllFormedReason::MustBeEmpty(PointMap::Witness);
+                    return Some(VerifyError::IllFormed(reason));
                 }
             }
             Some((Ok(_), scheduled)) => {
@@ -722,13 +747,35 @@ impl Verifier {
                         .copied()
                         .collect::<Vec<_>>();
                     if !unknown.is_empty() {
-                        return Some(VerifyError::UnknownPeers((unknown, PointMap::Witness)));
+                        let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Witness));
+                        return Some(VerifyError::IllFormed(reason));
                     }
                 }
             }
         }
 
         None
+    }
+
+    fn links_across_genesis(point: &Point) -> Option<IllFormedReason> {
+        let genesis_round = Genesis::id().round;
+        let proof_round = point.anchor_round(AnchorStageRole::Proof);
+        let trigger_round = point.anchor_round(AnchorStageRole::Trigger);
+        match (
+            proof_round.cmp(&genesis_round),
+            trigger_round.cmp(&genesis_round),
+        ) {
+            (cmp::Ordering::Less, _) | (_, cmp::Ordering::Less) => {
+                Some(IllFormedReason::LinksAcrossGenesis)
+            }
+            (cmp::Ordering::Greater, cmp::Ordering::Greater) if proof_round == trigger_round => {
+                // equality is impossible due to commit waves do not start every round;
+                // anchor trigger may belong to a later round than proof and vice versa;
+                // no indirect links over genesis tombstone
+                Some(IllFormedReason::LinksSameRound)
+            }
+            _ => None, // to validate dependencies
+        }
     }
 
     /// blame author and every dependent point's author
@@ -788,15 +835,13 @@ impl ValidateCtx {
             Err(VerifyError::BeforeGenesis | VerifyError::Uninit(_)) => {
                 (&Self::VERIFY_LABELS[0..=0], 1)
             }
-            Err(VerifyError::UnknownAuthor | VerifyError::UnknownPeers(_)) => {
-                (&Self::VERIFY_LABELS[1..=1], 1)
-            }
             Err(
-                VerifyError::BadSig
-                | VerifyError::IllFormed
-                | VerifyError::LackOfPeers(_)
-                | VerifyError::MustBeEmpty(_),
-            ) => (&Self::VERIFY_LABELS[2..=2], 1),
+                VerifyError::UnknownAuthor
+                | VerifyError::IllFormed(IllFormedReason::UnknownPeers(_)),
+            ) => (&Self::VERIFY_LABELS[1..=1], 1),
+            Err(VerifyError::BadSig | VerifyError::IllFormed(_)) => {
+                (&Self::VERIFY_LABELS[2..=2], 1)
+            }
             Ok(_) => (&Self::VERIFY_LABELS[..0], 0),
         };
         metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
