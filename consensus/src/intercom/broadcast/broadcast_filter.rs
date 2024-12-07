@@ -183,12 +183,7 @@ impl BroadcastFilterInner {
                                 dag_round.add_broadcast_exact(point, downloader, store, round_ctx);
                             }
                         }
-                        Err(
-                            VerifyError::IllFormed
-                            | VerifyError::MustBeEmpty(_)
-                            | VerifyError::LackOfPeers(_)
-                            | VerifyError::UnknownPeers(_),
-                        ) => {
+                        Err(VerifyError::IllFormed(_)) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
                                 dag_round.add_ill_formed_broadcast_exact(point, store, round_ctx);
                             }
