@@ -401,16 +401,11 @@ impl<T: DownloadType> DownloadTask<T> {
                         );
                         None
                     }
-                    Err(
-                        error @ (VerifyError::IllFormed
-                        | VerifyError::MustBeEmpty(_)
-                        | VerifyError::LackOfPeers(_)
-                        | VerifyError::UnknownPeers(_)),
-                    ) => {
+                    Err(error @ VerifyError::IllFormed(_)) => {
                         tracing::error!(
                             error = display(error),
                             point = debug(&point),
-                            "downloaded illformed"
+                            "downloaded"
                         );
                         Some(DownloadResult::IllFormed(point))
                     }
