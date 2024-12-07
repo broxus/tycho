@@ -24,7 +24,7 @@ impl BlockStuff {
     pub const BOOT_OFFSET: Duration = Duration::from_secs(12 * 3600);
 
     pub fn compute_is_persistent(block_utime: u32, prev_utime: u32) -> bool {
-        block_utime >> 17 != prev_utime >> 17
+        block_utime >> 10 != prev_utime >> 10
     }
 
     pub fn can_use_for_boot(block_utime: u32, now_utime: u32) -> bool {
@@ -55,6 +55,7 @@ impl BlockStuff {
             state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
             out_msg_queue_updates: OutMsgQueueUpdates {
                 diff_hash: Default::default(),
+                tail_len: 0,
             },
             extra: Lazy::new(&BlockExtra::default()).unwrap(),
         };
