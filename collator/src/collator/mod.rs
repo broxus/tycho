@@ -1396,8 +1396,12 @@ impl CollatorStdImpl {
             }
         }
 
-        self.do_collate(working_state, Some(top_shard_blocks_info))
-            .await
+        self.do_collate(
+            working_state,
+            Some(top_shard_blocks_info),
+            ForceMasterCollation::No,
+        )
+        .await
     }
 
     /// Run collation if there are internals,
@@ -1675,6 +1679,9 @@ impl CollatorStdImpl {
                             last_imported_chain_time,
                             "there are no pending internals or externals, will import next anchor",
                         );
+
+                        // drop used wu when anchor was not imported by used wu
+                        working_state.wu_used_from_last_anchor = 0;
                     }
                     (_, _, true) => {
                         tracing::info!(target: tracing_targets::COLLATOR,
@@ -1773,6 +1780,7 @@ impl CollatorStdImpl {
 
                                 imported_anchors_has_externals |= has_our_externals;
 
+                                // reduce used wu by one imported anchor
                                 working_state.wu_used_from_last_anchor = working_state
                                     .wu_used_from_last_anchor
                                     .saturating_sub(wu_used_to_import_next_anchor);
@@ -1780,7 +1788,7 @@ impl CollatorStdImpl {
                                 tracing::debug!(target: tracing_targets::COLLATOR,
                                     wu_used_from_last_anchor = working_state.wu_used_from_last_anchor,
                                     force_import_anchor_by_used_wu,
-                                    "wu_used_from_last_anchor dropped to",
+                                    "used wu dropped to",
                                 );
 
                                 if working_state.wu_used_from_last_anchor
@@ -1851,8 +1859,17 @@ impl CollatorStdImpl {
                     "will collate next shard block",
                 );
 
+                // should force next master block collation after this shard block
+                // when anchor import was skipped
+                let force_next_mc_block = if anchor_import_skipped {
+                    ForceMasterCollation::ByAnchorImportSkipped
+                } else {
+                    ForceMasterCollation::No
+                };
+
                 drop(histogram);
-                self.do_collate(working_state, None).await?;
+                self.do_collate(working_state, None, force_next_mc_block)
+                    .await?;
             }
             TryCollateCheck::NoPendingMessages
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
