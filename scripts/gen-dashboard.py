@@ -700,6 +700,10 @@ def core_block_strider() -> RowPanel:
             "Time to process block strider step",
         ),
         create_heatmap_panel(
+            "tycho_core_provider_cleanup_time",
+            "Time to cleanup block providers",
+        ),
+        create_heatmap_panel(
             "tycho_core_download_mc_block_time", "Masterchain block downloading time"
         ),
         create_heatmap_panel(
