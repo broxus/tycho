@@ -6,8 +6,7 @@ root_dir=$(cd "${script_dir}/../" && pwd -P)
 
 source "${script_dir}/common.sh"
 
-if ! command -v cargo 2>&1 >/dev/null
-then
+if ! command -v cargo 2>&1 >/dev/null; then
     cat << EOF
 ERROR: \`cargo\` could not be found. You need to install the Rust compiler first:
 
@@ -21,8 +20,19 @@ EOF
     exit 1
 fi
 
-set_clang_env 19
-cargo install --path ./cli --locked
+features=""
+if set_clang_env 19 18; then
+  if ! command -v cargo 2>&1 >/dev/null; then
+    echo "ERROR: \`lld\` could not be found."
+    exit 1
+  fi
+
+  features="--features lto"
+  echo "INFO: Building node with lto"
+  export RUSTFLAGS="-Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=lld"
+fi
+
+cargo install --path ./cli --locked $features
 
 cat << EOF
 Node installed successfully. Run the following to configure it:
