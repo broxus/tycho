@@ -19,6 +19,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CC: /usr/bin/clang
+  CXX: /usr/bin/clang++
 
 jobs:
   rustfmt:
@@ -43,7 +45,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: "clippy,rustfmt"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true

@@ -72,7 +72,7 @@ from a testing branch. Or you could build the RocksDB from source manually:
 
 ```bash
 # Install dependencies
-sudo apt install libjemalloc-dev libgflags-dev libzstd-dev liblz4-dev
+sudo apt install clang lld libjemalloc-dev libgflags-dev libzstd-dev liblz4-dev
 
 # Clone the repo
 cd /path/to

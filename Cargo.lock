@@ -1523,7 +1523,7 @@ dependencies = [
 [[package]]
 name = "librocksdb-sys"
 version = "0.17.1+9.7.4"
-source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=95d01b183cdb45f80a470cadfc030a545ab66156#95d01b183cdb45f80a470cadfc030a545ab66156"
+source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=b2dab4a0915eed72741657f783118d9220d4f070#b2dab4a0915eed72741657f783118d9220d4f070"
 dependencies = [
  "bindgen",
  "bzip2-sys",
@@ -2489,7 +2489,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.22.0"
-source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=95d01b183cdb45f80a470cadfc030a545ab66156#95d01b183cdb45f80a470cadfc030a545ab66156"
+source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=b2dab4a0915eed72741657f783118d9220d4f070#b2dab4a0915eed72741657f783118d9220d4f070"
 dependencies = [
  "libc",
  "librocksdb-sys",
@@ -3495,6 +3495,7 @@ dependencies = [
  "tycho-rpc",
  "tycho-storage",
  "tycho-util",
+ "weedb",
 ]
 
 [[package]]
@@ -4025,7 +4026,7 @@ dependencies = [
 [[package]]
 name = "weedb"
 version = "0.3.8"
-source = "git+https://github.com/broxus/weedb.git?rev=be76187ed31348144bdab3e113ad7de114d99ac6#be76187ed31348144bdab3e113ad7de114d99ac6"
+source = "git+https://github.com/broxus/weedb.git?rev=59728ea0c8703dd28a4c37dee05c1321cd81b966#59728ea0c8703dd28a4c37dee05c1321cd81b966"
 dependencies = [
  "librocksdb-sys",
  "metrics",

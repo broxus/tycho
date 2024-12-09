@@ -135,7 +135,7 @@ tycho-storage = { path = "./storage", version = "0.1.4" }
 tycho-util = { path = "./util", version = "0.1.4" }
 
 [patch.crates-io]
-weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "be76187ed31348144bdab3e113ad7de114d99ac6" }
+weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "59728ea0c8703dd28a4c37dee05c1321cd81b966" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
