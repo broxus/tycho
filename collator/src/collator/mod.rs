@@ -602,7 +602,7 @@ impl CollatorStdImpl {
                 new_next_block_id = %self.next_block_info,
                 "reset working state and msgs buffer",
             );
-            let working_state = Self::init_working_state(
+            let mut working_state = Self::init_working_state(
                 &self.next_block_info,
                 self.state_node_adapter.clone(),
                 mc_data,
@@ -613,6 +613,7 @@ impl CollatorStdImpl {
             // get last processed and last imported anchor info (will be None on zerostate)
             let prev_shard_data = working_state.prev_shard_data_ref();
             let prev_block_id = prev_shard_data.blocks_ids()[0]; // TODO: consider split/merge
+            let prev_shard_data_gen_chain_time = prev_shard_data.gen_chain_time();
             let anchors_processing_info_opt = Self::get_anchors_processing_info(
                 &working_state.next_block_id_short.shard,
                 &working_state.mc_data,
@@ -655,7 +656,7 @@ impl CollatorStdImpl {
                     }
                 };
 
-                let anchors_info = match import_init_anchors_res {
+                let mut anchors_info = match import_init_anchors_res {
                     Err(CollatorError::Cancelled(reason)) => {
                         self.listener
                             .on_cancelled(
@@ -676,6 +677,22 @@ impl CollatorStdImpl {
                         "imported anchors on resume: {:?}",
                         anchors_info.as_slice(),
                     );
+
+                    let wu_used = &mut working_state.wu_used_from_last_anchor;
+                    let wu_step = working_state.collation_config.wu_used_to_import_next_anchor;
+
+                    while let Some(anchor_info) = anchors_info.pop() {
+                        // TODO: Use `break` instead if `anchors_info` if sorted by `ct`.
+                        if anchor_info.into_inner().ct <= prev_shard_data_gen_chain_time {
+                            continue;
+                        }
+
+                        if let Some(new_wu_used) = wu_used.checked_sub(wu_step) {
+                            *wu_used = new_wu_used;
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -1984,4 +2001,12 @@ enum InitAnchorSource {
     FromCache(AnchorInfo),
     #[allow(dead_code)]
     Imported(AnchorInfo),
+}
+
+impl InitAnchorSource {
+    fn into_inner(self) -> AnchorInfo {
+        match self {
+            Self::FromCache(inner) | Self::Imported(inner) => inner,
+        }
+    }
 }
