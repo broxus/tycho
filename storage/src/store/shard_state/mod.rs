@@ -121,8 +121,13 @@ impl ShardStateStorage {
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
-            let (pending_op, new_cell_count) =
-                cell_storage.store_cell(&mut batch, root_cell, estimated_merkle_update_size)?;
+
+            let new_cell_count = cell_storage.store_cell(
+                &mut batch,
+                root_cell.as_ref(),
+                estimated_merkle_update_size,
+            )?;
+
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
@@ -136,8 +141,7 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            // Ensure that pending operation guard is dropped after the batch is written
-            drop(pending_op);
+            drop(root_cell);
 
             hist.finish();
 
@@ -170,6 +174,8 @@ impl ShardStateStorage {
         };
 
         let block_id = *block_id;
+
+        let _gc_lock = self.gc_lock.lock().await;
         tokio::task::spawn_blocking(move || ctx.store(&block_id, boc)).await?
     }
 
@@ -242,16 +248,12 @@ impl ShardStateStorage {
                 let key = key.to_vec();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let (pending_op, stats, mut batch) =
-                        cell_storage.remove_cell(&alloc, &root_hash)?;
+                    let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
-
-                    // Ensure that pending operation guard is dropped after the batch is written
-                    drop(pending_op);
 
                     Ok::<_, anyhow::Error>((stats, alloc))
                 })
