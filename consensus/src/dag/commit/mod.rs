@@ -349,7 +349,7 @@ mod test {
 
         assert_eq!(
             committer.dag.bottom_round(),
-            Round(24),
+            Round(25),
             "test config changed? should update test then"
         );
 
@@ -369,7 +369,7 @@ mod test {
             restore_point(&mut committer.dag, pack);
         }
 
-        assert_eq!(commit(&mut committer, None).len(), 3);
+        assert_eq!(commit(&mut committer, None).len(), 2);
 
         restore_point(&mut committer.dag, r_leader);
 

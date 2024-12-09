@@ -104,7 +104,11 @@ impl Engine {
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
         let mut dag = DagFront::default();
-        let committer = dag.init(DagRound::new_bottom(Genesis::id().round, &peer_schedule));
+        let mut committer = dag.init(DagRound::new_bottom(
+            Genesis::id().round.prev(),
+            &peer_schedule,
+        ));
+        dag.fill_to_top(Genesis::id().round, Some(&mut committer), &peer_schedule);
         let committer_run = tokio::spawn(future::ready(committer));
 
         let init_task = JoinTask::new({
@@ -167,7 +171,7 @@ impl Engine {
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> Option<Point> {
+    async fn pre_run(&mut self) -> Option<(Point, Option<Point>)> {
         self.init_task.take().expect("init task must be set").await;
 
         // take last round from db
@@ -178,6 +182,8 @@ impl Engine {
         })
         .await
         .expect("load last round from db");
+
+        tracing::info!("found last db round {}", last_db_round.0);
 
         self.ctx = EngineCtx::new(last_db_round);
 
@@ -296,27 +302,25 @@ impl Engine {
         }
 
         broadcasts.sort_unstable_by_key(|a| cmp::Reverse(a.round));
-        let (last_bcast, prev_bcast) = match broadcasts.as_slice() {
-            [last] if last.round >= consensus_round.prev() => (Some(*last), None),
-            [last, prev] if prev.round >= consensus_round.prev() => (Some(*last), Some(*prev)),
-            [] => (None, None),
+        let replay_bcasts_ids = match broadcasts.as_slice() {
+            [last] if last.round >= consensus_round.prev() => Some((*last, None)),
+            [last, prev] if prev.round >= consensus_round.prev() => Some((*last, Some(*prev))),
+            [] => None,
             _ => unreachable!(
                 "need only 2 last broadcasts up to {consensus_round:?}, got {:?}",
                 broadcasts.iter().map(|id| id.alt()).collect::<Vec<_>>()
             ),
         };
 
-        let (last_bcast, prev_bcast) = if last_bcast.is_some() || prev_bcast.is_some() {
+        let replay_bcasts = if let Some((last_bcast, prev_bcast)) = replay_bcasts_ids {
             // if there's a broadcast at last DB round - then it's round will be current for Engine
             let task = tokio::task::spawn_blocking({
                 let store = self.round_task.state.store.clone();
                 move || {
-                    let last = last_bcast.map(|id| {
-                        store
-                            .get_point(id.round, &id.digest)
-                            .expect("last bcast by id")
-                    });
-                    if let Some((last, prev_id)) = last.as_ref().zip(prev_bcast.as_ref()) {
+                    let last = store
+                        .get_point(last_bcast.round, &last_bcast.digest)
+                        .expect("last bcast by id");
+                    if let Some(prev_id) = prev_bcast.as_ref() {
                         assert_eq!(
                             last.data().prev_digest(),
                             Some(&prev_id.digest),
@@ -331,7 +335,7 @@ impl Engine {
                             .get_point(id.round, &id.digest)
                             .expect("prev bcast by id")
                     });
-                    (last, prev)
+                    Some((last, prev))
                 }
             });
             match task.await {
@@ -340,22 +344,18 @@ impl Engine {
                 Err(e) => panic!("loading broadcasts on init: {e}"),
             }
         } else {
-            (None, None)
+            None
         };
 
         while !dag_restore.is_empty() {
             _ = dag_restore.next().await;
         }
-        if let Some(prev) = prev_bcast {
-            // prev broadcast may belong only to the prev to top dag round
-            self.round_task.init_prev_broadcast(prev, &round_ctx);
-        }
         // last broadcast may belong to any of the last 2 dag rounds
-        last_bcast
+        replay_bcasts
     }
 
     pub async fn run(mut self) {
-        let mut start_point = self.pre_run().await;
+        let mut replay_bcasts = self.pre_run().await;
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
@@ -368,7 +368,7 @@ impl Engine {
             {
                 let old_dag_top_round = self.dag.top().round();
 
-                let consensus_round = if let Some(start_point) = &start_point {
+                let next_round = if let Some((start_point, _)) = &replay_bcasts {
                     assert!(
                         start_point.round() == old_dag_top_round
                             || start_point.round() == old_dag_top_round.prev(),
@@ -376,7 +376,8 @@ impl Engine {
                          top {old_dag_top_round:?}, {:?}",
                         start_point.id().alt()
                     );
-                    start_point.round()
+                    // start point must be at current round
+                    start_point.round().next().max(old_dag_top_round)
                 } else {
                     // do not repeat the `get()` - it can give non-reproducible result
                     let consensus_round = self.consensus_round.get();
@@ -386,7 +387,10 @@ impl Engine {
                         consensus_round.0,
                         old_dag_top_round.0,
                     );
-                    consensus_round
+                    metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
+                        .increment(consensus_round - old_dag_top_round);
+                    // if received from BcastFilter - produce point at round before it
+                    consensus_round.max(old_dag_top_round.next())
                 };
 
                 match collator_feedback(
@@ -398,7 +402,7 @@ impl Engine {
                 ) {
                     Ok(pause_at) => {
                         *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
-                            consensus_round.next().min(pause_at),
+                            next_round.min(pause_at),
                             ready_committer.as_mut(),
                             &self.round_task.state.peer_schedule,
                         ));
@@ -420,21 +424,20 @@ impl Engine {
                 let dag_top_round = self.dag.top().round();
 
                 assert!(
-                    dag_top_round <= consensus_round.next(),
-                    "new dag round {} cannot be grater than next consensus round {}",
+                    dag_top_round <= next_round,
+                    "new dag round {} cannot be greater than next expected round {}",
                     dag_top_round.0,
-                    consensus_round.0,
+                    next_round.0,
                 );
 
-                metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
-                    .increment(consensus_round - dag_top_round);
-
-                assert!(
-                    old_dag_top_round < dag_top_round,
-                    "new dag round {} must be grater than old one {}",
-                    dag_top_round.0,
-                    old_dag_top_round.0,
-                );
+                if replay_bcasts.is_none() {
+                    assert!(
+                        old_dag_top_round < dag_top_round,
+                        "new dag round {} must be greater than old one {}",
+                        dag_top_round.0,
+                        old_dag_top_round.0,
+                    );
+                }
 
                 if old_dag_top_round < dag_top_round.prev() {
                     self.ctx = EngineCtx::new(dag_top_round);
@@ -445,10 +448,15 @@ impl Engine {
             round_ctx = RoundCtx::new(&self.ctx, head.current().round());
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
-            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry);
+            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
 
-            let own_point_fut = match start_point.take() {
-                Some(point) => future::ready(Some(point)).boxed(),
+            let own_point_fut = match replay_bcasts.take() {
+                Some((point, prev_bcast)) => {
+                    if let Some(prev) = prev_bcast {
+                        self.round_task.init_prev_broadcast(prev, round_ctx.clone());
+                    }
+                    future::ready(Some(point)).boxed()
+                }
                 None => self.round_task.own_point_task(
                     &head,
                     collector_signal_tx.subscribe(),

@@ -13,6 +13,7 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
+use weedb::rocksdb::WriteBatch;
 use weedb::{rocksdb, BoundedCfHandle};
 
 use crate::db::*;
@@ -241,8 +242,9 @@ impl CellStorage {
 
     pub fn store_cell(
         &self,
-        batch: &mut rocksdb::WriteBatch,
+        batch: &mut WriteBatch,
         root: Cell,
+        estimated_cell_count: usize,
     ) -> Result<(PendingOperation<'_>, usize), CellStorageError> {
         struct CellWithRefs<'a> {
             rc: u32,
@@ -341,7 +343,10 @@ impl CellStorage {
             db: &self.db,
             raw_cache: &self.raw_cells_cache,
             alloc: &alloc,
-            transaction: FastHashMap::with_capacity_and_hasher(128, Default::default()),
+            transaction: FastHashMap::with_capacity_and_hasher(
+                estimated_cell_count,
+                Default::default(),
+            ),
             buffer: Vec::with_capacity(512),
         };
 
@@ -424,10 +429,9 @@ impl CellStorage {
 
     pub fn remove_cell(
         &self,
-        batch: &mut rocksdb::WriteBatch,
         alloc: &Bump,
         hash: &HashBytes,
-    ) -> Result<(PendingOperation<'_>, usize), CellStorageError> {
+    ) -> Result<(PendingOperation<'_>, usize, WriteBatch), CellStorageError> {
         #[derive(Clone, Copy)]
         struct CellState<'a> {
             rc: i64,
@@ -498,7 +502,13 @@ impl CellStorage {
         drop(stack);
 
         // Write transaction to the `WriteBatch`
+        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time");
         let total = transaction.len();
+
+        // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
+        //       and a bit more just in case.
+        let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
+
         for (key, CellState { removes, .. }) in transaction {
             self.raw_cells_cache.remove_refs(key, removes);
             batch.merge_cf(
@@ -507,7 +517,7 @@ impl CellStorage {
                 refcount::encode_negative_refcount(removes),
             );
         }
-        Ok((pending_op, total))
+        Ok((pending_op, total, batch))
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {

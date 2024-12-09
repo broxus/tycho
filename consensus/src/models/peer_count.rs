@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct PeerCount(u8);
 
 impl std::fmt::Debug for PeerCount {

@@ -818,6 +818,34 @@ def storage() -> RowPanel:
             "tycho_storage_state_update_time", "Time to write state update to rocksdb"
         ),
         create_heatmap_panel(
+            "tycho_storage_state_store_time",
+            "Time to store single root with rocksdb write etc",
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_batch_write_time", "Time to write merge in write batch"
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_state_update_size_bytes",
+            "State update size",
+            UNITS.BYTES,
+            "0.999",
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_state_update_size_predicted_bytes",
+            "Predicted state update size",
+            UNITS.BYTES,
+            "0.999",
+        ),
+        create_heatmap_panel(
+            "tycho_storage_batch_write_time", "Time to write merge in write batch"
+        ),
+        create_heatmap_panel(
             "tycho_storage_state_store_time", "Time to store state with cell traversal"
         ),
         create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),

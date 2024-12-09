@@ -14,9 +14,7 @@ use crate::models::Round;
 /// collector may run without broadcaster, as if broadcaster signalled Ok
 #[derive(Copy, Clone, Debug)]
 pub enum CollectorSignal {
-    Finish, // must be sent last
-    Err,    // must be sent last
-    Retry,
+    Retry { ready: bool },
 }
 
 pub struct Collector {
@@ -109,7 +107,9 @@ impl CollectorTask {
                     if self.is_ready() {
                         return;
                     } else {
-                        _ = self.collector_signal.send_replace(CollectorSignal::Retry);
+                        _ = self.collector_signal.send_replace(
+                            CollectorSignal::Retry { ready: self.is_includes_ready }
+                        );
                     }
                 },
                 // very frequent event that may seldom cause completion
@@ -143,13 +143,11 @@ impl CollectorTask {
     fn is_ready(&self) -> bool {
         // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
-        if result {
-            _ = self.collector_signal.send_replace(CollectorSignal::Finish); // last signal
-        }
         tracing::debug!(
             parent: self.ctx.span(),
             includes = self.current_dag_round.threshold().count(),
             "2F+1" = self.current_dag_round.peer_count().majority(),
+            bcaster_ready = self.is_bcaster_ready_ok,
             result = result,
             "ready?",
         );
@@ -178,7 +176,6 @@ impl CollectorTask {
             "from bcast filter",
         );
         if should_fail {
-            _ = self.collector_signal.send_replace(CollectorSignal::Err); // last signal
             Err(())
         } else {
             Ok(())

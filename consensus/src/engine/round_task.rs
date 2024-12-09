@@ -70,24 +70,24 @@ impl RoundTaskReady {
         }
     }
 
-    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
+    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: RoundCtx) {
         assert!(
             self.prev_broadcast.is_none(),
             "previous broadcast is already set"
         );
 
         let (bcaster_ready_tx, stub_rx) = oneshot::channel();
-        let (stub_tx, collector_signal_rx) = watch::channel(CollectorSignal::Finish);
+        let (stub_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry { ready: true });
         let broadcaster = Broadcaster::new(
             self.state.dispatcher.clone(),
             prev_last_point,
             self.state.peer_schedule.clone(),
             bcaster_ready_tx,
             collector_signal_rx,
-            round_ctx,
+            &round_ctx,
         );
         let task = async move {
-            broadcaster.run_continue().await;
+            broadcaster.run_continue(round_ctx).await;
             _ = stub_rx;
             _ = stub_tx;
         };
@@ -100,11 +100,9 @@ impl RoundTaskReady {
         mut collector_signal_rx: watch::Receiver<CollectorSignal>,
         round_ctx: &RoundCtx,
     ) -> BoxFuture<'static, Option<Point>> {
-        let current_round = head.current().round();
-
         let allowed_to_produce =
             self.last_own_point.as_ref().map_or(true, |prev_own| {
-                match prev_own.round.next().cmp(&current_round) {
+                match prev_own.round.cmp(&head.prev().round()) {
                     cmp::Ordering::Less => true,
                     cmp::Ordering::Equal => {
                         prev_own.evidence.len() >= prev_own.signers.majority_of_others()
@@ -115,7 +113,7 @@ impl RoundTaskReady {
                         prev_own.round,
                         prev_own.evidence.len(),
                         prev_own.signers.majority_of_others(),
-                        current_round
+                        head.current().round()
                     ),
                 }
             });
@@ -142,8 +140,8 @@ impl RoundTaskReady {
                             break false;
                         }
                         match *collector_signal_rx.borrow_and_update() {
-                            CollectorSignal::Err | CollectorSignal::Finish => break false,
-                            CollectorSignal::Retry => continue,
+                            CollectorSignal::Retry {ready: true} => break false,
+                            CollectorSignal::Retry {ready: false} => continue,
                         }
                     }
                 );
@@ -236,7 +234,8 @@ impl RoundTaskReady {
                     );
                     let new_last_own_point = broadcaster.run().await;
                     prev_bcast.inspect(|task| task.abort());
-                    let new_prev_bcast = tokio::spawn(broadcaster.run_continue()).abort_handle();
+                    let new_prev_bcast =
+                        tokio::spawn(broadcaster.run_continue(round_ctx)).abort_handle();
                     // join the check, just not to miss it; it must have completed already
                     self_check.await;
                     Some((new_prev_bcast, new_last_own_point))

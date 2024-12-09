@@ -6,6 +6,7 @@ use futures_util::FutureExt;
 
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::WeakDagRound;
+use crate::dyn_event;
 use crate::effects::{AltFmt, AltFormat, ValidateCtx};
 use crate::engine::CachedConfig;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime};
@@ -65,34 +66,36 @@ impl InclusionState {
                 signed: OnceLock::new(),
             };
             is_first = true;
+            signable
+        });
+        let mut log_level = tracing::Level::DEBUG;
+        if is_first {
             ValidateCtx::first_resolved(resolved);
             if resolved.trusted().is_some() || resolved.certified().is_some() {
                 if let Some(dag_round) = self.0.parent.upgrade() {
                     dag_round.threshold().add();
                 }
             } else {
-                tracing::warn!(
-                    result = display(resolved.alt()),
-                    author = display(resolved.author().alt()),
-                    round = resolved.round().0,
-                    digest = display(resolved.digest().alt()),
-                    "resolved dag point",
-                );
+                log_level = log_level.max(tracing::Level::WARN);
                 signable.reject();
-            }
-            signable
-        });
-        if !is_first {
-            tracing::warn!(
-                result = display(resolved.alt()),
-                author = display(resolved.author().alt()),
-                round = resolved.round().0,
-                digest = display(resolved.digest().alt()),
-                first_digest = display(signable.first_resolved.digest().alt()),
-                "resolved alternative dag point",
-            );
+            };
+        } else {
             ValidateCtx::alt_resolved(resolved);
+            log_level = log_level.max(tracing::Level::WARN);
         }
+        dyn_event!(
+            log_level,
+            result = display(resolved.alt()),
+            author = display(resolved.author().alt()),
+            round = resolved.round().0,
+            digest = display(resolved.digest().alt()),
+            signed = signable.signed().map(|a| a.is_ok()),
+            rejected = signable.signed().map(|a| a.is_err()),
+            first_digest = Some(!is_first)
+                .filter(|x| *x)
+                .map(|_| display(signable.first_resolved.digest().alt())),
+            "resolved dag point",
+        );
         signable
     }
     pub fn signable(&self) -> Option<&'_ Signable> {

@@ -11,7 +11,7 @@ use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use sha2::Digest;
 use tycho_block_util::state::MinRefMcStateTracker;
-use tycho_storage::NewBlockMeta;
+use tycho_storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
@@ -1052,13 +1052,16 @@ impl CollatorStdImpl {
             let adapter = self.state_node_adapter.clone();
             let labels = labels.clone();
             let new_state_root = finalized.new_state_root.clone();
+            let hint = StoreStateHint {
+                block_data_size: Some(finalized.block_candidate.block.data_size()),
+            };
             async move {
                 let _histogram = HistogramGuard::begin_with_labels(
                     "tycho_collator_build_new_state_time",
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root)
+                    .store_state_root(&block_id, meta, new_state_root, hint)
                     .await
             }
         });
@@ -1124,7 +1127,7 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_tx_per_block", &labels)
             .set(collation_data.tx_count as f64);
         metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
-            .set(collation_data.accounts_count as f64);
+            .set(collation_data.updated_accounts_count as f64);
         metrics::counter!("tycho_do_collate_int_enqueue_count")
             .increment(collation_data.int_enqueue_count);
         metrics::counter!("tycho_do_collate_int_dequeue_count")

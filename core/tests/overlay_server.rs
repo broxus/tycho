@@ -292,7 +292,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
         shard_states.min_ref_mc_state(),
     )?;
     shard_states
-        .store_state(&zerostate_handle, &zerostate)
+        .store_state(&zerostate_handle, &zerostate, Default::default())
         .await?;
 
     {

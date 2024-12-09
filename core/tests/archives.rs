@@ -101,7 +101,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &zerostate)
+        .store_state(&handle, &zerostate, Default::default())
         .await?;
 
     let tracker = MinRefMcStateTracker::default();
@@ -144,7 +144,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
 
         storage
             .shard_state_storage()
-            .store_state(&handle, &state)
+            .store_state(&handle, &state, Default::default())
             .await?;
     }
 
