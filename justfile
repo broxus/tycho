@@ -9,6 +9,10 @@ local_network_dir := justfile_directory() / ".temp"
 default:
     @just --choose
 
+# Installs the node.
+install:
+    ./scripts/install.sh
+
 # Installs the required version of `rustfmt`.
 install_fmt:
     rustup component add rustfmt --toolchain nightly

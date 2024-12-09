@@ -71,13 +71,24 @@ packages
 from a testing branch. Or you could build the RocksDB from source manually:
 
 ```bash
+# Install dependencies
+sudo apt install libjemalloc-dev libgflags-dev libzstd-dev liblz4-dev
+
+# Clone the repo
 cd /path/to
 git clone https://github.com/facebook/rocksdb.git
 cd rocksdb
-git checkout v8.10.0
+git checkout v9.7.4
+
+# Build the library
 mkdir -p build && cd ./build
-cmake -DWITH_LZ4=ON -DWITH_ZSTD=ON -DWITH_JEMALLOC=ON -DCMAKE_BUILD_TYPE=Release ..
+export CC=/usr/bin/clang
+export CXX=/usr/bin/clang++
+cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release \
+  -DWITH_LZ4=ON -DWITH_ZSTD=ON -DWITH_JEMALLOC=ON ..
 make -j16 rocksdb
+
+# Set env somewhere
 export ROCKSDB_LIB_DIR=/path/to/rocksdb/build
 ```
 
