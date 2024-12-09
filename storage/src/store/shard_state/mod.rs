@@ -121,8 +121,15 @@ impl ShardStateStorage {
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
-            let (pending_op, new_cell_count) =
-                cell_storage.store_cell(&mut batch, root_cell, estimated_merkle_update_size)?;
+
+            let alloc = bumpalo::Bump::new();
+            let (pending_op, new_cell_count) = cell_storage.store_cell(
+                &alloc,
+                &mut batch,
+                root_cell.as_ref(),
+                estimated_merkle_update_size,
+            )?;
+
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
@@ -136,8 +143,11 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            // Ensure that pending operation guard is dropped after the batch is written
-            drop(pending_op);
+            // Apply pending op only after the batch is written
+            pending_op.apply();
+
+            drop(root_cell);
+            drop(alloc);
 
             hist.finish();
 
@@ -250,8 +260,8 @@ impl ShardStateStorage {
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
 
-                    // Ensure that pending operation guard is dropped after the batch is written
-                    drop(pending_op);
+                    // Apply pending operation after the batch is written
+                    pending_op.apply();
 
                     Ok::<_, anyhow::Error>((stats, alloc))
                 })
