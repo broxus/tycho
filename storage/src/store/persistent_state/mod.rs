@@ -400,14 +400,12 @@ impl PersistentStateStorage {
         .await?
     }
 
-    // TODO: Remove `min_lt` and simplify (see https://github.com/broxus/tycho/issues/358)
     #[tracing::instrument(skip_all, fields(mc_seqno = mc_seqno, block_id = %block.id()))]
     pub async fn store_queue_state(
         &self,
         mc_seqno: u32,
         handle: &BlockHandle,
         block: BlockStuff,
-        min_lt: u64,
     ) -> Result<()> {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Queue)
@@ -425,7 +423,10 @@ impl PersistentStateStorage {
 
         let mut top_block_handle = handle.clone();
         let mut top_block = block;
-        loop {
+
+        let mut tail_len = top_block.block().out_msg_queue_updates.tail_len as usize;
+
+        while tail_len > 0 {
             let queue_diff = this.blocks.load_queue_diff(&top_block_handle).await?;
             let top_block_info = top_block.load_info()?;
 
@@ -435,10 +436,7 @@ impl PersistentStateStorage {
             messages.push(queue_diff.zip(&out_messages));
             queue_diffs.push(queue_diff.diff().clone());
 
-            // NOTE: Load blocks while their `end_lt` is greater than the lowest required LT
-            //       across all shards. We also must include an additional block before the
-            //       `min_lt` to be able to verify the full range.
-            if top_block_info.end_lt <= min_lt {
+            if tail_len == 1 {
                 break;
             }
 
@@ -447,11 +445,6 @@ impl PersistentStateStorage {
                 PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
             };
 
-            // Stop on zerostate
-            if prev_block_id.seqno == 0 {
-                break;
-            }
-
             let Some(prev_block_handle) = this.block_handles.load_handle(&prev_block_id) else {
                 anyhow::bail!("prev block handle not found for: {prev_block_id}");
             };
@@ -459,6 +452,7 @@ impl PersistentStateStorage {
 
             top_block_handle = prev_block_handle;
             top_block = prev_block;
+            tail_len -= 1;
         }
 
         let state = QueueStateHeader {

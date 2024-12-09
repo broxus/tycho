@@ -1,17 +1,17 @@
-use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
 use tokio::sync::Notify;
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ShardDescriptionExt,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ProcessedTo,
+    ShardDescriptionExt,
 };
 
 pub(super) type BlockCacheKey = BlockIdShort;
@@ -328,18 +328,12 @@ impl BlockCacheEntry {
         }
     }
 
-    pub fn int_processed_to(&self) -> &BTreeMap<ShardIdent, QueueKey> {
+    pub fn int_processed_to(&self) -> &ProcessedTo {
         match &self.data {
             BlockCacheEntryData::Collated {
                 candidate_stuff, ..
-            } => {
-                &candidate_stuff
-                    .candidate
-                    .queue_diff_aug
-                    .diff()
-                    .processed_upto
-            }
-            BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_upto,
+            } => &candidate_stuff.candidate.queue_diff_aug.diff().processed_to,
+            BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_to,
         }
     }
 }
