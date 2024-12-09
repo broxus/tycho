@@ -759,13 +759,54 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_load_cell_time", "Time to load cell from storage"
         ),
+        create_counter_panel(
+            expr_sum_rate("tycho_storage_load_cell_time_count"),
+            "Number of load_cell calls",
+            UNITS.OPS_PER_SEC,
+        ),
         create_heatmap_panel(
             "tycho_storage_get_cell_from_rocksdb_time", "Time to load cell from RocksDB"
+        ),
+        create_counter_panel(
+            expr_sum_rate("tycho_storage_get_cell_from_rocksdb_time_count"),
+            "Number of cache missed cell loads",
+            UNITS.OPS_PER_SEC,
+        ),
+        timeseries_panel(
+            title="Storage Cache Hit Rate",
+            targets=[
+                target(
+                    expr=expr_operator(
+                        expr_operator(
+                            "1",
+                            "-",
+                            expr_operator(
+                                expr_sum_rate(
+                                    "tycho_storage_get_cell_from_rocksdb_time_count",
+                                ),
+                                "/",
+                                expr_sum_rate(
+                                    "tycho_storage_load_cell_time_count",
+                                ),
+                            ),
+                        ),
+                        "*",
+                        "100",
+                    ),
+                    legend_format="Hit Rate",
+                )
+            ],
+            unit=UNITS.PERCENT_FORMAT,
+        ),
+        create_counter_panel(
+            "tycho_storage_raw_cells_cache_size",
+            "Raw cells cache size",
+            UNITS.BYTES_IEC,
         ),
         create_heatmap_quantile_panel(
             "tycho_storage_store_block_data_size",
             "Block data size",
-            UNITS.BYTES,
+            UNITS.BYTES_IEC,
             "0.999",
         ),
         create_heatmap_quantile_panel(
@@ -1603,7 +1644,7 @@ def mempool_point_rates() -> RowPanel:
         create_counter_panel(
             "tycho_mempool_msgs_unique_bytes",
             "Adapter: unique externals size",
-            unit_format=UNITS.BYTES,
+            unit_format=UNITS.BYTES_IEC,
         ),
         create_counter_panel(
             "tycho_mempool_msgs_duplicates_count",
@@ -1612,7 +1653,7 @@ def mempool_point_rates() -> RowPanel:
         create_counter_panel(
             "tycho_mempool_msgs_duplicates_bytes",
             "Adapter: removed duplicate externals size",
-            unit_format=UNITS.BYTES,
+            unit_format=UNITS.BYTES_IEC,
         ),
         create_counter_panel(
             "tycho_mempool_point_payload_count",
@@ -1621,7 +1662,7 @@ def mempool_point_rates() -> RowPanel:
         create_counter_panel(
             "tycho_mempool_point_payload_bytes",
             "Engine: points payload size",
-            unit_format=UNITS.BYTES,
+            unit_format=UNITS.BYTES_IEC,
         ),
         create_counter_panel(
             "tycho_mempool_evicted_externals_count",
@@ -1630,7 +1671,7 @@ def mempool_point_rates() -> RowPanel:
         create_counter_panel(
             "tycho_mempool_evicted_externals_size",
             "Input buffer: evicted externals size",
-            unit_format=UNITS.BYTES,
+            unit_format=UNITS.BYTES_IEC,
         ),
     ]
     return create_row("Mempool point rates", metrics)
@@ -1682,7 +1723,8 @@ def mempool_engine() -> RowPanel:
     metrics = [
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_rounds_dag_behind_consensus", range_selector="$__interval"
+                "tycho_mempool_rounds_dag_behind_consensus",
+                range_selector="$__interval",
             ),
             "Dag: rounds behind consensus",
         ),
@@ -1954,15 +1996,23 @@ def collator_execution_manager() -> RowPanel:
 
 def allocator_stats() -> RowPanel:
     metrics = [
-        create_gauge_panel("jemalloc_allocated_bytes", "Allocated Bytes", UNITS.BYTES),
-        create_gauge_panel("jemalloc_active_bytes", "Active Bytes", UNITS.BYTES),
-        create_gauge_panel("jemalloc_metadata_bytes", "Metadata Bytes", UNITS.BYTES),
-        create_gauge_panel("jemalloc_resident_bytes", "Resident Bytes", UNITS.BYTES),
-        create_gauge_panel("jemalloc_mapped_bytes", "Mapped Bytes", UNITS.BYTES),
-        create_gauge_panel("jemalloc_retained_bytes", "Retained Bytes", UNITS.BYTES),
-        create_gauge_panel("jemalloc_dirty_bytes", "Dirty Bytes", UNITS.BYTES),
         create_gauge_panel(
-            "jemalloc_fragmentation_bytes", "Fragmentation Bytes", UNITS.BYTES
+            "jemalloc_allocated_bytes", "Allocated Bytes", UNITS.BYTES_IEC
+        ),
+        create_gauge_panel("jemalloc_active_bytes", "Active Bytes", UNITS.BYTES_IEC),
+        create_gauge_panel(
+            "jemalloc_metadata_bytes", "Metadata Bytes", UNITS.BYTES_IEC
+        ),
+        create_gauge_panel(
+            "jemalloc_resident_bytes", "Resident Bytes", UNITS.BYTES_IEC
+        ),
+        create_gauge_panel("jemalloc_mapped_bytes", "Mapped Bytes", UNITS.BYTES_IEC),
+        create_gauge_panel(
+            "jemalloc_retained_bytes", "Retained Bytes", UNITS.BYTES_IEC
+        ),
+        create_gauge_panel("jemalloc_dirty_bytes", "Dirty Bytes", UNITS.BYTES_IEC),
+        create_gauge_panel(
+            "jemalloc_fragmentation_bytes", "Fragmentation Bytes", UNITS.BYTES_IEC
         ),
     ]
     return create_row("Allocator Stats", metrics)

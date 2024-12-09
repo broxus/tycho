@@ -3,6 +3,7 @@ use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
@@ -10,7 +11,7 @@ use everscale_types::cell::*;
 use parking_lot::Mutex;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
-use tycho_util::metrics::HistogramGuard;
+use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 use weedb::{rocksdb, BoundedCfHandle};
 
@@ -19,7 +20,7 @@ use crate::db::*;
 pub struct CellStorage {
     db: BaseDb,
     cells_cache: Arc<CellsIndex>,
-    raw_cells_cache: RawCellsCache,
+    raw_cells_cache: Arc<RawCellsCache>,
     pending: PendingOperations,
 }
 
@@ -28,7 +29,13 @@ type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 impl CellStorage {
     pub fn new(db: BaseDb, cache_size_bytes: u64) -> Arc<Self> {
         let cells_cache = Default::default();
-        let raw_cells_cache = RawCellsCache::new(cache_size_bytes);
+        let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes));
+
+        spawn_metrics_loop(
+            &raw_cells_cache.clone(),
+            Duration::from_secs(5),
+            |c| async move { c.refresh_metrics() },
+        );
 
         Arc::new(Self {
             db,
@@ -1015,6 +1022,10 @@ impl RawCellsCache {
             let old_refs = v.header.header.fetch_sub(refs as i64, Ordering::Release);
             debug_assert!(old_refs >= refs as i64);
         }
+    }
+
+    fn refresh_metrics(&self) {
+        metrics::gauge!("tycho_storage_raw_cells_cache_size").set(self.0.weight() as f64);
     }
 }
 
