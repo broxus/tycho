@@ -626,14 +626,10 @@ mod test {
             // check that state actually exists
             let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
 
-            let (pending_op, _, batch) =
-                cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
+            let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
             db.rocksdb().write_opt(batch, db.cells.write_config())?;
-
-            // Ensure that pending operation guard is dropped after the batch is written
-            drop(pending_op);
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
