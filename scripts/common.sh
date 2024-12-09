@@ -26,8 +26,10 @@ function set_clang_env {
     if [ ! -z "$cc_path" ] && [ ! -z "$cxx_path" ]; then
         export CC="$cc_path"
         export CXX="$cxx_path"
+        return 0
     elif [ -z "$require" ]; then
         echo "WARN: Clang ${clang_version} not found, fallback to default build."
+        return 1
     else
         echo "ERROR: Clang ${clang_version} required but not found."
         exit 1
