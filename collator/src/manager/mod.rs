@@ -1377,7 +1377,6 @@ where
                 self.blocks_cache.reset_top_shard_blocks_additional_info();
 
                 let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
-                let top_processed_to_anchor = mc_data.top_processed_to_anchor;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
