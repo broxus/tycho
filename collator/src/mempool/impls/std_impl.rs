@@ -97,7 +97,7 @@ impl MempoolAdapterStdImpl {
 
         // Note: mempool is always run from applied mc block
         self.top_known_anchor
-            .set_max_raw(last_state_update.mc_processed_to_anchor_id);
+            .set_max_raw(last_state_update.top_processed_to_anchor_id);
 
         let engine = Engine::new(
             self.key_pair.clone(),
@@ -116,7 +116,7 @@ impl MempoolAdapterStdImpl {
 
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = last_state_update
-            .mc_processed_to_anchor_id
+            .top_processed_to_anchor_id
             .saturating_sub(mempool_config.consensus.reset_rounds())
             .max(mempool_config.genesis.start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
@@ -136,10 +136,10 @@ impl MempoolAdapterStdImpl {
                 "cannot start from outdated peer sets (too short mempool epoch(s)): \
                  estimated sync bottom {estimated_sync_bottom} \
                  is older than prev vset switch round {}; \
-                 start round {}, masterchain processed to anchor {} in block {}",
+                 start round {}, top processed to anchor {} in block {}",
                 last_state_update.consensus_info.prev_vset_switch_round,
                 mempool_config.genesis.start_round,
-                last_state_update.mc_processed_to_anchor_id,
+                last_state_update.top_processed_to_anchor_id,
                 last_state_update.mc_block_id,
             )
         };
@@ -292,11 +292,11 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 // genesis does not have externals, so only strictly greater time and round
                 // will be saved into next block, so genesis can have values GEQ than in prev block
                 anyhow::ensure!(
-                    genesis.start_round >= new_cx.mc_processed_to_anchor_id
+                    genesis.start_round >= new_cx.top_processed_to_anchor_id
                         && genesis.time_millis >= new_cx.mc_block_chain_time,
                     "new {genesis:?} should be >= \
-                    master block processed_to_anchor_id {} and gen chain_time {}",
-                    new_cx.mc_processed_to_anchor_id,
+                    top processed_to_anchor_id {} and block gen chain_time {}",
+                    new_cx.top_processed_to_anchor_id,
                     new_cx.mc_block_chain_time,
                 );
 
