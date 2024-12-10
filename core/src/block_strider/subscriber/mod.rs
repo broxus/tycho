@@ -21,9 +21,17 @@ mod ps_subscriber;
 // === trait BlockSubscriber ===
 
 pub struct BlockSubscriberContext {
+    /// Related masterchain block id.
+    /// In case of context for mc block this id is the same as `block.id()`.
     pub mc_block_id: BlockId,
+    /// Related masterchain block flag.
+    /// In case of context for mc block this flag is the same as `is_key_block`.
+    pub mc_is_key_block: bool,
+    /// Whether the `block` from this context is a key block.
     pub is_key_block: bool,
+    /// Parsed block data.
     pub block: BlockStuff,
+    /// Serialized block data.
     pub archive_data: ArchiveData,
 }
 
@@ -123,10 +131,19 @@ impl<B: BlockSubscriber> BlockSubscriberExt for B {
 // === trait StateSubscriber ===
 
 pub struct StateSubscriberContext {
+    /// Related masterchain block id.
+    /// In case of context for mc block this id is the same as `block.id()`.
     pub mc_block_id: BlockId,
+    /// Related masterchain block flag.
+    /// In case of context for mc block this flag is the same as `is_key_block`.
+    pub mc_is_key_block: bool,
+    /// Whether the `block` from this context is a key block.
     pub is_key_block: bool,
+    /// Parsed block data.
     pub block: BlockStuff,
+    /// Serialized block data.
     pub archive_data: ArchiveData,
+    /// Applied shard state.
     pub state: ShardStateStuff,
 }
 

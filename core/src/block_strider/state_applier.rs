@@ -184,6 +184,7 @@ where
         let started_at = std::time::Instant::now();
         let cx = StateSubscriberContext {
             mc_block_id: cx.mc_block_id,
+            mc_is_key_block: cx.mc_is_key_block,
             is_key_block: cx.is_key_block,
             block: cx.block.clone(), // TODO: rewrite without clone
             archive_data: cx.archive_data.clone(), // TODO: rewrite without clone
@@ -204,7 +205,7 @@ where
             self.inner
                 .storage
                 .block_storage()
-                .move_into_archive(&prepared.handle)
+                .move_into_archive(&prepared.handle, cx.mc_is_key_block)
                 .await?;
         }
 

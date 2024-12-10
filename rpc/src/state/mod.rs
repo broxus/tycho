@@ -753,6 +753,7 @@ mod test {
 
         let ctx = BlockSubscriberContext {
             mc_block_id: BlockId::default(),
+            mc_is_key_block: false,
             is_key_block: false,
             block: block.data,
             archive_data: block.archive_data,
@@ -821,6 +822,7 @@ mod test {
 
         let ctx = BlockSubscriberContext {
             mc_block_id: BlockId::default(),
+            mc_is_key_block: false,
             is_key_block: false,
             block: block.data,
             archive_data: block.archive_data,

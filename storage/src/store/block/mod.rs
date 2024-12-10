@@ -640,7 +640,11 @@ impl BlockStorage {
     // === Archive stuff ===
 
     /// Loads data and proof for the block and appends them to the corresponding archive.
-    pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
+    pub async fn move_into_archive(
+        &self,
+        handle: &BlockHandle,
+        mc_is_key_block: bool,
+    ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_storage_move_into_archive_time");
 
         // Prepare data
@@ -651,7 +655,10 @@ impl BlockStorage {
         let chunks_cf = self.db.archives.cf();
 
         // Prepare archive
-        let archive_id = self.prepare_archive_id(handle);
+        let archive_id = self.prepare_archive_id(
+            handle.ref_by_mc_seqno(),
+            mc_is_key_block || handle.is_key_block(),
+        );
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
         // 0. Create transaction
@@ -986,15 +993,13 @@ impl BlockStorage {
         }
     }
 
-    fn prepare_archive_id(&self, handle: &BlockHandle) -> PreparedArchiveId {
-        let mc_seqno = handle.ref_by_mc_seqno();
-
+    fn prepare_archive_id(&self, mc_seqno: u32, force_split_archive: bool) -> PreparedArchiveId {
         let mut archive_ids = self.archive_ids.write();
 
         // Get the closest archive id
         let prev_id = archive_ids.range(..=mc_seqno).next_back().cloned();
 
-        if handle.is_key_block() {
+        if force_split_archive {
             let is_new = archive_ids.insert(mc_seqno);
             return PreparedArchiveId {
                 id: mc_seqno,
