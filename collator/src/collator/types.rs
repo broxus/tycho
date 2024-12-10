@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -8,24 +7,22 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits, BlockRef,
-    CollationConfig, CurrencyCollection, ExtInMsgInfo, GlobalVersion, HashUpdate, ImportFees,
-    InMsg, IntMsgInfo, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
-    ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent,
-    ShardIdentFull, ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    CollationConfig, CurrencyCollection, GlobalVersion, HashUpdate, ImportFees, InMsg, Lazy,
+    LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts,
+    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
-use rayon::iter::IntoParallelIterator;
 use ton_executor::{AccountMeta, ExecutedTransaction};
-use tycho_block_util::queue::{QueueKey, SerializedQueueDiff};
+use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use super::messages_reader::ReaderState;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::tracing_targets;
-use crate::types::{
-    BlockCandidate, McData, ProcessedTo, ProcessedUptoInfoStuff, ProofFunds, TopShardBlockInfo,
-};
+use crate::types::processed_upto::ProcessedUptoInfoStuff;
+use crate::types::{BlockCandidate, McData, ProofFunds, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -35,7 +32,7 @@ pub(super) struct WorkingState {
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
-    pub msgs_buffer: MessagesBuffer,
+    pub reader_state: ReaderState,
 }
 
 impl WorkingState {
@@ -195,7 +192,6 @@ pub(super) struct BlockCollationDataBuilder {
     pub block_id_short: BlockIdShort,
     pub gen_utime: u32,
     pub gen_utime_ms: u16,
-    pub processed_upto: ProcessedUptoInfoStuff,
     shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
     pub shards_max_end_lt: u64,
     pub shard_fees: ShardFees,
@@ -219,7 +215,6 @@ impl BlockCollationDataBuilder {
         rand_seed: HashBytes,
         min_ref_mc_seqno: u32,
         next_chain_time: u64,
-        processed_upto: ProcessedUptoInfoStuff,
         created_by: HashBytes,
         global_version: GlobalVersion,
         mempool_config_override: Option<MempoolGlobalConfig>,
@@ -230,7 +225,6 @@ impl BlockCollationDataBuilder {
             block_id_short,
             gen_utime,
             gen_utime_ms,
-            processed_upto,
             shards_max_end_lt: 0,
             shard_fees: Default::default(),
             value_flow: Default::default(),
@@ -295,7 +289,6 @@ impl BlockCollationDataBuilder {
             block_id_short: self.block_id_short,
             gen_utime: self.gen_utime,
             gen_utime_ms: self.gen_utime_ms,
-            processed_upto: self.processed_upto,
             min_ref_mc_seqno: self.min_ref_mc_seqno,
             rand_seed: self.rand_seed,
             created_by: self.created_by,
@@ -372,8 +365,6 @@ pub(super) struct BlockCollationData {
 
     pub in_msgs: BTreeMap<HashBytes, PreparedInMsg>,
     pub out_msgs: BTreeMap<HashBytes, PreparedOutMsg>,
-
-    pub processed_upto: ProcessedUptoInfoStuff,
 
     /// Ids of top blocks from shards that be included in the master block
     pub top_shard_blocks: Vec<TopShardBlockInfo>,
@@ -883,331 +874,6 @@ pub struct Dequeued {
 }
 
 #[derive(Default)]
-pub(super) struct MessageGroups {
-    shard_id: ShardIdent,
-
-    offset: u32,
-    max_message_key: QueueKey,
-    groups: FastHashMap<u32, MessageGroup>,
-
-    int_messages_count: usize,
-    ext_messages_count: usize,
-
-    group_limit: usize,
-    group_vert_size: usize,
-}
-
-impl MessageGroups {
-    pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
-        Self {
-            shard_id,
-            group_limit,
-            group_vert_size,
-            ..Default::default()
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.offset = 0;
-        self.max_message_key = QueueKey::MIN;
-        self.groups.clear();
-        self.int_messages_count = 0;
-        self.ext_messages_count = 0;
-    }
-
-    pub fn offset(&self) -> u32 {
-        self.offset
-    }
-
-    pub fn max_message_key(&self) -> &QueueKey {
-        &self.max_message_key
-    }
-
-    pub fn len(&self) -> usize {
-        self.groups.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
-    }
-
-    pub fn messages_count(&self) -> usize {
-        self.int_messages_count + self.ext_messages_count
-    }
-
-    pub fn int_messages_count(&self) -> usize {
-        self.int_messages_count
-    }
-
-    pub fn ext_messages_count(&self) -> usize {
-        self.ext_messages_count
-    }
-
-    fn incriment_counters(&mut self, is_int: bool) {
-        if is_int {
-            self.int_messages_count += 1;
-        } else {
-            self.ext_messages_count += 1;
-        }
-    }
-
-    /// add message adjusting groups,
-    pub fn add_message(&mut self, msg: Box<ParsedMessage>) {
-        assert_eq!(
-            msg.special_origin, None,
-            "unexpected special origin in ordinary messages set"
-        );
-
-        let (account_id, is_int) = match &msg.info {
-            MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
-                (dst.as_std().map(|a| a.address).unwrap_or_default(), false)
-            }
-            MsgInfo::Int(IntMsgInfo {
-                dst, created_lt, ..
-            }) => {
-                self.max_message_key = self.max_message_key.max(QueueKey {
-                    lt: *created_lt,
-                    hash: *msg.cell.repr_hash(),
-                });
-                (dst.as_std().map(|a| a.address).unwrap_or_default(), true)
-            }
-            MsgInfo::ExtOut(info) => {
-                unreachable!("ext out message in ordinary messages set: {info:?}")
-            }
-        };
-
-        self.incriment_counters(is_int);
-
-        let mut offset = self.offset;
-        loop {
-            let group_entry = self.groups.entry(offset).or_default();
-
-            if group_entry.is_full {
-                offset += 1;
-                continue;
-            }
-
-            let group_len = group_entry.inner.len();
-            match group_entry.inner.entry(account_id) {
-                Entry::Vacant(entry) => {
-                    if group_len < self.group_limit {
-                        entry.insert(vec![msg]);
-                        group_entry.incriment_counters(is_int);
-                        break;
-                    }
-
-                    offset += 1;
-                }
-                Entry::Occupied(mut entry) => {
-                    let msgs = entry.get_mut();
-                    if msgs.len() < self.group_vert_size {
-                        msgs.push(msg);
-
-                        if msgs.len() == self.group_vert_size {
-                            group_entry.filling += 1;
-                            if group_entry.filling == self.group_limit {
-                                group_entry.is_full = true;
-                            }
-                        }
-
-                        group_entry.incriment_counters(is_int);
-
-                        break;
-                    }
-
-                    offset += 1;
-                }
-            }
-        }
-
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
-        metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
-            .set(self.messages_count() as f64);
-    }
-
-    pub fn first_group_is_full(&self) -> bool {
-        if let Some(first_group) = self.groups.get(&self.offset) {
-            // FIXME: check if first group is full by stats on adding message
-            // let first_group_is_full = first_group.len() >= self.group_limit
-            //     && first_group
-            //         .inner
-            //         .values()
-            //         .all(|account_msgs| account_msgs.len() >= self.group_vert_size);
-            // first_group_is_full
-
-            first_group.is_full
-        } else {
-            false
-        }
-    }
-
-    pub fn extract_first_group(&mut self) -> Option<MessageGroup> {
-        let first_group_opt = self.extract_first_group_inner();
-        if first_group_opt.is_some() {
-            self.offset += 1;
-        }
-        if let Some(first_group) = first_group_opt.as_ref() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "extracted first message group from message_groups buffer: offset={}, buffer int={}, ext={}, group {}",
-                self.offset(), self.int_messages_count(), self.ext_messages_count(),
-                DisplayMessageGroup(first_group),
-            );
-        }
-        first_group_opt
-    }
-
-    fn extract_first_group_inner(&mut self) -> Option<MessageGroup> {
-        if let Some(first_group) = self.groups.remove(&self.offset) {
-            self.int_messages_count -= first_group.int_messages_count;
-            self.ext_messages_count -= first_group.ext_messages_count;
-
-            Some(first_group)
-        } else {
-            None
-        }
-    }
-
-    pub fn extract_merged_group(&mut self) -> Option<MessageGroup> {
-        let mut merged_group_opt: Option<MessageGroup> = None;
-        while let Some(next_group) = self.extract_first_group_inner() {
-            if let Some(merged_group) = merged_group_opt.as_mut() {
-                merged_group.int_messages_count += next_group.int_messages_count;
-                merged_group.ext_messages_count += next_group.ext_messages_count;
-                for (account_id, mut account_msgs) in next_group.inner {
-                    if let Some(existing_account_msgs) = merged_group.inner.get_mut(&account_id) {
-                        existing_account_msgs.append(&mut account_msgs);
-                    } else {
-                        merged_group.inner.insert(account_id, account_msgs);
-                    }
-                }
-            } else {
-                self.offset += 1;
-                merged_group_opt = Some(next_group);
-            }
-        }
-        if let Some(merged_group) = merged_group_opt.as_ref() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "extracted merged message group of new messages from message_groups buffer: buffer int={}, ext={}, group {}",
-                self.int_messages_count(), self.ext_messages_count(),
-                DisplayMessageGroup(merged_group),
-            );
-        }
-        merged_group_opt
-    }
-}
-
-// pub(super) type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
-#[derive(Default)]
-pub(super) struct MessageGroup {
-    #[allow(clippy::vec_box)]
-    inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
-    int_messages_count: usize,
-    ext_messages_count: usize,
-    filling: usize,
-    is_full: bool,
-}
-
-impl MessageGroup {
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn messages_count(&self) -> usize {
-        self.int_messages_count + self.ext_messages_count
-    }
-
-    fn incriment_counters(&mut self, is_int: bool) {
-        if is_int {
-            self.int_messages_count += 1;
-        } else {
-            self.ext_messages_count += 1;
-        }
-    }
-}
-
-impl IntoParallelIterator for MessageGroup {
-    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type Iter = rayon::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.inner.into_par_iter()
-    }
-}
-
-pub(super) struct DisplayMessageGroup<'a>(pub &'a MessageGroup);
-
-impl std::fmt::Debug for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "int={}, ext={}, ",
-            self.0.int_messages_count, self.0.ext_messages_count
-        )?;
-        let mut l = f.debug_list();
-        for messages in self.0.inner.values() {
-            l.entry(&messages.len());
-        }
-        l.finish()
-    }
-}
-
-#[allow(dead_code)]
-pub(super) struct DisplayMessageGroups<'a>(pub &'a MessageGroups);
-
-impl std::fmt::Debug for DisplayMessageGroups<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroups<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut m = f.debug_map();
-        for (k, v) in self.0.groups.iter() {
-            m.entry(k, &DisplayMessageGroup(v));
-        }
-        m.finish()
-    }
-}
-
-pub(super) struct MessagesBuffer {
-    /// messages groups
-    pub message_groups: MessageGroups,
-    /// current read positions of internals mq iterator
-    /// when it is not finished
-    pub current_iterator_positions: Option<FastHashMap<ShardIdent, QueueKey>>,
-    /// current read position for externals
-    pub current_ext_reader_position: Option<(u32, u64)>,
-}
-
-impl MessagesBuffer {
-    pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit").set(group_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
-            .set(group_vert_size as f64);
-        Self {
-            message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
-            current_iterator_positions: Some(FastHashMap::default()),
-            current_ext_reader_position: None,
-        }
-    }
-
-    pub fn message_groups_offset(&self) -> u32 {
-        self.message_groups.offset()
-    }
-
-    pub fn has_pending_messages(&self) -> bool {
-        !self.message_groups.is_empty()
-    }
-}
-
-#[derive(Default)]
 pub struct AnchorsCache {
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
@@ -1272,31 +938,17 @@ impl AnchorsCache {
     }
 }
 
-pub struct ParsedExternals {
-    #[allow(clippy::vec_box)]
-    pub ext_messages: Vec<Box<ParsedMessage>>,
-    pub current_reader_position: Option<(u32, u64)>,
-    pub last_read_to_anchor_chain_time: Option<u64>,
-    pub was_stopped_on_prev_read_to_reached: bool,
-    pub count_expired_anchors: u32,
-    pub count_expired_messages: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReadNextExternalsMode {
-    ToTheEnd,
-    ToPreviuosReadTo,
-}
-
-pub struct UpdateQueueDiffResult {
+pub struct FinalizeMessagesReaderResult {
     pub queue_diff: SerializedQueueDiff,
+    pub queue_diff_messages_count: usize,
     pub has_unprocessed_messages: bool,
-    pub diff_messages_len: usize,
+    pub reader_state: ReaderState,
+    pub anchors_cache: AnchorsCache,
+
     pub create_queue_diff_elapsed: Duration,
-    pub processed_to: ProcessedTo,
 }
 
-pub struct FinalizedCollationResult {
+pub struct FinalizeCollationResult {
     pub handle_block_candidate_elapsed: Duration,
 }
 
@@ -1316,7 +968,7 @@ pub struct ExecuteResult {
     pub last_read_to_anchor_chain_time: Option<u64>,
 }
 
-pub struct FinalizedBlock {
+pub struct FinalizeBlockResult {
     pub collation_data: Box<BlockCollationData>,
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
@@ -1324,13 +976,13 @@ pub struct FinalizedBlock {
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu_total: u64,
-    pub msgs_buffer: MessagesBuffer,
     pub collation_config: Arc<CollationConfig>,
 }
 
 pub struct CollationResult {
     pub final_result: FinalResult,
-    pub finalized: FinalizedBlock,
+    pub finalized: FinalizeBlockResult,
+    pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
     pub execute_result: ExecuteResult,
 }
@@ -1339,7 +991,7 @@ pub struct FinalResult {
     pub prepare_elapsed: Duration,
     pub finalize_block_elapsed: Duration,
     pub has_unprocessed_messages: bool,
-    pub diff_messages_len: usize,
+    pub queue_diff_messages_count: usize,
     pub execute_elapsed: Duration,
     pub execute_tick_elapsed: Duration,
     pub execute_tock_elapsed: Duration,

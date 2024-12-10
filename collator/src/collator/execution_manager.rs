@@ -12,27 +12,18 @@ use ton_executor::{
     ExecuteParams, ExecutedTransaction, ExecutorOutput, OrdinaryTransactionExecutor,
     PreloadedBlockchainConfig, TickTockTransactionExecutor, TransactionExecutor,
 };
-use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
-use super::types::{
-    AccountId, AnchorsCache, Dequeued, MessageGroup, MessagesBuffer, ParsedMessage,
-    ShardAccountStuff,
-};
-use super::CollatorStdImpl;
-use crate::collator::types::{ParsedExternals, ReadNextExternalsMode};
-use crate::internal_queue::types::EnqueuedMessage;
+use super::messages_buffer::MessageGroup;
+use super::types::{AccountId, ParsedMessage, ShardAccountStuff};
 use crate::tracing_targets;
-use crate::types::{
-    DisplayExternalsProcessedUpto, InternalsProcessedUptoStuff, ProcessedUptoInfoStuff,
-};
 
 #[cfg(test)]
 #[path = "tests/execution_manager_tests.rs"]
 pub(super) mod tests;
 
+#[cfg(FALSE)]
 pub(super) struct MessagesReader {
     shard_id: ShardIdent,
     /// max number of messages that could be loaded into runtime
@@ -63,17 +54,7 @@ pub(super) struct MessagesReader {
     read_new_msgs_from_iterator_count: u64,
 }
 
-pub(super) enum GetNextMessageGroupMode {
-    Continue,
-    Refill,
-}
-
-pub(super) struct GetNextMessageGroupContext {
-    pub next_chain_time: u64,
-    pub max_new_message_key_to_current_shard: QueueKey,
-    pub mode: GetNextMessageGroupMode,
-}
-
+#[cfg(FALSE)]
 impl MessagesReader {
     pub fn new(
         shard_id: ShardIdent,
@@ -318,7 +299,7 @@ impl MessagesReader {
                     anchors_cache,
                     3,
                     cx.next_chain_time,
-                    &mut processed_upto.externals,
+                    &mut None,
                     msgs_buffer.current_ext_reader_position,
                     read_next_externals_mode,
                 )?;
@@ -579,14 +560,15 @@ impl MessagesExecutor {
     }
 
     /// Run one execution group of messages by accounts
-    pub fn execute_group(&mut self, group: MessageGroup) -> Result<ExecutedGroup> {
+    pub fn execute_group(&mut self, msg_group: MessageGroup) -> Result<ExecutedGroup> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
         let mut ext_msgs_skipped = 0;
 
-        let group_horizontal_size = group.len();
-        let group_messages_count = group.messages_count();
+        // TODO: msgs-v3: rename to group_slots_count
+        let group_horizontal_size = msg_group.len();
+        let group_messages_count = msg_group.messages_count();
         let group_mean_vert_size: usize = group_messages_count
             .checked_div(group_horizontal_size)
             .unwrap_or_default();
@@ -604,7 +586,7 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let result = group
+        let result = msg_group
             .into_par_iter()
             .map_with(
                 (config, params, Arc::new(&self.accounts_cache)),
@@ -1005,102 +987,4 @@ fn execute_ticktock_transaction(
     account_stuff.apply_transaction(tx_lt, total_fees, account, &transaction);
 
     Ok(transaction)
-}
-
-#[derive(Clone)]
-pub(super) enum ProcessedUptoUpdate {
-    Force(QueueKey),
-    #[allow(dead_code)]
-    IfHigher(QueueKey),
-}
-
-pub(super) fn set_int_upto_all_processed(
-    processed_upto: &mut ProcessedUptoInfoStuff,
-) -> Vec<(ShardIdent, QueueKey)> {
-    let mut updated_processed_to = vec![];
-    for (shard_id, int_upto) in processed_upto.internals.iter_mut() {
-        int_upto.processed_to_msg = int_upto.read_to_msg;
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "set processed_upto.internals for shard {}: {}",
-            shard_id, int_upto,
-        );
-
-        updated_processed_to.push((*shard_id, int_upto.processed_to_msg));
-    }
-    updated_processed_to
-}
-
-pub(super) fn update_internals_processed_upto(
-    processed_upto: &mut ProcessedUptoInfoStuff,
-    shard_id: ShardIdent,
-    processed_to_opt: Option<ProcessedUptoUpdate>,
-    read_to_opt: Option<ProcessedUptoUpdate>,
-) -> bool {
-    use ProcessedUptoUpdate::{Force, IfHigher};
-
-    fn get_new_to_key<F>(
-        to_key_update_opt: Option<ProcessedUptoUpdate>,
-        get_current: F,
-    ) -> Option<QueueKey>
-    where
-        F: FnOnce() -> QueueKey,
-    {
-        if let Some(to_key_update) = to_key_update_opt {
-            match to_key_update {
-                Force(to_key) => Some(to_key),
-                IfHigher(to_key) => {
-                    let current_to_key = get_current();
-                    if to_key > current_to_key {
-                        Some(to_key)
-                    } else {
-                        None
-                    }
-                }
-            }
-        } else {
-            None
-        }
-    }
-
-    if processed_to_opt.is_none() && read_to_opt.is_none() {
-        return false;
-    }
-
-    let new_int_processed_upto_opt = if let Some(current) = processed_upto.internals.get(&shard_id)
-    {
-        let new_processed_to_opt = get_new_to_key(processed_to_opt, || current.processed_to_msg);
-        let new_read_to_opt = get_new_to_key(read_to_opt, || current.read_to_msg);
-        if new_processed_to_opt.is_none() && new_read_to_opt.is_none() {
-            None
-        } else {
-            Some(InternalsProcessedUptoStuff {
-                processed_to_msg: new_processed_to_opt.unwrap_or(current.processed_to_msg),
-                read_to_msg: new_read_to_opt.unwrap_or(current.read_to_msg),
-            })
-        }
-    } else {
-        Some(InternalsProcessedUptoStuff {
-            processed_to_msg: match processed_to_opt {
-                Some(Force(to_key) | IfHigher(to_key)) => to_key,
-                _ => QueueKey::MIN,
-            },
-            read_to_msg: match read_to_opt {
-                Some(Force(to_key) | IfHigher(to_key)) => to_key,
-                _ => QueueKey::max_for_lt(0),
-            },
-        })
-    };
-    if let Some(new_int_processed_upto) = new_int_processed_upto_opt {
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {}: {}",
-            shard_id, new_int_processed_upto,
-        );
-        processed_upto
-            .internals
-            .insert(shard_id, new_int_processed_upto);
-        true
-    } else {
-        false
-    }
 }

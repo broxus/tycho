@@ -5,7 +5,8 @@ use everscale_types::models::{
 };
 use tycho_util::FastHashMap;
 
-use crate::types::{DebugDisplay, ProcessedUptoInfoStuff};
+use crate::types::DebugDisplay;
+use crate::types::processed_upto::ProcessedUptoInfoStuff;
 
 pub struct BlockDebugInfo<'a> {
     pub block_id: &'a BlockId,
