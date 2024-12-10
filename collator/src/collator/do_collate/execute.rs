@@ -7,17 +7,15 @@ use super::execution_wrapper::ExecutorWrapper;
 use super::finalize::FinalizeState;
 use super::phase::{Phase, PhaseState};
 use super::BlockCollationData;
-use crate::collator::execution_manager::{
-    GetNextMessageGroupContext, GetNextMessageGroupMode, MessagesReader,
-};
-use crate::collator::types::{AnchorsCache, BlockLimitsLevel, ExecuteResult};
+use crate::collator::execution_manager::{GetNextMessageGroupContext, GetNextMessageGroupMode};
+use crate::collator::messages_reader::MessagesReaderV2;
+use crate::collator::types::{BlockLimitsLevel, ExecuteResult};
 use crate::tracing_targets;
 use crate::types::DisplayExternalsProcessedUpto;
 
 pub struct ExecuteState {
-    pub messages_reader: MessagesReader,
+    pub messages_reader: MessagesReaderV2,
     pub execute_result: Option<ExecuteResult>,
-    pub anchors_cache: AnchorsCache,
     pub executor: ExecutorWrapper,
 }
 
@@ -25,25 +23,41 @@ impl PhaseState for ExecuteState {}
 
 impl Phase<ExecuteState> {
     pub fn execute_special_transactions(&mut self) -> Result<()> {
+        let new_messages = self.extra.executor.create_special_transactions(
+            &self.state.mc_data.config,
+            &mut self.state.collation_data,
+        )?;
         self.extra
-            .executor
-            .create_special_transactions(&self.state.mc_data.config, &mut self.state.collation_data)
+            .messages_reader
+            .new_messages_mut()
+            .add_messages(new_messages);
+        Ok(())
     }
 
-    pub fn execute_tick_transaction(&mut self) -> Result<()> {
-        self.extra.executor.create_ticktock_transactions(
+    pub fn execute_tick_transactions(&mut self) -> Result<()> {
+        let new_messages = self.extra.executor.create_ticktock_transactions(
             &self.state.mc_data.config,
             TickTock::Tick,
             &mut self.state.collation_data,
-        )
+        )?;
+        self.extra
+            .messages_reader
+            .new_messages_mut()
+            .add_messages(new_messages);
+        Ok(())
     }
 
-    pub fn execute_tock_transaction(&mut self) -> Result<()> {
-        self.extra.executor.create_ticktock_transactions(
+    pub fn execute_tock_transactions(&mut self) -> Result<()> {
+        let new_messages = self.extra.executor.create_ticktock_transactions(
             &self.state.mc_data.config,
             TickTock::Tock,
             &mut self.state.collation_data,
-        )
+        )?;
+        self.extra
+            .messages_reader
+            .new_messages_mut()
+            .add_messages(new_messages);
+        Ok(())
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -69,10 +83,7 @@ impl Phase<ExecuteState> {
                         .max_new_message_key_to_current_shard,
                     mode: GetNextMessageGroupMode::Continue,
                 },
-                &mut self.state.collation_data.processed_upto,
-                &mut self.state.msgs_buffer,
-                &mut self.extra.anchors_cache,
-                &mut self.extra.executor.mq_iterator_adapter,
+                &mut Default::default(),
             )?;
             fill_msgs_total_elapsed += timer.elapsed();
 
@@ -100,11 +111,15 @@ impl Phase<ExecuteState> {
                 // Process transactions
                 timer = std::time::Instant::now();
                 for item in group_result.items {
-                    self.extra.executor.process_transaction(
+                    let new_messages = self.extra.executor.process_transaction(
                         item.executed,
                         Some(item.in_message),
                         &mut self.state.collation_data,
                     )?;
+                    self.extra
+                        .messages_reader
+                        .new_messages_mut()
+                        .add_messages(new_messages);
                 }
                 process_txs_total_elapsed += timer.elapsed();
 
@@ -121,16 +136,8 @@ impl Phase<ExecuteState> {
                         .increment(1);
                     break;
                 }
-            } else if self
-                .extra
-                .executor
-                .mq_iterator_adapter
-                .no_pending_existing_internals()
-                && self
-                    .extra
-                    .executor
-                    .mq_iterator_adapter
-                    .no_pending_new_messages()
+            } else if self.extra.messages_reader.no_pending_existing_internals()
+                && self.extra.messages_reader.no_pending_new_messages()
             {
                 break;
             }
@@ -143,13 +150,15 @@ impl Phase<ExecuteState> {
         self.state.collation_data.read_int_msgs_from_iterator_count = self
             .extra
             .messages_reader
-            .read_int_msgs_from_iterator_count();
+            .metrics()
+            .read_int_msgs_from_iterator_count;
         self.state.collation_data.read_ext_msgs_count =
-            self.extra.messages_reader.read_ext_msgs_count();
+            self.extra.messages_reader.metrics().read_ext_msgs_count;
         self.state.collation_data.read_new_msgs_from_iterator_count = self
             .extra
             .messages_reader
-            .read_new_msgs_from_iterator_count();
+            .metrics()
+            .read_new_msgs_from_iterator_count;
 
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
             .set(executed_groups_count as f64);
@@ -157,31 +166,35 @@ impl Phase<ExecuteState> {
         metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
             .record(fill_msgs_total_elapsed);
 
-        let init_iterator_elapsed = self
-            .extra
-            .executor
-            .mq_iterator_adapter
-            .init_iterator_total_elapsed();
+        let init_iterator_elapsed = self.extra.messages_reader.init_iterator_total_elapsed();
         metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
             .record(init_iterator_elapsed);
         let read_existing_messages_elapsed = self
             .extra
             .messages_reader
-            .read_existing_messages_total_elapsed();
+            .metrics()
+            .read_existing_messages_total_elapsed;
         metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
             .record(read_existing_messages_elapsed);
-        let read_new_messages_elapsed =
-            self.extra.messages_reader.read_new_messages_total_elapsed();
+        let read_new_messages_elapsed = self
+            .extra
+            .messages_reader
+            .metrics()
+            .read_new_messages_total_elapsed;
         metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
             .record(read_new_messages_elapsed);
-        let read_ext_messages_elapsed =
-            self.extra.messages_reader.read_ext_messages_total_elapsed();
+        let read_ext_messages_elapsed = self
+            .extra
+            .messages_reader
+            .metrics()
+            .read_ext_messages_total_elapsed;
         metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
             .record(read_ext_messages_elapsed);
         let add_to_message_groups_elapsed = self
             .extra
             .messages_reader
-            .add_to_message_groups_total_elapsed();
+            .metrics()
+            .add_to_message_groups_total_elapsed;
         metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
             .record(add_to_message_groups_elapsed);
 
@@ -242,16 +255,17 @@ impl Phase<ExecuteState> {
         Ok(())
     }
 
-    pub fn destruct(self) -> (Phase<FinalizeState>, AnchorsCache, ExecutorWrapper) {
+    pub fn finish(self) -> (Phase<FinalizeState>, MessagesReaderV2) {
+        let executor = self.extra.executor.executor;
         (
             Phase::<FinalizeState> {
                 extra: FinalizeState {
                     execute_result: self.extra.execute_result.unwrap(),
+                    executor,
                 },
                 state: self.state,
             },
-            self.extra.anchors_cache,
-            self.extra.executor,
+            self.extra.messages_reader,
         )
     }
 }

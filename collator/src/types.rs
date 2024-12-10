@@ -7,6 +7,7 @@ use anyhow::Result;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use processed_upto::ProcessedUptoInfoStuffV2;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
@@ -16,6 +17,8 @@ use tycho_util::FastHashMap;
 
 use crate::mempool::MempoolAnchorId;
 use crate::utils::block::detect_top_processed_to_anchor;
+
+pub mod processed_upto;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -75,7 +78,7 @@ pub struct BlockCollationResult {
 #[derive(Default, Clone)]
 pub struct ProcessedUptoInfoStuff {
     /// Externals processed up to point and range
-    pub externals: Option<ExternalsProcessedUpto>,
+    pub externals: Option<ExternalsProcessedUptoStuff>,
     /// Internals processed up to points and ranges by shards
     pub internals: BTreeMap<ShardIdent, InternalsProcessedUptoStuff>,
     /// Offset of processed messages from buffer.
@@ -99,7 +102,7 @@ impl std::fmt::Debug for ProcessedUptoInfoStuff {
     }
 }
 
-pub struct DisplayExternalsProcessedUpto<'a>(pub &'a ExternalsProcessedUpto);
+pub struct DisplayExternalsProcessedUpto<'a>(pub &'a ExternalsProcessedUptoStuff);
 impl std::fmt::Debug for DisplayExternalsProcessedUpto<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
@@ -120,22 +123,23 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
     type Error = everscale_types::error::Error;
 
     fn try_from(value: ProcessedUptoInfo) -> std::result::Result<Self, Self::Error> {
-        let mut res = Self {
-            processed_offset: value.processed_offset,
-            externals: value.externals,
-            ..Default::default()
-        };
-        for item in value.internals.iter() {
-            let (shard_id_full, int_upto_info) = item?;
-            res.internals.insert(
-                ShardIdent::try_from(shard_id_full)?,
-                InternalsProcessedUptoStuff {
-                    processed_to_msg: int_upto_info.processed_to_msg.into(),
-                    read_to_msg: int_upto_info.read_to_msg.into(),
-                },
-            );
-        }
-        Ok(res)
+        unimplemented!()
+        // let mut res = Self {
+        //     processed_offset: value.processed_offset,
+        //     externals: value.externals,
+        //     ..Default::default()
+        // };
+        // for item in value.internals.iter() {
+        //     let (shard_id_full, int_upto_info) = item?;
+        //     res.internals.insert(
+        //         ShardIdent::try_from(shard_id_full)?,
+        //         InternalsProcessedUptoStuff {
+        //             processed_to_msg: int_upto_info.processed_to_msg.into(),
+        //             read_to_msg: int_upto_info.read_to_msg.into(),
+        //         },
+        //     );
+        // }
+        // Ok(res)
     }
 }
 
@@ -143,19 +147,32 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
     type Error = everscale_types::error::Error;
 
     fn try_from(value: ProcessedUptoInfoStuff) -> std::result::Result<Self, Self::Error> {
-        let mut res = Self {
-            processed_offset: value.processed_offset,
-            externals: value.externals,
-            ..Default::default()
-        };
-        for (shard_id, int_upto_info) in value.internals {
-            res.internals.set(
-                ShardIdentFull::from(shard_id),
-                InternalsProcessedUpto::from(int_upto_info),
-            )?;
-        }
-        Ok(res)
+        unimplemented!()
+        // let mut res = Self {
+        //     processed_offset: value.processed_offset,
+        //     externals: value.externals,
+        //     ..Default::default()
+        // };
+        // for (shard_id, int_upto_info) in value.internals {
+        //     res.internals.set(
+        //         ShardIdentFull::from(shard_id),
+        //         InternalsProcessedUpto::from(int_upto_info),
+        //     )?;
+        // }
+        // Ok(res)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalsProcessedUptoStuff {
+    /// Externals processed to (anchor, len).
+    /// All externals to this point
+    /// already processed during previous blocks collations.
+    ///
+    /// Needs to read next externals after this point to reproduce messages buffer for collation.
+    pub processed_to: (u32, u64),
+    /// Needs to read externals up to this point to reproduce messages buffer for collation.
+    pub read_to: (u32, u64),
 }
 
 #[derive(Debug, Clone)]
@@ -182,10 +199,11 @@ impl std::fmt::Display for InternalsProcessedUptoStuff {
 
 impl From<InternalsProcessedUptoStuff> for InternalsProcessedUpto {
     fn from(value: InternalsProcessedUptoStuff) -> Self {
-        Self {
-            processed_to_msg: value.processed_to_msg.split(),
-            read_to_msg: value.read_to_msg.split(),
-        }
+        unimplemented!()
+        // Self {
+        //     processed_to_msg: value.processed_to_msg.split(),
+        //     read_to_msg: value.read_to_msg.split(),
+        // }
     }
 }
 
@@ -207,7 +225,7 @@ pub struct McData {
     pub validator_info: ValidatorInfo,
     pub consensus_info: ConsensusInfo,
 
-    pub processed_upto: ProcessedUptoInfoStuff,
+    pub processed_upto: ProcessedUptoInfoStuffV2,
 
     /// Minimal of top processed to anchors
     /// from master block and its top shards
@@ -230,12 +248,12 @@ impl McData {
             0
         };
 
-        let processed_upto: ProcessedUptoInfoStuff = state.processed_upto.load()?.try_into()?;
+        let processed_upto: ProcessedUptoInfoStuffV2 = state.processed_upto.load()?.try_into()?;
 
         let shards = extra.shards.as_vec()?;
         let top_processed_to_anchor = detect_top_processed_to_anchor(
             shards.iter().map(|(_, d)| *d),
-            processed_upto.externals.as_ref(),
+            processed_upto.externals.processed_to.0,
         );
 
         Ok(Arc::new(Self {

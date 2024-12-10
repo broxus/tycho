@@ -136,6 +136,10 @@ tycho-util = { path = "./util", version = "0.1.4" }
 
 [patch.crates-io]
 weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", branch = "next-rocksdb" }
+everscale-types = { git = "https://www.github.com/broxus/everscale-types.git", rev = "da03a39ba0bed726391f792be8dd211584a85b35" }
+
+[patch."https://github.com/broxus/everscale-types.git"]
+everscale-types = { git = "https://www.github.com/broxus/everscale-types.git", rev = "da03a39ba0bed726391f792be8dd211584a85b35" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

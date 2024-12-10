@@ -17,13 +17,14 @@ use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
 
 use super::phase::{Phase, PhaseState};
-use super::PrevData;
+use super::{PrevData, ReaderState};
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::messages_reader::{MessagesReaderV2, NewMessagesState};
 use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
 use crate::collator::types::{
-    BlockCollationData, ExecuteResult, FinalizedBlock, PreparedInMsg, PreparedOutMsg,
-    UpdateQueueDiffResult,
+    BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
+    PreparedInMsg, PreparedOutMsg,
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
@@ -33,18 +34,21 @@ use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizeState {
     pub execute_result: ExecuteResult,
+    pub executor: MessagesExecutor,
 }
 
 impl PhaseState for FinalizeState {}
 
 impl Phase<FinalizeState> {
-    pub fn update_queue_diff(
+    pub fn finalize_messages_reader(
         &mut self,
-        mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
-        shard_id: ShardIdent,
+        messages_reader: MessagesReaderV2,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Result<(UpdateQueueDiffResult, impl FnOnce() -> Result<Duration>)> {
-        let labels = [("workchain", shard_id.workchain().to_string())];
+    ) -> Result<(
+        FinalizeMessagesReaderResult,
+        impl FnOnce() -> Result<Duration>,
+    )> {
+        let labels = [("workchain", self.state.shard_id.workchain().to_string())];
 
         let prev_hash = self
             .state
@@ -54,20 +58,21 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
+        let has_messages_in_buffers = messages_reader.has_messages_in_buffers();
+
         // get queue diff and check for pending internals
-        let histogram_create_queue_diff =
-            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
+        let create_queue_diff_elapsed;
+        let (has_pending_internals_in_iterator, reader_state, anchors_cache, diff_with_messages) = {
+            let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
+                "tycho_do_collate_create_queue_diff_time",
+                &labels,
+            );
+            let finalize_message_reader_res = messages_reader.finalize()?;
+            create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+            finalize_message_reader_res
+        };
 
-        let (has_pending_internals_in_iterator, diff_with_messages) = mq_iterator_adapter.release(
-            !self.state.msgs_buffer.has_pending_messages(),
-            &mut self.state.msgs_buffer.current_iterator_positions,
-        )?;
-
-        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
-
-        let diff_messages_len = diff_with_messages.messages.len();
-        let has_unprocessed_messages =
-            self.state.msgs_buffer.has_pending_messages() || has_pending_internals_in_iterator;
+        let has_unprocessed_messages = has_messages_in_buffers || has_pending_internals_in_iterator;
 
         let (min_message, max_message) = {
             let messages = &diff_with_messages.messages;
@@ -81,7 +86,7 @@ impl Phase<FinalizeState> {
         };
 
         let queue_diff = QueueDiffStuff::builder(
-            shard_id,
+            self.state.shard_id,
             self.state.collation_data.block_id_short.seqno,
             &prev_hash,
         )
@@ -100,6 +105,8 @@ impl Phase<FinalizeState> {
 
         let queue_diff_hash = *queue_diff.hash();
         tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
+
+        let queue_diff_messages_count = diff_with_messages.messages.len();
 
         // start async update queue task
         let update_queue_task = {
@@ -123,10 +130,13 @@ impl Phase<FinalizeState> {
         };
 
         Ok((
-            UpdateQueueDiffResult {
+            FinalizeMessagesReaderResult {
                 queue_diff,
+                queue_diff_messages_count,
                 has_unprocessed_messages,
-                diff_messages_len,
+                reader_state,
+                anchors_cache,
+
                 create_queue_diff_elapsed,
             },
             update_queue_task,
@@ -140,8 +150,7 @@ impl Phase<FinalizeState> {
         usage_tree: UsageTree,
         queue_diff: SerializedQueueDiff,
         collator_config: Arc<CollatorConfig>,
-        executor: MessagesExecutor,
-    ) -> Result<(FinalizedBlock, ExecuteResult)> {
+    ) -> Result<(FinalizeBlockResult, ExecuteResult)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
         let wu_params_finalize = self
@@ -156,6 +165,8 @@ impl Phase<FinalizeState> {
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
+
+        let executor = self.extra.executor;
 
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = executor.executor_params().state_libs.clone();
@@ -624,7 +635,7 @@ impl Phase<FinalizeState> {
         );
 
         Ok((
-            FinalizedBlock {
+            FinalizeBlockResult {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
@@ -632,7 +643,6 @@ impl Phase<FinalizeState> {
                 new_observable_state,
                 finalize_wu_total,
                 old_mc_data: self.state.mc_data,
-                msgs_buffer: self.state.msgs_buffer,
                 collation_config: self.state.collation_config,
             },
             self.extra.execute_result,

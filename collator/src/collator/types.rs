@@ -21,8 +21,10 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use super::messages_reader::ReaderState;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
+use crate::types::processed_upto::ProcessedUptoInfoStuffV2;
 use crate::types::{BlockCandidate, McData, ProcessedUptoInfoStuff, ProofFunds};
 
 pub(super) struct WorkingState {
@@ -33,7 +35,7 @@ pub(super) struct WorkingState {
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
-    pub msgs_buffer: MessagesBuffer,
+    pub reader_state: ReaderState,
 }
 
 impl WorkingState {
@@ -56,7 +58,7 @@ pub(super) struct PrevData {
     total_validator_fees: CurrencyCollection,
     wu_used_from_last_anchor: u64,
 
-    processed_upto: ProcessedUptoInfoStuff,
+    processed_upto: ProcessedUptoInfoStuffV2,
 
     prev_queue_diff_hashes: Vec<HashBytes>,
 }
@@ -179,7 +181,7 @@ impl PrevData {
         &self.total_validator_fees
     }
 
-    pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
+    pub fn processed_upto(&self) -> &ProcessedUptoInfoStuffV2 {
         &self.processed_upto
     }
 
@@ -1284,14 +1286,17 @@ pub(super) enum ReadNextExternalsMode {
     ToPreviuosReadTo,
 }
 
-pub struct UpdateQueueDiffResult {
+pub struct FinalizeMessagesReaderResult {
     pub queue_diff: SerializedQueueDiff,
+    pub queue_diff_messages_count: usize,
     pub has_unprocessed_messages: bool,
-    pub diff_messages_len: usize,
+    pub reader_state: ReaderState,
+    pub anchors_cache: AnchorsCache,
+
     pub create_queue_diff_elapsed: Duration,
 }
 
-pub struct FinalizedCollationResult {
+pub struct FinalizeCollationResult {
     pub handle_block_candidate_elapsed: Duration,
 }
 
@@ -1311,7 +1316,7 @@ pub struct ExecuteResult {
     pub last_read_to_anchor_chain_time: Option<u64>,
 }
 
-pub struct FinalizedBlock {
+pub struct FinalizeBlockResult {
     pub collation_data: Box<BlockCollationData>,
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
@@ -1319,13 +1324,13 @@ pub struct FinalizedBlock {
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu_total: u64,
-    pub msgs_buffer: MessagesBuffer,
     pub collation_config: Arc<CollationConfig>,
 }
 
 pub struct CollationResult {
     pub final_result: FinalResult,
-    pub finalized: FinalizedBlock,
+    pub finalized: FinalizeBlockResult,
+    pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
     pub execute_result: ExecuteResult,
 }
@@ -1334,7 +1339,7 @@ pub struct FinalResult {
     pub prepare_elapsed: Duration,
     pub finalize_block_elapsed: Duration,
     pub has_unprocessed_messages: bool,
-    pub diff_messages_len: usize,
+    pub queue_diff_messages_count: usize,
     pub execute_elapsed: Duration,
     pub execute_tick_elapsed: Duration,
     pub execute_tock_elapsed: Duration,

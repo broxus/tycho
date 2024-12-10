@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::models::ShardIdent;
 use ton_executor::{ExecuteParams, PreloadedBlockchainConfig};
 use tycho_block_util::queue::QueueKey;
+use tycho_util::FastHashMap;
 
 use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
 use crate::collator::do_collate::phase::ActualState;
-use crate::collator::execution_manager::{
-    GetNextMessageGroupContext, GetNextMessageGroupMode, MessagesExecutor, MessagesReader,
-};
+use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::messages_reader::{MessagesReaderV2, ReaderState};
 use crate::collator::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use crate::collator::types::AnchorsCache;
 use crate::internal_queue::types::EnqueuedMessage;
@@ -21,6 +22,7 @@ use crate::types::{CollatorConfig, DisplayExternalsProcessedUpto};
 pub struct PrepareState {
     config: Arc<CollatorConfig>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    reader_state: ReaderState,
     anchors_cache: AnchorsCache,
 }
 
@@ -30,6 +32,7 @@ impl Phase<PrepareState> {
     pub fn new(
         config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        reader_state: ReaderState,
         anchors_cache: AnchorsCache,
         state: Box<ActualState>,
     ) -> Self {
@@ -38,6 +41,7 @@ impl Phase<PrepareState> {
             extra: PrepareState {
                 config,
                 mq_adapter,
+                reader_state,
                 anchors_cache,
             },
         }
@@ -111,11 +115,7 @@ impl Phase<PrepareState> {
         let mut mq_iterator_adapter = QueueIteratorAdapter::new(
             self.state.shard_id,
             self.extra.mq_adapter.clone(),
-            self.state
-                .msgs_buffer
-                .current_iterator_positions
-                .take()
-                .unwrap(),
+            FastHashMap::<ShardIdent, QueueKey>::default(),
             self.state.mc_data.gen_lt,
             self.state.prev_shard_data.gen_lt(),
         );
@@ -136,74 +136,30 @@ impl Phase<PrepareState> {
         )?;
 
         // create messages reader
-        let mut messages_reader = MessagesReader::new(
+        let mut messages_reader = MessagesReaderV2::new(
             self.state.shard_id,
             self.state.collation_config.msgs_exec_params.buffer_limit as _,
+            self.state.collation_config.msgs_exec_params.group_limit as _,
+            self.state.collation_config.msgs_exec_params.group_vert_size as _,
             mc_top_shards_end_lts,
+            self.extra.reader_state,
+            self.extra.anchors_cache,
+            mq_iterator_adapter,
         );
-
-        // holds the max LT_HASH of a new created messages to current shard
-        // it needs to define the read range for new messages when we get next message group
-        let max_new_message_key_to_current_shard = QueueKey::MIN;
 
         // refill messages buffer and skip groups upto offset (on node restart)
         let prev_processed_offset = self.state.collation_data.processed_upto.processed_offset;
-        if !self.state.msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
-            // when refill messages buffer on init or resume
-            // we should check externals expiration
-            // against previous block chain time
-
-            // TODO: But this will not work when there are uprocessed
-            //      externals in messages buffer from blocks before previous.
-            //      We need to redesing how to store exhaustive processed_upto
-            let prev_chain_time = self.state.prev_shard_data.gen_chain_time();
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset,
-                prev_chain_time,
-                "start: refill messages buffer and skip groups upto",
-            );
-
-            while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
-                let msg_group = messages_reader.get_next_message_group(
-                    GetNextMessageGroupContext {
-                        next_chain_time: prev_chain_time,
-                        max_new_message_key_to_current_shard,
-                        mode: GetNextMessageGroupMode::Refill,
-                    },
-                    &mut self.state.collation_data.processed_upto,
-                    &mut self.state.msgs_buffer,
-                    &mut self.extra.anchors_cache,
-                    &mut mq_iterator_adapter,
-                )?;
-                if msg_group.is_none() {
-                    // on restart from a new genesis we will not be able to refill buffer with externals
-                    // so we stop refilling when there is no more groups in buffer
-                    break;
-                }
-            }
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset,
-                prev_chain_time,
-                actual_offset = self.state.msgs_buffer.message_groups_offset(),
-                "finished: refill messages buffer and skip groups upto",
-            );
-
-            // next time we should read next message group like we did not make refill before
-            // so we need to reset flags that control from where to read messages
-            messages_reader.reset_read_state();
+        if !messages_reader.has_messages_in_buffers() && prev_processed_offset > 0 {
+            // TODO: pass processed_upto from collation data
+            messages_reader.refill_buffers_upto_offsets(&mut Default::default())?;
         }
 
         Ok(Phase::<ExecuteState> {
             extra: ExecuteState {
                 messages_reader,
                 execute_result: None,
-                anchors_cache: self.extra.anchors_cache,
                 executor: ExecutorWrapper::new(
                     executor,
-                    max_new_message_key_to_current_shard,
-                    mq_iterator_adapter,
                     self.state.shard_id,
                     self.extra.mq_adapter.clone(),
                 ),

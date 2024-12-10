@@ -16,6 +16,7 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
+use super::messages_buffer::MessageGroupV2;
 use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
     AccountId, AnchorsCache, Dequeued, MessageGroup, MessagesBuffer, ParsedMessage,
@@ -579,12 +580,13 @@ impl MessagesExecutor {
     }
 
     /// Run one execution group of messages by accounts
-    pub fn execute_group(&mut self, group: MessageGroup) -> Result<ExecutedGroup> {
+    pub fn execute_group(&mut self, group: MessageGroupV2) -> Result<ExecutedGroup> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
         let mut ext_msgs_skipped = 0;
 
+        // TODO: rename to group_slots_count
         let group_horizontal_size = group.len();
         let group_messages_count = group.messages_count();
         let group_mean_vert_size: usize = group_messages_count
