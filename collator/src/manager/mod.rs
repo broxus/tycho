@@ -6,8 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
-    BlockId, BlockIdShort, CollationConfig, ExternalsProcessedUpto, ProcessedUptoInfo, ShardIdent,
-    ValidatorDescription,
+    BlockId, BlockIdShort, CollationConfig, ProcessedUptoInfo, ShardIdent, ValidatorDescription,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
@@ -148,8 +147,10 @@ where
 
         self.spawn_task(move |worker| {
             Box::pin(async move {
-                worker
-                    .detect_top_processed_to_anchor_and_notify_mempool(state_cloned, processed_upto)
+                worker.detect_top_processed_to_anchor_and_notify_mempool(
+                    state_cloned,
+                    processed_upto.externals.processed_to.0,
+                )
             })
         })
         .await?;
@@ -184,11 +185,7 @@ fn metrics_report_last_applied_block_and_anchor(
     let labels = [("workchain", block_id.shard.workchain().to_string())];
 
     let block_ct = state.get_gen_chain_time();
-    let processed_to_anchor_id = processed_upto
-        .externals
-        .as_ref()
-        .map(|upto| upto.processed_to.0)
-        .unwrap_or_default();
+    let processed_to_anchor_id = processed_upto.externals.processed_to.0;
 
     metrics::gauge!("tycho_last_applied_block_seqno", &labels).set(block_id.seqno);
     metrics::gauge!("tycho_last_processed_to_anchor_id", &labels).set(processed_to_anchor_id);
@@ -354,7 +351,7 @@ where
     fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
         state: ShardStateStuff,
-        processed_upto: ProcessedUptoInfo,
+        mc_processed_to_anchor_id: MempoolAnchorId,
     ) -> Result<()> {
         // will make this only for master blocks
         if !state.block_id().is_masterchain() {
@@ -367,24 +364,24 @@ where
                 .as_vec()?
                 .into_iter()
                 .map(|(_, descr)| descr),
-            processed_upto.externals.as_ref(),
+            mc_processed_to_anchor_id,
         )
     }
 
     fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
         &self,
         mc_top_shards: I,
-        mc_ext_processed_upto: Option<&ExternalsProcessedUpto>,
+        mc_processed_to_anchor_id: MempoolAnchorId,
     ) -> Result<()>
     where
         I: Iterator<Item = ShardDescriptionShort>,
     {
         let top_processed_to_anchor =
-            detect_top_processed_to_anchor(mc_top_shards, mc_ext_processed_upto);
+            detect_top_processed_to_anchor(mc_top_shards, mc_processed_to_anchor_id);
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             top_processed_to_anchor,
-            mc_processed_to_anchor = mc_ext_processed_upto.map(|upto| upto.processed_to.0),
+            mc_processed_to_anchor_id,
             "detected minimal top_processed_to_anchor, will notify mempool",
 
         );
@@ -1101,7 +1098,13 @@ where
                 // so we can report top processed anchor here
                 self.detect_top_processed_to_anchor_and_notify_mempool_impl(
                     state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
-                    state.state().processed_upto.load()?.externals.as_ref(),
+                    state
+                        .state()
+                        .processed_upto
+                        .load()?
+                        .externals
+                        .processed_to
+                        .0,
                 )?;
 
                 // NOTE: here master block subgraph could be already extracted,

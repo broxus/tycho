@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -26,15 +27,8 @@ impl QueueDiffStuffBuilder {
         }
     }
 
-    // TODO: Use iterator of `(ShardIdent, QueueKey)`?
-    pub fn with_processed_to<'a, I>(mut self, processed_to: I) -> Self
-    where
-        I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
-    {
-        self.inner_mut().diff.processed_to = processed_to
-            .into_iter()
-            .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
-            .collect();
+    pub fn with_processed_to(mut self, processed_to: BTreeMap<ShardIdent, QueueKey>) -> Self {
+        self.inner_mut().diff.processed_to = processed_to;
         self
     }
 
@@ -79,12 +73,8 @@ impl SerializedQueueDiff {
         &self.inner.diff.hash
     }
 
-    pub fn processed_to(&self) -> impl Iterator<Item = (ShardIdent, &QueueKey)> {
-        self.inner
-            .diff
-            .processed_to
-            .iter()
-            .map(|(shard_ident, key)| (*shard_ident, key))
+    pub fn processed_to(&self) -> &BTreeMap<ShardIdent, QueueKey> {
+        &self.inner.diff.processed_to
     }
 
     fn inner_mut(&mut self) -> &mut Inner {

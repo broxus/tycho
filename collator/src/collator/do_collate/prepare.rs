@@ -2,25 +2,23 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ton_executor::{ExecuteParams, PreloadedBlockchainConfig};
-use tycho_block_util::queue::QueueKey;
 
 use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
 use crate::collator::do_collate::phase::ActualState;
-use crate::collator::execution_manager::{
-    GetNextMessageGroupContext, GetNextMessageGroupMode, MessagesExecutor, MessagesReader,
-};
-use crate::collator::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
+use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::messages_reader::{MessagesReader, MessagesReaderContext, ReaderState};
 use crate::collator::types::AnchorsCache;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::{CollatorConfig, DisplayExternalsProcessedUpto};
+use crate::types::CollatorConfig;
 
 pub struct PrepareState {
     config: Arc<CollatorConfig>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    reader_state: ReaderState,
     anchors_cache: AnchorsCache,
 }
 
@@ -30,6 +28,7 @@ impl Phase<PrepareState> {
     pub fn new(
         config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        reader_state: ReaderState,
         anchors_cache: AnchorsCache,
         state: Box<ActualState>,
     ) -> Self {
@@ -38,30 +37,20 @@ impl Phase<PrepareState> {
             extra: PrepareState {
                 config,
                 mq_adapter,
+                reader_state,
                 anchors_cache,
             },
         }
     }
 
-    pub fn run(mut self) -> Result<Phase<ExecuteState>> {
-        // show initial processed upto
-        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.offset = {}",
-            self.state.collation_data.processed_upto.processed_offset,
-        );
+    pub fn run(self) -> Result<Phase<ExecuteState>> {
+        // log initial processed upto
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
-            self.state.collation_data.processed_upto.externals.as_ref().map(DisplayExternalsProcessedUpto),
+            self.state.prev_shard_data.processed_upto().externals
         );
-        self.state
-            .collation_data
-            .processed_upto
-            .internals
-            .iter()
-            .for_each(|(shard_ident, processed_upto)| {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "initial processed_upto.internals for shard {}: {}",
-                    shard_ident, processed_upto,
-                );
-            });
+        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.internals = {:?}",
+            self.state.prev_shard_data.processed_upto().internals
+        );
 
         // init executor
         let executor = MessagesExecutor::new(
@@ -107,106 +96,32 @@ impl Phase<PrepareState> {
                 .collect()
         };
 
-        // create iterator adapter
-        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
-            self.state.shard_id,
-            self.extra.mq_adapter.clone(),
-            self.state
-                .msgs_buffer
-                .current_iterator_positions
-                .take()
-                .unwrap(),
-            self.state.mc_data.gen_lt,
-            self.state.prev_shard_data.gen_lt(),
-        );
-
-        // we need to init iterator anyway because we need it to add new messages to queue
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "init iterator for current ranges"
-        );
-        mq_iterator_adapter.try_init_next_range_iterator(
-            &mut self.state.collation_data.processed_upto,
-            mc_top_shards_end_lts.iter().copied(),
-            // We always init first iterator during block collation
-            // with current ranges from processed_upto info
-            // and do not touch next range before we read all existing messages buffer.
-            // In this case the initial iterator range will be equal both
-            // on Refill and on Continue.
-            InitIteratorMode::OmitNextRange,
-        )?;
-
         // create messages reader
         let mut messages_reader = MessagesReader::new(
-            self.state.shard_id,
-            self.state.collation_config.msgs_exec_params.buffer_limit as _,
-            mc_top_shards_end_lts,
+            MessagesReaderContext {
+                for_shard_id: self.state.shard_id,
+                block_seqno: self.state.collation_data.block_id_short.seqno,
+                next_chain_time: self.state.collation_data.get_gen_chain_time(),
+                msgs_exec_params: self.state.collation_config.msgs_exec_params.clone(),
+                mc_state_gen_lt: self.state.mc_data.gen_lt,
+                prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
+                mc_top_shards_end_lts,
+                reader_state: self.extra.reader_state,
+                anchors_cache: self.extra.anchors_cache,
+            },
+            self.extra.mq_adapter.clone(),
         );
 
-        // holds the max LT_HASH of a new created messages to current shard
-        // it needs to define the read range for new messages when we get next message group
-        let max_new_message_key_to_current_shard = QueueKey::MIN;
-
         // refill messages buffer and skip groups upto offset (on node restart)
-        let prev_processed_offset = self.state.collation_data.processed_upto.processed_offset;
-        if !self.state.msgs_buffer.has_pending_messages() && prev_processed_offset > 0 {
-            // when refill messages buffer on init or resume
-            // we should check externals expiration
-            // against previous block chain time
-
-            // TODO: But this will not work when there are uprocessed
-            //      externals in messages buffer from blocks before previous.
-            //      We need to redesing how to store exhaustive processed_upto
-            let prev_chain_time = self.state.prev_shard_data.gen_chain_time();
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset,
-                prev_chain_time,
-                "start: refill messages buffer and skip groups upto",
-            );
-
-            while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
-                let msg_group = messages_reader.get_next_message_group(
-                    GetNextMessageGroupContext {
-                        next_chain_time: prev_chain_time,
-                        max_new_message_key_to_current_shard,
-                        mode: GetNextMessageGroupMode::Refill,
-                    },
-                    &mut self.state.collation_data.processed_upto,
-                    &mut self.state.msgs_buffer,
-                    &mut self.extra.anchors_cache,
-                    &mut mq_iterator_adapter,
-                )?;
-                if msg_group.is_none() {
-                    // on restart from a new genesis we will not be able to refill buffer with externals
-                    // so we stop refilling when there is no more groups in buffer
-                    break;
-                }
-            }
-
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset,
-                prev_chain_time,
-                actual_offset = self.state.msgs_buffer.message_groups_offset(),
-                "finished: refill messages buffer and skip groups upto",
-            );
-
-            // next time we should read next message group like we did not make refill before
-            // so we need to reset flags that control from where to read messages
-            messages_reader.reset_read_state();
+        if messages_reader.check_need_refill() {
+            messages_reader.refill_buffers_upto_offsets()?;
         }
 
         Ok(Phase::<ExecuteState> {
             extra: ExecuteState {
                 messages_reader,
                 execute_result: None,
-                anchors_cache: self.extra.anchors_cache,
-                executor: ExecutorWrapper::new(
-                    executor,
-                    max_new_message_key_to_current_shard,
-                    mq_iterator_adapter,
-                    self.state.shard_id,
-                    self.extra.mq_adapter.clone(),
-                ),
+                executor: ExecutorWrapper::new(executor, self.state.shard_id),
             },
             state: self.state,
         })

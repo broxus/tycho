@@ -7,7 +7,9 @@ use error::CollatorError;
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::*;
 use futures_util::future::Future;
-use mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
+use messages_reader::{
+    FinalizedMessagesReader, MessagesReader, MessagesReaderContext, ReaderState,
+};
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -17,7 +19,7 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
-use types::{AnchorInfo, AnchorsCache, MessagesBuffer};
+use types::{AnchorInfo, AnchorsCache};
 
 use self::types::{CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
@@ -37,7 +39,8 @@ mod debug_info;
 mod do_collate;
 mod error;
 mod execution_manager;
-mod mq_iterator_adapter;
+mod messages_buffer;
+mod messages_reader;
 mod types;
 
 pub use error::CollationCancelReason;
@@ -361,7 +364,7 @@ impl CollatorStdImpl {
             &working_state.mc_data,
             &prev_block_id,
             prev_shard_data.gen_chain_time(),
-            prev_shard_data.processed_upto().externals.as_ref(),
+            prev_shard_data.processed_upto().externals.processed_to,
         );
 
         // import anchors
@@ -619,7 +622,7 @@ impl CollatorStdImpl {
                 &working_state.mc_data,
                 &prev_block_id,
                 prev_shard_data.gen_chain_time(),
-                prev_shard_data.processed_upto().externals.as_ref(),
+                prev_shard_data.processed_upto().externals.processed_to,
             );
 
             // import anchors
@@ -774,7 +777,7 @@ impl CollatorStdImpl {
         new_mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
         has_unprocessed_messages: bool,
-        msgs_buffer: MessagesBuffer,
+        reader_state: ReaderState,
         tracker: MinRefMcStateTracker,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -844,7 +847,7 @@ impl CollatorStdImpl {
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
-                msgs_buffer,
+                reader_state,
             }))
         }));
 
@@ -929,14 +932,10 @@ impl CollatorStdImpl {
             next_block_id_short,
             mc_data,
             wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
+            reader_state: ReaderState::new(prev_shard_data.processed_upto()),
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
             has_unprocessed_messages: None,
-            msgs_buffer: MessagesBuffer::new(
-                next_block_id_short.shard,
-                collation_config.msgs_exec_params.group_limit as _,
-                collation_config.msgs_exec_params.group_vert_size as _,
-            ),
             collation_config,
         }))
     }
@@ -946,17 +945,14 @@ impl CollatorStdImpl {
         mc_data: &McData,
         prev_block_id: &BlockId,
         prev_gen_chain_time: u64,
-        prev_processed_upto_externals: Option<&ExternalsProcessedUpto>,
+        prev_externals_processed_to: (MempoolAnchorId, u64),
     ) -> Option<AnchorsProcessingInfo> {
         // try get from mc data
         let mut from_mc_info_opt = None;
         if !shard_id.is_masterchain() {
-            if let Some((mc_processed_to_anchor_id, mc_processed_to_msgs_offset)) = mc_data
-                .processed_upto
-                .externals
-                .as_ref()
-                .map(|upto| upto.processed_to)
-            {
+            let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) =
+                mc_data.processed_upto.externals.processed_to;
+            if mc_processed_to_anchor_id > 0 {
                 // TODO: consider split/merge
 
                 // get from mc data if prev shard block is equal to the top shard
@@ -966,16 +962,17 @@ impl CollatorStdImpl {
                 // and we can omit top processed anchor from shard
                 // if it lower then top processed from master
                 for (top_shard_id, top_shard_descr) in mc_data.shards.iter() {
-                    if shard_id == top_shard_id
-                        && prev_block_id.seqno == top_shard_descr.seqno
-                        && !top_shard_descr.top_sc_block_updated
-                    {
-                        from_mc_info_opt = Some(AnchorsProcessingInfo {
-                            processed_to_anchor_id: mc_processed_to_anchor_id,
-                            processed_to_msgs_offset: mc_processed_to_msgs_offset,
-                            last_imported_chain_time: mc_data.gen_chain_time,
-                            last_imported_in_block_id: mc_data.block_id,
-                        });
+                    if shard_id == top_shard_id {
+                        if prev_block_id.seqno == top_shard_descr.seqno
+                            && !top_shard_descr.top_sc_block_updated
+                        {
+                            from_mc_info_opt = Some(AnchorsProcessingInfo {
+                                processed_to_anchor_id: mc_processed_to_anchor_id,
+                                processed_to_msgs_offset: mc_processed_to_msgs_offset,
+                                last_imported_chain_time: mc_data.gen_chain_time,
+                                last_imported_in_block_id: mc_data.block_id,
+                            });
+                        }
                         break;
                     }
                 }
@@ -983,15 +980,17 @@ impl CollatorStdImpl {
         }
 
         // try get from prev data
-        let from_prev_info_opt =
-            prev_processed_upto_externals
-                .as_ref()
-                .map(|upto| AnchorsProcessingInfo {
-                    processed_to_anchor_id: upto.processed_to.0,
-                    processed_to_msgs_offset: upto.processed_to.1,
+        let from_prev_info_opt = match prev_externals_processed_to {
+            (processed_to_anchor_id, processed_to_msgs_offset) if processed_to_anchor_id > 0 => {
+                Some(AnchorsProcessingInfo {
+                    processed_to_anchor_id,
+                    processed_to_msgs_offset,
                     last_imported_chain_time: prev_gen_chain_time,
                     last_imported_in_block_id: *prev_block_id,
-                });
+                })
+            }
+            _ => None,
+        };
 
         // choose the higher one
         match (from_mc_info_opt, from_prev_info_opt) {
@@ -1242,52 +1241,61 @@ impl CollatorStdImpl {
             return Ok(has_messages);
         }
 
-        let prev_shard_data = working_state.prev_shard_data_ref();
-
-        // when processing offset is > 0 we have uprocessed messages in buffer
-        if prev_shard_data.processed_upto().processed_offset > 0 {
+        // when we have processed offset > 0 in externals or externals
+        // then we should have uprocessed messages in buffer
+        if working_state
+            .reader_state
+            .check_has_non_zero_processed_offset()
+        {
             working_state.has_unprocessed_messages = Some(true);
             return Ok(true);
         }
 
-        // check messages buffer directly
-        let msgs_buffer = &working_state.msgs_buffer;
-
-        let has_pending_messages_in_buffer = msgs_buffer.has_pending_messages();
-        if has_pending_messages_in_buffer {
+        // if all internals and externals read
+        // then check if any buffer contain messages
+        if working_state.reader_state.count_messages_in_buffers() > 0 {
             working_state.has_unprocessed_messages = Some(true);
             return Ok(true);
         }
 
-        // check in queue using iterator
-        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
-            self.shard_id,
+        // finally check if has pending messages in iterators
+
+        // create reader
+        let mut messages_reader = MessagesReader::new(
+            MessagesReaderContext {
+                for_shard_id: working_state.next_block_id_short.shard,
+                block_seqno: working_state.next_block_id_short.seqno,
+                next_chain_time: 0,
+                msgs_exec_params: working_state.collation_config.msgs_exec_params.clone(),
+                mc_state_gen_lt: working_state.mc_data.gen_lt,
+                prev_state_gen_lt: working_state.prev_shard_data_ref().gen_lt(),
+                mc_top_shards_end_lts: working_state
+                    .mc_data
+                    .shards
+                    .iter()
+                    .map(|(k, v)| (*k, v.end_lt))
+                    .collect(),
+                // extract reader state to use in the reader
+                reader_state: std::mem::take(&mut working_state.reader_state),
+                // do not use anchors cache because we need to check
+                // only for pending internals in iterators
+                anchors_cache: Default::default(),
+            },
             self.mq_adapter.clone(),
-            msgs_buffer.current_iterator_positions.clone().unwrap(),
-            working_state.mc_data.gen_lt,
-            prev_shard_data.gen_lt(),
         );
 
-        let mut current_processed_upto = prev_shard_data.processed_upto().clone();
-        mq_iterator_adapter.try_init_next_range_iterator(
-            &mut current_processed_upto,
-            working_state
-                .mc_data
-                .shards
-                .iter()
-                .map(|(k, v)| (*k, v.end_lt)),
-            InitIteratorMode::UseNextRange,
-        )?;
+        // check if has pending internals
+        let has_pending_internals = messages_reader.check_has_pending_internals_in_iterators()?;
 
-        let has_internals = if !mq_iterator_adapter.no_pending_existing_internals() {
-            mq_iterator_adapter.iterator().next(true)?.is_some()
-        } else {
-            false
-        };
+        // return reader state to working state
+        let FinalizedMessagesReader {
+            mut reader_state, ..
+        } = messages_reader.finalize()?;
+        std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
-        working_state.has_unprocessed_messages = Some(has_internals);
+        working_state.has_unprocessed_messages = Some(has_pending_internals);
 
-        Ok(has_internals)
+        Ok(has_pending_internals)
     }
 
     async fn wait_state_and_try_collate_wrapper(&mut self) -> Result<()> {
