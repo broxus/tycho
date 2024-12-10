@@ -9,7 +9,7 @@ use super::MempoolAnchorId;
 pub struct StateUpdateContext {
     pub mc_block_id: BlockId,
     pub mc_block_chain_time: u64,
-    pub mc_processed_to_anchor_id: MempoolAnchorId,
+    pub top_processed_to_anchor_id: MempoolAnchorId,
     pub consensus_info: ConsensusInfo,
     pub consensus_config: ConsensusConfig,
     pub shuffle_validators: bool,
@@ -25,8 +25,8 @@ impl std::fmt::Debug for DebugStateUpdateContext<'_> {
             .field("mc_block_id", &self.0.mc_block_id.as_short_id())
             .field("mc_block_chain_time", &self.0.mc_block_chain_time)
             .field(
-                "mc_processed_to_anchor_id",
-                &self.0.mc_processed_to_anchor_id,
+                "top_processed_to_anchor_id",
+                &self.0.top_processed_to_anchor_id,
             )
             .field("consensus_info", &self.0.consensus_info)
             .field("consensus_config", &self.0.consensus_config)

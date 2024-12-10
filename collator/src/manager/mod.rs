@@ -1345,7 +1345,6 @@ where
                 self.blocks_cache.reset_top_shard_blocks_additional_info()?;
 
                 let mc_data = McData::load_from_state(state)?;
-                let top_processed_to_anchor = mc_data.top_processed_to_anchor;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1361,10 +1360,10 @@ where
                 self.blocks_cache
                     .remove_next_collated_blocks_from_cache(&to_block_keys);
 
-                self.process_mc_state_update(mc_data, true).await?;
+                self.process_mc_state_update(mc_data.clone(), true).await?;
 
                 // handle top processed to anchor in mempool
-                self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)?;
+                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
 
                 break;
             }
@@ -1492,16 +1491,10 @@ where
             .validator_set_cache
             .get_next_validator_set(&mc_data.config)?;
 
-        let mc_processed_to_anchor_id = mc_data
-            .processed_upto
-            .externals
-            .as_ref()
-            .map_or(0, |upto| upto.processed_to.0);
-
         let cx = StateUpdateContext {
             mc_block_id: mc_data.block_id,
             mc_block_chain_time: mc_data.gen_chain_time,
-            mc_processed_to_anchor_id,
+            top_processed_to_anchor_id: mc_data.top_processed_to_anchor,
             consensus_info: mc_data.consensus_info,
             shuffle_validators: mc_data.config.get_collation_config()?.shuffle_mc_validators,
             consensus_config: mc_data.config.get_consensus_config()?,
