@@ -319,26 +319,23 @@ impl<C> Node<C> {
         .unzip();
 
         // Create block strider
-        let blockchain_block_provider = BlockchainBlockProvider::new(
+        let archive_block_provider = ArchiveBlockProvider::new(
             self.blockchain_rpc_client.clone(),
             self.storage.clone(),
-            self.blockchain_block_provider_config.clone(),
+            self.archive_block_provider_config.clone(),
         );
-
-        // TODO: Uncomment when archive block provider can initiate downloads for shard blocks.
-        // blockchain_block_provider =
-        //     blockchain_block_provider.with_fallback(archive_block_provider.clone());
 
         let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
 
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
-        let archive_block_provider = ArchiveBlockProvider::new(
+        let blockchain_block_provider = BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
             self.storage.clone(),
-            self.archive_block_provider_config.clone(),
-        );
+            self.blockchain_block_provider_config.clone(),
+        )
+        .with_fallback(archive_block_provider.clone());
 
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
         let ps_subscriber = PsSubscriber::new(self.storage.clone());
