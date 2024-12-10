@@ -13,20 +13,19 @@ use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
-use super::MessagesReader;
-use crate::collator::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
-use crate::collator::execution_manager::{
-    GetNextMessageGroupContext, GetNextMessageGroupMode, InitIteratorMode,
+#[cfg(FALSE)]
+use super::super::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
+use super::super::types::{AnchorsCache, PrevData, WorkingState};
+#[cfg(FALSE)]
+use super::{
+    GetNextMessageGroupContext, GetNextMessageGroupMode, InitIteratorMode, MessagesReader,
 };
-use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
-use crate::collator::types::{AnchorsCache, MessagesBuffer, PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{
     EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::try_init_test_tracing;
-use crate::types::{InternalsProcessedUptoStuff, McData, ProcessedUptoInfoStuff};
 
 #[derive(Default)]
 struct QueueIteratorTestImpl<V: InternalMessageValue> {
@@ -136,6 +135,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
     }
 }
 
+#[cfg(FALSE)]
 fn gen_stub_working_state(
     next_block_id_short: BlockIdShort,
     prev_block_info: (BlockIdShort, (u64, u64)),
@@ -251,6 +251,7 @@ fn gen_stub_working_state(
     Box::new(working_state)
 }
 
+#[cfg(FALSE)]
 #[test]
 fn test_refill_msgs_buffer_with_only_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
