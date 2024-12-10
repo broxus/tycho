@@ -306,7 +306,7 @@ impl BlockCollationDataBuilder {
             start_lt,
             next_lt: start_lt + 1,
             tx_count: 0,
-            accounts_count: 0,
+            updated_accounts_count: 0,
             total_execute_msgs_time_mc: 0,
             execute_count_all: 0,
             execute_count_ext: 0,
@@ -339,7 +339,7 @@ pub(super) struct BlockCollationData {
     pub gen_utime_ms: u16,
 
     pub tx_count: u64,
-    pub accounts_count: u64,
+    pub updated_accounts_count: u64,
 
     pub block_limit: BlockLimitStats,
 

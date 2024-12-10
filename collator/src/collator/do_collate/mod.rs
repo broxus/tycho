@@ -1127,7 +1127,7 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_tx_per_block", &labels)
             .set(collation_data.tx_count as f64);
         metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
-            .set(collation_data.accounts_count as f64);
+            .set(collation_data.updated_accounts_count as f64);
         metrics::counter!("tycho_do_collate_int_enqueue_count")
             .increment(collation_data.int_enqueue_count);
         metrics::counter!("tycho_do_collate_int_dequeue_count")
