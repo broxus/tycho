@@ -20,8 +20,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Install build dependencies:
 ```bash
 sudo apt update
-sudo apt install build-essential git libssl-dev zlib1g-dev pkg-config clang jq
+sudo apt install build-essential git libssl-dev zlib1g-dev pkg-config clang jq lld
 ```
+
+> [!NOTE]
+> The latest Clang can also be installed via the official bash script:
+> ```bash
+> wget -qO- https://apt.llvm.org/llvm.sh | bash -s -- 19
+> ```
 
 ## How To Install
 
@@ -30,7 +36,7 @@ sudo apt install build-essential git libssl-dev zlib1g-dev pkg-config clang jq
 git clone https://github.com/broxus/tycho
 cd tycho
 git checkout tags/v0.1.4 -b mynode
-cargo install --path ./cli --locked
+./scripts/install.sh
 ```
 
 > [!NOTE]
