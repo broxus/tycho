@@ -380,33 +380,12 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId, prev_id: MempoolAnchorId) ->
 
     let mut externals = vec![];
     for i in 0..externals_count {
-        let body = {
-            let mut builder = CellBuilder::new();
-            builder.store_u32(id).unwrap();
-            builder.store_u64(chain_time).unwrap();
-            builder.store_u32(i).unwrap();
-            builder.build().unwrap()
-        };
-
         let addr_hash_base = i % 6 + 1;
-
-        let info = ExtInMsgInfo {
-            dst: IntAddr::Std(StdAddr::new(
-                if i > 0 && i % 3 == 0 { -1 } else { 0 },
-                HashBytes([addr_hash_base.try_into().unwrap(); 32]),
-            )),
-            ..Default::default()
-        };
-
-        let cell = CellBuilder::build_from(Message {
-            info: MsgInfo::ExtIn(info.clone()),
-            init: None,
-            body: body.as_slice().unwrap(),
-            layout: None,
-        })
-        .unwrap();
-
-        externals.push(Arc::new(ExternalMessage { cell, info }));
+        let dst = IntAddr::Std(StdAddr::new(
+            if i > 0 && i % 3 == 0 { -1 } else { 0 },
+            HashBytes([addr_hash_base.try_into().unwrap(); 32]),
+        ));
+        externals.push(Arc::new(make_stub_external(id, chain_time, i, dst)));
     }
 
     MempoolAnchor {
@@ -416,6 +395,36 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId, prev_id: MempoolAnchorId) ->
         chain_time,
         externals,
     }
+}
+
+pub(crate) fn make_stub_external(
+    anchor_id: MempoolAnchorId,
+    chain_time: u64,
+    msg_idx: u32,
+    dst: IntAddr,
+) -> ExternalMessage {
+    let body = {
+        let mut builder = CellBuilder::new();
+        builder.store_u32(anchor_id).unwrap();
+        builder.store_u64(chain_time).unwrap();
+        builder.store_u32(msg_idx).unwrap();
+        builder.build().unwrap()
+    };
+
+    let info = ExtInMsgInfo {
+        dst,
+        ..Default::default()
+    };
+
+    let cell = CellBuilder::build_from(Message {
+        info: MsgInfo::ExtIn(info.clone()),
+        init: None,
+        body: body.as_slice().unwrap(),
+        layout: None,
+    })
+    .unwrap();
+
+    ExternalMessage { cell, info }
 }
 
 pub(crate) fn make_anchor_from_file(

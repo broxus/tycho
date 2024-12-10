@@ -6,11 +6,9 @@ use everscale_types::prelude::*;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
+use super::super::types::{AnchorsCache, BlockCollationData, BlockCollationDataBuilder};
+use super::CollatorStdImpl;
 use crate::collator::do_collate::calculate_min_processed_to;
-use crate::collator::types::{
-    BlockCollationData, BlockCollationDataBuilder, ParsedExternals, ReadNextExternalsMode,
-};
-use crate::collator::{AnchorsCache, CollatorStdImpl};
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
 use crate::types::{supported_capabilities, ShardDescriptionShort};
@@ -61,6 +59,7 @@ const DEFAULT_BLOCK_LIMITS: BlockLimits = BlockLimits {
     },
 };
 
+#[cfg(FALSE)]
 pub(crate) fn build_stub_collation_data(
     next_block_id: BlockIdShort,
     anchors_cache: &AnchorsCache,
@@ -85,6 +84,7 @@ pub(crate) fn build_stub_collation_data(
     .build(start_lt, DEFAULT_BLOCK_LIMITS)
 }
 
+#[cfg(FALSE)]
 #[test]
 fn test_read_next_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);

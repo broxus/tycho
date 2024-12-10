@@ -13,9 +13,9 @@ pub use self::state_update_context::*;
 
 mod impls {
     pub use self::std_impl::MempoolAdapterStdImpl;
-    #[cfg(test)]
-    pub(crate) use self::stub_impl::make_stub_anchor;
     pub use self::stub_impl::MempoolAdapterStubImpl;
+    #[cfg(test)]
+    pub(crate) use self::stub_impl::{make_stub_anchor, make_stub_external};
 
     mod std_impl;
     mod stub_impl;
