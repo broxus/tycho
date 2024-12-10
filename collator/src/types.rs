@@ -17,6 +17,8 @@ use tycho_util::FastHashMap;
 use crate::mempool::MempoolAnchorId;
 use crate::utils::block::detect_top_processed_to_anchor;
 
+pub mod processed_upto;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct CollatorConfig {

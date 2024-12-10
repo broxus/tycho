@@ -37,6 +37,7 @@ mod debug_info;
 mod do_collate;
 mod error;
 mod execution_manager;
+mod messages_buffer;
 mod mq_iterator_adapter;
 mod types;
 
