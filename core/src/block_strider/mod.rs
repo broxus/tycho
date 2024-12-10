@@ -178,6 +178,7 @@ where
         let prepared_master = {
             let cx = Box::new(BlockSubscriberContext {
                 mc_block_id,
+                mc_is_key_block: is_key_block,
                 is_key_block,
                 block: block.clone(),
                 archive_data,
@@ -204,7 +205,11 @@ where
         // Start processing shard blocks in parallel
         let mut process_futures = FuturesUnordered::new();
         while let Some(blocks) = download_futures.next().await.transpose()? {
-            process_futures.push(Box::pin(self.process_shard_blocks(&mc_block_id, blocks)));
+            process_futures.push(Box::pin(self.process_shard_blocks(
+                &mc_block_id,
+                is_key_block,
+                blocks,
+            )));
         }
         metrics::histogram!("tycho_core_download_sc_blocks_time").record(started_at.elapsed());
 
@@ -280,11 +285,13 @@ where
     async fn process_shard_blocks(
         &self,
         mc_block_id: &BlockId,
+        mc_is_key_block: bool,
         mut blocks: Vec<BlockStuffAug>,
     ) -> Result<()> {
         let start_preparing_block = |block: BlockStuffAug| {
             let cx = Box::new(BlockSubscriberContext {
                 mc_block_id: *mc_block_id,
+                mc_is_key_block,
                 is_key_block: false,
                 block: block.data,
                 archive_data: block.archive_data,
