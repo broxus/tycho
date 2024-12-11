@@ -31,6 +31,8 @@ use crate::tracing_targets;
 use crate::types::{BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardHashesExt};
 use crate::utils::block::detect_top_processed_to_anchor;
 
+pub const LOGARITHM_DELIMITER: u64 = 1000;
+
 pub struct FinalizeState {
     pub execute_result: ExecuteResult,
 }
@@ -218,7 +220,8 @@ impl Phase<FinalizeState> {
             histogram_build_account_blocks_and_messages.finish();
 
         let processed_accounts = processed_accounts_res?;
-        self.state.collation_data.accounts_count = processed_accounts.accounts_len as u64;
+        self.state.collation_data.updated_accounts_count =
+            processed_accounts.updated_accounts_count as u64;
         let in_msgs = in_msgs_res?;
         let out_msgs = out_msgs_res?;
 
@@ -343,21 +346,29 @@ impl Phase<FinalizeState> {
                 labels,
             );
 
-            let accounts_count = self.state.collation_data.accounts_count;
+            let updated_accounts_count = self.state.collation_data.updated_accounts_count;
+            let old_accounts_count = self
+                .state
+                .prev_shard_data
+                .observable_accounts()
+                .root_extra()
+                .count as u64;
             let in_msgs_len = self.state.collation_data.in_msgs.len() as u64;
             let out_msgs_len = self.state.collation_data.out_msgs.len() as u64;
 
             finalize_wu_total = Self::calc_finalize_wu_total(
-                accounts_count,
+                old_accounts_count,
+                updated_accounts_count,
                 in_msgs_len,
                 out_msgs_len,
                 wu_params_finalize,
             );
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "finalize_wu_total: {}, accounts_count: {}, in_msgs: {}, out_msgs: {} ",
+                "finalize_wu_total: {}, old_state_accounts_count: {}, updated_accounts_count: {}, in_msgs: {}, out_msgs: {} ",
                 finalize_wu_total,
-                accounts_count,
+                old_accounts_count,
+                updated_accounts_count,
                 in_msgs_len,
                 out_msgs_len,
             );
@@ -640,7 +651,8 @@ impl Phase<FinalizeState> {
     }
 
     fn calc_finalize_wu_total(
-        accounts_count: u64,
+        old_accounts_count: u64,
+        updated_accounts_count: u64,
         in_msgs_len: u64,
         out_msgs_len: u64,
         wu_params_finalize: WorkUnitsParamsFinalize,
@@ -655,13 +667,15 @@ impl Phase<FinalizeState> {
             serialize_msg,
             state_update_min,
             state_update_accounts,
-            state_update_msg,
         } = wu_params_finalize;
 
-        let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;
-        let build = accounts_count
-            .saturating_mul(accounts_count_logarithm)
-            .saturating_mul(build_accounts as u64);
+        let old_accounts_count_logarithm =
+            ((old_accounts_count as f64).log2() * LOGARITHM_DELIMITER as f64) as u64;
+
+        let build = updated_accounts_count
+            .saturating_mul(build_accounts as u64)
+            .saturating_mul(old_accounts_count_logarithm)
+            .saturating_div(LOGARITHM_DELIMITER);
         let build_in_msg = in_msgs_len
             .saturating_mul(in_msgs_len.checked_ilog2().unwrap_or_default() as u64)
             .saturating_mul(build_in_msg as u64);
@@ -676,15 +690,15 @@ impl Phase<FinalizeState> {
 
         let merkle_calc = std::cmp::max(
             state_update_min as u64,
-            accounts_count
-                .saturating_mul(accounts_count_logarithm)
+            updated_accounts_count
                 .saturating_mul(state_update_accounts as u64)
-                .saturating_add(out_msgs_len.saturating_mul(state_update_msg as u64)),
+                .saturating_mul(old_accounts_count_logarithm)
+                .saturating_div(LOGARITHM_DELIMITER),
         );
 
         let serialize = std::cmp::max(
             serialize_min as u64,
-            accounts_count.saturating_mul(serialize_accounts as u64),
+            updated_accounts_count.saturating_mul(serialize_accounts as u64),
         )
         .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
 
@@ -937,7 +951,7 @@ impl Phase<FinalizeState> {
                 shard_accounts.set_any(
                     &updated_account.account_addr,
                     &DepthBalanceInfo {
-                        split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
+                        count: 1,
                         balance: updated_account.balance.clone(),
                     },
                     &updated_account.shard_account,
@@ -972,7 +986,7 @@ impl Phase<FinalizeState> {
             account_blocks.insert(updated_account.account_addr, account_block);
         }
 
-        let accounts_len = account_blocks.len();
+        let updated_accounts_count = account_blocks.len();
 
         // TODO: Somehow consume accounts inside an iterator
         let account_blocks = RelaxedAugDict::try_from_sorted_iter_any(
@@ -985,7 +999,7 @@ impl Phase<FinalizeState> {
             account_blocks: account_blocks.build()?,
             shard_accounts: shard_accounts.build()?,
             new_config_params,
-            accounts_len,
+            updated_accounts_count,
         })
     }
 
@@ -1227,7 +1241,7 @@ struct ProcessedAccounts {
     account_blocks: AccountBlocks,
     shard_accounts: ShardAccounts,
     new_config_params: Option<BlockchainConfigParams>,
-    accounts_len: usize,
+    updated_accounts_count: usize,
 }
 
 fn create_merkle_update(

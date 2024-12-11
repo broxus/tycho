@@ -324,10 +324,7 @@ impl ZerostateConfig {
 
                 accounts.set(
                     account,
-                    DepthBalanceInfo {
-                        balance,
-                        split_depth: 0,
-                    },
+                    DepthBalanceInfo { balance, count: 1 },
                     ShardAccount {
                         account: account_state_cell,
                         last_trans_hash: HashBytes::ZERO,
@@ -671,15 +668,14 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
             },
             finalize: WorkUnitsParamsFinalize {
                 build_transactions: 1_000,    // 1 mcs
-                build_accounts: 500,          // 0.5 mcs
+                build_accounts: 1200,         // 1.2 mcs
                 build_in_msg: 500,            // 0.5 mcs
                 build_out_msg: 500,           // 0.5 mcs
                 serialize_min: 15_000_000,    // 15 ms
                 serialize_accounts: 1_000,    // 1 mcs
                 serialize_msg: 2_000,         // 2 mcs
                 state_update_min: 15_000_000, // 15 ms
-                state_update_accounts: 500,   // 0.5 mcs
-                state_update_msg: 2_000,      // 2 mcs
+                state_update_accounts: 2200,  // 2.2 mcs
             },
         },
     })?;
