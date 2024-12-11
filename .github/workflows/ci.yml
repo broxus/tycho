@@ -52,6 +52,23 @@ jobs:
       - uses: extractions/setup-just@v2
       - name: Clippy check
         run: just lint
+  just_install:
+    name: just install works
+    needs: rustfmt
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: "clippy,rustfmt"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: extractions/setup-just@v2
+      - name: Clippy check
+        run: just install
 
   test:
     name: Test with codecov
