@@ -306,7 +306,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "lazy_static",
  "lazycell",
  "log",
@@ -1507,7 +1507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -4026,7 +4026,7 @@ dependencies = [
 [[package]]
 name = "weedb"
 version = "0.3.8"
-source = "git+https://github.com/broxus/weedb.git?branch=next-rocksdb#be76187ed31348144bdab3e113ad7de114d99ac6"
+source = "git+https://github.com/broxus/weedb.git?rev=be76187ed31348144bdab3e113ad7de114d99ac6#be76187ed31348144bdab3e113ad7de114d99ac6"
 dependencies = [
  "librocksdb-sys",
  "metrics",
