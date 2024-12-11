@@ -544,10 +544,15 @@ enum StoreStateError {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeSet;
+
     use bytesize::ByteSize;
     use everscale_types::models::ShardIdent;
+    use everscale_types::prelude::Dict;
+    use rand::prelude::SliceRandom;
+    use rand::{Rng, SeedableRng};
     use tycho_util::project_root;
-    use weedb::rocksdb::IteratorMode;
+    use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
     use crate::{Storage, StorageConfig};
@@ -643,6 +648,123 @@ mod test {
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
         Ok(())
+    }
+
+    use rand::rngs::StdRng;
+
+    #[tokio::test]
+    async fn rand_cells_storage() -> Result<()> {
+        tycho_util::test::init_logger("rand_cells_storage", "debug");
+
+        let (storage, _tempdir) = Storage::new_temp().await?;
+        let base_db = storage.base_db();
+        let cell_storage = &storage.shard_state_storage().cell_storage;
+
+        let mut rng = StdRng::seed_from_u64(1337);
+
+        let mut cell_keys = Vec::new();
+
+        const INITIAL_SIZE: usize = 100_000;
+
+        let mut keys: BTreeSet<HashBytes> =
+            (0..INITIAL_SIZE).map(|_| HashBytes(rng.gen())).collect();
+
+        let value = new_cell(4); // 4 is a random number, trust me
+
+        let keys_inner = keys.iter().map(|k| (*k, value.clone())).collect::<Vec<_>>();
+        let mut dict: Dict<HashBytes, Cell> = Dict::try_from_sorted_slice(&keys_inner)?;
+
+        // 2. Modification Loop
+
+        const MODIFY_COUNT: usize = INITIAL_SIZE / 50;
+
+        for i in 0..20 {
+            let keys_inner: Vec<_> = keys.iter().copied().collect();
+
+            let keys_to_remove: Vec<_> =
+                keys_inner.choose_multiple(&mut rng, MODIFY_COUNT).collect();
+
+            // Remove
+            for key in keys_to_remove {
+                dict.remove(key)?;
+                keys.remove(key);
+            }
+
+            let keys_inner: Vec<_> = keys.iter().copied().collect();
+            let keys_to_update = keys_inner
+                .choose_multiple(&mut rng, MODIFY_COUNT)
+                .collect::<Vec<_>>();
+
+            // Update
+            for key in keys_to_update {
+                let value = new_cell(rng.gen());
+                dict.set(key, value)?;
+            }
+
+            // Insert
+            for val in 0..MODIFY_COUNT {
+                let key = HashBytes(rng.gen());
+                let value = new_cell(val as u32);
+                keys.insert(key);
+                dict.set(key, value.clone())?;
+            }
+
+            // Store
+            let new_dict_cell = CellBuilder::build_from(dict.clone())?;
+
+            let cell_hash = new_dict_cell.repr_hash();
+            let mut batch = WriteBatch::new();
+            let traversed =
+                cell_storage.store_cell(&mut batch, new_dict_cell.as_ref(), MODIFY_COUNT * 3)?;
+
+            cell_keys.push(*cell_hash);
+
+            base_db
+                .rocksdb()
+                .write_opt(batch, base_db.cells.write_config())?;
+
+            tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
+        }
+
+        let mut bump = bumpalo::Bump::new();
+
+        tracing::info!("Starting GC");
+        let total = cell_keys.len();
+        for (id, key) in cell_keys.into_iter().enumerate() {
+            let cell = cell_storage.load_cell(key)?;
+
+            traverse_cell((cell as Arc<DynCell>).as_ref());
+
+            let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
+            base_db
+                .rocksdb()
+                .write_opt(batch, base_db.cells.write_config())?;
+            tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
+            bump.reset();
+        }
+
+        // two compactions in row. First one run merge operators, second one will remove all tombstones
+        base_db.trigger_compaction().await;
+        base_db.trigger_compaction().await;
+
+        let cells_left = base_db.cells.iterator(IteratorMode::Start).count();
+        tracing::info!("States GC finished. Cells left: {cells_left}");
+        assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+        Ok(())
+    }
+
+    fn traverse_cell(cell: &DynCell) {
+        for cell in cell.references() {
+            traverse_cell(cell);
+        }
+    }
+
+    fn new_cell(value: u32) -> Cell {
+        let mut cell = CellBuilder::new();
+        cell.store_u32(value).unwrap();
+        cell.store_u64(1).unwrap();
+        cell.store_reference(cell.clone().build().unwrap()).unwrap();
+        cell.build().unwrap()
     }
 
     fn parse_filename(name: &str) -> BlockId {

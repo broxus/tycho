@@ -306,7 +306,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "lazy_static",
  "lazycell",
  "log",
@@ -912,7 +912,7 @@ dependencies = [
  "serde",
  "sha2",
  "smallvec",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "typeid",
 ]
@@ -950,7 +950,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e182f7dbc2ef73d9ef67351c5fbbea084729c48362d3ce9dd44c28e32e277fe5"
 dependencies = [
  "libc",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -1103,7 +1103,7 @@ checksum = "df28aba11fa2e95570fae3b3ac8883ae8026f0374d043f24117cbb13e1c4c1ff"
 dependencies = [
  "futures-util",
  "hickory-client",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
 ]
 
@@ -1218,7 +1218,7 @@ dependencies = [
  "once_cell",
  "radix_trie",
  "rand",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
 ]
@@ -1240,7 +1240,7 @@ dependencies = [
  "ipnet",
  "once_cell",
  "rand",
- "thiserror",
+ "thiserror 1.0.66",
  "tinyvec",
  "tokio",
  "tracing",
@@ -1507,7 +1507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -1626,7 +1626,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "quanta",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
 ]
@@ -1700,7 +1700,7 @@ dependencies = [
  "rustc_version",
  "smallvec",
  "tagptr",
- "thiserror",
+ "thiserror 1.0.66",
  "triomphe",
  "uuid",
 ]
@@ -1898,7 +1898,7 @@ dependencies = [
  "js-sys",
  "once_cell",
  "pin-project-lite",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -1916,7 +1916,7 @@ dependencies = [
  "opentelemetry_api",
  "percent-encoding",
  "rand",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -1976,7 +1976,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879952a81a83930934cbf1786752d6dedc3b1f29e8f8fb2ad1d0a36f377cf442"
 dependencies = [
  "memchr",
- "thiserror",
+ "thiserror 1.0.66",
  "ucd-trie",
 ]
 
@@ -2234,7 +2234,7 @@ dependencies = [
  "rustc-hash 2.0.0",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
 ]
@@ -2251,7 +2251,7 @@ dependencies = [
  "rustc-hash 2.0.0",
  "rustls",
  "slab",
- "thiserror",
+ "thiserror 1.0.66",
  "tinyvec",
  "tracing",
 ]
@@ -2373,7 +2373,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
 dependencies = [
  "getrandom",
  "libredox",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -2916,7 +2916,7 @@ dependencies = [
  "serde",
  "static_assertions",
  "tarpc-plugins",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tokio-serde",
  "tokio-util",
@@ -2964,7 +2964,16 @@ version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d171f59dbaa811dbbb1aee1e73db92ec2b122911a48e1390dfe327a821ddede"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 1.0.66",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c006c85c7651b3cf2ada4584faa36773bd07bac24acfb39f3c431b36d7e667aa"
+dependencies = [
+ "thiserror-impl 2.0.3",
 ]
 
 [[package]]
@@ -2972,6 +2981,17 @@ name = "thiserror-impl"
 version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b08be0f17bd307950653ce45db00cd31200d82b624b36e181337d9c7d92765b5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.87",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f077553d607adc1caf65430528a576c757a71ed73944b66ebb58ef2bbd243568"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3095,7 +3115,7 @@ dependencies = [
  "digest",
  "sha2",
  "smallvec",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto-proc",
 ]
 
@@ -3122,7 +3142,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "rustc-hash 1.1.0",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -3213,7 +3233,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "everscale-types",
- "thiserror",
+ "thiserror 1.0.66",
  "ton_vm",
  "tracing",
 ]
@@ -3234,7 +3254,7 @@ dependencies = [
  "num-traits",
  "rand",
  "sha2",
- "thiserror",
+ "thiserror 1.0.66",
  "tracing",
 ]
 
@@ -3304,7 +3324,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3566e8ce28cc0a3fe42519fc80e6b4c943cc4c8cef275620eb8dac2d3d4e06cf"
 dependencies = [
  "crossbeam-channel",
- "thiserror",
+ "thiserror 1.0.66",
  "time",
  "tracing-subscriber",
 ]
@@ -3384,7 +3404,7 @@ dependencies = [
  "Inflector",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 1.0.66",
  "time",
  "tracing-core",
  "tracing-subscriber",
@@ -3448,7 +3468,7 @@ dependencies = [
  "everscale-types",
  "hex",
  "parking_lot",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "tycho-util",
 ]
@@ -3523,7 +3543,7 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "tokio",
  "tokio-util",
@@ -3565,7 +3585,7 @@ dependencies = [
  "rayon",
  "scopeguard",
  "serde",
- "thiserror",
+ "thiserror 1.0.66",
  "tikv-jemallocator",
  "tl-proto",
  "tokio",
@@ -3594,7 +3614,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "tarpc",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
  "tycho-block-util",
@@ -3624,7 +3644,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "tempfile",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "tokio",
  "tracing",
@@ -3695,7 +3715,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "tokio",
  "tokio-util",
@@ -3722,7 +3742,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tower",
  "tower-http",
@@ -3779,7 +3799,7 @@ dependencies = [
  "smallvec",
  "sysinfo",
  "tempfile",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "tokio",
  "tracing",
@@ -3812,7 +3832,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "tempfile",
- "thiserror",
+ "thiserror 1.0.66",
  "tl-proto",
  "tokio",
  "tracing",
@@ -4026,12 +4046,12 @@ dependencies = [
 [[package]]
 name = "weedb"
 version = "0.3.8"
-source = "git+https://github.com/broxus/weedb.git?branch=next-rocksdb#be76187ed31348144bdab3e113ad7de114d99ac6"
+source = "git+https://github.com/broxus/weedb.git?branch=next-rocksdb#a92ada225629bf1d1fe4434d8d6344e69f0bb586"
 dependencies = [
  "librocksdb-sys",
  "metrics",
  "rocksdb",
- "thiserror",
+ "thiserror 2.0.3",
  "tracing",
 ]
 
