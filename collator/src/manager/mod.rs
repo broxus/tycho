@@ -1335,6 +1335,8 @@ where
                     );
                 }
 
+                Self::reset_collation_sync_status(&mut self.collation_sync_state.lock());
+
                 // TODO: refactor this logic
                 // replace last collated block id with last applied
                 self.blocks_cache
@@ -1891,6 +1893,20 @@ where
                 .iter()
                 .any(|(_, forced)| *forced);
             collation_state.mc_collation_forced = mc_collation_forced;
+        }
+    }
+
+    /// Reset collation status from `WaitForMasterStatus` to `AttemptsInProgress` for every shard.
+    ///
+    /// Use this method before resuming collation after sync to avoid ambiguous situations.
+    /// If any shard has collation status `WaitForMasterStatus` and sync was executed,
+    /// when master collation check was finished first then it will enqueue one more resume for shard,
+    /// so we will have two parallel collations for shard that will cause panic futher.
+    fn reset_collation_sync_status(guard: &mut CollationSyncState) {
+        for (_, collation_state) in guard.states.iter_mut() {
+            if collation_state.status == CollationStatus::WaitForMasterStatus {
+                collation_state.status = CollationStatus::AttemptsInProgress;
+            }
         }
     }
 
