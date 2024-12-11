@@ -1324,6 +1324,11 @@ where
                     &mc_block_entry.top_shard_blocks_info,
                 )?;
 
+                // when we run sync by any reason we should drop uncommitted queue updates
+                // after restoring the required state
+                // to avoid panics if next block was already collated before an it is incorrect
+                self.mq_adapter.clear_session_state()?;
+
                 let state = mc_block_entry.cached_state()?;
 
                 // HACK: do not need to set master block latest chain time from zerostate when using mempool stub

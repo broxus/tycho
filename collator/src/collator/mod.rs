@@ -462,7 +462,7 @@ impl CollatorStdImpl {
                             ));
                         } else {
                             // last processed_to anchor in shard can be before last procssed in master
-                            // it is normal, so we should not cancel collation buy we unable to import init anchors
+                            // it is normal, so we should not cancel collation but we unable to import init anchors
                             false
                         }
                     } else {
