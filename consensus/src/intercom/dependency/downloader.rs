@@ -169,8 +169,7 @@ impl Downloader {
             request: Dispatcher::point_by_id_request(*point_id),
             point_id: *point_id,
             peer_count,
-            reliably_not_found: 0, // this node is +1 to 2F
-            unreliable_peers: 0,   // should not reach 1F+1
+            not_found: 0, // this node is +1 to 2F
             updates,
             undone_peers,
             downloading: FuturesUnordered::new(),
@@ -186,6 +185,13 @@ impl Downloader {
 
         DownloadCtx::meter_task::<T>(&task);
 
+        if downloaded.is_none() {
+            tracing::warn!(
+                parent: ctx.span(),
+                "not downloaded",
+            );
+        }
+
         downloaded
     }
 }
@@ -198,8 +204,7 @@ struct DownloadTask<T> {
     point_id: PointId,
 
     peer_count: PeerCount,
-    reliably_not_found: u8, // count only responses considered reliable
-    unreliable_peers: u8,   // count only responses considered unreliable
+    not_found: u8, // count only responses considered reliable
 
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
@@ -239,10 +244,11 @@ impl<T: DownloadType> DownloadTask<T> {
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
                         Some(found) => break Some(found),
-                        None => if self.shall_continue() {
-                            continue
-                        } else {
+                        None => if self.not_found as usize >= self.peer_count.majority_of_others() {
                             break None;
+                        } else if self.downloading.is_empty() {
+                            self.interval.reset(); // start new interval at current moment
+                            self.download_random();
                         }
                     },
                 // most rare arm to make progress despite slow responding peers
@@ -359,23 +365,18 @@ impl<T: DownloadType> DownloadTask<T> {
 
         match defined_response {
             None => {
-                if status.is_depender {
-                    // if points are persisted in storage - it's a ban;
-                    // else - peer evicted this point from its cache, as the point
-                    // is at least DAG_ROUNDS older than current consensus round
-                    self.unreliable_peers = self.unreliable_peers.saturating_add(1);
-                    DownloadCtx::meter_unreliable();
-                    tracing::warn!(peer = display(peer_id.alt()), "must have returned");
-                } else {
-                    self.reliably_not_found = self.reliably_not_found.saturating_add(1);
-                    metrics::counter!("tycho_mempool_download_not_found_responses").increment(1);
-                    tracing::trace!(peer = display(peer_id.alt()), "didn't return");
-                }
+                self.not_found = self.not_found.saturating_add(1);
+                DownloadCtx::meter_not_found();
+                tracing::debug!(
+                    peer = display(peer_id.alt()),
+                    is_depender = Some(status.is_depender).filter(|x| *x),
+                    "didn't return"
+                );
                 None
             }
             Some(point) if point.id() != self.point_id => {
                 // it's a ban
-                self.unreliable_peers = self.unreliable_peers.saturating_add(1);
+                self.not_found = self.not_found.saturating_add(1);
                 DownloadCtx::meter_unreliable();
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
@@ -391,7 +392,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(error @ VerifyError::BadSig) => {
                         // reliable peer won't return unverifiable point
-                        self.unreliable_peers = self.unreliable_peers.saturating_add(1);
+                        self.not_found = self.not_found.saturating_add(1);
                         DownloadCtx::meter_unreliable();
                         tracing::error!(
                             result = display(error),
@@ -428,23 +429,6 @@ impl<T: DownloadType> DownloadTask<T> {
         }
     }
 
-    fn shall_continue(&mut self) -> bool {
-        if self.reliably_not_found as usize >= self.peer_count.majority_of_others() {
-            // the only normal case to resolve into `NotFound`
-            tracing::warn!(
-                unreliable = self.unreliable_peers,
-                "not downloaded from majority",
-            );
-            false
-        } else {
-            if self.downloading.is_empty() {
-                self.interval.reset(); // start new interval at current moment
-                self.download_random();
-            }
-            true
-        }
-    }
-
     fn match_peer_updates(
         &mut self,
         result: Result<(PeerId, PeerState), RecvError>,
@@ -470,6 +454,11 @@ impl<T: DownloadType> DownloadTask<T> {
 impl DownloadCtx {
     fn meter_unreliable() {
         metrics::counter!("tycho_mempool_download_unreliable_responses").increment(1);
+        Self::meter_not_found();
+    }
+
+    fn meter_not_found() {
+        metrics::counter!("tycho_mempool_download_not_found_responses").increment(1);
     }
 
     fn meter_task<T>(task: &DownloadTask<T>) {
