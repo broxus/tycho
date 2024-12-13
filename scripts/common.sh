@@ -36,9 +36,20 @@ function set_clang_env {
         local cc_path=$(command -v "clang-$clang_version" 2>&1 || true)
         local cxx_path=$(command -v "clang++-$clang_version" 2>&1 || true)
 
-        if [ ! -z "$cc_path" ] && [ ! -z "$cxx_path" ]; then
+        local lld_bin=""
+        if command -v "ld.lld-$clang_version" 2>&1 >/dev/null; then
+            lld_bin="lld-$clang_version"
+        elif command -v "ld.lld" 2>&1 >/dev/null; then
+            local lld_version=$(ld.lld -V | awk '{print $2}' | cut -d '.' -f 1)
+            if [ "$lld_version" == "$clang_version" ]; then
+                lld_bin="lld"
+            fi
+        fi
+
+        if [ ! -z "$cc_path" ] && [ ! -z "$cxx_path" ] && [ ! -z "$lld_bin" ]; then
             export CC="$cc_path"
             export CXX="$cxx_path"
+            export LD="$lld_bin"
             return 0
         else
             prev_version="$clang_version"

@@ -14,7 +14,7 @@ else
     profile="${TYCHO_BUILD_PROFILE}"
 fi
 
-set_clang_env 19 18
+set_clang_env 19
 cargo build --bin tycho $profile_arg
 
 echo "${root_dir}/target/${profile}/tycho"

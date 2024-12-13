@@ -21,18 +21,13 @@ EOF
 fi
 
 features=""
-if set_clang_env 19 18; then
-  if ! command -v cargo 2>&1 >/dev/null; then
-    echo "ERROR: \`lld\` could not be found."
-    exit 1
-  fi
-
-  features="--features lto"
+if set_clang_env 19; then
+  features="$features --features lto"
   echo "INFO: Building node with lto"
-  export RUSTFLAGS="-Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=lld"
+  export RUSTFLAGS="-Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=$LD"
 fi
 
-cargo install --path ./cli --locked $features
+cargo install $features --path ./cli --locked
 
 cat << EOF
 Node installed successfully. Run the following to configure it:
