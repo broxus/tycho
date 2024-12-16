@@ -129,7 +129,7 @@ impl RoundTaskReady {
 
         // must stay lazy: not started until polled
         async move {
-            let mut threshold = Box::pin(head.prev().threshold().reached());
+            let mut threshold = head.prev().threshold().reached();
             let is_in_time = loop {
                 tokio::select!(
                     () = &mut threshold => {
