@@ -1507,7 +1507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -3220,7 +3220,7 @@ dependencies = [
 [[package]]
 name = "ton_vm"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-vm.git?branch=new_cells#e66fd5ff9f27e7d6b494cea015ee39aed6756ee9"
+source = "git+https://github.com/broxus/ton-labs-vm.git?branch=new_cells#b279cccd93caf4f1edc843a81c8ba2d205632ec4"
 dependencies = [
  "ahash",
  "anyhow",

@@ -121,7 +121,7 @@ zstd-sys = "2.0"
 
 # TODO: RIIR
 ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = "bc09b6072def8e91d1844b834967c90840b778c1" }
-ton_vm = { git = "https://github.com/broxus/ton-labs-vm.git", rev = "013e1dbe1bfb1237c51617f8c6c5a20a086f7d6a" }
+ton_vm = { git = "https://github.com/broxus/ton-labs-vm.git", rev = "b279cccd93caf4f1edc843a81c8ba2d205632ec4" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.1.4" }
