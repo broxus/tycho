@@ -33,8 +33,6 @@ impl Collector {
         collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Self {
-        let span_guard = ctx.span().clone().entered();
-
         let mut task = CollectorTask {
             consensus_round: self.consensus_round,
             ctx,
@@ -44,8 +42,6 @@ impl Collector {
             collector_signal,
             is_bcaster_ready_ok: false,
         };
-
-        drop(span_guard);
 
         task.run(bcaster_signal).await;
 
@@ -77,8 +73,7 @@ impl CollectorTask {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             CachedConfig::get().consensus.broadcast_retry_millis as _,
         ));
-        let current_dag_round = self.current_dag_round.clone();
-        let mut threshold = std::pin::pin!(current_dag_round.threshold().reached());
+        let mut threshold = self.current_dag_round.threshold().reached();
 
         loop {
             tokio::select! {
