@@ -71,9 +71,10 @@ impl InclusionState {
         let mut log_level = tracing::Level::DEBUG;
         if is_first {
             ValidateCtx::first_resolved(resolved);
-            if resolved.trusted().is_some() || resolved.certified().is_some() {
+            // FIXME certified is a flavor of valid, as verified by signature chain
+            if let Some(valid) = resolved.valid() {
                 if let Some(dag_round) = self.0.parent.upgrade() {
-                    dag_round.threshold().add();
+                    dag_round.threshold().add(valid);
                 }
             } else {
                 log_level = log_level.max(tracing::Level::WARN);

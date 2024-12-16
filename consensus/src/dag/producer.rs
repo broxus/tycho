@@ -44,7 +44,7 @@ impl Producer {
             _ => None,
         };
         let local_id = PeerId::from(key_pair.public_key);
-        let includes = Self::includes(finished_round, key_pair);
+        let includes = Self::includes(finished_round);
         let mut anchor_trigger = Self::link_from_includes(
             &local_id,
             current_round,
@@ -124,9 +124,8 @@ impl Producer {
         ))
     }
 
-    fn includes(finished_dag_round: &DagRound, key_pair: &KeyPair) -> Vec<PointInfo> {
-        let round = finished_dag_round.round();
-        let includes = Self::references(round, finished_dag_round, Some(key_pair), true);
+    fn includes(finished_dag_round: &DagRound) -> Vec<PointInfo> {
+        let includes = finished_dag_round.threshold().get();
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
             "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
