@@ -27,7 +27,6 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
-scc = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
@@ -65,3 +64,6 @@ block-creator-stats = []
 
 [lints]
 workspace = true
+
+[profile.test]
+incremental = true
