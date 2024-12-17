@@ -84,7 +84,7 @@ impl ArchiveBlockProvider {
                 .checked_get_entry_by_id(&info.archive, block_id, block_id)
                 .await
             {
-                Ok(block) => return Some(Ok(block.clone())),
+                Ok(block) => return block.map(Ok),
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, "invalid archive entry: {e}");
                     this.remove_archive_if_same(archive_key, &info);
@@ -113,7 +113,7 @@ impl ArchiveBlockProvider {
                 .checked_get_entry_by_id(&info.archive, &mc_block_id, &block_id)
                 .await
             {
-                Ok(block) => return Some(Ok(block.clone())),
+                Ok(block) => return Some(Ok(block.unwrap())),
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, %mc_block_id, "invalid archive entry: {e}");
                     this.remove_archive_if_same(archive_key, &info);
@@ -128,11 +128,17 @@ impl ArchiveBlockProvider {
         archive: &Archive,
         mc_block_id: &BlockId,
         block_id: &BlockId,
-    ) -> Result<BlockStuffAug> {
+    ) -> Result<Option<BlockStuffAug>> {
         let (block, ref proof, ref queue_diff) = match archive.get_entry_by_id(block_id) {
             Ok(entry) => entry,
             Err(e) => anyhow::bail!("archive is corrupted: {e:?}"),
         };
+
+        if block_id.is_masterchain()
+            && block.data.load_info().unwrap().gen_utime >= tycho_util::time::now_sec() - 600
+        {
+            return Ok(None);
+        }
 
         self.inner
             .proof_checker
@@ -145,7 +151,7 @@ impl ArchiveBlockProvider {
             })
             .await?;
 
-        Ok(block)
+        Ok(Some(block))
     }
 }
 
