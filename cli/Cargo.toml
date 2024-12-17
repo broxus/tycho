@@ -39,6 +39,8 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
 tempfile = { workspace = true }
+tokio-metrics = { workspace = true, optional = true }
+metrics-util = { workspace = true, optional = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
@@ -73,6 +75,7 @@ rustc_version = { workspace = true }
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:metrics"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
+tokio-metrics = ["dep:tokio-metrics", "dep:metrics-util"]
 debug = ["tycho-consensus/test"]
 lto = ["weedb/lto"]
 
