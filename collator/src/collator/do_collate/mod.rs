@@ -269,7 +269,7 @@ impl CollatorStdImpl {
 
             execute_phase.run()?;
 
-            histogram.finish();
+            histogram.finish()
         };
 
         // execute tock transaction

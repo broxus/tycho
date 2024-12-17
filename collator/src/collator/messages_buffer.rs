@@ -97,8 +97,8 @@ impl MessagesBufferV2 {
     pub fn fill_message_group<F>(
         &mut self,
         msg_group: &mut MessageGroupV2,
-        group_limit: usize,
-        group_vert_size: usize,
+        slots_count: usize,
+        slot_vert_size: usize,
         unused_buffer_accounts: Option<FastIndexSet<HashBytes>>,
         check_skip_account: F,
     ) -> FastIndexSet<HashBytes>
@@ -117,7 +117,7 @@ impl MessagesBufferV2 {
 
         // 1. try to fill remaning slots with messages of accounts which are not included in any slot
         let mut new_used_slots = FastHashSet::<SlotId>::default();
-        let mut remaning_slots_count = group_limit.saturating_sub(slots_info.slots.len());
+        let mut remaning_slots_count = slots_count.saturating_sub(slots_info.slots.len());
         if remaning_slots_count > 0 {
             // define next empty slot
             let last_slot_id = slots_info
@@ -133,7 +133,7 @@ impl MessagesBufferV2 {
                 // get slot
                 let slot = slots_info.slots.entry(slot_id).or_default();
                 let mut slot_cx = SlotContext {
-                    remaning_capacity: group_vert_size - slot.msgs_count(),
+                    remaning_capacity: slot_vert_size - slot.msgs_count(),
                     old_int_count: slot.int_count,
                     old_ext_count: slot.ext_count,
                     slot,
@@ -201,7 +201,7 @@ impl MessagesBufferV2 {
         // 2. try to fill all slots up to limit
         // including slots which were not fully filled
         // in message group before the previous step
-        for (_, slot_ids) in slots_info.index_by_msgs_count.range(..group_vert_size) {
+        for (_, slot_ids) in slots_info.index_by_msgs_count.range(..slot_vert_size) {
             for slot_id in slot_ids {
                 // skip slot that was used in the previous step
                 // we already looked up thru whole buffer to fill them
@@ -216,7 +216,7 @@ impl MessagesBufferV2 {
                     .expect("slot should exist because it is present in the index");
 
                 let mut slot_cx = SlotContext {
-                    remaning_capacity: group_vert_size - slot.msgs_count(),
+                    remaning_capacity: slot_vert_size - slot.msgs_count(),
                     old_int_count: slot.int_count,
                     old_ext_count: slot.ext_count,
                     slot,
