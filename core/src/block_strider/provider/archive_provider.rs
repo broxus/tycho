@@ -80,7 +80,10 @@ impl ArchiveBlockProvider {
                 continue;
             };
 
-            match self.checked_get_entry_by_id(&info.archive, block_id).await {
+            match self
+                .checked_get_entry_by_id(&info.archive, block_id, block_id)
+                .await
+            {
                 Ok(block) => return Some(Ok(block.clone())),
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, "invalid archive entry: {e}");
@@ -106,7 +109,10 @@ impl ArchiveBlockProvider {
                 continue;
             };
 
-            match self.checked_get_entry_by_id(&info.archive, &block_id).await {
+            match self
+                .checked_get_entry_by_id(&info.archive, &mc_block_id, &block_id)
+                .await
+            {
                 Ok(block) => return Some(Ok(block.clone())),
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, %mc_block_id, "invalid archive entry: {e}");
@@ -120,6 +126,7 @@ impl ArchiveBlockProvider {
     async fn checked_get_entry_by_id(
         &self,
         archive: &Archive,
+        mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<BlockStuffAug> {
         let (block, ref proof, ref queue_diff) = match archive.get_entry_by_id(block_id) {
@@ -130,7 +137,7 @@ impl ArchiveBlockProvider {
         self.inner
             .proof_checker
             .check_proof(CheckProof {
-                mc_block_id: block_id,
+                mc_block_id,
                 block: &block,
                 proof,
                 queue_diff,
