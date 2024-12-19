@@ -186,9 +186,9 @@ impl MempoolAdapterStdImpl {
                 MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                     cache.reset();
                     parser = Parser::new(config.deduplicate_rounds);
-                    store.report_new_start(anchors_full_bottom);
                     let first_to_execute =
                         (anchors_full_bottom.0).saturating_add(config.deduplicate_rounds as u32);
+                    store.report_new_start(first_to_execute);
                     first_after_gap = Some(first_to_execute);
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
