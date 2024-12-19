@@ -8,7 +8,7 @@ use everscale_types::prelude::*;
 use tl_proto::TlRead;
 
 use crate::archive::WithArchiveData;
-use crate::queue::proto::{QueueDiff, QueueKey};
+use crate::queue::proto::{QueueDiff, QueueKey, QueuePartition};
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 
@@ -104,6 +104,7 @@ impl QueueDiffStuff {
                     min_message: QueueKey::MIN,
                     max_message: QueueKey::MIN,
                     messages: Vec::new(),
+                    partition_router: Default::default(),
                 },
             }),
         }
@@ -136,6 +137,7 @@ impl QueueDiffStuff {
                     min_message: Default::default(),
                     max_message: Default::default(),
                     messages: Default::default(),
+                    partition_router: Default::default(),
                 },
             }),
         }
@@ -369,6 +371,7 @@ mod tests {
                         hash: message_hashes[9],
                     },
                     messages: message_hashes.clone(),
+                    partition_router: Default::default(),
                 },
             }),
         };

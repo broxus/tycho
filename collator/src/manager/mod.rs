@@ -27,7 +27,7 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
 };
-use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
+use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, QueueDiffWithMessages};
 use crate::manager::types::BlockCacheStoreResult;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
@@ -472,11 +472,14 @@ where
 
         let queue_diff_with_msgs =
             QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
+
+        let statistics = (queue_diff_with_msgs.clone(), queue_diff.block_id().shard).into();
+
         mq_adapter.apply_diff(
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
-            queue_diff.diff().max_message,
+            statistics,
         )
     }
 
@@ -1191,8 +1194,9 @@ where
             .await?;
 
         // calc internals processed upto
-        let mut min_processed_to_by_shards = BTreeMap::default();
+        let mut min_processed_to_by_shards = ProcessedTo::default();
 
+        // find min processed to by shards for trim tail
         for min_processed_upto in processed_to_by_shards.values() {
             for (shard_id, to_key) in min_processed_upto {
                 min_processed_to_by_shards
@@ -1207,7 +1211,7 @@ where
         }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
+            ?min_processed_to_by_shards,
         );
 
         // find first applied mc block and tail shard blocks and get previous

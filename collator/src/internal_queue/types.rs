@@ -5,8 +5,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
-use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr};
-use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
+use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
+use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartition};
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::state::state_iterator::MessageExt;
 use crate::types::ProcessedTo;
@@ -15,6 +16,7 @@ use crate::types::ProcessedTo;
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
     pub processed_to: ProcessedTo,
+    pub partition_router: FastHashMap<IntAddr, QueuePartition>,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -22,6 +24,7 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
         Self {
             messages: BTreeMap::new(),
             processed_to: BTreeMap::new(),
+            partition_router: Default::default(),
         }
     }
 }
@@ -32,7 +35,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
         let QueueDiff { processed_to, .. } = queue_diff_stuff.as_ref();
-        let processed_to = processed_to
+        let processed_to: BTreeMap<ShardIdent, QueueKey> = processed_to
             .iter()
             .map(|(shard_ident, key)| (*shard_ident, *key))
             .collect();
@@ -53,6 +56,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         Ok(Self {
             messages,
             processed_to,
+            partition_router: Default::default(),
         })
     }
 }
@@ -170,5 +174,127 @@ impl InternalMessageValue for EnqueuedMessage {
 
     fn key(&self) -> QueueKey {
         self.key()
+    }
+}
+
+pub struct PartitionQueueKey {
+    pub partition: QueuePartition,
+    pub key: QueueKey,
+}
+#[derive(Debug, Clone)]
+pub struct QueueShardRange {
+    pub shard_ident: ShardIdent,
+    pub from: QueueKey,
+    pub to: QueueKey,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueRange {
+    pub partition: QueuePartition,
+    pub shard_ident: ShardIdent,
+    pub from: QueueKey,
+    pub to: QueueKey,
+}
+
+pub struct QueueStatistics {
+    statistics: FastHashMap<IntAddr, u64>,
+}
+
+impl QueueStatistics {
+    pub fn new() -> Self {
+        Self {
+            statistics: Default::default(),
+        }
+    }
+    pub fn new_with_statistics(statistics: FastHashMap<IntAddr, u64>) -> Self {
+        Self { statistics }
+    }
+
+    pub fn show(&self) -> FastHashMap<IntAddr, u64> {
+        self.statistics.clone()
+    }
+
+    pub fn append(&mut self, other: &Self) {
+        for (key, value) in other.statistics.iter() {
+            *self.statistics.entry(key.clone()).or_insert(0) += *value;
+        }
+    }
+
+    pub fn apply_diff_statistics(&mut self, diff_statistics: DiffStatistics) {
+        let diff_statistics = diff_statistics.inner.statistics.clone();
+        for (_, values) in diff_statistics.iter() {
+            for value in values.iter() {
+                *self.statistics.entry(value.0.clone()).or_insert(0) += *value.1;
+            }
+        }
+    }
+}
+
+pub struct DiffStatistics {
+    inner: Arc<DiffStatisticsInner>,
+}
+
+impl DiffStatistics {
+    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartition, &FastHashMap<IntAddr, u64>)> {
+        self.inner.statistics.iter()
+    }
+
+    pub fn shard_ident(&self) -> &ShardIdent {
+        &self.inner.shard_ident
+    }
+
+    pub fn min_message(&self) -> &QueueKey {
+        &self.inner.min_message
+    }
+
+    pub fn max_message(&self) -> &QueueKey {
+        &self.inner.max_message
+    }
+}
+
+struct DiffStatisticsInner {
+    shard_ident: ShardIdent,
+    min_message: QueueKey,
+    max_message: QueueKey,
+    statistics: FastHashMap<QueuePartition, FastHashMap<IntAddr, u64>>,
+}
+
+impl<V: InternalMessageValue> From<(QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
+    fn from(value: (QueueDiffWithMessages<V>, ShardIdent)) -> Self {
+        let (diff, shard_ident) = value;
+        let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
+        let max_message = diff
+            .messages
+            .keys()
+            .next_back()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut statistics = FastHashMap::default();
+
+        for (_, message) in diff.messages {
+            let destination = message.destination();
+
+            let partition = diff
+                .partition_router
+                .get(&destination)
+                .unwrap_or(&QueuePartition::default())
+                .clone();
+
+            *statistics
+                .entry(partition)
+                .or_insert(FastHashMap::default())
+                .entry(destination.clone())
+                .or_insert(0) += 1;
+        }
+
+        Self {
+            inner: Arc::new(DiffStatisticsInner {
+                shard_ident,
+                min_message,
+                max_message,
+                statistics,
+            }),
+        }
     }
 }

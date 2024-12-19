@@ -509,6 +509,8 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for Display
     }
 }
 
+pub(super) struct DisplayNestedMap<'a, OK, IK, V>(pub &'a BTreeMap<OK, BTreeMap<IK, V>>);
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct ShardDescriptionShort {
     pub ext_processed_to_anchor_id: u32,
