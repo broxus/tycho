@@ -4,13 +4,12 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
-use tycho_util::FastHashMap;
 
 use super::super::messages_buffer::{MessagesBufferLimits, MessagesBufferV2};
 use super::super::types::{Dequeued, ParsedMessage};
 use super::{InternalsRangeReaderState, PartitionReaderState, ShardReaderState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
@@ -495,18 +494,22 @@ impl InternalsRangeReader {
     fn init(&mut self) -> Result<()> {
         // do not init iterator if range is fully read
         if !self.fully_read {
-            let mut ranges_from = FastHashMap::default();
-            let mut ranges_to = FastHashMap::default();
+            let mut ranges = vec![];
 
             for (shard_id, shard_reader_state) in &self.reader_state.shards {
                 let shard_range_to = QueueKey::max_for_lt(shard_reader_state.to);
-                ranges_from.insert(*shard_id, shard_reader_state.current_position);
-                ranges_to.insert(*shard_id, shard_range_to);
+                ranges.push(QueueShardRange {
+                    shard_ident: *shard_id,
+                    from: shard_reader_state.current_position,
+                    to: shard_range_to,
+                });
             }
 
-            let iterator =
-                self.mq_adapter
-                    .create_iterator(self.for_shard_id, ranges_from, ranges_to)?;
+            let iterator = self.mq_adapter.create_iterator(
+                self.for_shard_id,
+                self.partition_id.into(),
+                ranges,
+            )?;
 
             self.iterator_opt = Some(iterator);
         }

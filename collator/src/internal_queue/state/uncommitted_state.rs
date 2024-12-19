@@ -1,19 +1,25 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::Result;
-use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::QueueKey;
+use everscale_types::cell::{Cell, CellBuilder, CellFamily, Store};
+use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::prelude::Boc;
+use serde::Serialize;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_storage::model::StatKey;
 use tycho_storage::Storage;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::OwnedSnapshot;
 
 use crate::internal_queue::state::state_iterator::{
     ShardIteratorWithRange, StateIterator, StateIteratorImpl,
 };
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::{
+    DiffStatistics, InternalMessageValue, QueueRange, QueueShardRange, QueueStatistics,
+};
 
 // CONFIG
 
@@ -64,18 +70,31 @@ pub trait UncommittedStateFactory<V: InternalMessageValue> {
 
 #[trait_variant::make(UncommittedState: Send)]
 pub trait LocalUncommittedState<V: InternalMessageValue> {
-    fn add_messages(&self, source: ShardIdent, messages: &BTreeMap<QueueKey, Arc<V>>)
-        -> Result<()>;
+    fn add_messages_with_statistics(
+        &self,
+        source: ShardIdent,
+        partition_router: &FastHashMap<IntAddr, QueuePartition>,
+        messages: &BTreeMap<QueueKey, Arc<V>>,
+        statistics: DiffStatistics,
+    ) -> Result<()>;
 
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
-    ) -> Box<dyn StateIterator<V>>;
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
+    ) -> Result<Box<dyn StateIterator<V>>>;
 
     fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, QueueKey>) -> Result<()>;
     fn truncate(&self) -> Result<()>;
+    fn load_statistics(
+        &self,
+        result: &mut FastHashMap<IntAddr, u64>,
+        snapshot: &OwnedSnapshot,
+        partition: QueuePartition,
+        ranges: &Vec<QueueShardRange>,
+    ) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -91,30 +110,19 @@ impl UncommittedStateStdImpl {
 }
 
 impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
-    /// write new messages to storage
-    fn add_messages(
+    fn add_messages_with_statistics(
         &self,
         source: ShardIdent,
+        partition_router: &FastHashMap<IntAddr, QueuePartition>,
         messages: &BTreeMap<QueueKey, Arc<V>>,
+        statistics: DiffStatistics,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
 
-        for (internal_message_key, message) in messages.iter() {
-            self.storage
-                .internal_queue_storage()
-                .insert_message_uncommitted(
-                    &mut batch,
-                    tycho_storage::model::ShardsInternalMessagesKey::new(
-                        source,
-                        *internal_message_key,
-                    ),
-                    message.destination(),
-                    &message.serialize()?,
-                )?;
-        }
+        self.add_messages(&mut batch, source, partition_router, messages)?;
+        self.add_statistics(&mut batch, statistics)?;
 
         self.storage.internal_queue_storage().write_batch(batch)?;
-
         Ok(())
     }
 
@@ -122,30 +130,132 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
-    ) -> Box<dyn StateIterator<V>> {
-        let mut shard_iters_with_ranges = FastHashMap::with_capacity(ranges.len());
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
+    ) -> Result<Box<dyn StateIterator<V>>> {
+        let mut shard_iters_with_ranges = Vec::new();
 
-        for (&shard, (start, end)) in ranges {
+        for range in ranges {
             let iter = self
                 .storage
                 .internal_queue_storage()
                 .build_iterator_uncommitted(snapshot);
 
-            shard_iters_with_ranges.insert(shard, ShardIteratorWithRange::new(iter, *start, *end));
+            shard_iters_with_ranges.push((iter, range));
         }
 
-        Box::new(StateIteratorImpl::new(shard_iters_with_ranges, receiver))
+        let iterator = StateIteratorImpl::new(partition, shard_iters_with_ranges, receiver)?;
+        Ok(Box::new(iterator))
     }
 
     fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, QueueKey>) -> Result<()> {
+        #[cfg(FALSE)]
         let ranges = ranges.iter().map(|(shard, key)| (*shard, *key)).collect();
-        self.storage.internal_queue_storage().commit(ranges)
+        #[cfg(FALSE)]
+        self.storage.internal_queue_storage().commit(ranges);
+        Ok(())
     }
 
     fn truncate(&self) -> Result<()> {
         self.storage
             .internal_queue_storage()
             .clear_uncommitted_queue()
+    }
+
+    fn load_statistics(
+        &self,
+        result: &mut FastHashMap<IntAddr, u64>,
+        snapshot: &OwnedSnapshot,
+        partition: QueuePartition,
+        ranges: &Vec<QueueShardRange>,
+    ) -> Result<()> {
+        for range in ranges {
+            self.storage
+                .internal_queue_storage()
+                .collect_uncommited_stats_in_range(
+                    &snapshot,
+                    range.shard_ident,
+                    partition,
+                    range.from,
+                    range.to,
+                    result,
+                )?;
+        }
+
+        Ok(())
+    }
+}
+
+impl UncommittedStateStdImpl {
+    /// write new messages to storage
+    fn add_messages<V: InternalMessageValue>(
+        &self,
+        batch: &mut WriteBatch,
+        source: ShardIdent,
+        partition_router: &FastHashMap<IntAddr, QueuePartition>,
+        messages: &BTreeMap<QueueKey, Arc<V>>,
+    ) -> Result<()> {
+        for (internal_message_key, message) in messages {
+            let destination = message.destination();
+
+            let partition = partition_router
+                .get(&destination)
+                .unwrap_or(&QueuePartition::default())
+                .clone();
+
+            self.storage
+                .internal_queue_storage()
+                .insert_message_uncommitted(
+                    batch,
+                    tycho_storage::model::ShardsInternalMessagesKey::new(
+                        partition,
+                        source.clone(),
+                        *internal_message_key,
+                    ),
+                    destination,
+                    &message.serialize()?,
+                )?;
+        }
+
+        Ok(())
+    }
+
+    fn add_statistics(
+        &self,
+        batch: &mut WriteBatch,
+        diff_statistics: DiffStatistics,
+    ) -> Result<()> {
+        let shard_ident = diff_statistics.shard_ident();
+        let min_message = diff_statistics.min_message();
+        let max_message = diff_statistics.max_message();
+
+        for (index, (partition, values)) in diff_statistics.iter().enumerate() {
+            let cx = &mut Cell::empty_context();
+
+            for value in values {
+                let mut key_builder = CellBuilder::new();
+
+                let (addr, count) = value;
+
+                addr.store_into(&mut key_builder, cx)?;
+                let dest = key_builder.build()?;
+
+                let dest = Boc::encode(dest);
+
+                let key = StatKey {
+                    shard_ident: *shard_ident,
+                    partition: partition.clone(),
+                    min_message: min_message.clone(),
+                    max_message: max_message.clone(),
+                    index: index as u64,
+                };
+
+                self.storage
+                    .internal_queue_storage()
+                    .insert_destination_stat_uncommitted(batch, &key, &dest, *count)?;
+            }
+        }
+
+        Ok(())
     }
 }
