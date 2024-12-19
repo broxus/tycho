@@ -9,7 +9,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
-use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
+use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey, QueuePartition};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -176,7 +176,7 @@ impl std::fmt::Display for InternalsProcessedUptoStuff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "processed_to: {}, read_to: {}",
+            "processed_to: {:?}, read_to: {:?}",
             self.processed_to_msg, self.read_to_msg
         )
     }
@@ -298,7 +298,7 @@ pub struct BlockCandidate {
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub consensus_info: ConsensusInfo,
-    pub processed_to: FastHashMap<ShardIdent, QueueKey>,
+    pub processed_to: ProcessedTo,
 }
 
 #[derive(Default, Clone)]
@@ -624,6 +624,8 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for Display
         write!(f, "({}, {})", self.0 .0, self.0 .1)
     }
 }
+
+pub(super) struct DisplayNestedMap<'a, OK, IK, V>(pub &'a BTreeMap<OK, BTreeMap<IK, V>>);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct ShardDescriptionShort {

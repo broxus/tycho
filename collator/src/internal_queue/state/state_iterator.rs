@@ -1,16 +1,17 @@
 use std::cmp::{Ordering, Reverse};
+use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::{InternalMessageValue, QueueRange, QueueShardRange};
 
 pub struct ShardIteratorWithRange {
     pub iter: OwnedIterator,
@@ -76,41 +77,52 @@ pub struct StateIteratorImpl<V: InternalMessageValue> {
     message_queue: BinaryHeap<Reverse<MessageExt<V>>>,
     in_queue: HashSet<ShardIdent>,
     current_position: FastHashMap<ShardIdent, QueueKey>,
-    shards_to_remove: Vec<ShardIdent>,
+    iters_to_remove: Vec<ShardIdent>,
+    partition: QueuePartition,
 }
 
 impl<V: InternalMessageValue> StateIteratorImpl<V> {
     pub fn new(
-        shard_iters_with_ranges: FastHashMap<ShardIdent, ShardIteratorWithRange>,
+        partition: QueuePartition,
+        shard_iters_with_ranges: Vec<(OwnedIterator, QueueShardRange)>,
         receiver: ShardIdent,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut iters = FastHashMap::with_capacity(shard_iters_with_ranges.len());
 
-        for (shard_ident, shard_iter_with_range) in shard_iters_with_ranges {
-            let shard_iterator = ShardIterator::new(
+        for (iter, range) in shard_iters_with_ranges {
+            let QueueShardRange {
                 shard_ident,
-                shard_iter_with_range.range_start,
-                shard_iter_with_range.range_end,
-                receiver,
-                shard_iter_with_range.iter,
-            );
+                from,
+                to,
+            } = range;
 
-            iters.insert(shard_ident, shard_iterator);
+            let shard_iterator =
+                ShardIterator::new(partition, shard_ident, from, to, receiver, iter);
+
+            match iters.entry(shard_ident) {
+                Entry::Occupied(_) => {
+                    bail!("Iterator already exists for shard {:?}", shard_ident);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(shard_iterator);
+                }
+            }
         }
 
-        Self {
+        Ok(Self {
             iters,
+            partition,
             message_queue: BinaryHeap::new(),
             in_queue: HashSet::new(),
             current_position: Default::default(),
-            shards_to_remove: Vec::new(),
-        }
+            iters_to_remove: Vec::new(),
+        })
     }
 
     fn refill_queue(&mut self) -> Result<()> {
-        self.shards_to_remove.clear();
+        self.iters_to_remove.clear();
 
-        for (&shard_ident, iter) in &mut self.iters {
+        for (shard_ident, iter) in &mut self.iters {
             if self.in_queue.contains(&shard_ident) {
                 continue;
             }
@@ -120,30 +132,31 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
                     Some(IterResult::Value(value)) => {
                         let message =
                             V::deserialize(value).context("Failed to deserialize message")?;
-                        let message_ext = MessageExt::new(shard_ident, Arc::new(message));
+
+                        let message_ext = MessageExt::new(*shard_ident, Arc::new(message));
+
                         self.message_queue.push(Reverse(message_ext));
-                        self.in_queue.insert(shard_ident);
+                        self.in_queue.insert(shard_ident.clone());
                         iter.shift();
                         break;
                     }
-                    Some(IterResult::Skip(Some(key))) => {
-                        self.current_position
-                            .insert(key.shard_ident, key.internal_message_key);
+                    Some(IterResult::Skip(Some((shard_partition, queue_key)))) => {
+                        self.current_position.insert(shard_partition, queue_key);
                         iter.shift();
                     }
                     Some(IterResult::Skip(None)) => {
                         iter.shift();
                     }
                     None => {
-                        self.shards_to_remove.push(shard_ident);
+                        self.iters_to_remove.push(shard_ident.clone());
                         break;
                     }
                 }
             }
         }
 
-        for &shard_ident in &self.shards_to_remove {
-            self.iters.remove(&shard_ident);
+        for key in &self.iters_to_remove {
+            self.iters.remove(key);
         }
 
         Ok(())
@@ -156,7 +169,8 @@ impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
 
         if let Some(Reverse(message)) = self.message_queue.pop() {
             let message_key = message.message.key();
-            self.current_position.insert(message.source, message_key);
+            self.current_position
+                .insert(message.source.clone(), message_key);
 
             self.in_queue.remove(&message.source);
             return Ok(Some(message));

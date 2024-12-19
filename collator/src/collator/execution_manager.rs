@@ -142,6 +142,7 @@ impl MessagesReader {
         self.read_new_msgs_from_iterator_count
     }
 
+    #[cfg(FALSE)]
     #[tracing::instrument(skip_all)]
     pub fn get_next_message_group(
         &mut self,

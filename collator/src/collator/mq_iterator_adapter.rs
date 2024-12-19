@@ -113,7 +113,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     pub fn init_iterator_total_elapsed(&self) -> Duration {
         self.init_iterator_total_elapsed
     }
-
+    #[cfg(FALSE)]
     #[tracing::instrument(skip_all, fields(mode = ?mode))]
     pub fn try_init_next_range_iterator<I>(
         &mut self,
@@ -315,6 +315,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         }
     }
 
+    #[cfg(FALSE)]
     fn get_current_range(
         processed_upto: &mut ProcessedUptoInfoStuff,
         ranges_fully_read: &mut bool,
@@ -331,11 +332,12 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "initialized={}, existing ranges_fully_read={}, \
-            ranges_from={}, ranges_to={}",
-            initialized, ranges_fully_read,
-            DisplayIter(ranges_from.iter().map(DisplayTuple)),
-            DisplayIter(ranges_to.iter().map(DisplayTuple)),
+            initialized = initialized,
+            ranges_fully_read = ?ranges_fully_read,
+            ranges_from = ?ranges_from,
+            ranges_to = ?ranges_to,
+                        "get_current_range",
+
         );
 
         CurrentRange {
@@ -343,7 +345,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             ranges_to,
         }
     }
-
+    #[cfg(FALSE)]
     fn get_new_iterator(
         &mut self,
         current_range: CurrentRange,
@@ -368,20 +370,21 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "ranges updated from current position, ranges_fully_read={}, \
-                ranges_from={}, ranges_to={}",
-                ranges_fully_read,
-                DisplayIter(ranges_from.iter().map(DisplayTuple)),
-                DisplayIter(ranges_to.iter().map(DisplayTuple)),
+                ranges_fully_read = ?ranges_fully_read,
+                ranges_from = ?ranges_from,
+                ranges_to = ?ranges_to,
+                                "ranges updated from current position",
+
             );
             current_ranges_from
         } else {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "init with last ranges, ranges_fully_read={}, \
-                ranges_from={}, ranges_to={}",
-                ranges_fully_read,
-                DisplayIter(ranges_from.iter().map(DisplayTuple)),
-                DisplayIter(ranges_to.iter().map(DisplayTuple)),
+
+                ranges_fully_read = ?ranges_fully_read,
+                ranges_from = ?ranges_from,
+                ranges_to = ?ranges_to,
+                                                "init with last ranges",
+
             );
 
             ranges_from.clone()
@@ -398,6 +401,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         })
     }
 
+    #[cfg(FALSE)]
     fn update_iterator(
         &mut self,
         current_range: CurrentRange,
@@ -409,9 +413,9 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         } = current_range;
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated ranges_from={}, ranges_to={}",
-            DisplayIter(ranges_from.iter().map(DisplayTuple)),
-            DisplayIter(ranges_to.iter().map(DisplayTuple)),
+            ranges_from = ?ranges_from,
+            ranges_to = ?ranges_to,
+            "update iterator",
         );
         // update processed_upto info
         for (shard_id, new_process_to_key) in ranges_from.iter() {

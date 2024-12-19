@@ -46,6 +46,7 @@ impl Phase<ExecuteState> {
         )
     }
 
+    #[cfg(FALSE)]
     pub fn run(&mut self) -> Result<()> {
         let labels = [(
             "workchain",

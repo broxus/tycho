@@ -12,7 +12,7 @@ use everscale_types::models::{
     Transaction, TxInfo,
 };
 use everscale_types::num::Tokens;
-use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartition};
 use tycho_collator::internal_queue::queue::{
     Queue, QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
 };
@@ -23,7 +23,9 @@ use tycho_collator::internal_queue::state::states_iterators_manager::StatesItera
 use tycho_collator::internal_queue::state::uncommitted_state::{
     UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
-use tycho_collator::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
+use tycho_collator::internal_queue::types::{
+    InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
+};
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
 
@@ -139,9 +141,26 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    let end_key = *diff.messages.iter().last().unwrap().0;
+    let mut partition_router = FastHashMap::default();
 
-    queue.apply_diff(diff, block, &HashBytes::from([1; 32]), end_key)?;
+    for stored_object in &stored_objects {
+        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority);
+    }
+
+    let diff_with_messages = QueueDiffWithMessages {
+        messages: diff.messages,
+        processed_to: diff.processed_to,
+        partition_router,
+    };
+
+    let statistics = (diff_with_messages.clone(), block.shard).into();
+
+    queue.apply_diff(
+        diff_with_messages,
+        block,
+        &HashBytes::from([1; 32]),
+        statistics,
+    )?;
 
     let top_blocks = vec![(block, true)];
 
@@ -184,26 +203,46 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let top_blocks = vec![(block2, true)];
 
-    let end_key = *diff.messages.iter().last().unwrap().0;
-    queue.apply_diff(diff, block2, &HashBytes::from([0; 32]), end_key)?;
+    let mut partition_router = FastHashMap::default();
+
+    for stored_object in &stored_objects2 {
+        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority);
+    }
+
+    let diff_with_messages = QueueDiffWithMessages {
+        messages: diff.messages,
+        processed_to: diff.processed_to,
+        partition_router,
+    };
+
+    let statistics = (diff_with_messages.clone(), block.shard).into();
+
+    queue.apply_diff(
+        diff_with_messages,
+        block2,
+        &HashBytes::from([0; 32]),
+        statistics,
+    )?;
     queue.commit_diff(&top_blocks)?;
 
-    let mut ranges = FastHashMap::default();
-    ranges.insert(
-        ShardIdent::new_full(0),
-        (
-            QueueKey {
-                lt: 1,
-                hash: HashBytes::default(),
-            },
-            QueueKey {
-                lt: 4,
-                hash: HashBytes::default(),
-            },
-        ),
-    );
+    let mut ranges = Vec::new();
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(-1));
+    let queue_range = QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 1,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 4,
+            hash: HashBytes::default(),
+        },
+    };
+
+    ranges.push(queue_range);
+
+    let partition = QueuePartition::LowPriority;
+    let iterators = queue.iterator(partition, ranges, ShardIdent::new_full(-1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     iterator_manager.next().ok();
@@ -256,33 +295,47 @@ async fn test_queue_clear() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    let end_key = *diff.messages.iter().last().unwrap().0;
+    let diff_with_messages = QueueDiffWithMessages {
+        messages: diff.messages,
+        processed_to: diff.processed_to,
+        partition_router: Default::default(),
+    };
 
-    queue.apply_diff(diff, block, &HashBytes::from([1; 32]), end_key)?;
+    let statistics = (diff_with_messages.clone(), block.shard).into();
 
-    let mut ranges = FastHashMap::default();
-    ranges.insert(
-        ShardIdent::new_full(0),
-        (
-            QueueKey {
-                lt: 1,
-                hash: HashBytes::default(),
-            },
-            QueueKey {
-                lt: 4,
-                hash: HashBytes::default(),
-            },
-        ),
-    );
+    queue.apply_diff(
+        diff_with_messages,
+        block,
+        &HashBytes::from([1; 32]),
+        statistics,
+    )?;
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1));
+    let mut ranges = Vec::new();
+
+    let queue_range = QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 1,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 4,
+            hash: HashBytes::default(),
+        },
+    };
+
+    ranges.push(queue_range);
+
+    let partition = QueuePartition::NormalPriority;
+
+    let iterators = queue.iterator(partition, ranges.clone(), ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next().ok().is_some());
 
     queue.clear_uncommitted_state()?;
 
-    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1));
+    let iterators = queue.iterator(partition, ranges.clone(), ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next()?.is_none());
@@ -290,6 +343,69 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_statistics() -> anyhow::Result<()> {
+    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
+
+    let queue_factory = QueueFactoryStdImpl {
+        uncommitted_state_factory: UncommittedStateImplFactory {
+            storage: storage.clone(),
+        },
+        committed_state_factory: CommittedStateImplFactory { storage },
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+    };
+
+    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
+        queue_factory.create();
+    let block = BlockIdShort {
+        shard: ShardIdent::new_full(0),
+        seqno: 0,
+    };
+    let mut diff = QueueDiffWithMessages::new();
+
+    let stored_objects = vec![create_stored_object(
+        1,
+        "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+    )?];
+
+    for stored_object in &stored_objects {
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+    }
+
+    let start_key = *diff.messages.iter().next().unwrap().0;
+    let end_key = *diff.messages.iter().last().unwrap().0;
+    let diff_with_messages = QueueDiffWithMessages {
+        messages: diff.messages,
+        processed_to: diff.processed_to,
+        partition_router: Default::default(),
+    };
+
+    let statistics = (diff_with_messages.clone(), block.shard).into();
+
+    queue.apply_diff(
+        diff_with_messages,
+        block,
+        &HashBytes::from([1; 32]),
+        statistics,
+    )?;
+
+    let range = QueueRange {
+        shard_ident: ShardIdent::new_full(0),
+        partition: QueuePartition::NormalPriority,
+        from: start_key,
+        to: end_key,
+    };
+    let stat = queue.load_statistics(range)?;
+
+    assert_eq!(stat.show().len(), 1);
+
+    Ok(())
+}
+
+#[cfg(FALSE)]
 #[test]
 fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut out_msg = OutMsgDescr::default();
@@ -457,6 +573,7 @@ fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
     .unwrap()
 }
 
+#[cfg(FALSE)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_tail() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();

@@ -45,12 +45,13 @@ impl BlocksCache {
         for mut shard_cache in self.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
-                    let processed_to = entry
-                        .int_processed_to()
-                        .iter()
-                        .map(|(shard, queue_key)| (*shard, *queue_key))
-                        .collect();
+                    // let processed_to = entry
+                    //     .int_processed_to()
+                    //     .iter()
+                    //     .map(|(shard, queue_key)| (*shard, queue_key))
+                    //     .collect();
 
+                    let processed_to = entry.int_processed_to().clone();
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
                     {
@@ -174,7 +175,7 @@ impl BlocksCache {
                 continue;
             }
 
-            let mut processed_to = BTreeMap::default();
+            let mut processed_to = ProcessedTo::new();
 
             // try to find in cache
             if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
@@ -183,7 +184,7 @@ impl BlocksCache {
                         .int_processed_to()
                         .iter()
                         .for_each(|(shard, queue_key)| {
-                            processed_to.insert(*shard, *queue_key);
+                            processed_to.insert(*shard, queue_key.clone());
                         });
                 }
             }

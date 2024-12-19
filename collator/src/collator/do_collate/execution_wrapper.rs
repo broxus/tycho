@@ -9,7 +9,7 @@ use everscale_types::models::{
     Transaction,
 };
 use ton_executor::ExecutedTransaction;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 
 use super::BlockCollationData;
 use crate::collator::execution_manager::MessagesExecutor;

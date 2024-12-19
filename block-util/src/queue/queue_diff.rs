@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,7 +8,7 @@ use everscale_types::prelude::*;
 use tl_proto::TlRead;
 
 use crate::archive::WithArchiveData;
-use crate::queue::proto::{QueueDiff, QueueKey};
+use crate::queue::proto::{QueueDiff, QueueKey, QueuePartition};
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 
@@ -27,14 +28,8 @@ impl QueueDiffStuffBuilder {
     }
 
     // TODO: Use iterator of `(ShardIdent, QueueKey)`?
-    pub fn with_processed_to<'a, I>(mut self, processed_to: I) -> Self
-    where
-        I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
-    {
-        self.inner_mut().diff.processed_to = processed_to
-            .into_iter()
-            .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
-            .collect();
+    pub fn with_processed_to(mut self, processed_to: BTreeMap<ShardIdent, QueueKey>) -> Self {
+        self.inner_mut().diff.processed_to = processed_to;
         self
     }
 
@@ -79,14 +74,9 @@ impl SerializedQueueDiff {
         &self.inner.diff.hash
     }
 
-    pub fn processed_to(&self) -> impl Iterator<Item = (ShardIdent, &QueueKey)> {
-        self.inner
-            .diff
-            .processed_to
-            .iter()
-            .map(|(shard_ident, key)| (*shard_ident, key))
+    pub fn processed_to(&self) -> BTreeMap<ShardIdent, QueueKey> {
+        self.inner.diff.processed_to.clone()
     }
-
     fn inner_mut(&mut self) -> &mut Inner {
         Arc::get_mut(&mut self.inner).expect("inner is not shared")
     }
@@ -114,6 +104,7 @@ impl QueueDiffStuff {
                     min_message: QueueKey::MIN,
                     max_message: QueueKey::MIN,
                     messages: Vec::new(),
+                    partition_router: Default::default(),
                 },
             }),
         }
@@ -146,6 +137,7 @@ impl QueueDiffStuff {
                     min_message: Default::default(),
                     max_message: Default::default(),
                     messages: Default::default(),
+                    partition_router: Default::default(),
                 },
             }),
         }
@@ -379,6 +371,7 @@ mod tests {
                         hash: message_hashes[9],
                     },
                     messages: message_hashes.clone(),
+                    partition_router: Default::default(),
                 },
             }),
         };

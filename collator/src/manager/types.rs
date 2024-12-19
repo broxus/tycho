@@ -328,12 +328,19 @@ impl BlockCacheEntry {
         }
     }
 
-    pub fn int_processed_to(&self) -> &ProcessedTo {
+    pub fn int_processed_to(&self) -> ProcessedTo {
         match &self.data {
             BlockCacheEntryData::Collated {
                 candidate_stuff, ..
-            } => &candidate_stuff.candidate.queue_diff_aug.diff().processed_to,
-            BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_to,
+            } => candidate_stuff
+                .candidate
+                .queue_diff_aug
+                .diff()
+                .processed_to
+                .clone(),
+            BlockCacheEntryData::Received { queue_diff, .. } => {
+                queue_diff.diff().processed_to.clone()
+            }
         }
     }
 }

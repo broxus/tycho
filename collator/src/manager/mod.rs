@@ -28,7 +28,7 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
 };
-use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
+use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, QueueDiffWithMessages};
 use crate::manager::types::BlockCacheStoreResult;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
@@ -475,11 +475,14 @@ where
 
         let queue_diff_with_msgs =
             QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
+
+        let statistics = (queue_diff_with_msgs.clone(), queue_diff.block_id().shard).into();
+
         mq_adapter.apply_diff(
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
-            queue_diff.diff().max_message,
+            statistics,
         )
     }
 
@@ -920,7 +923,7 @@ where
                 &collation_result.prev_mc_block_id,
                 block_id.shard,
                 candidate_chain_time,
-                collation_result.force_next_mc_block,
+                ForceMasterCollation::No,
                 Some(block_id),
                 collation_result.collation_config.mc_block_min_interval_ms as _,
             )
@@ -1120,6 +1123,7 @@ where
         _last_collated_block_id: Option<&BlockId>, // TODO: use to skip queue recovery
         applied_range: Option<&(BlockSeqno, BlockSeqno)>,
     ) -> Result<()> {
+        #[cfg(FALSE)]
         if let Some(applied_range) = applied_range {
             if !self.sync_to_applied_mc_block(applied_range).await? {
                 let last_applied_mc_block_id_short = BlockIdShort {
@@ -1141,6 +1145,7 @@ where
         Ok(())
     }
 
+    #[cfg(FALSE)]
     #[tracing::instrument(skip_all, fields(applied_range = ?applied_range))]
     async fn sync_to_applied_mc_block(
         &self,
@@ -1188,8 +1193,9 @@ where
             .await?;
 
         // calc internals processed upto
-        let mut min_processed_to_by_shards = BTreeMap::default();
+        let mut min_processed_to_by_shards = ProcessedTo::default();
 
+        // find min processed to by shards for trim tail
         for min_processed_upto in processed_to_by_shards.values() {
             for (shard_id, to_key) in min_processed_upto {
                 min_processed_to_by_shards
@@ -1204,7 +1210,7 @@ where
         }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
+            min_processed_to_by_shards = ?min_processed_to_by_shards,
         );
 
         // find first applied mc block and tail shard blocks and get previous
@@ -1268,11 +1274,13 @@ where
                 };
                 let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+
                     diff_block_id = %prev_block_id.as_short_id(),
                     diff_required,
-                    max_message = %queue_diff_stuff.as_ref().max_message,
-                    min_processed_to = %min_processed_to,
-                    "check if diff required to restore queue working state on sync:",
+                    max_message = ?queue_diff_stuff.as_ref().max_message,
+                    min_processed_to = ?min_processed_to,
+                                                            "check if diff required to restore queue working state on sync:",
+
                 );
                 if diff_required {
                     let block_stuff = self
@@ -1349,9 +1357,6 @@ where
                     &mc_block_entry.top_shard_blocks_info,
                 )?;
 
-                // when we run sync by any reason we should drop uncommitted queue updates
-                // after restoring the required state
-                // to avoid panics if next block was already collated before an it is incorrect
                 self.mq_adapter.clear_session_state()?;
 
                 let state = mc_block_entry.cached_state()?;
@@ -1419,6 +1424,7 @@ where
             .blocks_cache
             .get_all_processed_to_by_mc_block_from_cache(mc_block_key)?;
 
+        #[cfg(FALSE)]
         for (top_block_id, processed_to_opt) in all_processed_to {
             let processed_to = match processed_to_opt {
                 Some(processed_to) => processed_to,

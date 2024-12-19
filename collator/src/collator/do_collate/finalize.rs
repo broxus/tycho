@@ -49,6 +49,7 @@ pub struct FinalizeBlockContext {
 }
 
 impl Phase<FinalizeState> {
+    #[cfg(FALSE)]
     pub fn update_queue_diff(
         &mut self,
         mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
@@ -96,20 +97,13 @@ impl Phase<FinalizeState> {
             self.state.collation_data.block_id_short.seqno,
             &prev_hash,
         )
-        .with_processed_to(
-            diff_with_messages
-                .processed_to
-                .iter()
-                .map(|(k, v)| (*k, v.lt, &v.hash)),
-        )
+        .with_processed_to(diff_with_messages.processed_to.clone())
         .with_messages(
             &min_message,
             &max_message,
             diff_with_messages.messages.keys().map(|k| &k.hash),
         )
         .serialize();
-
-        let diff_processed_to = diff_with_messages.processed_to.clone();
 
         let queue_diff_hash = *queue_diff.hash();
         tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
@@ -175,7 +169,7 @@ impl Phase<FinalizeState> {
             .finalize
             .clone();
 
-        let processed_to = queue_diff.processed_to().map(|(k, v)| (k, *v)).collect();
+        let processed_to = queue_diff.processed_to();
         let shard = self.state.collation_data.block_id_short.shard;
 
         let labels = &[("workchain", shard.workchain().to_string())];

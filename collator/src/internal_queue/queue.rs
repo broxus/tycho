@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
 use serde::{Deserialize, Serialize};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
 
 use crate::internal_queue::gc::GcManager;
@@ -18,9 +18,13 @@ use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::state::uncommitted_state::{
     UncommittedState, UncommittedStateFactory, UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
-use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
+use crate::internal_queue::types::{
+    DiffStatistics, InternalMessageValue, PartitionQueueKey, QueueDiffWithMessages, QueueRange,
+    QueueShardRange, QueueStatistics,
+};
 use crate::tracing_targets;
 use crate::types::ProcessedTo;
+
 // FACTORY
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,16 +76,17 @@ where
     /// Create iterator for specified shard and return it
     fn iterator(
         &self,
-        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
         for_shard_id: ShardIdent,
-    ) -> Vec<Box<dyn StateIterator<V>>>;
+    ) -> Result<Vec<Box<dyn StateIterator<V>>>>;
     /// Add messages to uncommitted state from `diff.messages` and add diff to the cache
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        diff_hash: &HashBytes,
-        end_key: QueueKey,
+        hash: &HashBytes,
+        statistics: DiffStatistics,
     ) -> Result<()>;
     /// Move messages from uncommitted state to committed state and update gc ranges
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
@@ -91,6 +96,8 @@ where
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
     /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
+    /// load statistics for the given range by accounts
+    fn load_statistics(&self, range: QueueRange) -> Result<QueueStatistics>;
 }
 
 // IMPLEMENTATION
@@ -146,18 +153,24 @@ where
 {
     fn iterator(
         &self,
-        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
         for_shard_id: ShardIdent,
-    ) -> Vec<Box<dyn StateIterator<V>>> {
+    ) -> Result<Vec<Box<dyn StateIterator<V>>>> {
         let snapshot = self.committed_state.snapshot();
-        let committed_state_iterator =
-            self.committed_state
-                .iterator(&snapshot, for_shard_id, ranges);
+
+        let committed_state_iterator = self.committed_state.iterator(
+            &snapshot,
+            for_shard_id,
+            partition.clone(),
+            ranges.clone(),
+        )?;
+
         let uncommitted_state_iterator =
             self.uncommitted_state
-                .iterator(&snapshot, for_shard_id, ranges);
+                .iterator(&snapshot, for_shard_id, partition, ranges)?;
 
-        vec![committed_state_iterator, uncommitted_state_iterator]
+        Ok(vec![committed_state_iterator, uncommitted_state_iterator])
     }
 
     fn apply_diff(
@@ -165,7 +178,7 @@ where
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         hash: &HashBytes,
-        end_key: QueueKey,
+        statistics: DiffStatistics,
     ) -> Result<()> {
         // Get or insert the shard diffs for the given block_id_short.shard
         let mut shard_diffs = self
@@ -181,9 +194,8 @@ where
                     "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
                     block_id_short, shard_diff.hash,  hash,
                 )
-            } else {
-                return Ok(());
             }
+            return Ok(());
         }
 
         let last_applied_seqno = shard_diffs.keys().next_back().cloned();
@@ -204,15 +216,26 @@ where
             }
         }
 
+        let max_message = diff
+            .messages
+            .keys()
+            .next_back()
+            .cloned()
+            .unwrap_or_default();
+
         // Add messages to uncommitted_state if there are any
         if !diff.messages.is_empty() {
-            self.uncommitted_state
-                .add_messages(block_id_short.shard, &diff.messages)?;
+            self.uncommitted_state.add_messages_with_statistics(
+                block_id_short.shard,
+                &diff.partition_router,
+                &diff.messages,
+                statistics,
+            )?;
         }
 
         let short_diff = ShortQueueDiff {
             processed_to: diff.processed_to,
-            end_key,
+            end_key: max_message,
             hash: *hash,
         };
 
@@ -224,8 +247,10 @@ where
 
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
         let mut shards_to_commit = FastHashMap::default();
+        #[cfg(FALSE)]
         let mut gc_ranges = FastHashMap::default();
 
+        #[cfg(FALSE)]
         for (block_id_short, top_shard_block_changed) in mc_top_blocks {
             let mut diffs_to_commit = vec![];
 
@@ -280,6 +305,7 @@ where
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
 
+        #[cfg(FALSE)]
         for (shard, end_key) in gc_ranges {
             self.gc.update_delete_until(shard, end_key);
         }
@@ -288,6 +314,7 @@ where
     }
 
     fn clear_uncommitted_state(&self) -> Result<()> {
+        self.uncommitted_state.truncate()?;
         let diffs_before_clear: usize =
             self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
         self.uncommitted_diffs.clear();
@@ -298,7 +325,7 @@ where
             diffs_after_clear,
              "Cleared uncommitted diffs.",
         );
-        self.uncommitted_state.truncate()
+        Ok(())
     }
 
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
@@ -326,5 +353,19 @@ where
                 .retain(|_, diff| &diff.end_key > inclusive_until);
         }
         Ok(())
+    }
+
+    fn load_statistics(&self, range: QueueRange) -> Result<QueueStatistics> {
+        let snapshot = self.committed_state.snapshot();
+        let mut statistics = FastHashMap::default();
+
+        self.committed_state
+            .load_statistics(&mut statistics, &snapshot, &range)?;
+        self.uncommitted_state
+            .load_statistics(&mut statistics, &snapshot, &range)?;
+
+        let statistics = QueueStatistics::new_with_statistics(statistics);
+
+        Ok(statistics)
     }
 }

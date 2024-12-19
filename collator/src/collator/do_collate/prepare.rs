@@ -43,6 +43,7 @@ impl Phase<PrepareState> {
         }
     }
 
+    #[cfg(FALSE)]
     pub fn run(mut self) -> Result<Phase<ExecuteState>> {
         // show initial processed upto
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.offset = {}",
@@ -165,6 +166,7 @@ impl Phase<PrepareState> {
             );
 
             while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
+                #[cfg(FALSE)]
                 let msg_group = messages_reader.get_next_message_group(
                     GetNextMessageGroupContext {
                         next_chain_time: prev_chain_time,
@@ -176,6 +178,7 @@ impl Phase<PrepareState> {
                     &mut self.extra.anchors_cache,
                     &mut mq_iterator_adapter,
                 )?;
+                #[cfg(FALSE)]
                 if msg_group.is_none() {
                     // on restart from a new genesis we will not be able to refill buffer with externals
                     // so we stop refilling when there is no more groups in buffer

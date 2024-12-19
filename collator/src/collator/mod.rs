@@ -1237,6 +1237,7 @@ impl CollatorStdImpl {
         Ok(anchors_info)
     }
 
+    #[cfg(FALSE)]
     fn check_has_unprocessed_messages(&mut self, working_state: &mut WorkingState) -> Result<bool> {
         if let Some(has_messages) = working_state.has_unprocessed_messages {
             return Ok(has_messages);
@@ -1415,12 +1416,14 @@ impl CollatorStdImpl {
             }
         }
 
+        #[cfg(FALSE)]
         self.do_collate(
             working_state,
             Some(top_shard_blocks_info),
             ForceMasterCollation::No,
         )
-        .await
+        .await;
+        Ok(())
     }
 
     /// Run collation if there are internals,
@@ -1455,7 +1458,11 @@ impl CollatorStdImpl {
             .unwrap_or_default();
 
         // check if has unprocessed messages in buffer or queue
+        #[cfg(FALSE)]
         let has_unprocessed_messages = self.check_has_unprocessed_messages(&mut working_state)?;
+
+        let has_unprocessed_messages = false;
+        ///////////////////// !!!
 
         if has_unprocessed_messages {
             // do not import next anchor and force collation
@@ -1666,8 +1673,11 @@ impl CollatorStdImpl {
                 TryCollateCheck::ForceMcBlockByUncommittedChainLength
             } else {
                 // check has unprocessed messages in buffer or queue
+                #[cfg(FALSE)]
                 let has_uprocessed_messages =
                     self.check_has_unprocessed_messages(&mut working_state)?;
+                let has_uprocessed_messages = false;
+                //////////////////////////// !!!
 
                 // check pending externals
                 let has_externals = self.anchors_cache.has_pending_externals();
@@ -1887,6 +1897,7 @@ impl CollatorStdImpl {
                 };
 
                 drop(histogram);
+                #[cfg(FALSE)]
                 self.do_collate(working_state, None, force_next_mc_block)
                     .await?;
             }

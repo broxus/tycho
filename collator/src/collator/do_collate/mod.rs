@@ -22,8 +22,8 @@ use super::types::{
     AnchorsCache, BlockCollationDataBuilder, CollationResult, ExecuteResult, FinalizedBlock,
     FinalizedCollationResult, ParsedExternals, PrevData, ReadNextExternalsMode, WorkingState,
 };
-use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use super::{CollatorStdImpl, ForceMasterCollation};
+use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::types::{
     AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, ShardDescriptionExt,
     UpdateQueueDiffResult,
@@ -57,6 +57,7 @@ impl CollatorStdImpl {
             ct = self.anchors_cache.last_imported_anchor().map(|a| a.ct).unwrap_or_default(),
         )
     )]
+    #[cfg(FALSE)]
     pub(super) async fn do_collate(
         &mut self,
         working_state: Box<WorkingState>,
@@ -222,7 +223,7 @@ impl CollatorStdImpl {
 
         Ok(())
     }
-
+    #[cfg(FALSE)]
     fn run(
         collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
@@ -1351,6 +1352,7 @@ impl CollatorStdImpl {
     }
 }
 
+#[cfg(FALSE)]
 fn calculate_min_processed_to(
     shard_id: &ShardIdent,
     current_processed_to: Option<QueueKey>,
