@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
-use tycho_storage::model::ShardsInternalMessagesKey;
+use tycho_storage::model::{QueuePartition, ShardsInternalMessagesKey};
 use tycho_storage::owned_iterator::OwnedIterator;
 
 use crate::types::ShortAddr;
@@ -18,10 +18,10 @@ impl Range {
     }
 }
 
-impl From<(QueueKey, QueueKey, ShardIdent)> for Range {
-    fn from(value: (QueueKey, QueueKey, ShardIdent)) -> Self {
-        let from = ShardsInternalMessagesKey::new(value.2, value.0);
-        let to = ShardsInternalMessagesKey::new(value.2, value.1);
+impl From<(ShardIdent, QueuePartition, QueueKey, QueueKey)> for Range {
+    fn from(value: (ShardIdent, QueuePartition, QueueKey, QueueKey)) -> Self {
+        let from = ShardsInternalMessagesKey::new(value.1, value.0, value.2);
+        let to = ShardsInternalMessagesKey::new(value.1, value.0, value.3);
 
         Range { from, to }
     }
@@ -34,27 +34,29 @@ pub enum IterResult<'a> {
 
 pub struct ShardIterator {
     range: Range,
-    source: ShardIdent,
+    // source: ShardIdent,
     receiver: ShardIdent,
+    // partition: QueuePartition,
     iterator: OwnedIterator,
 }
 
 impl ShardIterator {
     pub fn new(
+        partition: QueuePartition,
         source: ShardIdent,
         from: QueueKey,
         to: QueueKey,
         receiver: ShardIdent,
         mut iterator: OwnedIterator,
     ) -> Self {
-        iterator.seek(ShardsInternalMessagesKey::new(source, from));
+        iterator.seek(ShardsInternalMessagesKey::new(partition, source, from));
 
         let range = Range::from((from, to, source));
 
         Self {
             range,
             receiver,
-            source,
+            // source,
             iterator,
         }
     }
@@ -67,9 +69,9 @@ impl ShardIterator {
         if let Some(key) = self.iterator.key() {
             let key = ShardsInternalMessagesKey::from(key);
 
-            if key.shard_ident != self.source {
-                return Ok(None);
-            }
+            // if key.shard_ident != self.source {
+            //     return Ok(None);
+            // }
 
             if key == self.range.from {
                 return Ok(Some(IterResult::Skip(None)));

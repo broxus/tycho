@@ -7,7 +7,7 @@ use everscale_types::prelude::*;
 use tl_proto::TlRead;
 
 use crate::archive::WithArchiveData;
-use crate::queue::proto::{QueueDiff, QueueKey};
+use crate::queue::proto::{QueueDiff, QueueKey, QueuePartition};
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 
@@ -29,12 +29,13 @@ impl QueueDiffStuffBuilder {
     // TODO: Use iterator of `(ShardIdent, QueueKey)`?
     pub fn with_processed_upto<'a, I>(mut self, processed_upto: I) -> Self
     where
-        I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
+        I: IntoIterator<Item = (ShardIdent, QueuePartition, u64, &'a HashBytes)>,
     {
-        self.inner_mut().diff.processed_upto = processed_upto
-            .into_iter()
-            .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
-            .collect();
+        // TODO !!!
+        // self.inner_mut().diff.processed_upto = processed_upto
+        //     .into_iter()
+        //     .map(|(shard_ident, partition, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
+        //     .collect();
         self
     }
 
@@ -94,6 +95,11 @@ impl QueueDiffStuff {
     pub fn new_empty(block_id: &BlockId) -> Self {
         use std::collections::BTreeMap;
 
+        let partitions_processed_upto = BTreeMap::from([
+            (QueuePartition::NormalPriority, QueueKey::MIN),
+            (QueuePartition::LowPriority, QueueKey::MIN),
+        ]);
+
         Self {
             inner: Arc::new(Inner {
                 block_id: *block_id,
@@ -102,7 +108,7 @@ impl QueueDiffStuff {
                     prev_hash: HashBytes::ZERO,
                     shard_ident: block_id.shard,
                     seqno: block_id.seqno,
-                    processed_upto: BTreeMap::from([(block_id.shard, QueueKey::MIN)]),
+                    processed_upto: BTreeMap::from([(block_id.shard, partitions_processed_upto)]),
                     min_message: QueueKey::MIN,
                     max_message: QueueKey::MIN,
                     messages: Vec::new(),

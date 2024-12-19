@@ -1,18 +1,24 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 
 use crate::util::{StoredValue, StoredValueBuffer};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShardsInternalMessagesKey {
+    pub partition: QueuePartition,
     pub shard_ident: ShardIdent,
     pub internal_message_key: QueueKey,
 }
 
 impl ShardsInternalMessagesKey {
-    pub fn new(shard_ident: ShardIdent, internal_message_key: QueueKey) -> Self {
+    pub fn new(
+        partition: QueuePartition,
+        shard_ident: ShardIdent,
+        internal_message_key: QueueKey,
+    ) -> Self {
         Self {
+            partition,
             shard_ident,
             internal_message_key,
         }
@@ -32,6 +38,7 @@ impl StoredValue for ShardsInternalMessagesKey {
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        self.partition.serialize(buffer);
         self.shard_ident.serialize(buffer);
         self.internal_message_key.serialize(buffer);
     }
@@ -41,12 +48,46 @@ impl StoredValue for ShardsInternalMessagesKey {
             panic!("Insufficient data for deserialization")
         }
 
+        let partition = QueuePartition::deserialize(reader);
         let shard_ident = ShardIdent::deserialize(reader);
         let internal_message_key = QueueKey::deserialize(reader);
 
         Self {
+            partition,
             shard_ident,
             internal_message_key,
+        }
+    }
+}
+
+impl StoredValue for QueuePartition {
+    const SIZE_HINT: usize = 1;
+
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        let value = match self {
+            QueuePartition::NormalPriority => 0u8,
+            QueuePartition::LowPriority => 1u8,
+        };
+        buffer.write_raw_slice(&[value]);
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self
+    where
+        Self: Sized,
+    {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let value = reader[0];
+        *reader = &reader[1..];
+
+        match value {
+            0 => QueuePartition::NormalPriority,
+            1 => QueuePartition::LowPriority,
+            _ => panic!("Unknown value for QueuePartition: {}", value),
         }
     }
 }

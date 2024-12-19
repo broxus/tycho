@@ -2,7 +2,7 @@ use std::fs::File;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
@@ -17,6 +17,13 @@ pub mod model;
 #[derive(Clone)]
 pub struct InternalQueueStorage {
     db: BaseDb,
+}
+
+struct CommitRange {
+    shard_ident: ShardIdent,
+    partition: QueuePartition,
+    from: QueueKey,
+    to: QueueKey,
 }
 
 impl InternalQueueStorage {
@@ -59,6 +66,8 @@ impl InternalQueueStorage {
                 };
 
                 let key = ShardsInternalMessagesKey {
+                    // TODO !!! read it
+                    partition: QueuePartition::NormalPriority,
                     shard_ident,
                     internal_message_key: QueueKey {
                         lt: int_msg_info.created_lt,
@@ -182,14 +191,10 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn delete_messages(
-        &self,
-        source_shard: ShardIdent,
-        from: &QueueKey,
-        to: &QueueKey,
-    ) -> Result<()> {
-        let start_key = ShardsInternalMessagesKey::new(source_shard, *from);
-        let end_key = ShardsInternalMessagesKey::new(source_shard, *to);
+    pub fn delete_messages(&self, range: CommitRange) -> Result<()> {
+        let start_key =
+            ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.from);
+        let end_key = ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.to);
 
         let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
 
@@ -211,19 +216,21 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn commit(&self, ranges: FastHashMap<ShardIdent, QueueKey>) -> Result<()> {
+    pub fn commit(&self, ranges: Vec<CommitRange>) -> Result<()> {
         let snapshot = self.snapshot();
 
         let mut batch = WriteBatch::default();
 
         for range in ranges {
             let from = ShardsInternalMessagesKey {
-                shard_ident: range.0,
-                internal_message_key: QueueKey::MIN,
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.from,
             };
             let to = ShardsInternalMessagesKey {
-                shard_ident: range.0,
-                internal_message_key: range.1,
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.to,
             };
 
             let mut readopts = self.db.shards_internal_messages_session.new_read_config();

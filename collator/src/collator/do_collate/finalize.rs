@@ -87,9 +87,9 @@ impl Phase<FinalizeState> {
         )
         .with_processed_upto(
             diff_with_messages
-                .processed_upto
-                .iter()
-                .map(|(k, v)| (*k, v.lt, &v.hash)),
+                .processed_upto.iter()
+                // .iter()
+                // .map(|(k, v)| (*k, v.lt, &v.hash)),
         )
         .with_messages(
             &min_message,

@@ -1,6 +1,7 @@
 use ahash::HashMapExt;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
+use tycho_storage::model::QueuePartition;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 use weedb::OwnedSnapshot;
@@ -108,7 +109,12 @@ impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
         Box::new(StateIteratorImpl::new(shard_iters_with_ranges, receiver))
     }
 
-    fn delete_messages(&self, shard: ShardIdent, until: &QueueKey) -> anyhow::Result<()> {
+    fn delete_messages(
+        &self,
+        partition: QueuePartition,
+        shard: ShardIdent,
+        until: &QueueKey,
+    ) -> anyhow::Result<()> {
         self.storage
             .internal_queue_storage()
             .delete_messages(shard, &QueueKey::MIN, until)

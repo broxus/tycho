@@ -150,10 +150,11 @@ impl Inner {
         let merge = |block_handle: BlockHandle,
                      mut processed_upto: BTreeMap<ShardIdent, QueueKey>| async move {
             let queue_diff = blocks.load_queue_diff(&block_handle).await?;
-            for (&shard, &key) in &queue_diff.as_ref().processed_upto {
-                let existing = processed_upto.entry(shard).or_insert(key);
-                *existing = std::cmp::min(*existing, key);
-            }
+            // TODO !!!
+            // for (&shard, &key) in &queue_diff.as_ref().processed_upto {
+            // let existing = processed_upto.entry(shard).or_insert(key);
+            // *existing = std::cmp::min(*existing, key);
+            // }
             Ok::<_, anyhow::Error>(processed_upto)
         };
 

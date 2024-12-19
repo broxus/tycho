@@ -6,14 +6,17 @@ use anyhow::{bail, Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
 use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
+use scc::HashSet;
 use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::state::state_iterator::MessageExt;
 
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_upto: BTreeMap<ShardIdent, BTreeMap<QueuePartition, QueueKey>>,
+    pub partition_routing: FastHashMap<QueuePartition, FastHashSet<IntAddr>>,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -21,6 +24,7 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
         Self {
             messages: BTreeMap::new(),
             processed_upto: BTreeMap::new(),
+            partition_routing: Default::default(),
         }
     }
 }
@@ -31,10 +35,10 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
         let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
-        let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
-            .iter()
-            .map(|(shard_ident, key)| (*shard_ident, *key))
-            .collect();
+        // let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
+        //     .iter()
+        //     .map(|(shard_ident, key)| (*shard_ident, *key))
+        //     .collect();
 
         let mut messages: BTreeMap<QueueKey, Arc<_>> = BTreeMap::new();
         for msg in queue_diff_stuff.zip(out_msg_description) {
@@ -51,7 +55,9 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
 
         Ok(Self {
             messages,
-            processed_upto,
+            processed_upto: processed_upto.clone(),
+            // TODO !!!
+            partition_routing: Default::default(),
         })
     }
 }
@@ -170,4 +176,9 @@ impl InternalMessageValue for EnqueuedMessage {
     fn key(&self) -> QueueKey {
         self.key()
     }
+}
+
+pub struct PartitionQueueKey {
+    pub partition: QueuePartition,
+    pub key: QueueKey,
 }

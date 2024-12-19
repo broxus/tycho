@@ -22,7 +22,7 @@ pub struct QueueDiff {
     /// Seqno of the corresponding block.
     pub seqno: u32,
     /// collator boundaries.
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_upto: BTreeMap<ShardIdent, BTreeMap<QueuePartition, QueueKey>>,
     /// Min message queue key.
     pub min_message: QueueKey,
     /// Max message queue key.
@@ -55,7 +55,8 @@ impl TlWrite for QueueDiff {
         4 + tl::hash_bytes::SIZE_HINT
             + tl::shard_ident::SIZE_HINT
             + 4
-            + processed_upto_map::size_hint(&self.processed_upto)
+            // TODO !!!
+            // + processed_upto_map::size_hint(&self.processed_upto)
             + 2 * QueueKey::SIZE_HINT
             + messages_list::size_hint(&self.messages)
     }
@@ -68,7 +69,8 @@ impl TlWrite for QueueDiff {
         tl::hash_bytes::write(&self.prev_hash, packet);
         tl::shard_ident::write(&self.shard_ident, packet);
         packet.write_u32(self.seqno);
-        processed_upto_map::write(&self.processed_upto, packet);
+        // TODO !!!
+        // processed_upto_map::write(&self.processed_upto, packet);
         self.min_message.write_to(packet);
         self.max_message.write_to(packet);
         messages_list::write(&self.messages, packet);
@@ -90,7 +92,9 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             prev_hash: tl::hash_bytes::read(data, offset)?,
             shard_ident: tl::shard_ident::read(data, offset)?,
             seqno: u32::read_from(data, offset)?,
-            processed_upto: processed_upto_map::read(data, offset)?,
+            // TODO !!!
+            processed_upto: Default::default(),
+            // processed_upto: processed_upto_map::read(data, offset)?,
             min_message: QueueKey::read_from(data, offset)?,
             max_message: QueueKey::read_from(data, offset)?,
             messages: messages_list::read(data, offset)?,
@@ -150,6 +154,16 @@ pub struct QueueKey {
     pub lt: u64,
     #[tl(with = "tl::hash_bytes")]
     pub hash: HashBytes,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+#[tl(boxed)]
+pub enum QueuePartition {
+    #[tl(id = 0)]
+    NormalPriority = 0,
+    #[tl(id = 1)]
+    LowPriority = 1,
 }
 
 impl QueueKey {

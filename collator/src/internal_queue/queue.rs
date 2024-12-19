@@ -8,6 +8,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::QueueKey;
+use tycho_storage::model::QueuePartition;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
 
 use crate::internal_queue::gc::GcManager;
@@ -18,7 +19,9 @@ use crate::internal_queue::state::session_state::{
     SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::StateIterator;
-use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
+use crate::internal_queue::types::{
+    InternalMessageValue, PartitionQueueKey, QueueDiffWithMessages,
+};
 
 // FACTORY
 
@@ -108,7 +111,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 }
 
 struct ShortQueueDiff {
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_upto: BTreeMap<ShardIdent, BTreeMap<QueuePartition, QueueKey>>,
     pub last_key: Option<QueueKey>,
     pub hash: HashBytes,
 }
@@ -173,9 +176,8 @@ where
                     "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
                     block_id_short, shard_diff.hash,  hash,
                 )
-            } else {
-                return Ok(());
             }
+            return Ok(());
         }
 
         let last_applied_seqno = shard_diffs.last_key_value().map(|(key, _)| *key);

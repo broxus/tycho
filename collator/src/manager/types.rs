@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
 use tokio::sync::Notify;
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartition};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -328,7 +328,7 @@ impl BlockCacheEntry {
         }
     }
 
-    pub fn int_processed_to(&self) -> &BTreeMap<ShardIdent, QueueKey> {
+    pub fn int_processed_to(&self) -> &BTreeMap<ShardIdent, BTreeMap<QueuePartition, QueueKey>> {
         match &self.data {
             BlockCacheEntryData::Collated {
                 candidate_stuff, ..
