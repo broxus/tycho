@@ -9,7 +9,7 @@ use everscale_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, CurrencyCollection, ExternalsProcessedUpto,
     ShardDescription, ShardIdent, ShardStateUnsplit, ValidatorInfo,
 };
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
@@ -22,7 +22,8 @@ use super::{
 };
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{
-    EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
+    EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff, QueueRange,
+    ShardPartition,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::try_init_test_tracing;
@@ -50,11 +51,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorTestImpl<V> {
         unimplemented!()
     }
 
-    fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey> {
-        unimplemented!()
-    }
-
-    fn add_message(&mut self, _message: V) -> Result<()> {
+    fn current_position(&self) -> FastHashMap<ShardPartition, QueueKey> {
         unimplemented!()
     }
 
@@ -70,8 +67,12 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorTestImpl<V> {
         unimplemented!()
     }
 
-    fn commit(&mut self, _messages: Vec<(ShardIdent, QueueKey)>) -> Result<()> {
+    fn commit(&mut self, _messages: Vec<(ShardPartition, QueueKey)>) -> Result<()> {
         Ok(())
+    }
+
+    fn add_message(&mut self, _partition: QueuePartition, _message: V) -> Result<()> {
+        unimplemented!()
     }
 }
 
@@ -85,9 +86,8 @@ struct MessageQueueAdapterTestImpl<V: InternalMessageValue> {
 impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueAdapterTestImpl<V> {
     fn create_iterator(
         &self,
-        _for_shard_id: ShardIdent,
-        _shards_from: FastHashMap<ShardIdent, QueueKey>,
-        _shards_to: FastHashMap<ShardIdent, QueueKey>,
+        for_shard_id: ShardIdent,
+        ranges: Vec<QueueRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         Ok(Box::new(QueueIteratorTestImpl::default()))
     }
@@ -108,8 +108,9 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
 
     fn add_message_to_iterator(
         &self,
-        _iterator: &mut Box<dyn QueueIterator<V>>,
-        _message: V,
+        iterator: &mut Box<dyn QueueIterator<V>>,
+        partition: QueuePartition,
+        message: V,
     ) -> Result<()> {
         unimplemented!()
     }
@@ -117,7 +118,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
     fn commit_messages_to_iterator(
         &self,
         _iterator: &mut Box<dyn QueueIterator<V>>,
-        _messages: Vec<(ShardIdent, QueueKey)>,
+        _messages: Vec<(ShardPartition, QueueKey)>,
     ) -> Result<()> {
         unimplemented!()
     }

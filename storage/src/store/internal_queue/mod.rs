@@ -1,14 +1,21 @@
+use std::collections::HashMap;
 use std::fs::File;
 
-use anyhow::Result;
+use ahash::RandomState;
+use anyhow::{Error, Result};
+use everscale_types::boc::Boc;
+use everscale_types::cell::{Cell, CellSlice, Load};
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
-use weedb::rocksdb::{ReadOptions, WriteBatch};
+use weedb::rocksdb::{
+    DBCommon, DBRawIterator, DBRawIteratorWithThreadMode, MultiThreaded, ReadOptions, WriteBatch,
+    WriteBatchWithTransaction,
+};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
 
 use crate::db::*;
-use crate::model::ShardsInternalMessagesKey;
+use crate::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
 use crate::store::QueueStateReader;
 use crate::util::{OwnedIterator, StoredValue};
 
@@ -20,6 +27,137 @@ pub struct InternalQueueStorage {
 }
 
 impl InternalQueueStorage {
+    pub fn insert_destination_stat_uncommitted(
+        &self,
+        batch: &mut WriteBatchWithTransaction<false>,
+        key: &StatKey,
+        dest: &[u8],
+        count: u64,
+    ) -> Result<()> {
+        let cf = self.db.internal_messages_dest_stat_uncommitted.cf();
+        let mut key_buffer = Vec::with_capacity(StatKey::SIZE_HINT);
+        key.serialize(&mut key_buffer);
+
+        let mut value_buffer = Vec::with_capacity(std::mem::size_of::<u64>() + dest.len());
+
+        unsafe {
+            let count_bytes = count.to_be_bytes();
+            let ptr = value_buffer.as_mut_ptr();
+
+            std::ptr::copy_nonoverlapping(count_bytes.as_ptr(), ptr, count_bytes.len());
+
+            std::ptr::copy_nonoverlapping(dest.as_ptr(), ptr.add(count_bytes.len()), dest.len());
+
+            value_buffer.set_len(count_bytes.len() + dest.len());
+        }
+
+        batch.put_cf(&cf, &key_buffer, &value_buffer);
+
+        Ok(())
+    }
+
+    pub fn collect_commited_stats_in_range(
+        &self,
+        snapshot: &OwnedSnapshot,
+        shard_ident: ShardIdent,
+        partition: QueuePartition,
+        from: QueueKey,
+        to: QueueKey,
+        result: &mut FastHashMap<IntAddr, u64>,
+    ) -> Result<()> {
+        let mut read_config = self.db.internal_messages_dest_stat.new_read_config();
+        read_config.set_snapshot(snapshot);
+        let cf = self.db.internal_messages_dest_stat.cf();
+
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+
+        self.collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
+    }
+
+    pub fn collect_uncommited_stats_in_range(
+        &self,
+        snapshot: &OwnedSnapshot,
+        shard_ident: ShardIdent,
+        partition: QueuePartition,
+        from: QueueKey,
+        to: QueueKey,
+        result: &mut FastHashMap<IntAddr, u64>,
+    ) -> Result<()> {
+        let mut read_config = self
+            .db
+            .internal_messages_dest_stat_uncommitted
+            .new_read_config();
+        read_config.set_snapshot(snapshot);
+        let cf = self.db.internal_messages_dest_stat_uncommitted.cf();
+
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+
+        self.collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
+    }
+
+    fn collect_dest_counts_in_range(
+        &self,
+        iter: &mut DBRawIterator<'_>,
+        shard_ident: ShardIdent,
+        partition: QueuePartition,
+        from: QueueKey,
+        to: QueueKey,
+        result: &mut FastHashMap<IntAddr, u64>,
+    ) -> Result<()> {
+        let from_key = StatKey {
+            shard_ident,
+            partition,
+            min_message: from,
+            max_message: QueueKey::MIN,
+            index: 0,
+        };
+
+        let from_key_bytes = {
+            let mut buf = Vec::with_capacity(StatKey::SIZE_HINT);
+            from_key.serialize(&mut buf);
+            buf
+        };
+
+        iter.seek(&from_key_bytes);
+
+        while iter.valid() {
+            let key_bytes = iter.key();
+            let value_bytes = iter.value();
+
+            match (key_bytes, value_bytes) {
+                (Some(mut k), Some(v)) => {
+                    let current_key = StatKey::deserialize(&mut k);
+
+                    if current_key.shard_ident != shard_ident || current_key.partition != partition
+                    {
+                        break;
+                    }
+
+                    if current_key.max_message > to {
+                        break;
+                    }
+
+                    let (count_bytes, dest_bytes) = v.split_at(8);
+                    let count = u64::from_be_bytes(count_bytes.try_into().unwrap());
+
+                    let cell = Boc::decode(dest_bytes)?;
+
+                    let int_addr = IntAddr::load_from(&mut cell.as_slice()?)?;
+
+                    let entry = result.entry(int_addr).or_insert(0);
+                    *entry += count;
+                }
+                _ => {
+                    break;
+                }
+            }
+
+            iter.next();
+        }
+
+        Ok(())
+    }
+
     pub fn new(db: BaseDb) -> Self {
         Self { db }
     }
@@ -59,6 +197,8 @@ impl InternalQueueStorage {
                 };
 
                 let key = ShardsInternalMessagesKey {
+                    // TODO !!! read it
+                    partition: QueuePartition::NormalPriority,
                     shard_ident,
                     internal_message_key: QueueKey {
                         lt: int_msg_info.created_lt,
@@ -81,14 +221,10 @@ impl InternalQueueStorage {
         .await?
     }
 
-    pub fn delete_messages(
-        &self,
-        source_shard: ShardIdent,
-        from: &QueueKey,
-        to: &QueueKey,
-    ) -> Result<()> {
-        let start_key = ShardsInternalMessagesKey::new(source_shard, *from);
-        let end_key = ShardsInternalMessagesKey::new(source_shard, *to);
+    pub fn delete_messages(&self, range: QueueRange) -> Result<()> {
+        let start_key =
+            ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.from);
+        let end_key = ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.to);
 
         let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
 
@@ -110,19 +246,21 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn commit(&self, ranges: FastHashMap<ShardIdent, QueueKey>) -> Result<()> {
+    pub fn commit(&self, ranges: Vec<QueueRange>) -> Result<()> {
         let snapshot = self.snapshot();
 
         let mut batch = WriteBatch::default();
 
         for range in ranges {
             let from = ShardsInternalMessagesKey {
-                shard_ident: range.0,
-                internal_message_key: QueueKey::MIN,
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.from,
             };
             let to = ShardsInternalMessagesKey {
-                shard_ident: range.0,
-                internal_message_key: range.1,
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.to,
             };
 
             let mut readopts = self
