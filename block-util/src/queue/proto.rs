@@ -4,6 +4,7 @@ use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tl_proto::{TlRead, TlWrite};
+use tycho_util::FastHashMap;
 
 use crate::tl;
 
@@ -30,6 +31,8 @@ pub struct QueueDiff {
     pub max_message: QueueKey,
     /// List of message hashes (sorted ASC).
     pub messages: Vec<HashBytes>,
+    /// Partition router
+    pub partition_router: FastHashMap<IntAddr, QueuePartition>,
 }
 
 impl QueueDiff {
@@ -94,6 +97,8 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             min_message: QueueKey::read_from(data)?,
             max_message: QueueKey::read_from(data)?,
             messages: messages_list::read(data)?,
+            // TODO !!! add read for partition_router
+            partition_router: Default::default(),
         };
 
         if result.max_message < result.min_message {
@@ -147,11 +152,37 @@ pub struct QueueStateHeader {
 }
 
 /// Queue key.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
 pub struct QueueKey {
     pub lt: u64,
     #[tl(with = "tl::hash_bytes")]
     pub hash: HashBytes,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+#[tl(boxed)]
+pub enum QueuePartition {
+    #[tl(id = 0)]
+    NormalPriority = 0,
+    #[tl(id = 1)]
+    LowPriority = 1,
+}
+
+impl Default for QueuePartition {
+    fn default() -> Self {
+        Self::NormalPriority
+    }
+}
+
+impl From<u8> for QueuePartition {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::NormalPriority,
+            1 => Self::LowPriority,
+            _ => panic!("Invalid value for QueuePartition"),
+        }
+    }
 }
 
 impl QueueKey {
@@ -198,6 +229,12 @@ impl From<QueueKey> for (u64, HashBytes) {
     #[inline]
     fn from(key: QueueKey) -> Self {
         key.split()
+    }
+}
+
+impl std::fmt::Debug for QueueKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
     }
 }
 
@@ -470,6 +507,7 @@ mod tests {
                 HashBytes::from([0x02; 32]),
                 HashBytes::from([0x03; 32]),
             ],
+            partition_router: Default::default(),
         };
 
         let bytes = tl_proto::serialize(&diff);
@@ -516,6 +554,7 @@ mod tests {
                     HashBytes::from([0x02; 32]),
                     HashBytes::from([0x03; 32]),
                 ],
+                partition_router: Default::default(),
             };
 
             // NOTE: We need this for the hash computation.
