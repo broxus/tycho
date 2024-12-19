@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_storage::model::ShardsInternalMessagesKey;
 use tycho_storage::owned_iterator::OwnedIterator;
 
@@ -18,10 +18,12 @@ impl Range {
     }
 }
 
-impl From<(QueueKey, QueueKey, ShardIdent)> for Range {
-    fn from(value: (QueueKey, QueueKey, ShardIdent)) -> Self {
-        let from = ShardsInternalMessagesKey::new(value.2, value.0);
-        let to = ShardsInternalMessagesKey::new(value.2, value.1);
+impl From<(QueuePartition, ShardIdent, QueueKey, QueueKey)> for Range {
+    fn from(value: (QueuePartition, ShardIdent, QueueKey, QueueKey)) -> Self {
+        let (partition, shard_ident, from, to) = value;
+
+        let from = ShardsInternalMessagesKey::new(partition, shard_ident, from);
+        let to = ShardsInternalMessagesKey::new(partition, shard_ident, to);
 
         Range { from, to }
     }
@@ -29,32 +31,35 @@ impl From<(QueueKey, QueueKey, ShardIdent)> for Range {
 
 pub enum IterResult<'a> {
     Value(&'a [u8]),
-    Skip(Option<ShardsInternalMessagesKey>),
+    Skip(Option<(ShardIdent, QueueKey)>),
 }
 
 pub struct ShardIterator {
+    partition: QueuePartition,
+    shard_ident: ShardIdent,
     range: Range,
-    source: ShardIdent,
     receiver: ShardIdent,
     iterator: OwnedIterator,
 }
 
 impl ShardIterator {
     pub fn new(
-        source: ShardIdent,
+        partition: QueuePartition,
+        shard_ident: ShardIdent,
         from: QueueKey,
         to: QueueKey,
         receiver: ShardIdent,
         mut iterator: OwnedIterator,
     ) -> Self {
-        iterator.seek(ShardsInternalMessagesKey::new(source, from));
+        iterator.seek(ShardsInternalMessagesKey::new(partition, shard_ident, from));
 
-        let range = Range::from((from, to, source));
+        let range = Range::from((partition, shard_ident, from, to));
 
         Self {
+            partition,
+            shard_ident,
             range,
             receiver,
-            source,
             iterator,
         }
     }
@@ -67,9 +72,9 @@ impl ShardIterator {
         if let Some(key) = self.iterator.key() {
             let key = ShardsInternalMessagesKey::from(key);
 
-            if key.shard_ident != self.source {
-                return Ok(None);
-            }
+            // if key.shard_ident != self.source {
+            //     return Ok(None);
+            // }
 
             if key == self.range.from {
                 return Ok(Some(IterResult::Skip(None)));
@@ -91,7 +96,10 @@ impl ShardIterator {
             return if self.receiver.contains_address(&short_addr) {
                 Ok(Some(IterResult::Value(&value[9..])))
             } else {
-                Ok(Some(IterResult::Skip(Some(key))))
+                Ok(Some(IterResult::Skip(Some((
+                    key.shard_ident,
+                    key.internal_message_key,
+                )))))
             };
         }
         Ok(None)

@@ -2,17 +2,20 @@ use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::commited_state::CommittedStateStdImpl;
+use crate::internal_queue::state::state_iterator::IterRange;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::uncommitted_state::UncommittedStateStdImpl;
-use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
+use crate::internal_queue::types::{
+    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
+};
 use crate::tracing_targets;
-use crate::types::{DisplayIter, DisplayTuple, DisplayTupleRef};
+use crate::types::{DisplayIter, DisplayNestedMap, DisplayTuple, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>,
@@ -26,8 +29,8 @@ where
     fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, QueueKey>,
-        shards_to: FastHashMap<ShardIdent, QueueKey>,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
     /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
     fn apply_diff(
@@ -35,7 +38,7 @@ where
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
-        end_key: QueueKey,
+        statistics: DiffStatistics,
     ) -> Result<()>;
 
     /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
@@ -71,29 +74,22 @@ impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdImpl<V> {
-    #[instrument(skip_all, fields(%for_shard_id))]
+    #[instrument(skip_all, fields(%for_shard_id, ranges = ?ranges))]
     fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, QueueKey>,
-        shards_to: FastHashMap<ShardIdent, QueueKey>,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let time_start = std::time::Instant::now();
-        let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
-        let states_iterators = self.queue.iterator(&ranges, for_shard_id);
-
+        let states_iterators = self.queue.iterator(partition, ranges, for_shard_id)?;
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
-
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
+
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            range = %DisplayIter(ranges
-                .iter()
-                .map(|(k, v)| DisplayTuple((k, DisplayTupleRef(v))))
-            ),
             elapsed = %humantime::format_duration(time_start.elapsed()),
-            for_shard_id = %for_shard_id,
             "Iterator created"
         );
         Ok(Box::new(iterator))
@@ -105,17 +101,18 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         hash: &HashBytes,
-        end_key: QueueKey,
+        statistics: DiffStatistics,
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_to = diff.processed_to.clone();
-        self.queue.apply_diff(diff, block_id_short, hash, end_key)?;
+        self.queue
+            .apply_diff(diff, block_id_short, hash, statistics)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             new_messages_len = len,
             elapsed = ?time.elapsed(),
-            processed_to = %DisplayIter(processed_to.iter().map(DisplayTuple)),
+            processed_to = ?processed_to,
             "Diff applied",
         );
         Ok(())
@@ -165,8 +162,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
-            source_shard = %source_shard,
-            inclusive_until = %inclusive_until,
+            source_shard = ?source_shard,
+            inclusive_until = ?inclusive_until,
             "Trimming diffs"
         );
         self.queue.trim_diffs(source_shard, inclusive_until)
