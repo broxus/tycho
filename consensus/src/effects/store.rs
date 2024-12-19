@@ -61,8 +61,9 @@ impl MempoolAdapterStore {
     }
 
     /// allows to remove no more needed data before sync and store of newly created dag part
-    pub fn report_new_start(&self, new_start: Round) {
-        self.commit_finished.set_max(new_start);
+    pub fn report_new_start(&self, next_expected_anchor: u32) {
+        // set as committed because every anchor is repeatable by stored history (if it exists)
+        self.commit_finished.set_max_raw(next_expected_anchor);
     }
 
     pub fn expand_anchor_history(&self, anchor: &PointInfo, history: &[PointInfo]) -> Vec<Bytes> {
@@ -190,27 +191,19 @@ impl MempoolStore {
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
     ) {
         fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
-            assert!(
-                committed < consensus,
-                "failed expectation: committed {} < consensus {}",
-                committed.0,
-                consensus.0
+            // If the node is not scheduled, then it's paused and does not receive broadcasts:
+            // mempool receives fresher TKA (via validator sync)
+            // while BcastFilter has outdated consensus round.
+            // In such case top DAG round follows TKA while Engine round does not advance,
+            // DAG eventually shrinks by advancing its bottom and reports it to MempoolAdapter.
+
+            // So `committed` follows both consensus and TKA, and does not stall while Engine can.
+
+            let least_to_keep = (committed - CachedConfig::get().consensus.reset_rounds()).min(
+                // consensus for general work and sync:  collator may observe a gap if lags too far
+                // TKA for deep sync: consensus round is stalled, history not needed for others
+                consensus.max(top_known_anchor) - CachedConfig::get().consensus.max_total_rounds(),
             );
-            // collator needs TKA after restart
-            let least_to_keep = if consensus + CachedConfig::get().consensus.max_total_rounds()
-                < top_known_anchor
-            {
-                // collator is syncing blocks: need reproducible TKA on restart;
-                // safe to clean uncommitted
-                top_known_anchor - CachedConfig::get().consensus.reset_rounds()
-            } else if top_known_anchor <= committed {
-                // collator is collating: keep until commit finished & reproducible TKA on restart
-                (consensus - CachedConfig::get().consensus.max_total_rounds())
-                    .min(committed - CachedConfig::get().consensus.reset_rounds())
-            } else {
-                // tie: collator syncs and does not need committed, but commit may be not finished
-                committed - CachedConfig::get().consensus.reset_rounds()
-            };
             let remainder =
                 least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32;
             Genesis::id().round.max(least_to_keep - remainder)
@@ -249,8 +242,9 @@ impl MempoolStore {
 
                         match inner.clean(&up_to_exclusive) {
                             Ok(Some((first, last))) => {
-                                metrics::gauge!("tycho_mempool_rounds_db_cleaned_lower").set(first);
-                                metrics::gauge!("tycho_mempool_rounds_db_cleaned_upper").set(last);
+                                const CLEANED: &str = "tycho_mempool_rounds_db_cleaned";
+                                metrics::gauge!(CLEANED, "kind" => "lower").set(first);
+                                metrics::gauge!(CLEANED, "kind" => "upper").set(last);
                                 tracing::info!(
                                     "mempool DB cleaned for rounds [{first}..{last}] before {}",
                                     new_least_to_keep.0
