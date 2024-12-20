@@ -139,12 +139,11 @@ impl BroadcastFilterInner {
                 })
             };
             match try_by_round_entry {
-                Err(ExtendMapErr::CannotExtend) => (false, None, None),
-                // grab a lock
                 Ok(mut entry) if verified.is_ok() && round >= top_round => {
+                    // grab a lock
                     let (peer_count, same_round) = entry.value_mut();
                     // ban the author, if we detect equivocation now; we won't be able to prove it
-                    //   if some signatures are invalid (it's another reason for a local ban)
+                    // if some signatures are invalid (it's another reason for a local ban)
                     let (duplicates, equivocation) = match same_round.entry(author) {
                         hash_map::Entry::Occupied(mut existing) => {
                             let (old_digest, duplicates) = match existing.get_mut() {
@@ -178,13 +177,7 @@ impl BroadcastFilterInner {
                 }
                 // points must be channelled to Collector only after signal that threshold is reached
                 // (i.e. round is advanced), so had to piggyback on map's locking
-                Err(ExtendMapErr::RoundIsInDag) | Ok(_) => {
-                    assert!(
-                        verified.is_err() || round <= top_round,
-                        "branch clause is broken, expected {round:?} <= top dag {:?}, \
-                         also verified {verified:?}",
-                        top_round
-                    );
+                Err(ExtendMapErr::RoundIsInDag) | Ok(_) if round <= top_round => {
                     match &verified {
                         Ok(()) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
@@ -214,6 +207,7 @@ impl BroadcastFilterInner {
                     }
                     (false, None, None)
                 }
+                _ => (false, None, None),
             }
         } else {
             (false, None, None) // should ban sender
