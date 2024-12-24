@@ -20,7 +20,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
-use crate::config::{RpcConfig, TransactionsGcConfig};
+use crate::config::{RpcConfig, RpcStorage, TransactionsGcConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
 
@@ -34,13 +34,16 @@ impl RpcStateBuilder {
         let (storage, blockchain_rpc_client) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
-        let gc_handle = self.config.transactions_gc.as_ref().map(|config| {
-            tokio::spawn(transactions_gc(
-                config.clone(),
-                storage.clone(),
-                gc_notify.clone(),
-            ))
-        });
+        let gc_handle = match &self.config.storage {
+            RpcStorage::Full { gc } => gc.as_ref().map(|config| {
+                tokio::spawn(transactions_gc(
+                    config.clone(),
+                    storage.clone(),
+                    gc_notify.clone(),
+                ))
+            }),
+            RpcStorage::StateOnly => None,
+        };
 
         RpcState {
             inner: Arc::new(Inner {
@@ -427,7 +430,7 @@ impl Inner {
         }
 
         // Send a new KeyBlock notification to run GC
-        if self.config.transactions_gc.is_some() {
+        if self.config.storage.gc_is_enabled() {
             self.gc_notify.notify_waiters();
         }
 
