@@ -22,12 +22,34 @@ pub struct RpcConfig {
     /// Default: `4` (= 16 virtual shards).
     pub shard_split_depth: u8,
 
-    /// Transactions garbage collector configuration.
-    ///
-    /// Default: clear all transactions older than `1 week` every `1 hour`.
-    ///
-    /// `None` to disable garbage collection.
-    pub transactions_gc: Option<TransactionsGcConfig>,
+    pub storage: RpcStorage,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RpcStorage {
+    Full {
+        /// Transactions garbage collector configuration.
+        ///
+        /// Default: clear all transactions older than `1 week` every `1 hour`.
+        ///
+        /// `None` to disable garbage collection.
+        gc: Option<TransactionsGcConfig>,
+    },
+    /// Only store the state, no transactions and code hashes.
+    StateOnly,
+}
+
+impl RpcStorage {
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full { .. })
+    }
+    pub fn gc_is_enabled(&self) -> bool {
+        match self {
+            Self::Full { gc } => gc.is_some(),
+            Self::StateOnly => false,
+        }
+    }
 }
 
 impl Default for RpcConfig {
@@ -36,7 +58,9 @@ impl Default for RpcConfig {
             listen_addr: (Ipv4Addr::UNSPECIFIED, 8000).into(),
             generate_stub_keyblock: false,
             shard_split_depth: 4,
-            transactions_gc: Some(Default::default()),
+            storage: RpcStorage::Full {
+                gc: Some(Default::default()),
+            },
         }
     }
 }

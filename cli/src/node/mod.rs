@@ -140,7 +140,12 @@ impl Node {
         // Setup storage
         let storage = Storage::builder()
             .with_config(node_config.storage)
-            .with_rpc_storage(node_config.rpc.is_some())
+            .with_rpc_storage(
+                node_config
+                    .rpc
+                    .as_ref()
+                    .is_some_and(|x| x.storage.is_full()),
+            )
             .build()
             .await
             .context("failed to create storage")?;
