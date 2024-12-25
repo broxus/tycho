@@ -239,10 +239,16 @@ impl Producer {
             .iter()
             .find(|point| point.data().author == local_id);
 
+        // DB removal is a corner case: local node will download own points as dependencies
+        // of other's points. And local node may try to produce a new point with previous
+        // in includes, but there are no evidence for it, thus panic. Then, after restart
+        // the local node will re-broadcast those downloaded point, collect signatures for it
+        // and produce a new point at round it panicked.
         assert_eq!(
             prev_info.map(|prev| prev.digest()),
             proven_vertex,
-            "included prev point digest does not match broadcasted one"
+            "included prev point digest does not match broadcasted one. \
+             This may be OK after DB deletion: try to restart the node a couple of times."
         );
 
         let anchor_time = match anchor_proof {
