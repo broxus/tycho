@@ -1,5 +1,4 @@
 use std::cmp;
-use std::collections::btree_map;
 use std::sync::{Arc, Weak};
 
 use everscale_crypto::ed25519::KeyPair;
@@ -121,6 +120,7 @@ impl DagRound {
         self.0.locations.view(author, |_, v| view(v))
     }
 
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn select<'a, F, R>(&'a self, mut filter_map: F) -> impl Iterator<Item = R> + 'a
     where
         F: FnMut((&PeerId, &DagLocation)) -> Option<R> + 'a,
@@ -139,16 +139,15 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
-    /// for genesis (next round key pair) and own points (point round key pair)
-    /// this does not start recursive validation so node may restart with only broadcast point
-    /// and download dependencies when consensus round is determined
-    /// Note must be called inside [`tokio::task::spawn_blocking()`] unlike other methods
-    pub fn insert_exact_sign(
+    /// for locally produced points
+    #[must_use = "await for point to resolve in dag"]
+    pub fn add_local(
         &self,
         point: &Point,
-        key_pair: Option<&KeyPair>,
+        key_pair: Option<&Arc<KeyPair>>,
         store: &MempoolStore,
-    ) {
+        round_ctx: &RoundCtx,
+    ) -> DagPointFuture {
         assert_eq!(
             point.round(),
             self.round(),
@@ -164,9 +163,10 @@ impl DagRound {
                     )
                 })
                 .or_insert_with(|| {
-                    DagPointFuture::new_local_trusted(point, &loc.state, store, key_pair)
-                });
-        });
+                    DagPointFuture::new_local_valid(point, &loc.state, store, key_pair, round_ctx)
+                })
+                .clone()
+        })
     }
 
     pub fn set_bad_sig_in_broadcast_exact(&self, author: &PeerId) {
@@ -208,19 +208,15 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        let digest = point.digest();
         self.edit(&point.data().author, |loc| {
-            match loc.versions.entry(*digest) {
-                btree_map::Entry::Occupied(occupied) => {
-                    let first = occupied.get();
-                    first.resolve_download(point, true);
-                }
-                btree_map::Entry::Vacant(vacant) => {
-                    vacant.insert(DagPointFuture::new_broadcast(
+            loc.versions
+                .entry(*point.digest())
+                .and_modify(|first| first.resolve_download(point, true))
+                .or_insert_with(|| {
+                    DagPointFuture::new_broadcast(
                         self, point, &loc.state, downloader, store, round_ctx,
-                    ));
-                }
-            }
+                    )
+                });
         });
     }
 
@@ -306,10 +302,9 @@ impl std::fmt::Debug for AltFmt<'_, DagRound> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
         write!(f, "{}[", inner.round().0)?;
-        inner
-            .select(|(peer, loc)| write!(f, "{}{:?}", peer.alt(), loc.alt()).err())
-            .next()
-            .map_or(Ok(()), Err)?;
+        for result in inner.select(|(peer, loc)| Some(write!(f, "{}{:?}", peer.alt(), loc.alt()))) {
+            result?;
+        }
         write!(f, "]")?;
         Ok(())
     }

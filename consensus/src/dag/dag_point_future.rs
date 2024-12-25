@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_storage::point_status::PointStatus;
@@ -14,7 +16,7 @@ use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
-use crate::effects::{Ctx, DownloadCtx, MempoolStore, RoundCtx, ValidateCtx};
+use crate::effects::{AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{Cert, DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
 
@@ -27,13 +29,16 @@ impl Future for DagPointFuture {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
-            DagPointFutureType::Validate { task, .. }
-            | DagPointFutureType::Load { task, .. }
-            | DagPointFutureType::Store(task) => match task.poll_unpin(cx) {
+            DagPointFutureType::Validate { task, .. } | DagPointFutureType::Load { task, .. } => {
+                match task.poll_unpin(cx) {
+                    Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            DagPointFutureType::Store(task) => match task.poll_unpin(cx) {
                 Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
                 Poll::Pending => Poll::Pending,
             },
-            DagPointFutureType::Ready(ready) => ready.poll_unpin(cx),
         }
     }
 }
@@ -43,8 +48,7 @@ enum DagPointFutureType {
     Validate {
         task: Shared<JoinTask<DagPoint>>,
         // normally, if we are among the last nodes to validate some broadcast point,
-        // we can receive its proof from author, trust its signatures and skip vertex validation;
-        // also, any still not locally validated dependencies of a vertex become trusted
+        // we can receive its proof from author, check its signatures and skip validation of the vertex and its deps
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
     },
     Load {
@@ -54,36 +58,51 @@ enum DagPointFutureType {
         dependers_tx: mpsc::UnboundedSender<PeerId>,
         resolve: Arc<OnceTake<oneshot::Sender<DownloadResult>>>,
     },
-    Store(Shared<JoinTask<DagPoint>>),
-    Ready(future::Ready<DagPoint>),
+    Store(Shared<BoxFuture<'static, DagPoint>>),
 }
 
 impl DagPointFuture {
     /// locally created points are assumed to be valid, checked prior insertion if needed;
     /// for points of others - there are all other methods
-    pub fn new_local_trusted(
+    pub fn new_local_valid(
         point: &Point,
         state: &InclusionState,
         store: &MempoolStore,
-        key_pair: Option<&KeyPair>,
+        key_pair: Option<&Arc<KeyPair>>,
+        round_ctx: &RoundCtx,
     ) -> Self {
-        let status = PointStatus {
-            is_ill_formed: false,
-            is_validated: false, // Note this is distinct from other valid points' statuses
-            is_valid: true,
-            is_trusted: true,
-            ..Default::default()
+        let handle = {
+            let point = point.clone();
+            let state = state.clone();
+            let store = store.clone();
+            let key_pair = key_pair.cloned();
+            let round_ctx = round_ctx.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let _span = round_ctx.span().enter();
+
+                let status = PointStatus {
+                    is_ill_formed: false,
+                    is_validated: false, // Note this is distinct from other valid points' statuses
+                    is_valid: true,
+                    is_trusted: true,
+                    ..Default::default()
+                };
+                store.insert_point(&point, &status);
+                let dag_point = DagPoint::Trusted(ValidPoint::new(&point));
+                let signable = state.init(&dag_point); // only after persisted
+                signable.sign(point.round(), key_pair.as_deref());
+                assert!(
+                    signable.signed().is_some_and(|sig| sig.is_ok()),
+                    "Coding or configuration error: local point cannot be signed; \
+                    node is not in validator set?"
+                );
+                dag_point
+            })
         };
-        store.insert_point(point, &status);
-        let dag_point = DagPoint::Trusted(ValidPoint::new(point));
-        let signable = state.init(&dag_point); // only after persisted
-        signable.sign(point.round(), key_pair);
-        assert!(
-            signable.signed().is_some_and(|sig| sig.is_ok()),
-            "Coding or configuration error: local point cannot be signed; \
-            node is not in validator set?"
-        );
-        Self(DagPointFutureType::Ready(future::ready(dag_point)))
+        let boxed = Self::box_blocking(handle, point, round_ctx, "new_local_valid()");
+
+        Self(DagPointFutureType::Store(Shared::new(boxed)))
     }
 
     pub fn new_ill_formed_broadcast(
@@ -92,26 +111,59 @@ impl DagPointFuture {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
-        let store_fut = tokio::task::spawn_blocking({
+        let handle = {
             let point = point.clone();
+            let state = state.clone();
             let store = store.clone();
-            move || {
+            let round_ctx = round_ctx.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let _span = round_ctx.span().enter();
+
                 let status = PointStatus {
                     is_ill_formed: true, // Note: it was not validated, can't be certified
                     ..Default::default()
                 };
                 store.insert_point(&point, &status);
-                DagPoint::IllFormed(Arc::new(point.id()))
-            }
-        });
-        let task = async move { store_fut.await.expect("db insert ill-formed broadcast") };
-        let state = state.clone();
-        Self(DagPointFutureType::Store(Shared::new(JoinTask::new(
-            task.inspect(move |dag_point| {
-                state.init(dag_point);
+                let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
+                state.init(&dag_point);
+                dag_point
             })
-            .instrument(round_ctx.span().clone()),
-        ))))
+        };
+        let boxed = Self::box_blocking(handle, point, round_ctx, "new_ill_formed_broadcast()");
+
+        Self(DagPointFutureType::Store(Shared::new(boxed)))
+    }
+
+    fn box_blocking(
+        handle: JoinHandle<DagPoint>,
+        point: &Point,
+        round_ctx: &RoundCtx,
+        method: &'static str,
+    ) -> BoxFuture<'static, DagPoint> {
+        let point_id = point.id();
+        let round_ctx = round_ctx.clone();
+
+        async move {
+            match handle.await {
+                Ok(dag_point) => dag_point,
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => {
+                    // should not happen, as blocking threads cannot be cancelled
+                    tracing::error!(
+                        parent: round_ctx.span(),
+                        error = display(e),
+                        method = method,
+                        author = display(point_id.author.alt()),
+                        round = point_id.round.0,
+                        digest = display(point_id.digest.alt()),
+                        "blocking thread exited, dag point future will not resolve"
+                    );
+                    future::pending().await
+                }
+            }
+        }
+        .boxed()
     }
 
     pub fn new_broadcast(
