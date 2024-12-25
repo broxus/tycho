@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use everscale_crypto::ed25519::KeyPair;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
@@ -145,71 +144,32 @@ impl Producer {
         let Some(witness_round) = finished_dag_round.prev().upgrade() else {
             return Vec::new();
         };
-        // have to make additional signatures because there still may be spawned tasks to Signer
-        let references = Self::references(round, &witness_round, key_pair, false);
-        let Some(includes) = last_own_point
+
+        let includes = last_own_point
             .filter(|l| l.round == round)
-            .map(|l| &l.includes)
-        else {
-            // have to link all @ r-2 if r-1 was skipped - because we made signatures;
-            // exclude own point from failed round - do not make other nodes massively ask for it;
-            return references
-                .into_iter()
-                .filter(|witness| witness.data().author != local_id)
-                .collect();
-        };
-        // do not repeat includes from previous point if it existed (they also contain own point)
-        references
-            .into_iter()
-            .filter(|witness| !includes.contains_key(&witness.data().author))
-            .collect()
-    }
+            .map(|l| &l.includes);
 
-    fn references(
-        round: Round,
-        dag_round: &DagRound,
-        key_pair: Option<&KeyPair>,
-        include_certified: bool,
-    ) -> Vec<PointInfo> {
-        let mut last_references = Vec::new();
-        let mut references = dag_round
-            .select(|(_, loc)| {
-                loc.state
-                    .signable()
-                    .and_then(|signable| match signable.signed() {
-                        Some(Ok(_sig)) => signable.first_resolved.valid().map(|v| v.info.clone()),
-                        _ if include_certified && signable.first_resolved.certified().is_some() => {
-                            signable.first_resolved.certified().map(|v| v.info.clone())
-                        }
-                        None if key_pair.is_some() => {
-                            last_references.push(loc.state.clone());
-                            None
-                        }
-                        Some(Err(_)) | None => None,
-                    })
+        // have to link all @ r-2 if r-1 was skipped - because we made signatures;
+        witness_round
+            .select(|(peer, loc)| {
+                let skip = match includes {
+                    // do not repeat previous point's includes (they also contain own point)
+                    Some(includes) => includes.contains_key(peer),
+                    // exclude own point from failed round - do not make others massively ask for it
+                    _ => peer == local_id,
+                };
+                if skip {
+                    None
+                } else {
+                    // there still may be spawned tasks to Signer, so have to make signatures
+                    loc.state
+                        .sign_or_reject(round, key_pair)
+                        .ok()
+                        .and_then(|signed| signed.first_resolved.valid().cloned())
+                        .map(|valid| valid.info)
+                }
             })
-            .collect::<Vec<_>>();
-
-        if last_references.is_empty() {
-            return references;
-        }
-
-        // support known points
-        let mut last_references = last_references
-            .into_par_iter()
-            .filter_map(|state| {
-                state.signable().and_then(|signable| {
-                    signable.sign(round, key_pair);
-                    match signable.signed() {
-                        Some(Ok(_sig)) => signable.first_resolved.valid().map(|v| v.info.clone()),
-                        Some(Err(_)) | None => None,
-                    }
-                })
-            })
-            .collect();
-
-        references.append(&mut last_references);
-        references
+            .collect::<Vec<_>>()
     }
 
     fn link_from_includes(

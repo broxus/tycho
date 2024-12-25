@@ -1,5 +1,4 @@
 use std::cmp;
-use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -13,13 +12,11 @@ use tycho_util::sync::rayon_run;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
-use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, Cert, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof,
-    Round, ValidPoint,
+    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof, Round,
 };
 
 // Note on equivocation.
@@ -35,7 +32,7 @@ use crate::models::{
 
 pub struct Verifier;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum PointMap {
     Evidence, // r+0
     Includes, // r-1
@@ -56,12 +53,20 @@ pub enum VerifyError {
     IllFormed(IllFormedReason),
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
+    #[error("unknown after load from DB")]
+    AfterLoadFromDb,
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
     #[error("links both anchor roles to same round")]
     LinksSameRound,
+    #[error("self link")]
+    SelfLink,
+    #[error("anchor link")]
+    AnchorLink,
+    #[error("bad signature in evidence map")]
+    EvidenceSig,
     #[error("{0:?} peer map must be empty")]
     MustBeEmpty(PointMap),
     #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
@@ -70,6 +75,13 @@ pub enum IllFormedReason {
     LackOfPeers((usize, PeerCount, PointMap)),
     #[error("some structure issue")]
     NotDescribed, // TODO enum for each check
+}
+
+#[derive(Debug)]
+pub enum ValidateResult {
+    Valid { is_certified: bool },
+    Invalid { is_certified: bool },
+    IllFormed(IllFormedReason),
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -92,15 +104,6 @@ impl Verifier {
 
     /// must be called iff [`Self::verify`] succeeded
     ///
-    /// Note: during sync (eg after reboot) `prev_proof` may be passed as None
-    ///  if point is already stored as successfully validated (`Trusted` or certified),
-    ///  so prev point's evidence won't be re-checked, even if it exists.
-    ///  So this method **must not enforce or rely on** next well-formness invariant:
-    ///  "if point includes own prev point, than it has evidence for it".
-    ///  Instead, this method exploits reversed conclusion from point being well-formed:
-    ///  "if point has evidence, then it lists own prev point in includes map",
-    ///  so it can be (down)loaded and validated as a direct dependency.
-    ///
     /// We do not require the whole `Point` to avoid OOM as during sync Dag can grow large.
     pub async fn validate(
         info: PointInfo, // @ r+0
@@ -110,7 +113,7 @@ impl Verifier {
         store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
         ctx: ValidateCtx,
-    ) -> DagPoint {
+    ) -> ValidateResult {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = ctx.span().enter();
 
@@ -122,17 +125,18 @@ impl Verifier {
                 // for genesis point it's sufficient to be well-formed and pass integrity check,
                 // it cannot be validated against AnchorStage (as it knows nothing about genesis)
                 // and cannot contain dependencies
-                return ValidateCtx::validated(DagPoint::Trusted(ValidPoint::new(info)));
+                return ctx.validated(ValidateResult::Valid {
+                    is_certified: false,
+                });
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
         let Some(r_0_pre) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG");
-            return ValidateCtx::validated(DagPoint::Invalid(Cert {
-                inner: info,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: certified_rx.try_recv() != Err(TryRecvError::Empty),
-            }));
+            });
         };
         assert_eq!(
             r_0_pre.round(),
@@ -141,14 +145,14 @@ impl Verifier {
         );
 
         if !Self::is_self_links_ok(&info, &r_0_pre) {
-            return ValidateCtx::validated(DagPoint::IllFormed(Arc::new(info.id())));
+            return ctx.validated(ValidateResult::IllFormed(IllFormedReason::SelfLink));
         }
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
             .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre))
         {
-            return ValidateCtx::validated(DagPoint::IllFormed(Arc::new(info.id())));
+            return ctx.validated(ValidateResult::IllFormed(IllFormedReason::AnchorLink));
         };
 
         drop(r_0_pre);
@@ -156,7 +160,7 @@ impl Verifier {
 
         // certified flag aborts proof check; checked proof mark dependencies as certified;
         // check depender's sig before new (down)load point futures are spawned
-        let mut proven_by_cert = if certified_rx.try_recv() != Err(TryRecvError::Empty) {
+        let proven_by_cert = if certified_rx.try_recv() != Err(TryRecvError::Empty) {
             // FIXME either sent or sender dropped - all the same; make distinct and do not drop
             Some(true)
         } else if let Some(proof) = prev_proof {
@@ -164,20 +168,17 @@ impl Verifier {
             let certified = tokio::select! {
                 biased;
                 _ = &mut certified_rx => {
-                    Ok(true) // certified; certifies
+                    true // certified; certifies
                 },
                 is_sig_ok = &mut signatures_fut => {
                     if is_sig_ok {
-                        Ok(false) // not certified; certifies
+                        false // not certified; certifies
                     } else {
-                        Err(())
+                        return ctx.validated(ValidateResult::IllFormed(IllFormedReason::EvidenceSig));
                     }
                 }
             };
-            if certified.is_err() {
-                return ValidateCtx::validated(DagPoint::IllFormed(Arc::new(info.id())));
-            }
-            certified.ok()
+            Some(certified)
         } else {
             None
         };
@@ -186,27 +187,24 @@ impl Verifier {
 
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ValidateCtx::validated(DagPoint::Invalid(Cert {
-                inner: info,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: proven_by_cert.unwrap_or_default(),
-            }));
+            });
         };
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot validate point's 'includes', no round in local DAG");
-            return ValidateCtx::validated(DagPoint::Invalid(Cert {
-                inner: info,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: proven_by_cert.unwrap_or_default(),
-            }));
+            });
         };
 
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.data().witness.is_empty() {
             tracing::debug!("cannot validate point's 'witness', no round in local DAG");
-            return ValidateCtx::validated(DagPoint::Invalid(Cert {
-                inner: info,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: proven_by_cert.unwrap_or_default(),
-            }));
+            });
         }
 
         let direct_deps = Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
@@ -230,23 +228,15 @@ impl Verifier {
             }
             None => {}
         }
-
-        let mut is_unique_in_loc_fut = std::pin::pin!(Self::is_unique_in_loc(
-            info.clone(),
-            r_0.view(&info.data().author, |loc| {
-                let other_versions = Self::versions_except(loc, Some(info.digest()));
-                (loc.bad_sig_in_broadcast, other_versions)
-            })
-        )
-        .instrument(ctx.span().clone()));
+        let mut is_certified = proven_by_cert.unwrap_or_default();
 
         let mut is_valid_fut = std::pin::pin!({
             let deps_and_prev = direct_deps
                 .iter()
                 .cloned()
-                // peer has to jump over a round if it had some invalid point in prev loc
-                // do not add same prev_digest twice - it is added as one of 'includes'
-                // do not extend listed dependencies as they may become trusted by consensus
+                // peer has to jump over a round if it could not produce valid point in prev loc;
+                // do not add same prev_digest twice - it is added as one of 'includes';
+                // do not extend listed dependencies as they may become certified by majority
                 .chain(prev_other_versions.into_iter());
             Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(ctx.span().clone())
         });
@@ -256,76 +246,35 @@ impl Verifier {
         drop(r_1);
         drop(span_guard);
 
-        let mut valid = None;
-        let mut unique_in_loc = None;
-        while !(valid.is_some() && (unique_in_loc.is_some() || proven_by_cert.unwrap_or(false))) {
+        let valid = loop {
             tokio::select! {
                 biased;
-                _ = &mut certified_rx, if !proven_by_cert.unwrap_or(false) => {
-                    proven_by_cert = Some(true); // oneshot cannot be lagged, only closed
+                _ = &mut certified_rx, if !is_certified => {
+                    is_certified = true; // oneshot cannot be lagged, only closed
                     for shared in &direct_deps {
                         shared.mark_certified();
                     }
                 },
-                is_valid = &mut is_valid_fut, if valid.is_none() => {
-                    valid = Some(is_valid);
+                is_valid = &mut is_valid_fut => {
+                    break is_valid;
                 },
-                is_unique_in_loc = &mut is_unique_in_loc_fut, if unique_in_loc.is_none() => {
-                    unique_in_loc = Some(is_unique_in_loc);
-                }
-            }
-        }
-
-        let (dag_point, level) = match (
-            proven_by_cert.unwrap_or_default(), // no matter prev proof check here
-            valid.expect("validation must be completed to participate in consensus"),
-            unique_in_loc,
-        ) {
-            (true, true, _) => (
-                DagPoint::Certified(ValidPoint::new(info)),
-                tracing::Level::TRACE,
-            ),
-            (false, true, Some(true)) => (
-                DagPoint::Trusted(ValidPoint::new(info)),
-                tracing::Level::TRACE,
-            ),
-            (false, true, Some(false)) => (
-                DagPoint::Suspicious(ValidPoint::new(info)),
-                tracing::Level::WARN,
-            ),
-            (is_certified, false, _) => (
-                DagPoint::Invalid(Cert {
-                    inner: info,
-                    is_certified,
-                }),
-                tracing::Level::ERROR,
-            ),
-            (false, true, None) => {
-                let _guard = ctx.span().enter();
-                unreachable!(
-                    "unexpected pattern in loop break: \
-                     proven_by_cert={proven_by_cert:?} valid={valid:?} \
-                     unique_in_loc={unique_in_loc:?}"
-                );
             }
         };
-        dyn_event!(
-            parent: ctx.span(),
-            level,
-            result = display(dag_point.alt()),
-            proven_by_cert = debug(proven_by_cert),
-            valid = debug(valid),
-            unique_in_loc = debug(unique_in_loc),
-            "validated",
-        );
-        ValidateCtx::validated(dag_point)
+
+        let status = if valid {
+            ValidateResult::Valid { is_certified }
+        } else {
+            ValidateResult::Invalid { is_certified }
+        };
+
+        ctx.validated(status)
     }
 
     fn is_self_links_ok(
         info: &PointInfo,     // @ r+0
         dag_round: &DagRound, // r+0
     ) -> bool {
-        // existence of proofs in leader points is a part of point's well-form-ness check
+        // existence of proofs in leader points is a part of point's well-formedness check
         match &dag_round.anchor_stage() {
             Some(stage) if stage.leader == info.data().author => {
                 // either Proof directly points on candidate
@@ -401,16 +350,6 @@ impl Verifier {
         (found, others)
     }
 
-    fn versions_except(dag_location: &DagLocation, except: Option<&Digest>) -> Vec<DagPointFuture> {
-        // this is a synchronization point as whole closure runs under DashMap's lock
-        dag_location
-            .versions
-            .iter()
-            .filter(|(digest, _)| (except != Some(*digest)))
-            .map(|(_, shared)| shared.clone())
-            .collect::<Vec<_>>()
-    }
-
     fn spawn_direct_deps(
         info: &PointInfo,          // @ r+0
         r_1: &DagRound,            // r-1
@@ -452,53 +391,6 @@ impl Verifier {
         dependencies
     }
 
-    async fn is_unique_in_loc(
-        info: PointInfo,
-        loc_data: Option<(bool, Vec<DagPointFuture>)>,
-    ) -> bool {
-        let Some((broadcasted_bad_sig, other_versions)) = loc_data else {
-            return true;
-        };
-        if broadcasted_bad_sig {
-            return false;
-        };
-        let mut other_versions = other_versions.into_iter().collect::<FuturesUnordered<_>>();
-        while let Some(dag_point) = other_versions.next().await {
-            assert_eq!(
-                dag_point.author(),
-                info.data().author,
-                "this method checks only points by the same author"
-            );
-            assert_eq!(
-                dag_point.round(),
-                info.round(),
-                "this method checks only points at the same round"
-            );
-            assert_ne!(
-                dag_point.digest(),
-                info.digest(),
-                "impossible to validate the same point multiple times concurrently"
-            );
-            match dag_point {
-                DagPoint::Trusted(_)
-                | DagPoint::Suspicious(_)
-                | DagPoint::Certified(_)
-                | DagPoint::Invalid(_)
-                | DagPoint::IllFormed(_)
-                | DagPoint::NotFound(Cert {
-                    is_certified: true, ..
-                }) => {
-                    return false;
-                }
-                DagPoint::NotFound(_) => {
-                    // failed download is ok here:
-                    // it's other point's dependency, that really may not exist
-                }
-            }
-        }
-        true
-    }
-
     /// check only direct dependencies and location for previous point (let it jump over round)
     async fn is_valid(
         info: PointInfo,
@@ -522,46 +414,31 @@ impl Verifier {
             if dag_point.round() == prev_round && dag_point.author() == info.data().author {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
-                        match dag_point {
-                            DagPoint::Trusted(ValidPoint { info: found, .. })
-                            | DagPoint::Suspicious(ValidPoint { info: found, .. })
-                            | DagPoint::Certified(ValidPoint { info: found, .. })
-                            | DagPoint::Invalid(Cert {
-                                inner: found,
-                                is_certified: true,
-                            }) => {
-                                if !Self::is_proof_ok(&info, &found) {
-                                    return false;
-                                } // else ok continue
-                            }
-                            DagPoint::Invalid(_)
-                            | DagPoint::IllFormed(_)
-                            | DagPoint::NotFound(_) => {
-                                // author must have skipped current point's round
-                                // to clear its bad history
-                                return false;
-                            }
-                        }
+                        let Some(found) = dag_point.trusted() else {
+                            // author must have skipped current point's round
+                            // to clear its bad history
+                            return false;
+                        };
+                        if !Self::is_proof_ok(&info, found) {
+                            return false;
+                        } // else ok continue
                     }
                     Some(_) | None => {
                         #[allow(clippy::match_same_arms, reason = "comments")]
                         match dag_point {
-                            DagPoint::Trusted(_)
-                            | DagPoint::Suspicious(_)
-                            | DagPoint::Certified(_) => {
+                            DagPoint::Valid(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`
                                 // None: point must have filled `prev_digest` and `includes`
                                 return false;
                             }
-                            DagPoint::Invalid(_)
-                            | DagPoint::IllFormed(_)
-                            | DagPoint::NotFound(Cert {
-                                is_certified: true, ..
-                            }) => {
+                            DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`,
                                 //       just to be invalid for an invalid dependency
                                 // None: author must have skipped current point's round
                                 return false;
+                            }
+                            DagPoint::NotFound(cert) if cert.is_certified => {
+                                return false; // same as for valid
                             }
                             DagPoint::NotFound(_) => {
                                 // failed download is ok for both Some and None:
@@ -571,41 +448,31 @@ impl Verifier {
                     }
                 }
             } else {
-                match dag_point {
-                    DagPoint::Trusted(ValidPoint { info, .. })
-                    | DagPoint::Suspicious(ValidPoint { info, .. })
-                    | DagPoint::Certified(ValidPoint { info, .. })
-                    | DagPoint::Invalid(Cert {
-                        inner: info,
-                        is_certified: true,
-                    }) => {
-                        if info.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
-                            || info.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
-                        {
-                            // did not actualize the chain
-                            return false;
-                        }
-                        let valid_point_id = info.id();
-                        if ({
-                            valid_point_id == anchor_trigger_link_id
-                                && info.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
-                        }) || ({
-                            valid_point_id == anchor_proof_link_id
-                                && info.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
-                        }) {
-                            // path does not lead to destination
-                            return false;
-                        }
-                        if valid_point_id == anchor_proof_link_id
-                            && info.data().anchor_time != info.data().anchor_time
-                        {
-                            // anchor candidate's time is not inherited from its proof
-                            return false;
-                        }
-                    }
-                    DagPoint::Invalid(_) | DagPoint::IllFormed(_) | DagPoint::NotFound(_) => {
-                        return false; // just invalid dependency
-                    }
+                let Some(info) = dag_point.trusted() else {
+                    return false; // just invalid dependency
+                };
+                if info.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
+                    || info.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
+                {
+                    // did not actualize the chain
+                    return false;
+                }
+                let valid_point_id = info.id();
+                if ({
+                    valid_point_id == anchor_trigger_link_id
+                        && info.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
+                }) || ({
+                    valid_point_id == anchor_proof_link_id
+                        && info.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
+                }) {
+                    // path does not lead to destination
+                    return false;
+                }
+                if valid_point_id == anchor_proof_link_id
+                    && info.data().anchor_time != info.data().anchor_time
+                {
+                    // anchor candidate's time is not inherited from its proof
+                    return false;
                 }
             }
         }
@@ -698,8 +565,8 @@ impl Verifier {
                         let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
                         return Some(VerifyError::IllFormed(reason));
                     }
-                    if evidence.len() < total.majority_of_others() {
-                        let len = scheduled.len();
+                    let len = evidence.len();
+                    if len < total.majority_of_others() {
                         let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
                         return Some(VerifyError::IllFormed(reason));
                     }
@@ -729,8 +596,8 @@ impl Verifier {
                     let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Includes));
                     return Some(VerifyError::IllFormed(reason));
                 }
-                if includes.len() < total.majority() {
-                    let len = scheduled.len();
+                let len = includes.len();
+                if len < total.majority() {
                     let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Includes));
                     return Some(VerifyError::IllFormed(reason));
                 }
@@ -836,7 +703,7 @@ impl ValidateCtx {
         (Self::KIND, "not_found"),
         (Self::KIND, "ill_formed"),
         (Self::KIND, "invalid"),
-        (Self::KIND, "suspicious"),
+        (Self::KIND, "valid"),
     ];
 
     fn verified(result: &Result<(), VerifyError>) {
@@ -856,29 +723,56 @@ impl ValidateCtx {
         metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
     }
 
-    fn validated_labels(dag_point: &DagPoint) -> (&'static [(&'static str, &'static str)], u64) {
+    fn validated_labels(dag_point: &DagPoint) -> &'static [(&'static str, &'static str)] {
         match dag_point {
-            DagPoint::NotFound(_) => (&Self::VALIDATE_LABELS[0..=0], 1),
-            DagPoint::IllFormed(_) => (&Self::VALIDATE_LABELS[1..=1], 1),
-            DagPoint::Invalid(_) => (&Self::VALIDATE_LABELS[2..=2], 1),
-            DagPoint::Suspicious(_) => (&Self::VALIDATE_LABELS[3..=3], 1),
-            DagPoint::Certified(_) | DagPoint::Trusted(_) => (&Self::VALIDATE_LABELS[..0], 0),
+            DagPoint::NotFound(_) => &Self::VALIDATE_LABELS[0..=0],
+            DagPoint::IllFormed(_) => &Self::VALIDATE_LABELS[1..=1],
+            DagPoint::Invalid(_) => &Self::VALIDATE_LABELS[2..=2],
+            DagPoint::Valid(_) => &Self::VALIDATE_LABELS[3..=3],
         }
     }
 
-    fn validated(result: DagPoint) -> DagPoint {
-        let (labels, count) = Self::validated_labels(&result);
-        metrics::counter!("tycho_mempool_verifier_validate", labels).increment(count);
+    fn validated(&self, result: ValidateResult) -> ValidateResult {
+        let labels = match &result {
+            ValidateResult::IllFormed(reason) => {
+                tracing::error!(
+                    parent: self.span(),
+                    result = "ill-formed",
+                    reason = display(reason),
+                    "validated",
+                );
+                &Self::VALIDATE_LABELS[1..=1]
+            }
+            ValidateResult::Invalid { is_certified } => {
+                tracing::warn!(
+                    parent: self.span(),
+                    is_certified = is_certified,
+                    result = "invalid",
+                    "validated",
+                );
+                &Self::VALIDATE_LABELS[2..=2]
+            }
+            ValidateResult::Valid { is_certified } => {
+                tracing::debug!(
+                    parent: self.span(),
+                    is_certified = is_certified,
+                    result = "valid",
+                    "validated",
+                );
+                &Self::VALIDATE_LABELS[3..=3]
+            }
+        };
+        metrics::counter!("tycho_mempool_verifier_validate", labels).increment(1);
         result
     }
 
     pub fn first_resolved(dag_point: &DagPoint) {
-        let (labels, count) = Self::validated_labels(dag_point);
-        metrics::counter!("tycho_mempool_points_first_resolved", labels).increment(count);
+        let labels = Self::validated_labels(dag_point);
+        metrics::counter!("tycho_mempool_points_first_resolved", labels).increment(1);
     }
 
     pub fn alt_resolved(dag_point: &DagPoint) {
-        let (labels, _) = Self::validated_labels(dag_point);
+        let labels = Self::validated_labels(dag_point);
         metrics::counter!("tycho_mempool_alt_points_resolved", labels).increment(1);
     }
 }
