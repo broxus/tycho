@@ -16,7 +16,9 @@ use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
-use crate::effects::{AltFormat, Ctx, EngineCtx, MempoolAdapterStore, MempoolStore, RoundCtx};
+use crate::effects::{
+    AltFormat, Ctx, DbCleaner, EngineCtx, MempoolAdapterStore, MempoolStore, RoundCtx,
+};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -30,6 +32,7 @@ pub struct Engine {
     committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
     consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
+    db_cleaner: DbCleaner,
     ctx: EngineCtx,
     init_task: Option<JoinTask<()>>,
 }
@@ -93,11 +96,8 @@ impl Engine {
         genesis.verify_hash().expect("Failed to verify genesis");
         Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
 
-        let store = MempoolStore::new(
-            mempool_adapter_store,
-            consensus_round.receiver(),
-            top_known_anchor.receiver(),
-        );
+        let store = MempoolStore::new(mempool_adapter_store);
+        let db_cleaner = DbCleaner::new(mempool_adapter_store);
 
         // Dag, created at genesis, will at first extend up to it's greatest length
         // (in case last broadcast is within it) without data,
@@ -152,6 +152,7 @@ impl Engine {
             committer_run,
             committed_info_tx,
             consensus_round,
+            db_cleaner,
             round_task,
             ctx: engine_ctx,
             init_task: Some(init_task),
@@ -356,6 +357,11 @@ impl Engine {
 
     pub async fn run(mut self) {
         let mut replay_bcasts = self.pre_run().await;
+        let _db_clean_task = self.db_cleaner.new_task(
+            self.round_task.state.consensus_round.receiver(),
+            self.round_task.state.top_known_anchor.receiver(),
+        );
+
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;

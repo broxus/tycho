@@ -8,6 +8,7 @@ use tl_proto::TlWrite;
 use tycho_network::OverlayId;
 use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
+use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{
@@ -21,7 +22,7 @@ use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
-    pub inner: MempoolStorage,
+    storage: MempoolStorage,
     commit_finished: RoundWatch<Commit>,
 }
 
@@ -53,9 +54,9 @@ trait MempoolStoreImpl: Send + Sync {
 }
 
 impl MempoolAdapterStore {
-    pub fn new(inner: MempoolStorage, commit_finished: RoundWatch<Commit>) -> Self {
+    pub fn new(storage: MempoolStorage, commit_finished: RoundWatch<Commit>) -> Self {
         MempoolAdapterStore {
-            inner,
+            storage,
             commit_finished,
         }
     }
@@ -86,13 +87,13 @@ impl MempoolAdapterStore {
             );
             Vec::new()
         } else {
-            self.inner
+            self.storage
                 .expand_anchor_history(history)
                 .with_context(|| context(anchor, history))
                 .expect("DB expand anchor history")
         };
         // may skip expand part, but never skip set committed - let it write what it should
-        self.inner
+        self.storage
             .set_committed(anchor, history)
             .with_context(|| context(anchor, history))
             .expect("DB set committed");
@@ -104,19 +105,8 @@ impl MempoolAdapterStore {
 }
 
 impl MempoolStore {
-    pub fn new(
-        mempool_adapter_store: &MempoolAdapterStore,
-        consensus_round: RoundWatcher<Consensus>,
-        top_known_anchor: RoundWatcher<TopKnownAnchor>,
-    ) -> Self {
-        Self::clean_task(
-            mempool_adapter_store.inner.clone(),
-            consensus_round,
-            mempool_adapter_store.commit_finished.receiver(),
-            top_known_anchor,
-        );
-
-        Self(Arc::new(mempool_adapter_store.inner.clone()))
+    pub fn new(mempool_adapter_store: &MempoolAdapterStore) -> Self {
+        Self(Arc::new(mempool_adapter_store.storage.clone()))
     }
 
     #[cfg(feature = "test")]
@@ -183,37 +173,53 @@ impl MempoolStore {
             .with_context(|| format!("new overlay id {}", overlay_id))
             .expect("DB drop all data");
     }
+}
 
-    fn clean_task(
-        inner: MempoolStorage,
-        mut consensus_round: RoundWatcher<Consensus>,
-        mut committed_round: RoundWatcher<Commit>,
-        mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
-    ) {
-        fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
-            // If the node is not scheduled, then it's paused and does not receive broadcasts:
-            // mempool receives fresher TKA (via validator sync)
-            // while BcastFilter has outdated consensus round.
-            // In such case top DAG round follows TKA while Engine round does not advance,
-            // DAG eventually shrinks by advancing its bottom and reports it to MempoolAdapter.
+pub struct DbCleaner {
+    storage: MempoolStorage,
+    committed_round: RoundWatch<Commit>,
+}
 
-            // So `committed` follows both consensus and TKA, and does not stall while Engine can.
-
-            let least_to_keep = (committed - CachedConfig::get().consensus.reset_rounds()).min(
-                // consensus for general work and sync:  collator may observe a gap if lags too far
-                // TKA for deep sync: consensus round is stalled, history not needed for others
-                consensus.max(top_known_anchor) - CachedConfig::get().consensus.max_total_rounds(),
-            );
-            let remainder =
-                least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32;
-            Genesis::id().round.max(least_to_keep - remainder)
+impl DbCleaner {
+    pub fn new(adapter_store: &MempoolAdapterStore) -> Self {
+        Self {
+            storage: adapter_store.storage.clone(),
+            committed_round: adapter_store.commit_finished.clone(),
         }
+    }
 
-        tokio::spawn(async move {
+    fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
+        // If the node is not scheduled, then it's paused and does not receive broadcasts:
+        // mempool receives fresher TKA (via validator sync)
+        // while BcastFilter has outdated consensus round.
+        // In such case top DAG round follows TKA while Engine round does not advance,
+        // DAG eventually shrinks by advancing its bottom and reports it to MempoolAdapter.
+
+        // So `committed` follows both consensus and TKA, and does not stall while Engine can.
+
+        let least_to_keep = (committed - CachedConfig::get().consensus.reset_rounds()).min(
+            // consensus for general work and sync:  collator may observe a gap if lags too far
+            // TKA for deep sync: consensus round is stalled, history not needed for others
+            consensus.max(top_known_anchor) - CachedConfig::get().consensus.max_total_rounds(),
+        );
+        let remainder =
+            least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32;
+        Genesis::id().round.max(least_to_keep - remainder)
+    }
+
+    pub fn new_task(
+        &self,
+        mut consensus_round: RoundWatcher<Consensus>,
+        mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
+    ) -> JoinTask<()> {
+        let storage = self.storage.clone();
+        let mut committed_round = self.committed_round.receiver();
+
+        JoinTask::new(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
             let mut top_known = top_known_anchor.get();
-            let mut prev_least_to_keep = least_to_keep(consensus, committed, top_known);
+            let mut prev_least_to_keep = Self::least_to_keep(consensus, committed, top_known);
             loop {
                 tokio::select! {
                     biased;
@@ -230,17 +236,17 @@ impl MempoolStore {
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
                     .set(committed - top_known);
 
-                let new_least_to_keep = least_to_keep(consensus, committed, top_known);
+                let new_least_to_keep = Self::least_to_keep(consensus, committed, top_known);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
                     .set(consensus - new_least_to_keep);
 
                 if new_least_to_keep > prev_least_to_keep {
-                    let inner = inner.clone();
+                    let storage = storage.clone();
                     let task = tokio::task::spawn_blocking(move || {
                         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
                         MempoolStorage::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
 
-                        match inner.clean(&up_to_exclusive) {
+                        match storage.clean(&up_to_exclusive) {
                             Ok(Some((first, last))) => {
                                 const CLEANED: &str = "tycho_mempool_rounds_db_cleaned";
                                 metrics::gauge!(CLEANED, "kind" => "lower").set(first);
@@ -274,7 +280,7 @@ impl MempoolStore {
                     }
                 }
             }
-        });
+        })
     }
 }
 
