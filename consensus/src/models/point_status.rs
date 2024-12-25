@@ -3,7 +3,105 @@ use std::fmt::{Debug, Display, Formatter};
 use tycho_network::PeerId;
 use tycho_storage::point_status::{AnchorFlags, StatusFlags};
 
-use crate::effects::AltFormat;
+use crate::effects::{AltFmt, AltFormat};
+use crate::models::{Digest, PointId, PrevPointProof, Round};
+use crate::prelude::PointInfo;
+
+pub enum PointRestore {
+    Exists(PointInfo, Option<PrevPointProof>),
+    Valid(PointInfo, PointStatusValid),
+    Invalid(PointInfo, PointStatusInvalid),
+    IllFormed(PointId, PointStatusIllFormed),
+    NotFound(Round, Digest, PointStatusNotFound),
+}
+impl PointRestore {
+    /// required partial order: resolved + valid, resolved, valid, no flags, no status
+    pub fn restore_order_asc(&self) -> u8 {
+        fn order_desc<T: PointStatus>(status: &T) -> u8 {
+            let mut desc = 1;
+            desc += (status.is_first_resolved() as u8) << 7;
+            desc += (status.is_first_valid() as u8) << 6;
+            desc
+        }
+        // greater value for greater priority
+        let desc = match self {
+            PointRestore::Exists(_, _) => 0,
+            PointRestore::Valid(_, status) => order_desc(status),
+            PointRestore::Invalid(_, status) => order_desc(status),
+            PointRestore::IllFormed(_, status) => order_desc(status),
+            PointRestore::NotFound(_, _, status) => order_desc(status),
+        };
+        // reverse order
+        u8::MAX - desc
+    }
+    pub fn round(&self) -> Round {
+        match self {
+            Self::Exists(info, _) | Self::Valid(info, _) | Self::Invalid(info, _) => info.round(),
+            Self::IllFormed(id, _) => id.round,
+            Self::NotFound(round, _, _) => *round,
+        }
+    }
+    pub fn author(&self) -> &PeerId {
+        match self {
+            Self::Exists(info, _) | Self::Valid(info, _) | Self::Invalid(info, _) => {
+                &info.data().author
+            }
+            Self::IllFormed(id, _) => &id.author,
+            Self::NotFound(_, _, status) => &status.author,
+        }
+    }
+    pub fn digest(&self) -> &Digest {
+        match self {
+            Self::Exists(info, _) | Self::Valid(info, _) | Self::Invalid(info, _) => info.digest(),
+            Self::IllFormed(id, _) => &id.digest,
+            Self::NotFound(_, digest, _) => digest,
+        }
+    }
+    pub fn id(&self) -> PointId {
+        PointId {
+            author: *self.author(),
+            round: self.round(),
+            digest: *self.digest(),
+        }
+    }
+}
+
+impl AltFormat for PointRestore {}
+impl Debug for AltFmt<'_, PointRestore> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        write!(f, "Restore {{ {:?} ", inner.id().alt())?;
+        match inner {
+            PointRestore::Exists(_, Some(prev)) => {
+                write!(f, "Exists prev # {}", prev.digest.alt())?;
+            }
+            PointRestore::Exists(_, None) => {
+                f.write_str("Exists prev # None")?;
+            }
+            PointRestore::Valid(_, status) => {
+                write!(f, "{status}")?;
+            }
+            PointRestore::Invalid(_, status) => {
+                write!(f, "{status}")?;
+            }
+            PointRestore::IllFormed(_, status) => {
+                write!(f, "{status}")?;
+            }
+            PointRestore::NotFound(_, _, status) => {
+                let mut tuple = f.debug_tuple("NotFound");
+                if status.is_first_resolved {
+                    tuple.field(&"first resolved");
+                }
+                if status.is_certified {
+                    tuple.field(&"certified");
+                }
+                // author is shown in point id
+                tuple.finish()?;
+            }
+        }
+        f.write_str(" }")
+    }
+}
 
 #[derive(Debug)]
 pub enum PointStatusStored {
