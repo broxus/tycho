@@ -9,6 +9,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
+use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -176,6 +177,7 @@ impl DagRound {
     pub fn add_ill_formed_broadcast_exact(
         &self,
         point: &Point,
+        reason: &IllFormedReason,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
@@ -187,9 +189,11 @@ impl DagRound {
         self.edit(&point.data().author, |loc| {
             loc.versions
                 .entry(*point.digest())
-                .and_modify(|first| first.resolve_download(point, false))
+                .and_modify(|first| first.resolve_download(point, Some(reason)))
                 .or_insert_with(|| {
-                    DagPointFuture::new_ill_formed_broadcast(point, &loc.state, store, round_ctx)
+                    DagPointFuture::new_ill_formed_broadcast(
+                        point, reason, &loc.state, store, round_ctx,
+                    )
                 });
         });
     }
@@ -211,7 +215,7 @@ impl DagRound {
         self.edit(&point.data().author, |loc| {
             loc.versions
                 .entry(*point.digest())
-                .and_modify(|first| first.resolve_download(point, true))
+                .and_modify(|first| first.resolve_download(point, None))
                 .or_insert_with(|| {
                     DagPointFuture::new_broadcast(
                         self, point, &loc.state, downloader, store, round_ctx,

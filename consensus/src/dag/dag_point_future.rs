@@ -15,10 +15,10 @@ use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
-use crate::dag::{DagRound, Verifier};
+use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
 use crate::effects::{AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::intercom::{DownloadResult, Downloader};
-use crate::models::{Cert, DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
+use crate::models::{Cert, DagPoint, Digest, Point, PointId, PointInfo};
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -89,7 +89,7 @@ impl DagPointFuture {
                     ..Default::default()
                 };
                 store.insert_point(&point, &status);
-                let dag_point = DagPoint::Trusted(ValidPoint::new(&point));
+                let dag_point = DagPoint::new_valid(PointInfo::from(&point), false);
                 let signable = state.init(&dag_point); // only after persisted
                 signable.sign(point.round(), key_pair.as_deref());
                 assert!(
@@ -107,12 +107,14 @@ impl DagPointFuture {
 
     pub fn new_ill_formed_broadcast(
         point: &Point,
+        reason: &IllFormedReason,
         state: &InclusionState,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
         let handle = {
             let point = point.clone();
+            let reason = reason.clone();
             let state = state.clone();
             let store = store.clone();
             let round_ctx = round_ctx.clone();
@@ -125,7 +127,7 @@ impl DagPointFuture {
                     ..Default::default()
                 };
                 store.insert_point(&point, &status);
-                let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
+                let dag_point = DagPoint::new_ill_formed(point.id(), reason);
                 state.init(&dag_point);
                 dag_point
             })
@@ -192,7 +194,7 @@ impl DagPointFuture {
                 move || store.insert_point(&point, &PointStatus::default())
             });
             let validated_fut = Verifier::validate(
-                info,
+                info.clone(),
                 prev_proof,
                 point_dag_round,
                 downloader,
@@ -201,15 +203,13 @@ impl DagPointFuture {
                 validate_ctx,
             );
             // do not abort store if not valid
-            let dag_point = match tokio::join!(stored_fut, validated_fut) {
+            let validated = match tokio::join!(stored_fut, validated_fut) {
                 (Ok(_), validated) => validated,
                 (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                 (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
-            let status = PointStatus {
-                is_validated: true,
-                ..dag_point.basic_status()
-            };
+            let (dag_point, status) = Self::init_validated(info, validated);
+
             tokio::task::spawn_blocking(move || {
                 store.set_status(point_id.round, &point_id.digest, &status);
             })
@@ -289,9 +289,10 @@ impl DagPointFuture {
                             is_certified: status.is_certified,
                         })))
                     }
-                    Some(status) if status.is_ill_formed => {
-                        Some(Err(DagPoint::IllFormed(Arc::new(point_id))))
-                    }
+                    Some(status) if status.is_ill_formed => Some(Err(DagPoint::new_ill_formed(
+                        point_id,
+                        IllFormedReason::AfterLoadFromDb,
+                    ))),
                     Some(status) => {
                         // have to load and drop the full point only because of evidence;
                         // should be the rarest case, when shutdown interrupted point validation
@@ -323,7 +324,7 @@ impl DagPointFuture {
                         .await;
                     let verified = match downloaded {
                         Some(DownloadResult::Verified(point)) => point,
-                        Some(DownloadResult::IllFormed(point)) => {
+                        Some(DownloadResult::IllFormed(point, reason)) => {
                             tokio::task::spawn_blocking({
                                 let store = store.clone();
                                 let status = PointStatus {
@@ -334,13 +335,13 @@ impl DagPointFuture {
                             })
                             .await
                             .expect("db store ill-formed download");
-                            return DagPoint::IllFormed(Arc::new(point_id));
+                            return DagPoint::new_ill_formed(point_id, reason);
                         }
                         None => {
-                            return DagPoint::NotFound(Cert {
-                                inner: Arc::new(point_id),
-                                is_certified: once_certified_tx_clone.take().is_none(),
-                            })
+                            return DagPoint::new_not_found(
+                                point_id,
+                                once_certified_tx_clone.take().is_none(),
+                            )
                         }
                     };
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
@@ -373,7 +374,7 @@ impl DagPointFuture {
                 }
             }
             let validated_fut = Verifier::validate(
-                verified,
+                verified.clone(),
                 prev_proof,
                 point_dag_round,
                 downloader,
@@ -382,15 +383,12 @@ impl DagPointFuture {
                 validate_ctx,
             );
             // do not abort store if not valid
-            let dag_point = match tokio::join!(storage_fut, validated_fut) {
+            let validated = match tokio::join!(storage_fut, validated_fut) {
                 (Ok(_), validated) => validated,
                 (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                 (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
-            let status = PointStatus {
-                is_validated: true,
-                ..dag_point.basic_status()
-            };
+            let (dag_point, status) = Self::init_validated(verified, validated);
             tokio::task::spawn_blocking(move || {
                 store.set_status(point_id.round, &point_id.digest, &status);
             })
@@ -414,6 +412,28 @@ impl DagPointFuture {
         })
     }
 
+    fn init_validated(info: PointInfo, validated: ValidateResult) -> (DagPoint, PointStatus) {
+        match validated {
+            ValidateResult::Valid { is_certified } => {
+                let dag_point = DagPoint::new_valid(info, is_certified);
+                let mut status = dag_point.basic_status();
+                status.is_certified = is_certified;
+                (dag_point, status)
+            }
+            ValidateResult::Invalid { is_certified } => {
+                let dag_point = DagPoint::new_invalid(info, is_certified);
+                let mut status = dag_point.basic_status();
+                status.is_certified = is_certified;
+                (dag_point, status)
+            }
+            ValidateResult::IllFormed(reason) => {
+                let dag_point = DagPoint::new_ill_formed(info.id(), reason);
+                let status = dag_point.basic_status();
+                (dag_point, status)
+            }
+        }
+    }
+
     pub fn add_depender(&self, depender: &PeerId) {
         if let DagPointFutureType::Load { dependers_tx, .. } = &self.0 {
             // receiver is dropped upon completion
@@ -421,13 +441,12 @@ impl DagPointFuture {
         }
     }
 
-    pub fn resolve_download(&self, broadcast: &Point, is_ok: bool) {
+    pub fn resolve_download(&self, broadcast: &Point, ill_formed_reason: Option<&IllFormedReason>) {
         if let DagPointFutureType::Load { resolve, .. } = &self.0 {
             if let Some(oneshot) = resolve.take() {
-                let result = if is_ok {
-                    DownloadResult::Verified(broadcast.clone())
-                } else {
-                    DownloadResult::IllFormed(broadcast.clone())
+                let result = match ill_formed_reason {
+                    None => DownloadResult::Verified(broadcast.clone()),
+                    Some(reason) => DownloadResult::IllFormed(broadcast.clone(), reason.clone()),
                 };
                 // receiver is dropped upon completion
                 oneshot.send(result).ok();
