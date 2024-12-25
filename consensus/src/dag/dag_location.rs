@@ -43,6 +43,13 @@ impl DagLocation {
             bad_sig_in_broadcast: false,
         }
     }
+
+    /// the one that will be accounted in [`Threshold`](super::threshold::Threshold),
+    /// but may resolve later; better `await`, plain `.now_or_never()` will lead to data race
+    pub fn first_valid(&self) -> Option<DagPointFuture> {
+        let digest = self.state.0.valid.0.get()?;
+        self.versions.get(digest).cloned()
+    }
 }
 
 #[derive(Clone)]
