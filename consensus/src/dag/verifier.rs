@@ -16,7 +16,8 @@ use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof, Round,
+    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PointStatusInvalid,
+    PointStatusValid, PrevPointProof, Round, ValidPoint,
 };
 
 // Note on equivocation.
@@ -79,8 +80,8 @@ pub enum IllFormedReason {
 
 #[derive(Debug)]
 pub enum ValidateResult {
-    Valid { is_certified: bool },
-    Invalid { is_certified: bool },
+    Valid(PointStatusValid), // TODO fill anchor flags
+    Invalid(PointStatusInvalid),
     IllFormed(IllFormedReason),
 }
 
@@ -125,18 +126,17 @@ impl Verifier {
                 // for genesis point it's sufficient to be well-formed and pass integrity check,
                 // it cannot be validated against AnchorStage (as it knows nothing about genesis)
                 // and cannot contain dependencies
-                return ctx.validated(ValidateResult::Valid {
-                    is_certified: false,
-                });
+                return ctx.validated(ValidateResult::Valid(PointStatusValid::default()));
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
         let Some(r_0_pre) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid {
+            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
+                is_first_resolved: false,
                 is_certified: certified_rx.try_recv() != Err(TryRecvError::Empty),
-            });
+            }));
         };
         assert_eq!(
             r_0_pre.round(),
@@ -187,24 +187,27 @@ impl Verifier {
 
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ctx.validated(ValidateResult::Invalid {
+            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
+                is_first_resolved: false,
                 is_certified: proven_by_cert.unwrap_or_default(),
-            });
+            }));
         };
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot validate point's 'includes', no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid {
+            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
+                is_first_resolved: false,
                 is_certified: proven_by_cert.unwrap_or_default(),
-            });
+            }));
         };
 
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.data().witness.is_empty() {
             tracing::debug!("cannot validate point's 'witness', no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid {
+            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
+                is_first_resolved: false,
                 is_certified: proven_by_cert.unwrap_or_default(),
-            });
+            }));
         }
 
         let direct_deps = Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
@@ -262,12 +265,98 @@ impl Verifier {
         };
 
         let status = if valid {
-            ValidateResult::Valid { is_certified }
+            let mut status = PointStatusValid::default();
+            status.is_certified = is_certified;
+            ValidateResult::Valid(status)
         } else {
-            ValidateResult::Invalid { is_certified }
+            ValidateResult::Invalid(PointStatusInvalid {
+                is_first_resolved: false,
+                is_certified,
+            })
         };
 
         ctx.validated(status)
+    }
+
+    /// During sync (e.g. after reboot) there is no evidence map in `PointInfo`
+    /// as point is already stored as successfully validated or certified,
+    /// so prev point's evidence won't be re-checked, even if it exists.
+    /// So this method **does not enforce or rely on** next well-formedness invariant:
+    /// "if point includes own prev point, then it has evidence for it".
+    /// Instead, this method exploits reversed conclusion from point being well-formed:
+    /// "if point has evidence, then it lists own prev point in includes map",
+    /// so it can be accessed as a direct dependency.
+    pub async fn restore_dependencies(
+        valid: ValidPoint, // @ r+0
+        r_0: WeakDagRound, // r+0
+        downloader: Downloader,
+        store: MempoolStore,
+        mut certified_rx: oneshot::Receiver<()>,
+        ctx: ValidateCtx,
+    ) {
+        let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
+        let span_guard = ctx.span().enter();
+
+        let Some(r_0) = r_0.upgrade() else {
+            tracing::info!("cannot restore point, no round in local DAG");
+            return;
+        };
+
+        assert_eq!(
+            r_0.round(),
+            valid.info.round(),
+            "Coding error: dag round mismatches point round"
+        );
+
+        let Some(r_1) = r_0.prev().upgrade() else {
+            tracing::info!("cannot restore point's 'includes', no round in local DAG");
+            return;
+        };
+
+        let direct_deps = Self::spawn_direct_deps(
+            &valid.info,
+            &r_1,
+            r_1.prev().upgrade(),
+            &downloader,
+            &store,
+            &ctx,
+        );
+
+        let mut is_certified =
+            valid.is_certified || certified_rx.try_recv() != Err(TryRecvError::Empty);
+        if is_certified {
+            for shared in &direct_deps {
+                shared.mark_certified(); // all dependencies
+            }
+        } else if let Some(digest) = valid.info.data().prev_digest() {
+            // point is valid, so it contained evidence for prev digest
+            r_1.view(&valid.info.data().author, |loc| {
+                loc.versions
+                    .get(digest)
+                    .map(|vertex| vertex.mark_certified())
+            });
+        }
+
+        let mut deps_fut = direct_deps.iter().cloned().collect::<FuturesUnordered<_>>();
+
+        drop(span_guard);
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut certified_rx, if !is_certified => {
+                    is_certified = true; // oneshot cannot be lagged, only closed
+                    for shared in &direct_deps {
+                        shared.mark_certified();
+                    }
+                },
+                next = &mut deps_fut.next() => {
+                    if next.is_none() {
+                        break;
+                    }
+                },
+            }
+        }
     }
 
     fn is_self_links_ok(
@@ -693,47 +782,44 @@ impl Verifier {
 impl ValidateCtx {
     const KIND: &'static str = "kind";
 
-    const VERIFY_LABELS: [(&'static str, &'static str); 3] = [
-        (Self::KIND, "bad_round"), // mb problem with local or author's peer schedule
-        (Self::KIND, "bad_peer"),  // local peer schedule ok, peer usage is unexpected
-        (Self::KIND, "ill_formed"), // bad point structure
-    ];
-
-    const VALIDATE_LABELS: [(&'static str, &'static str); 4] = [
-        (Self::KIND, "not_found"),
-        (Self::KIND, "ill_formed"),
-        (Self::KIND, "invalid"),
-        (Self::KIND, "valid"),
-    ];
-
     fn verified(result: &Result<(), VerifyError>) {
-        let (labels, count) = match result {
-            Err(VerifyError::BeforeGenesis | VerifyError::Uninit(_)) => {
-                (&Self::VERIFY_LABELS[0..=0], 1)
-            }
+        let label = match result {
+            Err(VerifyError::BeforeGenesis | VerifyError::Uninit(_)) => "bad_round",
             Err(
                 VerifyError::UnknownAuthor
                 | VerifyError::IllFormed(IllFormedReason::UnknownPeers(_)),
-            ) => (&Self::VERIFY_LABELS[1..=1], 1),
-            Err(VerifyError::BadSig | VerifyError::IllFormed(_)) => {
-                (&Self::VERIFY_LABELS[2..=2], 1)
+            ) => "bad_peer",
+            Err(VerifyError::BadSig | VerifyError::IllFormed(_)) => "ill_formed",
+            Ok(_) => {
+                metrics::counter!("tycho_mempool_points_verify_ok").increment(1);
+                return;
             }
-            Ok(_) => (&Self::VERIFY_LABELS[..0], 0),
         };
-        metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
+        metrics::counter!("tycho_mempool_points_verify_err", Self::KIND => label).increment(1);
     }
 
-    fn validated_labels(dag_point: &DagPoint) -> &'static [(&'static str, &'static str)] {
-        match dag_point {
-            DagPoint::NotFound(_) => &Self::VALIDATE_LABELS[0..=0],
-            DagPoint::IllFormed(_) => &Self::VALIDATE_LABELS[1..=1],
-            DagPoint::Invalid(_) => &Self::VALIDATE_LABELS[2..=2],
-            DagPoint::Valid(_) => &Self::VALIDATE_LABELS[3..=3],
-        }
+    pub fn resolved(dag_point: &DagPoint) {
+        const ORD: &str = "ord";
+        let ord = if dag_point.is_first_resolved() {
+            "first"
+        } else {
+            "alt"
+        };
+        let kind = match dag_point {
+            DagPoint::NotFound(_) => "not_found",
+            DagPoint::IllFormed(_) => "ill_formed",
+            DagPoint::Invalid(_) => "invalid",
+            DagPoint::Valid(_) => {
+                metrics::counter!("tycho_mempool_points_resolved_ok", ORD => ord).increment(1);
+                return;
+            }
+        };
+        metrics::counter!("tycho_mempool_points_resolved_err", ORD => ord, Self::KIND => kind)
+            .increment(1);
     }
 
     fn validated(&self, result: ValidateResult) -> ValidateResult {
-        let labels = match &result {
+        match &result {
             ValidateResult::IllFormed(reason) => {
                 tracing::error!(
                     parent: self.span(),
@@ -741,38 +827,24 @@ impl ValidateCtx {
                     reason = display(reason),
                     "validated",
                 );
-                &Self::VALIDATE_LABELS[1..=1]
             }
-            ValidateResult::Invalid { is_certified } => {
+            ValidateResult::Invalid(invalid) => {
                 tracing::warn!(
                     parent: self.span(),
-                    is_certified = is_certified,
+                    is_certified = invalid.is_certified,
                     result = "invalid",
                     "validated",
                 );
-                &Self::VALIDATE_LABELS[2..=2]
             }
-            ValidateResult::Valid { is_certified } => {
+            ValidateResult::Valid(valid) => {
                 tracing::debug!(
                     parent: self.span(),
-                    is_certified = is_certified,
+                    is_certified = valid.is_certified,
                     result = "valid",
                     "validated",
                 );
-                &Self::VALIDATE_LABELS[3..=3]
             }
         };
-        metrics::counter!("tycho_mempool_verifier_validate", labels).increment(1);
         result
-    }
-
-    pub fn first_resolved(dag_point: &DagPoint) {
-        let labels = Self::validated_labels(dag_point);
-        metrics::counter!("tycho_mempool_points_first_resolved", labels).increment(1);
-    }
-
-    pub fn alt_resolved(dag_point: &DagPoint) {
-        let labels = Self::validated_labels(dag_point);
-        metrics::counter!("tycho_mempool_alt_points_resolved", labels).increment(1);
     }
 }

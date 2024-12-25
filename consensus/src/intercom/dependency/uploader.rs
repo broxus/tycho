@@ -1,11 +1,10 @@
 use bytes::Bytes;
 use tycho_network::PeerId;
-use tycho_storage::point_status::PointStatus;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
 use crate::intercom::dto::PointByIdResponse;
-use crate::models::PointId;
+use crate::models::{PointId, PointStatusInvalid, PointStatusStored};
 
 pub struct Uploader;
 
@@ -21,29 +20,30 @@ impl Uploader {
             (None, PointByIdResponse::TryLater)
         } else {
             let status_opt = store.get_status(point_id.round, &point_id.digest);
-            let result = match (status_opt.as_ref())
-                // point has default status during validation - should retry when finished
-                .filter(|status| **status != PointStatus::default())
-            {
-                Some(status) => {
-                    if status.is_valid || status.is_trusted || status.is_certified {
-                        match store.get_point_raw(point_id.round, &point_id.digest) {
-                            None => PointByIdResponse::DefinedNone,
-                            Some(slice) => PointByIdResponse::Defined(slice),
-                        }
-                    } else {
-                        PointByIdResponse::DefinedNone
-                    }
-                }
-                None => {
+            let result = match &status_opt {
+                Some(
+                    PointStatusStored::Valid(_)
+                    | PointStatusStored::Invalid(PointStatusInvalid {
+                        is_certified: true, ..
+                    }),
+                ) => match store.get_point_raw(point_id.round, &point_id.digest) {
+                    None => PointByIdResponse::DefinedNone,
+                    Some(slice) => PointByIdResponse::Defined(slice),
+                },
+                Some(PointStatusStored::Exists) | None => {
                     if head.last_back_bottom() <= point_id.round {
-                        // may be downloading or resolving - dag may be incomplete
+                        // may be downloading, unknown or resolving - dag may be incomplete
                         PointByIdResponse::TryLater
                     } else {
-                        // must have been stored and committed, but not found
+                        // must have been stored and committed, may be too old and deleted
                         PointByIdResponse::DefinedNone
                     }
                 }
+                Some(
+                    PointStatusStored::IllFormed(_)
+                    | PointStatusStored::NotFound(_)
+                    | PointStatusStored::Invalid(_),
+                ) => PointByIdResponse::DefinedNone,
             };
             (status_opt, result)
         };
@@ -51,7 +51,7 @@ impl Uploader {
             parent: round_ctx.span(),
             result = display(result.alt()),
             not_found = Some(status_opt.is_none()).filter(|x| *x),
-            found = status_opt.map(debug),
+            found = status_opt.map(display),
             peer = display(peer_id.alt()),
             author = display(point_id.author.alt()),
             round = point_id.round.0,
