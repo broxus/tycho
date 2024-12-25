@@ -272,6 +272,7 @@ impl std::fmt::Display for AltFmt<'_, Committer> {
 mod test {
     use std::array;
     use std::io::Write;
+    use std::sync::Arc;
 
     use everscale_crypto::ed25519::{KeyPair, SecretKey};
     use tycho_network::PeerId;
@@ -293,16 +294,23 @@ mod test {
 
         let (genesis, _) = CachedConfig::init(&default_test_config());
 
-        let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
-            let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));
-            (PeerId::from(keys.public_key), keys)
-        });
-
-        let (genesis_round, peer_schedule, stub_downloader) =
-            test_utils::make_dag_parts(&peers, &genesis, &stub_store);
-
         let engine_ctx = EngineCtx::new(genesis.round());
-        let mut round_ctx;
+
+        let peers: [(PeerId, Arc<KeyPair>); PEER_COUNT] = array::from_fn(|i| {
+            let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));
+            (PeerId::from(keys.public_key), Arc::new(keys))
+        });
+        let local_keys = &peers[0].1;
+
+        let mut round_ctx = RoundCtx::new(&engine_ctx, genesis.round());
+
+        let (peer_schedule, stub_downloader) =
+            test_utils::make_dag_parts(&peers, local_keys, &genesis);
+
+        let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
+        genesis_round
+            .add_local(&genesis, Some(local_keys), &stub_store, &round_ctx)
+            .await;
 
         let mut dag = DagFront::default();
         let mut committer = dag.init(genesis_round);
@@ -325,6 +333,7 @@ mod test {
             test_utils::populate_points(
                 dag.top(),
                 &peers,
+                local_keys,
                 &peer_schedule,
                 &stub_downloader,
                 &stub_store,
