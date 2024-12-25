@@ -8,7 +8,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tycho_util::futures::JoinTask;
 
-use crate::dag::{DagHead, LastOwnPoint, Producer, Verifier, WeakDagRound};
+use crate::dag::{DagHead, LastOwnPoint, Producer, ValidateResult, Verifier, WeakDagRound};
 use crate::effects::{AltFormat, CollectCtx, Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
@@ -214,7 +214,7 @@ impl RoundTaskReady {
                 let own_point = own_point_fut.await;
 
                 if let Some(own_point) = own_point {
-                    let self_check = Self::expect_own_trusted_point(
+                    let self_check = Self::expect_own_valid_point(
                         own_point_round,
                         own_point.clone(),
                         peer_schedule.clone(),
@@ -269,7 +269,7 @@ impl RoundTaskReady {
         }
     }
 
-    fn expect_own_trusted_point(
+    fn expect_own_valid_point(
         point_round: WeakDagRound,
         point: Point,
         peer_schedule: PeerSchedule,
@@ -278,7 +278,7 @@ impl RoundTaskReady {
         round_ctx: RoundCtx,
     ) -> JoinTask<()> {
         JoinTask::new(async move {
-            point.verify_hash().expect("Failed to verify own point");
+            point.verify_hash().expect("Hash is invalid for own point");
 
             if let Err(error) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = round_ctx.span().enter();
@@ -287,7 +287,7 @@ impl RoundTaskReady {
             let (_do_not_drop_or_send, do_not_certify_tx) = oneshot::channel();
             let info = PointInfo::from(&point);
             let validate_ctx = ValidateCtx::new(&round_ctx, &info);
-            let dag_point = Verifier::validate(
+            let validated = Verifier::validate(
                 info,
                 point.prev_proof(),
                 point_round,
@@ -297,14 +297,17 @@ impl RoundTaskReady {
                 validate_ctx,
             )
             .await;
-            if dag_point.trusted().is_none() {
-                let _guard = round_ctx.span().enter();
-                panic!(
-                    "Failed to validate own point: {} {:?}",
-                    dag_point.alt(),
-                    point
-                )
-            };
+            match validated {
+                ValidateResult::Valid { .. } => {}
+                ValidateResult::Invalid { .. } => {
+                    let _guard = round_ctx.span().enter();
+                    panic!("Failed to validate own point: Invalid {point:?}")
+                }
+                ValidateResult::IllFormed(reason) => {
+                    let _guard = round_ctx.span().enter();
+                    panic!("Failed to validate own point: {reason} {point:?}")
+                }
+            }
         })
     }
 }

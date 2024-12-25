@@ -478,9 +478,7 @@ impl DagBack {
                     .filter_map(|version| version.clone().now_or_never())
                     // take any suitable
                     .filter_map(move |dag_point| match dag_point {
-                        DagPoint::Trusted(valid)
-                        | DagPoint::Suspicious(valid)
-                        | DagPoint::Certified(valid) => {
+                        DagPoint::Valid(valid) => {
                             if valid.info.data().anchor_trigger == Link::ToSelf {
                                 Some(Ok(valid))
                             } else {
@@ -519,9 +517,7 @@ impl DagBack {
             return Err(SyncError::TryLater);
         }; // not yet resolved;
         match dag_point {
-            DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) | DagPoint::Certified(valid) => {
-                Ok(valid)
-            }
+            DagPoint::Valid(valid) => Ok(valid),
             DagPoint::Invalid(cert) if cert.is_certified => {
                 Err(SyncError::Impossible(cert.inner.round()))
             }
