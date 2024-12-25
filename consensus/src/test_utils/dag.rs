@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{AnchorStage, DagRound, Verifier};
+use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
 use crate::effects::{MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
@@ -70,7 +70,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
-                .map(|p| p.valid().cloned().expect("must be trusted"))
+                .map(|p| p.valid().cloned().expect("must be valid"))
                 .map(|p| p.info)
                 .next()
         })
@@ -129,7 +129,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         let info = PointInfo::from(point);
         let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
-        Verifier::validate(
+        let validated = Verifier::validate(
             info,
             point.prev_proof(),
             dag_round.downgrade(),
@@ -138,9 +138,11 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             certified_tx,
             validate_ctx,
         )
-        .await
-        .trusted()
-        .expect("trusted point");
+        .await;
+        assert!(
+            matches!(validated, ValidateResult::Valid { .. }),
+            "expected valid point, got {validated:?}"
+        );
     }
 
     for point in points.values() {

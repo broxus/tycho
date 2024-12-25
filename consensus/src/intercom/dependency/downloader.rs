@@ -15,7 +15,7 @@ use tycho_network::{PeerId, Request};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::{Verifier, VerifyError};
+use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{CachedConfig, ConsensusConfigExt};
@@ -31,7 +31,7 @@ pub struct Downloader {
 
 pub enum DownloadResult {
     Verified(Point),
-    IllFormed(Point),
+    IllFormed(Point, IllFormedReason),
 }
 
 struct DownloaderInner {
@@ -401,13 +401,13 @@ impl<T: DownloadType> DownloadTask<T> {
                         );
                         None
                     }
-                    Err(error @ VerifyError::IllFormed(_)) => {
+                    Err(VerifyError::IllFormed(reason)) => {
                         tracing::error!(
-                            error = display(error),
+                            error = display(&reason),
                             point = debug(&point),
-                            "downloaded"
+                            "downloaded ill-formed"
                         );
-                        Some(DownloadResult::IllFormed(point))
+                        Some(DownloadResult::IllFormed(point, reason))
                     }
                     Err(
                         error @ (VerifyError::BeforeGenesis
