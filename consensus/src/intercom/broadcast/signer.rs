@@ -77,17 +77,14 @@ impl Signer {
             Some(Err(())) => return SignatureResponse::NoPoint,
             Some(Ok(state)) => state,
         };
-        let Some(signable) = state.signable() else {
-            return SignatureResponse::TryLater; // still validating
-        };
-        if round == current_round {
-            signable.sign(current_round, head.keys().to_include.as_deref());
+        let keys = if round == current_round {
+            &head.keys().to_include
         } else {
             // only previous to current round
-            signable.sign(current_round, head.keys().to_witness.as_deref());
+            &head.keys().to_witness
         };
-        match signable.signed() {
-            Some(Ok(sig)) => SignatureResponse::Signature(sig.clone()),
+        match state.sign(current_round, keys.as_deref()) {
+            Some(Ok(signed)) => SignatureResponse::Signature(signed.signature.clone()),
             Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),
             None => SignatureResponse::TryLater,
         }
