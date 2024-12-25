@@ -88,7 +88,7 @@ mod test {
     use super::*;
     use crate::dag::threshold::Threshold;
     use crate::engine::CachedConfig;
-    use crate::models::{Link, PeerCount, Point, PointData, UnixTime};
+    use crate::models::{DagPoint, Link, PeerCount, Point, PointData, UnixTime};
     use crate::test_utils::default_test_config;
 
     #[tokio::test]
@@ -106,10 +106,10 @@ mod test {
 
         CachedConfig::init(&default_test_config());
 
-        for i in 1..total_peers {
+        for i in 1..=total_peers {
             let keypair = KeyPair::generate(&mut thread_rng());
 
-            let point = Point::new(
+            let info = PointInfo::from(&Point::new(
                 &keypair,
                 round,
                 Default::default(),
@@ -123,10 +123,12 @@ mod test {
                     time: UnixTime::now(),
                     anchor_time: UnixTime::now(),
                 },
-            );
+            ));
 
             tokio::time::sleep(Duration::from_millis(10)).await;
-            thresh.add(&ValidPoint::new(&point));
+            let dag_point = DagPoint::new_valid(info, false);
+            let valid = dag_point.valid().expect("created as valid");
+            thresh.add(valid);
             println!("count {}", thresh.count());
             assert_eq!(i, thresh.count(), "must return count");
         }
