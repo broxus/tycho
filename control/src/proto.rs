@@ -7,6 +7,7 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_network::PeerId;
 use tycho_util::serde_helpers;
 
 use crate::error::ServerResult;
@@ -33,6 +34,9 @@ pub trait ControlServer {
 
     /// Returns memory profiler dump.
     async fn dump_memory_profiler() -> ServerResult<Vec<u8>>;
+
+    /// Get node neighbours info
+    async fn get_neighbours_info() -> ServerResult<NeighboursInfoResponse>;
 
     /// Broadcast a message to validators.
     async fn broadcast_external_message(req: BroadcastExtMsgRequest) -> ServerResult<()>;
@@ -261,4 +265,19 @@ pub struct ElectionsPayloadResponse {
     pub public_key: HashBytes,
     #[serde(with = "serde_helpers::signature")]
     pub signature: Box<[u8; 64]>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NeighboursInfoResponse {
+    pub neighbours: Vec<NeighbourInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NeighbourInfo {
+    pub id: PeerId,
+    pub expires_at: u32,
+    pub score: u8,
+    pub failed_requests: u64,
+    pub total_requests: u64,
+    pub roundtrip_ms: u64,
 }
