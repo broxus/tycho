@@ -11,9 +11,7 @@ use tycho_storage::MempoolStorage;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::{
-    DBPinnableSlice, IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch,
-};
+use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -38,7 +36,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
 
-    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice<'_>>>;
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<Bytes>>;
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>>;
 
@@ -135,9 +133,9 @@ impl MempoolStore {
             .expect("DB get point full")
     }
 
-    pub fn get_point_raw(&self, round: Round, digest: Digest) -> Option<DBPinnableSlice<'_>> {
+    pub fn get_point_raw(&self, round: Round, digest: &Digest) -> Option<Bytes> {
         self.0
-            .get_point_raw(round, &digest)
+            .get_point_raw(round, digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
             .expect("DB get point full")
     }
@@ -363,15 +361,15 @@ impl MempoolStoreImpl for MempoolStorage {
             .transpose()
     }
 
-    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
+    fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<Bytes>> {
         metrics::counter!("tycho_mempool_store_get_point_raw_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_raw_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
 
         let points = &self.db.points;
-        let point = points.get(key.as_slice()).context("db get")?;
-        Ok(point)
+        let point = points.get_owned(key.as_slice()).context("db get")?;
+        Ok(point.map(Bytes::from_owner))
     }
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>> {
@@ -568,7 +566,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn get_point_raw(&self, _: Round, _: &Digest) -> Result<Option<DBPinnableSlice<'_>>> {
+    fn get_point_raw(&self, _: Round, _: &Digest) -> Result<Option<Bytes>> {
         anyhow::bail!("should not be used in tests")
     }
 
