@@ -1,22 +1,23 @@
+use std::cmp;
 use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use itertools::Itertools;
-use tl_proto::TlWrite;
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::OverlayId;
 use tycho_storage::MempoolStorage;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
+use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::models::{
-    Digest, Point, PointInfo, PointStatus, PointStatusStored, PointStatusStoredRef,
+    Digest, Point, PointInfo, PointRestore, PointStatus, PointStatusStored, PointStatusStoredRef,
     PointStatusValid, Round,
 };
 
@@ -53,7 +54,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn last_round(&self) -> Result<Round>;
 
-    fn load_info_rounds(&self, bottom: Round, top: Round) -> Result<Vec<PointInfo>>;
+    fn load_restore(&self, bottom: Round, top: Round) -> Result<Vec<PointRestore>>;
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
@@ -147,6 +148,7 @@ impl MempoolStore {
             .expect("DB get point full")
     }
 
+    #[allow(dead_code, reason = "idiomatic getter may come in useful")]
     pub fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
         self.0
             .get_info(round, digest)
@@ -161,15 +163,15 @@ impl MempoolStore {
             .expect("DB get point status")
     }
 
-    pub fn load_info_rounds(&self, bottom: Round, top: Round) -> Vec<PointInfo> {
-        self.0
-            .load_info_rounds(bottom, top)
-            .with_context(|| format!("range [{}..{}]", bottom.0, top.0))
-            .expect("DB load info rounds")
-    }
-
     pub fn last_round(&self) -> Round {
         self.0.last_round().expect("DB load last round")
+    }
+
+    pub fn load_restore(&self, bottom: Round, top: Round) -> Vec<PointRestore> {
+        self.0
+            .load_restore(bottom, top)
+            .with_context(|| format!("range [{}..{}]", bottom.0, top.0))
+            .expect("DB load restore")
     }
 
     pub fn init_storage(&self, overlay_id: &OverlayId) {
@@ -513,7 +515,7 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(Round(round))
     }
 
-    fn load_info_rounds(&self, bottom: Round, top: Round) -> Result<Vec<PointInfo>> {
+    fn load_restore(&self, bottom: Round, top: Round) -> Result<Vec<PointRestore>> {
         fn opts(bottom: Round, top: Round) -> ReadOptions {
             let mut opts = ReadOptions::default();
             let mut buf = [0; MempoolStorage::KEY_LEN];
@@ -524,20 +526,104 @@ impl MempoolStoreImpl for MempoolStorage {
             opts
         }
 
-        let points_info_cf = self.db.points_info.cf();
+        fn get_value<T>(iter: &mut DBRawIterator<'_>, key: &[u8]) -> Result<T>
+        where
+            for<'b> T: TlRead<'b>,
+        {
+            iter.status().context("before seek")?;
+            iter.seek(key);
+            iter.status().context("after seek")?;
+            let (f_key, value) = iter.item().context("iter exhausted")?;
+            match key.cmp(f_key) {
+                cmp::Ordering::Less => {
+                    anyhow::bail!(
+                        "iter did not seek, found key {}",
+                        MempoolStorage::format_key(f_key),
+                    )
+                }
+                cmp::Ordering::Equal => {
+                    Ok(tl_proto::deserialize::<T>(value).context("deserialize")?)
+                }
+                cmp::Ordering::Greater => {
+                    anyhow::bail!(
+                        "no record found, next key {}",
+                        MempoolStorage::format_key(f_key),
+                    )
+                }
+            }
+        }
 
         let mut result = Vec::new();
 
-        let iter = (self.db.rocksdb()).iterator_cf_opt(
-            &points_info_cf,
+        let status_iter = (self.db.rocksdb()).iterator_cf_opt(
+            &self.db.points_status.cf(),
             opts(bottom, top),
             IteratorMode::Start,
         );
+        let mut info_iter =
+            (self.db.rocksdb()).raw_iterator_cf_opt(&self.db.points_info.cf(), opts(bottom, top));
+        let mut point_iter =
+            (self.db.rocksdb()).raw_iterator_cf_opt(&self.db.points.cf(), opts(bottom, top));
 
-        for item in iter {
-            let (_, v) = item.context("get point status")?;
-            let info = tl_proto::deserialize::<PointInfo>(&v).context("deserialize point info")?;
-            result.push(info);
+        let mut round_buf = [0_u8; 4];
+        let mut digest_buf = [0_u8; 32];
+        for item in status_iter {
+            let (key, status_bytes) = item.context("get point status")?;
+            anyhow::ensure!(
+                key.len() == MempoolStorage::KEY_LEN,
+                "unexpected key len {}",
+                key.len()
+            );
+            let status = PointStatusStored::decode(&status_bytes)?;
+
+            match status {
+                PointStatusStored::NotFound(status) => {
+                    round_buf.copy_from_slice(&key[..4]);
+                    digest_buf.copy_from_slice(&key[4..]);
+                    let round = Round(u32::from_be_bytes(round_buf));
+                    let digest = Digest::wrap(digest_buf);
+                    result.push(PointRestore::NotFound(round, digest, status));
+                }
+                PointStatusStored::Valid(status) => {
+                    let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
+                        format!(
+                            "table point info, status {status}, key {}",
+                            MempoolStorage::format_key(&key)
+                        )
+                    })?;
+                    result.push(PointRestore::Valid(info, status));
+                }
+                PointStatusStored::Invalid(status) => {
+                    let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
+                        format!(
+                            "table point info, status {status}, key {}",
+                            MempoolStorage::format_key(&key)
+                        )
+                    })?;
+                    result.push(PointRestore::Invalid(info, status));
+                }
+                PointStatusStored::IllFormed(status) => {
+                    let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
+                        format!(
+                            "table point info, status {status}, key {}",
+                            MempoolStorage::format_key(&key)
+                        )
+                    })?;
+                    result.push(PointRestore::IllFormed(info.id(), status));
+                }
+                status @ PointStatusStored::Exists => {
+                    let point = get_value::<Point>(&mut point_iter, &key).with_context(|| {
+                        format!(
+                            "table point, status {status}, key {}",
+                            MempoolStorage::format_key(&key)
+                        )
+                    })?;
+                    result.push(PointRestore::Exists(
+                        PointInfo::from(&point),
+                        point.prev_proof(),
+                    ));
+                }
+            }
         }
 
         Ok(result)
@@ -600,7 +686,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn load_info_rounds(&self, _: Round, _: Round) -> Result<Vec<PointInfo>> {
+    fn load_restore(&self, _: Round, _: Round) -> Result<Vec<PointRestore>> {
         anyhow::bail!("should not be used in tests")
     }
 

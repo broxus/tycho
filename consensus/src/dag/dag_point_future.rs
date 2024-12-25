@@ -19,8 +19,8 @@ use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
 use crate::effects::{AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
-    DagPoint, Digest, Point, PointId, PointInfo, PointStatusIllFormed, PointStatusNotFound,
-    PointStatusStored, PointStatusStoredRef, PointStatusValid,
+    DagPoint, Digest, Point, PointId, PointInfo, PointRestore, PointStatusIllFormed,
+    PointStatusNotFound, PointStatusStored, PointStatusStoredRef, PointStatusValid,
 };
 
 #[derive(Clone)]
@@ -32,12 +32,11 @@ impl Future for DagPointFuture {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
-            DagPointFutureType::Validate { task, .. } | DagPointFutureType::Load { task, .. } => {
-                match task.poll_unpin(cx) {
-                    Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
+            DagPointFutureType::Validate { task, .. }
+            | DagPointFutureType::Download { task, .. } => match task.poll_unpin(cx) {
+                Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
+                Poll::Pending => Poll::Pending,
+            },
             DagPointFutureType::Store(task) => match task.poll_unpin(cx) {
                 Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
                 Poll::Pending => Poll::Pending,
@@ -54,7 +53,7 @@ enum DagPointFutureType {
         // we can receive its proof from author, check its signatures and skip validation of the vertex and its deps
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
     },
-    Load {
+    Download {
         task: Shared<JoinTask<DagPoint>>,
         // this could be a `Notify`, but both sender and receiver must be used only once
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
@@ -231,7 +230,7 @@ impl DagPointFuture {
     }
 
     #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
-    pub fn new_load<T>(
+    pub fn new_download<T>(
         point_dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
@@ -264,135 +263,56 @@ impl DagPointFuture {
         }
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let (certified_tx, certified_rx) = oneshot::channel();
-        let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
-        let once_certified_tx_clone = once_certified_tx.clone();
 
         let task = async move {
-            let stored = tokio::task::spawn_blocking({
-                let state = state.clone();
+            let validate_or_ready = {
+                let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
                 let store = store.clone();
-                move || {
-                    let status = match store.get_status(point_id.round, &point_id.digest) {
-                        None => return None,
-                        Some(status) => status,
-                    };
-                    let either = match status {
-                        PointStatusStored::Exists => {
-                            let point = store
-                                .get_point(point_id.round, &point_id.digest)
-                                .expect("point by status must exist in DB");
-                            let info = PointInfo::from(&point);
-                            let prev_proof = point.prev_proof();
-                            Either::Left((info, prev_proof))
-                        }
-                        PointStatusStored::Valid(status) => {
-                            state.acquire_restore(&point_id, &status);
-                            let info = store
-                                .get_info(point_id.round, &point_id.digest)
-                                .expect("info by status must exist in DB");
-                            Either::Right(DagPoint::new_valid(info, &status))
-                        }
-                        PointStatusStored::Invalid(status) => {
-                            state.acquire_restore(&point_id, &status);
-                            let info = store
-                                .get_info(point_id.round, &point_id.digest)
-                                .expect("info by status must exist in DB");
-                            Either::Right(DagPoint::new_invalid(info, &status))
-                        }
-                        PointStatusStored::IllFormed(status) => {
-                            state.acquire_restore(&point_id, &status);
-                            let info = store
-                                .get_info(point_id.round, &point_id.digest)
-                                .expect("info by status must exist in DB");
-                            Either::Right(DagPoint::new_ill_formed(
-                                info.id(),
-                                &status,
-                                IllFormedReason::AfterLoadFromDb,
-                            ))
-                        }
-                        PointStatusStored::NotFound(status) => {
-                            state.acquire_restore(&point_id, &status);
-                            Either::Right(DagPoint::new_not_found(
+                let downloaded = downloader
+                    .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
+                    .await;
+                match downloaded {
+                    Some(DownloadResult::Verified(point)) => {
+                        let info = PointInfo::from(&point);
+                        let prev_prof = point.prev_proof();
+                        let storage_fut = tokio::task::spawn_blocking(move || {
+                            store.insert_point(&point, PointStatusStoredRef::Exists);
+                        });
+                        Either::Left((info, prev_prof, storage_fut))
+                    }
+                    Some(DownloadResult::IllFormed(point, reason)) => {
+                        let mut status = PointStatusIllFormed::default();
+                        state.acquire(&point_id, &mut status);
+                        let dag_point = DagPoint::new_ill_formed(point.id(), &status, reason);
+                        let storage_fut = tokio::task::spawn_blocking(move || {
+                            store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
+                        });
+                        Either::Right((dag_point, storage_fut))
+                    }
+                    None => {
+                        let mut status = PointStatusNotFound {
+                            is_first_resolved: false,
+                            is_certified: false,
+                            author: point_id.author,
+                        };
+                        state.acquire(&point_id, &mut status);
+                        let dag_point =
+                            DagPoint::new_not_found(point_id.round, &point_id.digest, &status);
+                        let storage_fut = tokio::task::spawn_blocking(move || {
+                            store.set_status(
                                 point_id.round,
                                 &point_id.digest,
-                                &status,
-                            ))
-                        }
-                    };
-                    Some(either)
-                }
-            })
-            .await
-            .expect("db get point info status");
-
-            let validate_or_restore = match stored {
-                None => {
-                    let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
-                    let downloaded = downloader
-                        .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
-                        .await;
-                    match downloaded {
-                        Some(DownloadResult::Verified(point)) => {
-                            let info = PointInfo::from(&point);
-                            let prev_prof = point.prev_proof();
-                            let storage_fut = tokio::task::spawn_blocking({
-                                let store = store.clone();
-                                move || {
-                                    store.insert_point(&point, PointStatusStoredRef::Exists);
-                                }
-                            });
-                            Either::Left((info, prev_prof, Either::Left(storage_fut)))
-                        }
-                        Some(DownloadResult::IllFormed(point, reason)) => {
-                            let mut status = PointStatusIllFormed::default();
-                            state.acquire(&point_id, &mut status);
-                            let dag_point = DagPoint::new_ill_formed(point.id(), &status, reason);
-                            let storage_fut = tokio::task::spawn_blocking({
-                                let store = store.clone();
-                                move || {
-                                    store.insert_point(
-                                        &point,
-                                        PointStatusStoredRef::IllFormed(&status),
-                                    );
-                                }
-                            });
-                            Either::Right((dag_point, Either::Left(storage_fut)))
-                        }
-                        None => {
-                            let mut status = PointStatusNotFound {
-                                is_first_resolved: false,
-                                is_certified: false,
-                                author: point_id.author,
-                            };
-                            state.acquire(&point_id, &mut status);
-                            let dag_point =
-                                DagPoint::new_not_found(point_id.round, &point_id.digest, &status);
-                            let storage_fut = tokio::task::spawn_blocking({
-                                let store = store.clone();
-                                move || {
-                                    store.set_status(
-                                        point_id.round,
-                                        &point_id.digest,
-                                        PointStatusStoredRef::NotFound(&status),
-                                    );
-                                }
-                            });
-                            Either::Right((dag_point, Either::Left(storage_fut)))
-                        }
+                                PointStatusStoredRef::NotFound(&status),
+                            );
+                        });
+                        Either::Right((dag_point, storage_fut))
                     }
-                }
-                Some(Either::Left((info, prev_proof))) => {
-                    Either::Left((info, prev_proof, Either::Right(future::ready(Ok(())))))
-                }
-                Some(Either::Right(dag_point)) => {
-                    Either::Right((dag_point, Either::Right(future::ready(Ok(())))))
                 }
             };
 
-            let dag_point = match validate_or_restore {
+            match validate_or_ready {
                 Either::Left((verified, prev_proof, storage_fut)) => {
                     let validate_ctx = ValidateCtx::new(&into_round_ctx, &verified);
-
                     let validated = Verifier::validate(
                         verified.clone(),
                         prev_proof,
@@ -405,24 +325,101 @@ impl DagPointFuture {
                     .await;
                     let (dag_point, status) = Self::acquire_validated(&state, verified, validated);
                     storage_fut.await.expect("spawned store point");
-                    let store = store.clone();
                     tokio::task::spawn_blocking(move || {
-                        store.set_status(point_id.round, &point_id.digest, status.as_ref());
+                        store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
+                        state.resolve(&dag_point);
+                        dag_point
                     })
                     .await
-                    .expect("spawned update point status");
+                    .expect("spawned update point status")
+                }
+                Either::Right((dag_point, storage_fut)) => {
+                    storage_fut.await.expect("spawned store point");
+                    state.resolve(&dag_point);
                     dag_point
                 }
-                Either::Right((DagPoint::Valid(valid), storage_fut)) => {
-                    if valid.is_certified {
-                        // note if the point contains valid evidence for a vertex,
-                        //  the vertex and its dependencies are marked certified, but not the point itself,
-                        //  so just `Valid` stored status does not trigger certification mark
-                        if let Some(certified) = once_certified_tx_clone.take() {
-                            _ = certified.send(());
-                        }
-                    }
-                    let validate_ctx = ValidateCtx::new(&into_round_ctx, &valid.info);
+            }
+        };
+
+        DagPointFuture(DagPointFutureType::Download {
+            task: Shared::new(JoinTask::new(task.instrument(span))),
+            certified: Arc::new(OnceTake::new(certified_tx)),
+            dependers_tx,
+            resolve: Arc::new(OnceTake::new(broadcast_tx)),
+        })
+    }
+
+    pub fn new_restore(
+        point_dag_round: &DagRound,
+        point_restore: PointRestore,
+        state: &InclusionState,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        round_ctx: &RoundCtx,
+        wait_dependencies: bool,
+    ) -> Self {
+        let point_dag_round = point_dag_round.downgrade();
+        let state = state.clone();
+        let downloader = downloader.clone();
+        let store = store.clone();
+        let span = round_ctx.span().clone();
+        let round_ctx = round_ctx.clone();
+
+        let (certified_tx, certified_rx) = oneshot::channel();
+
+        // keep this section sync so that call site may not wait for each result to resolve
+        let validate_or_restore = match point_restore {
+            PointRestore::Exists(info, prev_proof) => Either::Left((info, prev_proof)),
+            PointRestore::Valid(info, status) => {
+                let dag_point = DagPoint::new_valid(info, &status);
+                state.acquire_restore(&dag_point.id(), &status);
+                Either::Right(dag_point)
+            }
+            PointRestore::Invalid(info, status) => {
+                let dag_point = DagPoint::new_invalid(info, &status);
+                state.acquire_restore(&dag_point.id(), &status);
+                Either::Right(dag_point)
+            }
+            PointRestore::IllFormed(id, status) => {
+                let dag_point =
+                    DagPoint::new_ill_formed(id, &status, IllFormedReason::AfterLoadFromDb);
+                state.acquire_restore(&dag_point.id(), &status);
+                Either::Right(dag_point)
+            }
+            PointRestore::NotFound(round, digest, status) => {
+                let dag_point = DagPoint::new_not_found(round, &digest, &status);
+                state.acquire_restore(&dag_point.id(), &status);
+                Either::Right(dag_point)
+            }
+        };
+
+        let task = async move {
+            let dag_point = match validate_or_restore {
+                Either::Left((verified, prev_proof)) => {
+                    let validate_ctx = ValidateCtx::new(&round_ctx, &verified);
+                    let validated = Verifier::validate(
+                        verified.clone(),
+                        prev_proof,
+                        point_dag_round,
+                        downloader,
+                        store.clone(),
+                        certified_rx,
+                        validate_ctx,
+                    )
+                    .await;
+                    let (dag_point, status) = Self::acquire_validated(&state, verified, validated);
+                    tokio::task::spawn_blocking(move || {
+                        store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
+                        dag_point
+                    })
+                    .await
+                    .expect("spawned update point status")
+                }
+                Either::Right(DagPoint::Valid(valid)) if wait_dependencies => {
+                    // only some last rounds should wait for dependencies to resolve, because
+                    // deep, unlinked and not found dependencies must not slow down the whole;
+                    // anyway, already resolved dag point means all its dependencies were resolved
+                    let validate_ctx = ValidateCtx::new(&round_ctx, &valid.info);
                     Verifier::restore_dependencies(
                         valid.clone(),
                         point_dag_round,
@@ -432,23 +429,17 @@ impl DagPointFuture {
                         validate_ctx,
                     )
                     .await;
-                    storage_fut.await.expect("spawned store point");
                     DagPoint::Valid(valid)
                 }
-                Either::Right((dag_point, storage_fut)) => {
-                    storage_fut.await.expect("spawned store point");
-                    dag_point
-                }
+                Either::Right(dag_point) => dag_point,
             };
             state.resolve(&dag_point);
             dag_point
         };
 
-        DagPointFuture(DagPointFutureType::Load {
+        DagPointFuture(DagPointFutureType::Validate {
             task: Shared::new(JoinTask::new(task.instrument(span))),
-            certified: once_certified_tx,
-            dependers_tx,
-            resolve: Arc::new(OnceTake::new(broadcast_tx)),
+            certified: Arc::new(OnceTake::new(certified_tx)),
         })
     }
 
@@ -485,14 +476,14 @@ impl DagPointFuture {
     }
 
     pub fn add_depender(&self, depender: &PeerId) {
-        if let DagPointFutureType::Load { dependers_tx, .. } = &self.0 {
+        if let DagPointFutureType::Download { dependers_tx, .. } = &self.0 {
             // receiver is dropped upon completion
             _ = dependers_tx.send(*depender);
         }
     }
 
     pub fn resolve_download(&self, broadcast: &Point, ill_formed_reason: Option<&IllFormedReason>) {
-        if let DagPointFutureType::Load { resolve, .. } = &self.0 {
+        if let DagPointFutureType::Download { resolve, .. } = &self.0 {
             if let Some(oneshot) = resolve.take() {
                 let result = match ill_formed_reason {
                     None => DownloadResult::Verified(broadcast.clone()),
@@ -508,7 +499,7 @@ impl DagPointFuture {
         // every vertex is certified by definition,
         // but also every vertex dependency is certified transitively
         if let DagPointFutureType::Validate { certified, .. }
-        | DagPointFutureType::Load { certified, .. } = &self.0
+        | DagPointFutureType::Download { certified, .. } = &self.0
         {
             if let Some(oneshot) = certified.take() {
                 // receiver is dropped upon completion
