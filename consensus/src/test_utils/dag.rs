@@ -22,10 +22,10 @@ use crate::models::{
 };
 
 pub fn make_dag_parts<const PEER_COUNT: usize>(
-    peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
+    local_keys: &Arc<KeyPair>,
     genesis: &Point,
-    store: &MempoolStore,
-) -> (DagRound, PeerSchedule, Downloader) {
+) -> (PeerSchedule, Downloader) {
     let network = Network::builder()
         .with_random_private_key()
         .build("0.0.0.0:0", Router::builder().build())
@@ -36,8 +36,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
-    let local_keys = Arc::new(peers[0].1);
-
+    // any peer id will be ok, network is not used
     let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
     peer_schedule.set_next_subset(
         &[],
@@ -50,17 +49,14 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let stub_downloader =
         Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
 
-    let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
-
-    genesis_round.insert_exact_sign(genesis, Some(&local_keys), store);
-
-    (genesis_round, peer_schedule, stub_downloader)
+    (peer_schedule, stub_downloader)
 }
 
 #[allow(clippy::too_many_arguments, reason = "ok in test")]
 pub async fn populate_points<const PEER_COUNT: usize>(
     dag_round: &DagRound,
-    peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
+    local_keys: &Arc<KeyPair>,
     peer_schedule: &PeerSchedule,
     downloader: &Downloader,
     store: &MempoolStore,
@@ -148,7 +144,9 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     }
 
     for point in points.values() {
-        dag_round.insert_exact_sign(point, Some(&peers[0].1), store);
+        dag_round
+            .add_local(point, Some(local_keys), store, round_ctx)
+            .await;
     }
 }
 
@@ -156,7 +154,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
 fn point<const PEER_COUNT: usize>(
     round: Round,
     idx: usize,
-    peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
     includes: &BTreeMap<PeerId, Digest>,
     max_prev_time: UnixTime,
     max_anchor_time: UnixTime,
