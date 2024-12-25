@@ -102,6 +102,11 @@ impl InclusionState {
     pub fn signable(&self) -> Option<&'_ Signable> {
         self.0.signable.get()
     }
+    pub fn sign_or_reject(&self, _at: Round, _key_pair: Option<&KeyPair>) -> Result<Signable, ()> {
+        _ = self;
+        // FIXME must remove the ability to sign point in location if it will be resolved later
+        Err(())
+    }
 }
 
 // Actually we are not interested in the round of making a signature,
@@ -125,7 +130,7 @@ impl Signable {
         key_pair: Option<&KeyPair>, // same round for own point and next round for other's
     ) -> bool {
         let mut this_call_signed = false;
-        if let Some((valid, key_pair)) = self.first_resolved.trusted().zip(key_pair) {
+        if let Some((valid, key_pair)) = self.first_resolved.valid().zip(key_pair) {
             if valid.info.data().time - UnixTime::now()
                 < UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _)
             {

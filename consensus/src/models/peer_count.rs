@@ -5,7 +5,9 @@ pub struct PeerCount(u8);
 
 impl std::fmt::Debug for PeerCount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("PeerCount").field(&self.full()).finish()
+        f.debug_struct("PeerCount")
+            .field("3F+1", &self.full())
+            .finish()
     }
 }
 

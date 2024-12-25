@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display, Formatter, Result};
 use tycho_network::PeerId;
 
 use crate::engine::CachedConfig;
-use crate::models::{DagPoint, Digest, PointId, Signature};
+use crate::models::{Digest, PointId, Signature};
 
 /// Display implementations to be used as fields in structured logs,
 /// while Debug is a temporary convenience
@@ -74,21 +74,5 @@ impl Debug for AltFmt<'_, PointId> {
                 self.0.author, self.0.round.0, self.0.digest
             ),
         }
-    }
-}
-
-impl AltFormat for DagPoint {}
-impl Display for AltFmt<'_, DagPoint> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        f.write_str(match AltFormat::unpack(self) {
-            DagPoint::Trusted(_) => "Trusted",
-            DagPoint::Suspicious(_) => "Suspicious",
-            DagPoint::Certified(_) => "Certified",
-            DagPoint::Invalid(cert) if cert.is_certified => "Invalid(certified)",
-            DagPoint::Invalid(_) => "Invalid",
-            DagPoint::IllFormed(_) => "IllFormed",
-            DagPoint::NotFound(cert) if cert.is_certified => "NotFound(certified)",
-            DagPoint::NotFound(_) => "NotFound",
-        })
     }
 }
