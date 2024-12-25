@@ -1,167 +1,166 @@
-use anyhow::Result;
 use weedb::rocksdb::MergeOperands;
 
-use crate::MempoolStorage;
+use crate::{BytesFmt, MempoolStorage};
 
-/// Flags are stored in their order from left to right
-/// and may be merged from `false` to `true` but not vice versa.
-/// Point must be committed at single round.
-#[derive(Default, Debug, PartialEq)]
-pub struct PointStatus {
-    // points are stored only after verified: points with sig or digest mismatch are never stored;
-    // certified points are validated, and validation takes place only after verification;
-    // locally created points (incl. genesis) are the only not validated before get stored;
-    pub is_ill_formed: bool, // some well-formness is checked only on validate()
-    pub is_validated: bool,  // need to distinguish not-yet-validated from invalid
-    pub is_valid: bool,      // a point may be validated as invalid but certified afterward
-    pub is_trusted: bool,    // locally decided as not equivocated (cannot change decision later)
-    pub is_certified: bool,  // some points won't be marked because they are already validated
-    pub anchor_chain_role: Option<AnchorChainRole>,
-    pub committed_at_round: Option<u32>, // not committed are stored with impossible zero round
-}
+const MEMPOOL_DB_STATUS_MERGE: &str = "MEMPOOL_DB_STATUS_MERGE";
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum AnchorChainRole {
-    Trigger, // not necessarily unique; contained in some point field
-    Anchor,  // unique; not contained in point
-    Proof,   // unique; contained in some point field
+// Flags are stored in their order from left to right
+// and may be merged from `false` to `true` but not vice versa.
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug)]
+    pub struct StatusFlags : u8 {
+        const Found = 0b_1 << 7;
+        const WellFormed = 0b_1 << 6;
+        const Valid = 0b_1 << 5;
+        const FirstValid = 0b_1 << 4;
+        const FirstResolved = 0b_1 << 3;
+        const Certified = 0b_1 << 2;
+    }
 }
 
 bitflags::bitflags! {
-    struct Flags : u8 {
-        const IllFormed = 0b_1 << 6;
-        const Validated = 0b_1 << 5;
-        const Valid = 0b_1 << 4;
-        const Trusted = 0b_1 << 3;
-        const Certified = 0b_1 << 2;
-        const AnchorChainRoleUnique = 0b_1 << 1;
-        const AnchorChainRoleInPoint = 0b_1 << 0;
+    #[derive(Copy, Clone, Default, Debug)]
+    pub struct AnchorFlags : u8 {
+        const Used = 0b_1 << 7;
+        const Trigger = 0b_1 << 6;
+        const Proof = 0b_1 << 5;
     }
 }
 
-impl From<Flags> for PointStatus {
-    fn from(flags: Flags) -> Self {
-        Self {
-            is_ill_formed: flags.contains(Flags::IllFormed),
-            is_validated: flags.contains(Flags::Validated),
-            is_valid: flags.contains(Flags::Valid),
-            is_trusted: flags.contains(Flags::Trusted),
-            is_certified: flags.contains(Flags::Certified),
-            anchor_chain_role: match (
-                flags.contains(Flags::AnchorChainRoleUnique),
-                flags.contains(Flags::AnchorChainRoleInPoint),
-            ) {
-                (false, false) => None,
-                (false, true) => Some(AnchorChainRole::Trigger),
-                (true, false) => Some(AnchorChainRole::Anchor),
-                (true, true) => Some(AnchorChainRole::Proof),
-            },
-            committed_at_round: None,
+impl StatusFlags {
+    pub const VALID_BYTES: usize = 1 + 1 + 4;
+    pub const INVALID_BYTES: usize = 1;
+    pub const ILL_FORMED_BYTES: usize = 1;
+    pub const NOT_FOUND_BYTES: usize = 1 + 32;
+
+    pub fn try_from_stored(value: &[u8]) -> Result<Option<Self>, String> {
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let len = value.len();
+        let flags = Self::from_bits_retain(value[0]);
+        let is_ok = if !flags.contains(Self::Found) {
+            len == Self::NOT_FOUND_BYTES
+        } else if !flags.contains(Self::WellFormed) {
+            len == Self::ILL_FORMED_BYTES
+        } else if !flags.contains(Self::Valid) {
+            len == Self::INVALID_BYTES
+        } else {
+            len == Self::VALID_BYTES
+        };
+        if is_ok {
+            Ok(Some(flags))
+        } else {
+            Err(format!(
+                "unexpected {len} bytes for stored status: {flags:?}",
+            ))
         }
     }
 }
 
-impl From<&PointStatus> for Flags {
-    fn from(status: &PointStatus) -> Self {
-        let mut flags = Flags::empty();
-        flags.set(Flags::IllFormed, status.is_ill_formed);
-        flags.set(Flags::Validated, status.is_validated);
-        flags.set(Flags::Valid, status.is_valid);
-        flags.set(Flags::Trusted, status.is_trusted);
-        flags.set(Flags::Certified, status.is_certified);
-        if let Some(role) = status.anchor_chain_role {
-            flags.insert(match role {
-                AnchorChainRole::Trigger => Flags::AnchorChainRoleInPoint,
-                AnchorChainRole::Anchor => Flags::AnchorChainRoleUnique,
-                AnchorChainRole::Proof => {
-                    Flags::AnchorChainRoleInPoint | Flags::AnchorChainRoleUnique
-                }
-            });
-        }
-        flags
-    }
-}
-
-impl PointStatus {
-    const BYTES: usize = 1 + 4;
-    const DEFAULT: [u8; Self::BYTES] = [0, 0, 0, 0, 0];
-
-    pub fn encode(&self) -> [u8; Self::BYTES] {
-        let mut result = Self::DEFAULT;
-
-        result[0] = Flags::from(self).bits();
-
-        if let Some(at) = self.committed_at_round {
-            result[1..].copy_from_slice(&at.to_be_bytes()[..]);
-        }
-
-        result
-    }
-
-    pub fn decode(stored: &[u8]) -> Result<Self> {
-        if stored.len() != Self::BYTES {
-            anyhow::bail!(
-                "unexpected amount of bytes for stored status: {}",
-                stored.len()
+pub(crate) fn merge(
+    key: &[u8],
+    stored: Option<&[u8]>,
+    new_status_queue: &MergeOperands,
+) -> Option<Vec<u8>> {
+    fn none_if_err_or_empty(key: &[u8], value: &[u8]) -> Option<StatusFlags> {
+        StatusFlags::try_from_stored(value).unwrap_or_else(|msg| {
+            tracing::error!(
+                target: MEMPOOL_DB_STATUS_MERGE,
+                "ignore {msg}, key: {}", MempoolStorage::format_key(key)
             );
-        }
-        let mut status = PointStatus::from(Flags::from_bits_retain(stored[0]));
-
-        let mut committed_at = [0_u8; Self::BYTES - 1];
-        committed_at.copy_from_slice(&stored[1..]);
-        let committed_at = u32::from_be_bytes(committed_at);
-        if committed_at != 0 {
-            status.committed_at_round = Some(committed_at);
-        }
-
-        Ok(status)
+            None
+        })
     }
 
-    pub(crate) fn merge(
-        key: &[u8],
-        stored: Option<&[u8]>,
-        new_status_queue: &MergeOperands,
-    ) -> Option<Vec<u8>> {
-        let mut result = Self::DEFAULT;
-        if let Some(stored) = stored {
-            if stored.len() == Self::BYTES {
-                result.copy_from_slice(stored);
-            } else {
+    let mut status_flags = StatusFlags::empty();
+    let mut anchor_flags = 0_u8;
+    stored
+        .into_iter()
+        .chain(new_status_queue)
+        .reduce(|a, b| {
+            let Some(a_flags) = none_if_err_or_empty(key, a) else {
+                return b;
+            };
+            let Some(b_flags) = none_if_err_or_empty(key, b) else {
+                return a;
+            };
+            // restart is definitely not reproducible if next errors occur
+            if a_flags.contains(StatusFlags::FirstResolved)
+                != b_flags.contains(StatusFlags::FirstResolved)
+            {
                 tracing::error!(
-                    "point status merge discarded unexpected stored value of {} bytes for {}",
-                    stored.len(),
+                    target: MEMPOOL_DB_STATUS_MERGE,
+                    "FIRST_RESOLVED flag mismatch for {a_flags:?} and {b_flags:?}, key: {}",
                     MempoolStorage::format_key(key)
                 );
             }
-        }
-
-        for new_status in new_status_queue {
-            if new_status.len() != Self::BYTES {
+            if a_flags.contains(StatusFlags::FirstValid)
+                != b_flags.contains(StatusFlags::FirstValid)
+            {
                 tracing::error!(
-                    "point status merge discarded unexpected new point status of {} bytes for {}",
-                    new_status.len(),
+                    target: MEMPOOL_DB_STATUS_MERGE,
+                    "FIRST_VALID flag mismatch for {a_flags:?} and {b_flags:?}, key: {}",
                     MempoolStorage::format_key(key)
                 );
-                continue;
             }
-
-            if new_status[1..] != Self::DEFAULT[1..] {
-                if result[1..] == Self::DEFAULT[1..] {
-                    result[1..].copy_from_slice(&new_status[1..]);
-                } else if new_status[1..] != result[1..] {
-                    let old = MempoolStorage::parse_round(&result[1..]);
-                    let new = MempoolStorage::parse_round(&new_status[1..]);
-                    tracing::error!(
-                        "point status merge skipped for different commit rounds: \
-                         {old:?} and {new:?} for {}",
-                        MempoolStorage::format_key(key)
-                    );
-                    continue;
+            // try our best even if errors above occurred, favouring flags set to 'true'
+            status_flags |= a_flags | b_flags;
+            match (
+                a_flags.contains(StatusFlags::Found),
+                b_flags.contains(StatusFlags::Found),
+            ) {
+                (true, false) => return a,
+                (false, true) => return b,
+                (false, false) => {
+                    if a[1..] != b[1..] {
+                        tracing::error!(
+                            target: MEMPOOL_DB_STATUS_MERGE,
+                            "cannot merge NOT_FOUND author: use {} ignore {}, key {}",
+                            BytesFmt(&a[1..]),
+                            BytesFmt(&b[1..]),
+                            MempoolStorage::format_key(key)
+                        );
+                    }
+                    return a;
+                }
+                (true, true) => {} // continue
+            }
+            match (
+                a_flags.contains(StatusFlags::WellFormed),
+                b_flags.contains(StatusFlags::WellFormed),
+            ) {
+                (_, false) => return a, // only already merged flags byte is stored for ill-formed
+                (false, true) => return b,
+                (true, true) => {} // continue
+            }
+            match (
+                a_flags.contains(StatusFlags::Valid),
+                b_flags.contains(StatusFlags::Valid),
+            ) {
+                (_, false) => a, // only already merged flags byte is stored for invalid
+                (false, true) => b,
+                (true, true) => {
+                    anchor_flags |= a[1] | b[1];
+                    // take the greatest commit round, because not committed stores all zeros
+                    if a[2..] >= b[2..] {
+                        a
+                    } else {
+                        b
+                    }
                 }
             }
-            result[0] |= new_status[0];
-        }
-
-        Some(Vec::from(result))
-    }
+        })
+        .map(|c| match none_if_err_or_empty(key, c) {
+            Some(flags) => {
+                let mut result = c.to_vec();
+                result[0] |= flags.bits();
+                let valid_combo = StatusFlags::Found | StatusFlags::WellFormed | StatusFlags::Valid;
+                if flags.contains(valid_combo) {
+                    result[1] |= anchor_flags;
+                }
+                result
+            }
+            None => Vec::new(), // keep empty
+        })
 }

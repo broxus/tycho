@@ -2,12 +2,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{atomic, Arc};
 
 use tycho_network::PeerId;
-use tycho_storage::point_status::PointStatus;
 
 use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::point::{Digest, PointId};
-use crate::models::{PointInfo, Round};
+use crate::models::{
+    PointInfo, PointStatusIllFormed, PointStatusInvalid, PointStatusNotFound, PointStatusValid,
+    Round,
+};
 
 #[derive(Clone, Debug)]
 /// cases with point hash or signature mismatch are not represented in enum;
@@ -29,29 +31,45 @@ pub enum DagPoint {
 }
 
 impl DagPoint {
-    pub fn new_valid(info: PointInfo, is_certified: bool) -> Self {
+    pub fn new_valid(info: PointInfo, status: &PointStatusValid) -> Self {
         DagPoint::Valid(ValidPoint {
             info,
-            is_certified,
+            is_first_valid: status.is_first_valid,
+            is_first_resolved: status.is_first_resolved,
+            is_certified: status.is_certified,
             is_committed: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub fn new_invalid(info: PointInfo, is_certified: bool) -> Self {
+    pub fn new_invalid(info: PointInfo, status: &PointStatusInvalid) -> Self {
         DagPoint::Invalid(Cert {
             inner: info,
-            is_certified,
+            is_first_resolved: status.is_first_resolved,
+            is_certified: status.is_certified,
         })
     }
 
-    pub fn new_ill_formed(id: PointId, reason: IllFormedReason) -> Self {
-        DagPoint::IllFormed(IllFormedPoint(Arc::new(IllFormedPointInner { id, reason })))
+    pub fn new_ill_formed(
+        id: PointId,
+        status: &PointStatusIllFormed,
+        reason: IllFormedReason,
+    ) -> Self {
+        DagPoint::IllFormed(IllFormedPoint(Arc::new(IllFormedPointInner {
+            id,
+            is_first_resolved: status.is_first_resolved,
+            reason,
+        })))
     }
 
-    pub fn new_not_found(id: PointId, is_certified: bool) -> Self {
+    pub fn new_not_found(round: Round, digest: &Digest, status: &PointStatusNotFound) -> Self {
         DagPoint::NotFound(Arc::new(Cert {
-            inner: id,
-            is_certified,
+            inner: PointId {
+                author: status.author,
+                round,
+                digest: *digest,
+            },
+            is_first_resolved: status.is_first_resolved,
+            is_certified: status.is_certified,
         }))
     }
 
@@ -70,11 +88,11 @@ impl DagPoint {
         }
     }
 
-    fn well_formed(&self) -> Option<&PointInfo> {
-        match self {
-            Self::Valid(valid) => Some(&valid.info),
-            Self::Invalid(cert) => Some(&cert.inner),
-            _ => None,
+    pub fn id(&self) -> PointId {
+        PointId {
+            author: self.author(),
+            round: self.round(),
+            digest: *self.digest(),
         }
     }
 
@@ -105,18 +123,12 @@ impl DagPoint {
         }
     }
 
-    pub fn basic_status(&self) -> PointStatus {
-        PointStatus {
-            is_ill_formed: self.well_formed().is_none(),
-            is_valid: self.valid().is_some(),
-            is_trusted: self.trusted().is_some(),
-            is_certified: match self {
-                Self::Valid(valid) => valid.is_certified,
-                Self::Invalid(cert) => cert.is_certified,
-                Self::NotFound(cert) => cert.is_certified,
-                Self::IllFormed(_) => false,
-            },
-            ..Default::default()
+    pub fn is_first_resolved(&self) -> bool {
+        match self {
+            Self::Valid(valid) => valid.is_first_resolved,
+            Self::Invalid(cert) => cert.is_first_resolved,
+            Self::IllFormed(ill) => ill.0.is_first_resolved,
+            Self::NotFound(cert) => cert.is_first_resolved,
         }
     }
 }
@@ -126,12 +138,15 @@ pub struct ValidPoint {
     pub info: PointInfo,
     pub is_committed: Arc<AtomicBool>,
     pub is_certified: bool,
+    pub is_first_valid: bool,
+    is_first_resolved: bool,
 }
 
 #[derive(Clone)]
 pub struct IllFormedPoint(Arc<IllFormedPointInner>);
 struct IllFormedPointInner {
     id: PointId,
+    is_first_resolved: bool,
     reason: IllFormedReason,
 }
 impl std::fmt::Debug for IllFormedPoint {
@@ -140,6 +155,7 @@ impl std::fmt::Debug for IllFormedPoint {
             .field("round", &self.0.id.round.0)
             .field("author", &self.0.id.author)
             .field("digest", &self.0.id.digest)
+            .field("is_first_resolved", &self.0.is_first_resolved)
             .field("reason", &format!("{}", self.0.reason))
             .finish()
     }
@@ -148,6 +164,7 @@ impl std::fmt::Debug for IllFormedPoint {
 pub struct Cert<T> {
     pub inner: T,
     pub is_certified: bool,
+    is_first_resolved: bool,
 }
 
 impl<T> Clone for Cert<T>
@@ -157,6 +174,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            is_first_resolved: self.is_first_resolved,
             is_certified: self.is_certified,
         }
     }
@@ -178,10 +196,17 @@ where
 impl AltFormat for DagPoint {}
 impl std::fmt::Display for AltFmt<'_, DagPoint> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const FIRST_RESOLVED: &str = "first resolved";
         const CERTIFIED: &str = "certified";
         match AltFormat::unpack(self) {
             DagPoint::Valid(valid) => {
                 let mut tuple = f.debug_tuple("Valid");
+                if valid.is_first_valid {
+                    tuple.field(&"first valid");
+                }
+                if valid.is_first_resolved {
+                    tuple.field(&FIRST_RESOLVED);
+                }
                 if valid.is_certified {
                     tuple.field(&CERTIFIED);
                 }
@@ -192,6 +217,9 @@ impl std::fmt::Display for AltFmt<'_, DagPoint> {
             }
             DagPoint::Invalid(cert) => {
                 let mut tuple = f.debug_tuple("Invalid");
+                if cert.is_first_resolved {
+                    tuple.field(&FIRST_RESOLVED);
+                }
                 if cert.is_certified {
                     tuple.field(&CERTIFIED);
                 }
@@ -199,11 +227,17 @@ impl std::fmt::Display for AltFmt<'_, DagPoint> {
             }
             DagPoint::IllFormed(ill) => {
                 let mut tuple = f.debug_tuple("IllFormed");
+                if ill.0.is_first_resolved {
+                    tuple.field(&FIRST_RESOLVED);
+                }
                 tuple.field(&format!("reason: {}", ill.0.reason));
                 tuple.finish()
             }
             DagPoint::NotFound(cert) => {
                 let mut tuple = f.debug_tuple("NotFound");
+                if cert.is_first_resolved {
+                    tuple.field(&FIRST_RESOLVED);
+                }
                 if cert.is_certified {
                     tuple.field(&CERTIFIED);
                 }

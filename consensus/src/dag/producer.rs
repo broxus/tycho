@@ -165,8 +165,7 @@ impl Producer {
                     loc.state
                         .sign_or_reject(round, key_pair)
                         .ok()
-                        .and_then(|signed| signed.first_resolved.valid().cloned())
-                        .map(|valid| valid.info)
+                        .map(|signed| signed.first_resolved.info.clone())
                 }
             })
             .collect::<Vec<_>>()
