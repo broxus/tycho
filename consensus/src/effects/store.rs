@@ -6,7 +6,6 @@ use bytes::Bytes;
 use itertools::Itertools;
 use tl_proto::TlWrite;
 use tycho_network::OverlayId;
-use tycho_storage::point_status::PointStatus;
 use tycho_storage::MempoolStorage;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -16,7 +15,10 @@ use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatc
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
-use crate::models::{Digest, Point, PointInfo, Round};
+use crate::models::{
+    Digest, Point, PointInfo, PointStatus, PointStatusStored, PointStatusStoredRef,
+    PointStatusValid, Round,
+};
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
@@ -28,9 +30,14 @@ pub struct MempoolAdapterStore {
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(&self, point: &Point, status: &PointStatus) -> Result<()>;
+    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()>;
 
-    fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) -> Result<()>;
+    fn set_status(
+        &self,
+        round: Round,
+        digest: &Digest,
+        status: PointStatusStoredRef<'_>,
+    ) -> Result<()>;
 
     fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()>;
 
@@ -40,7 +47,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>>;
 
-    fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatus>>;
+    fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>>;
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>>;
 
@@ -112,14 +119,14 @@ impl MempoolStore {
         Self(Arc::new(()))
     }
 
-    pub fn insert_point(&self, point: &Point, status: &PointStatus) {
+    pub fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) {
         self.0
             .insert_point(point, status)
-            .with_context(|| format!("id {:?} {status:?}", point.id().alt()))
+            .with_context(|| format!("id {:?}", point.id().alt()))
             .expect("DB insert point full");
     }
 
-    pub fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) {
+    pub fn set_status(&self, round: Round, digest: &Digest, status: PointStatusStoredRef<'_>) {
         self.0
             .set_status(round, digest, status)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
@@ -140,14 +147,14 @@ impl MempoolStore {
             .expect("DB get point full")
     }
 
-    pub fn get_info(&self, round: Round, digest: Digest) -> Option<PointInfo> {
+    pub fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
         self.0
-            .get_info(round, &digest)
+            .get_info(round, digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
             .expect("DB get point info")
     }
 
-    pub fn get_status(&self, round: Round, digest: &Digest) -> Option<PointStatus> {
+    pub fn get_status(&self, round: Round, digest: &Digest) -> Option<PointStatusStored> {
         self.0
             .get_status(round, digest)
             .with_context(|| format!("round {} digest {}", round.0, digest.alt()))
@@ -283,7 +290,7 @@ impl DbCleaner {
 }
 
 impl MempoolStoreImpl for MempoolStorage {
-    fn insert_point(&self, point: &Point, status: &PointStatus) -> Result<()> {
+    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
@@ -306,14 +313,23 @@ impl MempoolStoreImpl for MempoolStorage {
 
         let value = PointInfo::serializable_from(point);
         value.write_to(&mut buffer);
-
         batch.put_cf(&info_cf, key.as_slice(), &buffer);
-        batch.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice());
+
+        buffer.clear();
+
+        status.write_to(&mut buffer);
+
+        batch.merge_cf(&status_cf, key.as_slice(), &buffer);
 
         Ok(db.write(batch)?)
     }
 
-    fn set_status(&self, round: Round, digest: &Digest, status: &PointStatus) -> Result<()> {
+    fn set_status(
+        &self,
+        round: Round,
+        digest: &Digest,
+        status: PointStatusStoredRef<'_>,
+    ) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_status_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
@@ -321,7 +337,7 @@ impl MempoolStoreImpl for MempoolStorage {
         let db = self.db.rocksdb();
         let status_cf = self.db.points_status.cf();
 
-        Ok(db.merge_cf(&status_cf, key.as_slice(), status.encode().as_slice())?)
+        Ok(db.merge_cf(&status_cf, key.as_slice(), status.encode())?)
     }
 
     fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
@@ -333,15 +349,13 @@ impl MempoolStoreImpl for MempoolStorage {
         let status_cf = self.db.points_status.cf();
         let mut batch = WriteBatch::default();
 
-        let status_encoded = PointStatus {
-            committed_at_round: Some(anchor.round().0),
-            ..Default::default()
-        }
-        .encode();
+        let mut status = PointStatusValid::default();
+        status.committed_at_round = Some(anchor.round().0);
+        let status_encoded = status.encode();
 
         for info in history {
             MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-            batch.merge_cf(&status_cf, buf.as_slice(), status_encoded.as_slice());
+            batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
         }
 
         Ok(db.write(batch)?)
@@ -386,7 +400,7 @@ impl MempoolStoreImpl for MempoolStorage {
             .transpose()
     }
 
-    fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatus>> {
+    fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>> {
         metrics::counter!("tycho_mempool_store_get_status_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_status_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
@@ -397,7 +411,7 @@ impl MempoolStoreImpl for MempoolStorage {
             .get(key.as_slice())
             .context("db get point status")?
             .as_deref()
-            .map(PointStatus::decode)
+            .map(PointStatusStored::decode)
             .transpose()
     }
 
@@ -550,11 +564,11 @@ impl MempoolStoreImpl for MempoolStorage {
 
 #[cfg(feature = "test")]
 impl MempoolStoreImpl for () {
-    fn insert_point(&self, _: &Point, _: &PointStatus) -> Result<()> {
+    fn insert_point(&self, _: &Point, _: PointStatusStoredRef<'_>) -> Result<()> {
         Ok(())
     }
 
-    fn set_status(&self, _: Round, _: &Digest, _: &PointStatus) -> Result<()> {
+    fn set_status(&self, _: Round, _: &Digest, _: PointStatusStoredRef<'_>) -> Result<()> {
         Ok(())
     }
 
@@ -574,7 +588,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn get_status(&self, _: Round, _: &Digest) -> Result<Option<PointStatus>> {
+    fn get_status(&self, _: Round, _: &Digest) -> Result<Option<PointStatusStored>> {
         anyhow::bail!("should not be used in tests")
     }
 
