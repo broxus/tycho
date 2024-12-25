@@ -77,6 +77,13 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
+    pub async fn get_neighbours_info(&self) -> ClientResult<NeighboursInfoResponse> {
+        self.inner
+            .get_neighbours_info(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn broadcast_external_message(&self, message: OwnedMessage) -> ClientResult<()> {
         if !message.info.is_external_in() {
             return Err(ClientError::ClientFailed(anyhow::anyhow!(

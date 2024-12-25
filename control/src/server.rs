@@ -448,6 +448,30 @@ impl proto::ControlServer for ControlServer {
         self.inner.memory_profiler.dump().await.map_err(Into::into)
     }
 
+    async fn get_neighbours_info(self, _: Context) -> ServerResult<proto::NeighboursInfoResponse> {
+        let neighbours = self
+            .inner
+            .blockchain_rpc_client
+            .overlay_client()
+            .neighbours()
+            .get_active_neighbours()
+            .iter()
+            .map(|x| {
+                let stats = x.get_stats();
+                proto::NeighbourInfo {
+                    id: *x.peer_id(),
+                    expires_at: x.expires_at_secs(),
+                    score: stats.score,
+                    failed_requests: stats.failed_requests,
+                    total_requests: stats.total_requests,
+                    roundtrip_ms: stats.avg_roundtrip.unwrap_or_default().as_millis() as u64,
+                }
+            })
+            .collect::<_>();
+
+        Ok(proto::NeighboursInfoResponse { neighbours })
+    }
+
     async fn broadcast_external_message(
         self,
         _: Context,
