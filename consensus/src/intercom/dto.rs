@@ -120,7 +120,6 @@ pub enum SignatureResponse {
     /// * equivocation
     /// * invalid dependency
     /// * signer is more than 1 round in front of us
-    /// * signer's clock are too far in the future (probably consensus stalled for long)
     Rejected(SignatureRejectedReason),
 }
 
@@ -132,6 +131,17 @@ impl Display for AltFmt<'_, SignatureResponse> {
             SignatureResponse::NoPoint => f.write_str("NoPoint"),
             SignatureResponse::TryLater => f.write_str("TryLater"),
             SignatureResponse::Rejected(reason) => f.debug_tuple("Rejected").field(reason).finish(),
+        }
+    }
+}
+
+impl<T> AltFormat for PointByIdResponse<T> {}
+impl<T> Display for AltFmt<'_, PointByIdResponse<T>> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match AltFormat::unpack(self) {
+            PointByIdResponse::Defined(_) => f.write_str("Some"),
+            PointByIdResponse::DefinedNone => f.write_str("None"),
+            PointByIdResponse::TryLater => f.write_str("TryLater"),
         }
     }
 }
