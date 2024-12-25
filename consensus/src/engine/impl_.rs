@@ -114,19 +114,21 @@ impl Engine {
         let init_task = JoinTask::new({
             let store = store.clone();
             let genesis_dag_round = dag.top().clone();
+            let round_ctx = RoundCtx::new(&engine_ctx, Genesis::id().round);
             async move {
-                let init_storage_task = tokio::task::spawn_blocking({
-                    move || {
-                        store.init_storage(&overlay_id);
-                        // may be overwritten or left unused until next clean task, does not matter
-                        genesis_dag_round.insert_exact_sign(&genesis, Some(&key_pair), &store);
-                    }
-                });
+                let init_storage_task = {
+                    let store = store.clone();
+                    tokio::task::spawn_blocking(move || store.init_storage(&overlay_id))
+                };
                 match init_storage_task.await {
                     Ok(()) => (),
                     Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                     Err(e) => panic!("failed to clean db on genesis {e:?}"),
                 }
+                // may be overwritten or left unused until next clean task, does not matter
+                genesis_dag_round
+                    .add_local(&genesis, Some(&key_pair), &store, &round_ctx)
+                    .await;
             }
         });
 
@@ -271,11 +273,12 @@ impl Engine {
                 );
             }
 
-            _ = dag_round.select(|(_, loc)| {
+            let iter = dag_round.select(|(_, loc)| {
                 // each restore future is eager, as it has a spawned task inside
                 dag_restore.extend(loc.versions.values().cloned());
                 None::<()>
             });
+            _ = iter.collect::<Vec<_>>();
 
             // to repeat broadcasts from two last determined consensus rounds
             if round >= last_db_round.prev() {
@@ -459,7 +462,7 @@ impl Engine {
             let own_point_fut = match replay_bcasts.take() {
                 Some((point, prev_bcast)) => {
                     if let Some(prev) = prev_bcast {
-                        self.round_task.init_prev_broadcast(prev, round_ctx.clone());
+                        self.round_task.init_prev_broadcast(prev, &round_ctx);
                     }
                     future::ready(Some(point)).boxed()
                 }
