@@ -13,7 +13,7 @@ use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, Round};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -236,7 +236,7 @@ impl DagRound {
     ) {
         self.edit(author, |loc| {
             loc.versions.entry(*digest).or_insert_with(|| {
-                DagPointFuture::new_load(
+                DagPointFuture::new_download(
                     self, author, digest, None, &loc.state, downloader, store, round_ctx,
                 )
             });
@@ -259,7 +259,7 @@ impl DagRound {
                 .entry(*digest)
                 .and_modify(|first| first.add_depender(depender))
                 .or_insert_with(|| {
-                    DagPointFuture::new_load(
+                    DagPointFuture::new_download(
                         self,
                         author,
                         digest,
@@ -272,6 +272,44 @@ impl DagRound {
                 })
                 .clone()
         })
+    }
+
+    pub fn restore(
+        &self,
+        point_restore: PointRestore,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        round_ctx: &RoundCtx,
+        restore_dependencies: bool,
+    ) {
+        let _guard = round_ctx.span().enter();
+        assert_eq!(
+            point_restore.round(),
+            self.round(),
+            "Coding error: point restore round does not match dag round"
+        );
+        let author = *point_restore.author();
+        self.edit(&author, |loc| {
+            loc.versions
+                .entry(*point_restore.digest())
+                .and_modify(|_| {
+                    panic!(
+                        "points must be restored only once. {:?}",
+                        point_restore.alt()
+                    )
+                })
+                .or_insert_with(|| {
+                    DagPointFuture::new_restore(
+                        self,
+                        point_restore,
+                        &loc.state,
+                        downloader,
+                        store,
+                        round_ctx,
+                        restore_dependencies,
+                    )
+                });
+        });
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {
