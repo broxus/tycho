@@ -1,5 +1,7 @@
 pub mod point_status;
 
+use std::fmt::{Display, Formatter};
+
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb::{IteratorMode, ReadOptions, WriteBatch};
 
@@ -33,17 +35,13 @@ impl MempoolStorage {
     }
     pub fn format_key(bytes: &[u8]) -> String {
         if let Some(round) = Self::parse_round(bytes) {
-            let mut digest = String::with_capacity((Self::KEY_LEN - 4) * 2);
-            for byte in &bytes[4..Self::KEY_LEN] {
-                digest.push_str(&format!("{byte:02x?}"));
+            if bytes.len() == Self::KEY_LEN {
+                format!("round {round} digest {}", BytesFmt(&bytes[4..]))
+            } else {
+                format!("unknown {} bytes: {:.12}", bytes.len(), BytesFmt(bytes))
             }
-            format!("round {round} digest {digest} total bytes: {}", bytes.len())
         } else {
-            let mut smth = String::with_capacity(bytes.len() * 2);
-            for byte in &bytes[4..Self::KEY_LEN] {
-                smth.push_str(&format!("{byte:02x?}"));
-            }
-            format!("unknown short bytes {smth}")
+            format!("unknown short {} bytes {}", bytes.len(), BytesFmt(bytes))
         }
     }
 
@@ -148,5 +146,16 @@ impl MempoolStorage {
         default_cf.compact_range(None::<&[u8]>, None::<&[u8]>);
 
         Ok(false)
+    }
+}
+
+pub struct BytesFmt<'a>(pub &'a [u8]);
+impl Display for BytesFmt<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let len = f.precision().unwrap_or(self.0.len());
+        for byte in &self.0[..len] {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }

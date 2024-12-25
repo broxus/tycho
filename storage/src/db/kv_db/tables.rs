@@ -730,7 +730,8 @@ impl ColumnFamilyOptions<Caches> for PointsInfo {
 
 /// Stores mempool point flags
 /// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
-/// - Value: [`crate::point_status::PointStatus`]
+/// - Value: [`tycho_consensus::models::point_status::PointStatusStored`]
+///   - also see  [`crate::point_status::StatusFlags::try_from_stored`]
 pub struct PointsStatus;
 
 impl PointsStatus {}
@@ -744,10 +745,7 @@ impl ColumnFamilyOptions<Caches> for PointsStatus {
         optimize_for_point_lookup(opts, caches);
         opts.set_disable_auto_compactions(true);
 
-        opts.set_merge_operator_associative(
-            "points_status_merge",
-            crate::point_status::PointStatus::merge,
-        );
+        opts.set_merge_operator_associative("points_status_merge", crate::point_status::merge);
     }
 }
 
