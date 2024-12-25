@@ -183,9 +183,11 @@ impl BroadcastFilterInner {
                                 dag_round.add_broadcast_exact(point, downloader, store, round_ctx);
                             }
                         }
-                        Err(VerifyError::IllFormed(_)) => {
+                        Err(VerifyError::IllFormed(reason)) => {
                             if let Some(dag_round) = head.next().scan(point.round()) {
-                                dag_round.add_ill_formed_broadcast_exact(point, store, round_ctx);
+                                dag_round.add_ill_formed_broadcast_exact(
+                                    point, reason, store, round_ctx,
+                                );
                             }
                         }
                         Err(VerifyError::BadSig) => {
