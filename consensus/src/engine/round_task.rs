@@ -6,7 +6,6 @@ use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt};
 use tokio::sync::{oneshot, watch};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
-use tracing::Instrument;
 use tycho_util::futures::JoinTask;
 
 use crate::dag::{DagHead, LastOwnPoint, Producer, Verifier, WeakDagRound};
@@ -70,7 +69,7 @@ impl RoundTaskReady {
         }
     }
 
-    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: RoundCtx) {
+    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
         assert!(
             self.prev_broadcast.is_none(),
             "previous broadcast is already set"
@@ -84,8 +83,9 @@ impl RoundTaskReady {
             self.state.peer_schedule.clone(),
             bcaster_ready_tx,
             collector_signal_rx,
-            &round_ctx,
+            round_ctx,
         );
+        let round_ctx = round_ctx.clone();
         let task = async move {
             broadcaster.run_continue(round_ctx).await;
             _ = stub_rx;
@@ -100,22 +100,25 @@ impl RoundTaskReady {
         mut collector_signal_rx: watch::Receiver<CollectorSignal>,
         round_ctx: &RoundCtx,
     ) -> BoxFuture<'static, Option<Point>> {
-        let allowed_to_produce = self
-            .last_own_point
-            .as_ref()
-            .is_none_or(|prev_own| match prev_own.round.cmp(&head.prev().round()) {
-                cmp::Ordering::Less => true,
-                cmp::Ordering::Equal => {
-                    prev_own.evidence.len() >= prev_own.signers.majority_of_others()
+        let allowed_to_produce =
+            (self.last_own_point.as_ref()).is_none_or(|prev_own| {
+                match prev_own.round.cmp(&head.prev().round()) {
+                    cmp::Ordering::Less => true,
+                    cmp::Ordering::Equal => {
+                        prev_own.evidence.len() >= prev_own.signers.majority_of_others()
+                    }
+                    cmp::Ordering::Greater => {
+                        let _guard = round_ctx.span().enter();
+                        panic!(
+                            "already produced point at {:?} and gathered {}/{} evidence, \
+                             trying to produce point at {:?}",
+                            prev_own.round,
+                            prev_own.evidence.len(),
+                            prev_own.signers.majority_of_others(),
+                            head.current().round()
+                        );
+                    }
                 }
-                cmp::Ordering::Greater => panic!(
-                    "already produced point at {:?} and gathered {}/{} evidence, \
-                     trying to produce point at {:?}",
-                    prev_own.round,
-                    prev_own.evidence.len(),
-                    prev_own.signers.majority_of_others(),
-                    head.current().round()
-                ),
             });
 
         if !allowed_to_produce {
@@ -126,6 +129,7 @@ impl RoundTaskReady {
         let last_own_point = self.last_own_point.clone();
         let store = self.state.store.clone();
         let head = head.clone();
+        let round_ctx = round_ctx.clone();
 
         // must stay lazy: not started until polled
         async move {
@@ -153,33 +157,28 @@ impl RoundTaskReady {
             }
             drop(threshold);
 
-            let point_result = tokio::task::spawn_blocking(move || {
-                let task_start_time = Instant::now();
-                let point_opt =
-                    Producer::new_point(last_own_point.as_deref(), &input_buffer, &head);
-                if let Some(own_point) = point_opt.as_ref() {
+            let task_start_time = Instant::now();
+
+            let produced = (round_ctx.span())
+                .in_scope(|| Producer::new_point(last_own_point.as_deref(), &input_buffer, &head));
+            round_ctx.own_point(produced.as_ref());
+            match produced {
+                Some(own_point) => {
                     // Note: actually we should use `keys().to_include`, this is a WorkAround to support
                     //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
                     //   this is safe as any node never changes its keys until restart, after which
                     //   the node does not recognise points signed with old keypair as locally created
-                    let wa_keys = head.keys().to_produce.as_deref();
-                    head.current().insert_exact_sign(own_point, wa_keys, &store);
+                    let wa_keys = head.keys().to_produce.as_ref();
+                    head.current()
+                        .add_local(&own_point, wa_keys, &store, &round_ctx)
+                        .await;
                     metrics::histogram!("tycho_mempool_engine_produce_time")
                         .record(task_start_time.elapsed());
-                };
-                point_opt
-            })
-            .await;
-            match point_result {
-                Ok(result) => result,
-                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                Err(e) => {
-                    tracing::warn!("produce point task cancelled: {e}");
-                    None
+                    Some(own_point)
                 }
+                None => None,
             }
         }
-        .instrument(round_ctx.span().clone())
         .boxed()
     }
 
@@ -213,7 +212,6 @@ impl RoundTaskReady {
             let store = self.state.store.clone();
             async move {
                 let own_point = own_point_fut.await;
-                round_ctx.own_point(own_point.as_ref());
 
                 if let Some(own_point) = own_point {
                     let self_check = Self::expect_own_trusted_point(
