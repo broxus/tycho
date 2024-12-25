@@ -1848,7 +1848,7 @@ def mempool_rounds() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_consensus_ahead_top_known",
-            "Consensus ahead of top known block: silent mode trigger",
+            "Consensus ahead of top known block: pause clause",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_dag_length",
@@ -1883,7 +1883,7 @@ def mempool_rounds() -> RowPanel:
     return create_row("Mempool rounds", metrics)
 
 
-def mempool_point_rates() -> RowPanel:
+def mempool_payload_rates() -> RowPanel:
     metrics = [
         create_counter_panel(
             "tycho_mempool_msgs_unique_count",
@@ -1926,7 +1926,7 @@ def mempool_point_rates() -> RowPanel:
             "Input buffer: time msg spent in queue",
         ),
     ]
-    return create_row("Mempool point rates", metrics)
+    return create_row("Mempool payload rates", metrics)
 
 
 def mempool_engine_rates() -> RowPanel:
@@ -1961,11 +1961,13 @@ def mempool_engine_rates() -> RowPanel:
         ),
         create_counter_panel(
             "tycho_mempool_signing_postponed",
-            "Signings postponed: point time too far in future",
+            "Signings postponed: point time or round are in future",
+            legend_format="{{instance}} - {{kind}}",
         ),
         create_counter_panel(
             "tycho_mempool_signing_rejected",
-            "Signings rejected: signer not in vset or point issue",
+            "Signings rejected: point round too old or node not in v_set",
+            legend_format="{{instance}} - {{kind}}",
         ),
     ]
     return create_row("Mempool engine rates", metrics)
@@ -2010,47 +2012,16 @@ def mempool_engine() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_mempool_commit_anchor_latency_time",
-            "Engine committed anchor: time latency (min over batch)",
+            "Engine committed anchor: time latency",
         ),
         create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_points_first_resolved",
-                label_selectors=['kind=~"$kind"'],
-                range_selector="$__interval",
-                by_labels=["kind", "instance"],
-            ),
-            "Engine: resolve first point errors and warnings (total at moment)",
-            legend_format="{{instance}} - {{kind}}",
+            "tycho_mempool_points_verify_ok",
+            "Verifier: verify() OK points (rate)"
         ),
         create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_alt_points_resolved",
-                label_selectors=['kind=~"$kind"'],
-                range_selector="$__interval",
-                by_labels=["kind", "instance"],
-            ),
-            "Engine: resolved alternative points (total at moment)",
-            legend_format="{{instance}} - {{kind}}",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_verifier_verify",
-                label_selectors=['kind=~"$kind"'],
-                range_selector="$__interval",
-                by_labels=["kind", "instance"],
-            ),
-            "Verifier: verify() errors (total at moment)",
-            legend_format="{{instance}} - {{kind}}",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_verifier_validate",
-                label_selectors=['kind=~"$kind"'],
-                range_selector="$__interval",
-                by_labels=["kind", "instance"],
-            ),
-            "Verifier: validate() errors and warnings (total at moment)",
-            legend_format="{{instance}} - {{kind}}",
+            "tycho_mempool_points_resolved_ok",
+            "Engine: valid points resolved (rate)",
+            legend_format="{{instance}} - {{ord}}",
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_verify_time",
@@ -2060,9 +2031,39 @@ def mempool_engine() -> RowPanel:
             "tycho_mempool_verifier_validate_time",
             "Verifier: validate() point dependencies in DAG and all-1 sigs",
         ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_points_verify_err",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Verifier: verify() errors (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_points_resolved_err",
+                label_selectors=['kind=~"$kind"','ord="first"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Engine: resolved first point errors (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
         create_heatmap_panel(
             "tycho_mempool_adapter_parse_anchor_history_time",
             "Adapter: parse anchor history into cells",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_points_resolved_err",
+                label_selectors=['kind=~"$kind"','ord="alt"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Engine: resolved alt point errors (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
         ),
     ]
     return create_row("Mempool engine", metrics)
@@ -2523,7 +2524,7 @@ dashboard = Dashboard(
         collator_commit_block_metrics(),
         validator(),
         mempool_rounds(),
-        mempool_point_rates(),
+        mempool_payload_rates(),
         mempool_engine_rates(),
         mempool_engine(),
         mempool_intercom(),
