@@ -1000,10 +1000,6 @@ fn extract_code_hash(account: &ShardAccount) -> Result<ExtractedCodeHash> {
     if let Some(account) = account.load_account()? {
         if let AccountState::Active(state_init) = &account.state {
             if let Some(code) = &state_init.code {
-                if code.descriptor().is_pruned_branch() {
-                    return Ok(ExtractedCodeHash::Skip);
-                }
-
                 return Ok(ExtractedCodeHash::Exact(Some(*code.repr_hash())));
             }
         }
