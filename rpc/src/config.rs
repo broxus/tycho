@@ -35,6 +35,11 @@ pub enum RpcStorage {
         ///
         /// `None` to disable garbage collection.
         gc: Option<TransactionsGcConfig>,
+
+        /// Reset all accounts.
+        ///
+        /// Default: `false`.
+        force_reindex: bool,
     },
     /// Only store the state, no transactions and code hashes.
     StateOnly,
@@ -46,7 +51,14 @@ impl RpcStorage {
     }
     pub fn gc_is_enabled(&self) -> bool {
         match self {
-            Self::Full { gc } => gc.is_some(),
+            Self::Full { gc, .. } => gc.is_some(),
+            Self::StateOnly => false,
+        }
+    }
+
+    pub fn is_force_reindex(&self) -> bool {
+        match self {
+            Self::Full { force_reindex, .. } => *force_reindex,
             Self::StateOnly => false,
         }
     }
@@ -60,6 +72,7 @@ impl Default for RpcConfig {
             shard_split_depth: 4,
             storage: RpcStorage::Full {
                 gc: Some(Default::default()),
+                force_reindex: false,
             },
         }
     }

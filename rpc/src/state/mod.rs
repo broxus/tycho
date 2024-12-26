@@ -35,7 +35,7 @@ impl RpcStateBuilder {
 
         let gc_notify = Arc::new(Notify::new());
         let gc_handle = match &self.config.storage {
-            RpcStorage::Full { gc } => gc.as_ref().map(|config| {
+            RpcStorage::Full { gc, .. } => gc.as_ref().map(|config| {
                 tokio::spawn(transactions_gc(
                     config.clone(),
                     storage.clone(),
@@ -316,7 +316,7 @@ impl Inner {
             let node_instance_id = self.storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
 
-            if node_instance_id != rpc_instance_id {
+            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
                 let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
                     let state_info = state.as_ref();
                     Ok(CachedAccounts {
