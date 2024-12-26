@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use everscale_types::models::ConsensusConfig;
@@ -74,7 +75,7 @@ impl InputBufferInner for InputBufferData {
 
 #[derive(Default)]
 struct InputBufferData {
-    data: VecDeque<Bytes>,
+    data: VecDeque<(Bytes, Instant)>,
     data_bytes: usize,
     offset_elements: usize,
     payload_buffer_bytes: usize,
@@ -87,9 +88,14 @@ impl InputBufferData {
         let result = self
             .data
             .iter()
-            .take_while(|elem| {
+            .take_while(|(elem, _)| {
                 taken_bytes += elem.len();
                 taken_bytes <= self.payload_batch_bytes
+            })
+            .map(|(elem, ingested)| {
+                metrics::histogram!("tycho_mempool_input_buffer_spent_time")
+                    .record(ingested.elapsed());
+                elem
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -113,7 +119,7 @@ impl InputBufferData {
             let to_drop = self
                 .data
                 .iter()
-                .take_while(|front| {
+                .take_while(|(front, _)| {
                     // last call must not change `self`
                     let take_more = self.data_bytes > max_data_bytes;
                     if take_more {
@@ -141,14 +147,14 @@ impl InputBufferData {
         }
 
         self.data_bytes += payload_bytes;
-        self.data.push_back(payload);
+        self.data.push_back((payload, Instant::now()));
     }
 
     fn commit_offset(&mut self) {
         let committed_bytes: usize = self
             .data
             .drain(..self.offset_elements)
-            .map(|comitted_bytes| comitted_bytes.len())
+            .map(|(comitted_bytes, _)| comitted_bytes.len())
             .sum();
 
         self.update_capacity();

@@ -1702,6 +1702,10 @@ def mempool_point_rates() -> RowPanel:
             "Input buffer: evicted externals size",
             unit_format=UNITS.BYTES_IEC,
         ),
+        create_heatmap_panel(
+            "tycho_mempool_input_buffer_spent_time",
+            "Input buffer: time msg spent in queue",
+        ),
     ]
     return create_row("Mempool point rates", metrics)
 
