@@ -526,6 +526,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
             queue_diff_with_msgs: QueueDiffWithMessages {
                 messages: Default::default(),
                 processed_to: Default::default(),
+                partition_router: Default::default(),
             },
             messages_for_current_shard: Default::default(),
             max_message_key_for_current_shard: QueueKey::MIN,

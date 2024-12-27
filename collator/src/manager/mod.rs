@@ -1,4 +1,4 @@
-use std::collections::{hash_map, BTreeMap, VecDeque};
+use std::collections::{hash_map, VecDeque};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
@@ -1198,7 +1198,7 @@ where
 
         // find min processed to by shards for trim tail
         for min_processed_upto in processed_to_by_shards.values() {
-            for (shard_id, to_key) in min_processed_upto {
+            for (shard_id, to_key) in min_processed_upto.clone() {
                 min_processed_to_by_shards
                     .entry(shard_id)
                     .and_modify(|min| {
@@ -1309,16 +1309,13 @@ where
 
         // apply required previous queue diffs
         while let Some((diff, diff_hash, block_id, max_message_key)) = prev_queue_diffs.pop() {
-            self.mq_adapter.apply_diff(
-                diff,
-                block_id.as_short_id(),
-                &diff_hash,
-                max_message_key,
-            )?;
+            let statistics = (diff.clone(), block_id.shard).into();
+            self.mq_adapter
+                .apply_diff(diff, block_id.as_short_id(), &diff_hash, statistics)?;
         }
         // trim diffs tails for all shards
         for (shard_id, min_processed_to) in min_processed_to_by_shards {
-            self.mq_adapter.trim_diffs(shard_id, min_processed_to)?;
+            self.mq_adapter.trim_diffs(&shard_id, &min_processed_to)?;
         }
 
         // sync all applied blocks

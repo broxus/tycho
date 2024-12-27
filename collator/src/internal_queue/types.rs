@@ -7,7 +7,7 @@ use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
 use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
 use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartition};
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 
 use super::state::state_iterator::MessageExt;
 use crate::types::ProcessedTo;

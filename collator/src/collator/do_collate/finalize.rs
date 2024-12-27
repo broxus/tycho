@@ -129,11 +129,12 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
+                let statistics = (queue_diff_with_msgs.clone(), block_id_short.shard).into();
                 mq_adapter.apply_diff(
                     queue_diff_with_msgs,
                     block_id_short,
                     &queue_diff_hash,
-                    max_message,
+                    statistics,
                 )?;
                 let apply_queue_diff_elapsed = histogram.finish();
 

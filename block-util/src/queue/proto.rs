@@ -174,6 +174,16 @@ impl Default for QueuePartition {
     }
 }
 
+impl From<u8> for QueuePartition {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::NormalPriority,
+            1 => Self::LowPriority,
+            _ => panic!("Invalid value for QueuePartition"),
+        }
+    }
+}
+
 impl QueueKey {
     const SIZE_HINT: usize = 8 + 32;
 
