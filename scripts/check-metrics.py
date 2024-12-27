@@ -87,7 +87,9 @@ def process_metric_arg(
         if constant_value:
             metric_names.add(constant_value)
         else:
-            if not any(dir in file_path for dir in blacklisted_dirs):
+            if not any(
+                dir in file_path for dir in blacklisted_dirs
+            ) and not arg.startswith("format!"):
                 print(f"Warning: Unresolved metric name '{arg}' in {file_path}")
 
 

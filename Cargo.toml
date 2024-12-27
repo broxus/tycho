@@ -58,6 +58,7 @@ itertools = "0.12"
 libc = "0.2"
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
+metrics-util = "0.17.0"
 moka = { version = "0.12", features = ["sync"] }
 parking_lot = { version = "0.12.1" }
 parking_lot_core = "0.9.9"
@@ -104,6 +105,7 @@ tikv-jemallocator = { version = "0.6.0", features = [
 tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 tl-proto = "0.4"
 tokio = { version = "1", default-features = false }
+tokio-metrics = { version = "0.3.1" }
 tokio-stream = "0.1.15"
 tokio-util = { version = "0.7.10", features = ["codec"] }
 tower = "0.5"
@@ -138,9 +140,10 @@ tycho-util = { path = "./util", version = "0.1.5" }
 weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "59728ea0c8703dd28a4c37dee05c1321cd81b966" }
 
 [workspace.lints.rust]
-future_incompatible = "warn"
-nonstandard_style = "warn"
-rust_2018_idioms = "warn"
+future_incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -213,6 +216,7 @@ unused_self = "warn"
 useless_transmute = "warn"
 verbose_file_reads = "warn"
 zero_sized_map_values = "warn"
+
 
 [profile.release]
 lto = "thin"
