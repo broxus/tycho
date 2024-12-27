@@ -327,6 +327,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "blake3"
 version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -709,6 +718,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f63b86c8a8826a49b8c21f08a2d07338eec8d900540f8630dc76284be802989"
+dependencies = [
+ "darling_core",
+ "darling_macro",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95133861a8032aaea082871032f5815eb9e98cef03fa916ab4500513994df9e5"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.87",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d336a2a514f6ccccaa3e09b02d41d35330c07ddf03a62165fcec10bb561c7806"
+dependencies = [
+ "darling_core",
+ "quote",
+ "syn 2.0.87",
+]
+
+[[package]]
 name = "dashmap"
 version = "5.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -754,6 +798,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -782,6 +827,12 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dyn-clone"
+version = "1.0.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d6ef0072f8a535281e4876be788938b528e9a1d43900b82c2569af7da799125"
 
 [[package]]
 name = "ed25519"
@@ -890,7 +941,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=8cb2789228c54eff73cb150c8fb5a1d61aeb136d#8cb2789228c54eff73cb150c8fb5a1d61aeb136d"
+source = "git+https://github.com/broxus/everscale-types.git?rev=e2d7ff86c211f8cf49b82d0db6de08883b454712#e2d7ff86c211f8cf49b82d0db6de08883b454712"
 dependencies = [
  "ahash",
  "anyhow",
@@ -911,7 +962,7 @@ dependencies = [
  "serde",
  "sha2",
  "smallvec",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto",
  "typeid",
 ]
@@ -919,7 +970,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=8cb2789228c54eff73cb150c8fb5a1d61aeb136d#8cb2789228c54eff73cb150c8fb5a1d61aeb136d"
+source = "git+https://github.com/broxus/everscale-types.git?rev=e2d7ff86c211f8cf49b82d0db6de08883b454712#e2d7ff86c211f8cf49b82d0db6de08883b454712"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -948,7 +999,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e182f7dbc2ef73d9ef67351c5fbbea084729c48362d3ce9dd44c28e32e277fe5"
 dependencies = [
  "libc",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -1101,7 +1152,7 @@ checksum = "df28aba11fa2e95570fae3b3ac8883ae8026f0374d043f24117cbb13e1c4c1ff"
 dependencies = [
  "futures-util",
  "hickory-client",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
 ]
 
@@ -1216,7 +1267,7 @@ dependencies = [
  "once_cell",
  "radix_trie",
  "rand",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
 ]
@@ -1238,7 +1289,7 @@ dependencies = [
  "ipnet",
  "once_cell",
  "rand",
- "thiserror",
+ "thiserror 1.0.66",
  "tinyvec",
  "tokio",
  "tracing",
@@ -1365,6 +1416,12 @@ dependencies = [
  "tower-service",
  "tracing",
 ]
+
+[[package]]
+name = "ident_case"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idna"
@@ -1624,7 +1681,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "quanta",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
 ]
@@ -1698,7 +1755,7 @@ dependencies = [
  "rustc_version",
  "smallvec",
  "tagptr",
- "thiserror",
+ "thiserror 1.0.66",
  "triomphe",
  "uuid",
 ]
@@ -1748,20 +1805,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
-dependencies = [
- "num-bigint",
- "num-complex",
- "num-integer",
- "num-iter",
- "num-rational",
- "num-traits",
-]
-
-[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1772,30 +1815,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-complex"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "num-conv"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
-
-[[package]]
-name = "num-derive"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.87",
-]
 
 [[package]]
 name = "num-integer"
@@ -1803,28 +1826,6 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
- "num-traits",
-]
-
-[[package]]
-name = "num-iter"
-version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1429034a0490724d0075ebb2bc9e875d6503c3cf69e235a8941aa757d83ef5bf"
-dependencies = [
- "autocfg",
- "num-integer",
- "num-traits",
-]
-
-[[package]]
-name = "num-rational"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
-dependencies = [
- "num-bigint",
- "num-integer",
  "num-traits",
 ]
 
@@ -1896,7 +1897,7 @@ dependencies = [
  "js-sys",
  "once_cell",
  "pin-project-lite",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -1914,7 +1915,7 @@ dependencies = [
  "opentelemetry_api",
  "percent-encoding",
  "rand",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -1969,12 +1970,12 @@ checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
 name = "pest"
-version = "2.7.14"
+version = "2.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "879952a81a83930934cbf1786752d6dedc3b1f29e8f8fb2ad1d0a36f377cf442"
+checksum = "8b7cafe60d6cf8e62e1b9b2ea516a089c008945bb5a275416789e7db0bc199dc"
 dependencies = [
  "memchr",
- "thiserror",
+ "thiserror 2.0.10",
  "ucd-trie",
 ]
 
@@ -2228,10 +2229,10 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash 2.0.0",
+ "rustc-hash 2.1.0",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tracing",
 ]
@@ -2245,10 +2246,10 @@ dependencies = [
  "bytes",
  "rand",
  "ring",
- "rustc-hash 2.0.0",
+ "rustc-hash 2.1.0",
  "rustls",
  "slab",
- "thiserror",
+ "thiserror 1.0.66",
  "tinyvec",
  "tracing",
 ]
@@ -2370,7 +2371,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
 dependencies = [
  "getrandom",
  "libredox",
- "thiserror",
+ "thiserror 1.0.66",
 ]
 
 [[package]]
@@ -2507,9 +2508,9 @@ checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "583034fd73374156e66797ed8e5b0d5690409c9226b22d87cb7f19821c05d152"
+checksum = "c7fb8039b3032c191086b10f11f319a6e99e1e82889c5cc6046f515c9db1d497"
 
 [[package]]
 name = "rustc_version"
@@ -2913,7 +2914,7 @@ dependencies = [
  "serde",
  "static_assertions",
  "tarpc-plugins",
- "thiserror",
+ "thiserror 1.0.66",
  "tokio",
  "tokio-serde",
  "tokio-util",
@@ -2961,7 +2962,16 @@ version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d171f59dbaa811dbbb1aee1e73db92ec2b122911a48e1390dfe327a821ddede"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 1.0.66",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ac7f54ca534db81081ef1c1e7f6ea8a3ef428d2fc069097c079443d24124d3"
+dependencies = [
+ "thiserror-impl 2.0.10",
 ]
 
 [[package]]
@@ -2969,6 +2979,17 @@ name = "thiserror-impl"
 version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b08be0f17bd307950653ce45db00cd31200d82b624b36e181337d9c7d92765b5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.87",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e9465d30713b56a37ede7185763c3492a91be2f5fa68d958c44e41ab9248beb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3084,42 +3105,42 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4a5337f0a73f14ff69265aa9a4b8ff61a27910f889ad22c136c700f969db638"
+checksum = "410fb3d256aefbb37aaa41ba321a2482530461205f5461d8216c50ccafa263cb"
 dependencies = [
  "bytes",
  "digest",
  "sha2",
  "smallvec",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto-proc",
 ]
 
 [[package]]
 name = "tl-proto-proc"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1972929aad3bf0683b741f99c85886666b9665b9f4a1437659ebc2bc0a526f7e"
+checksum = "5caf1121373f118fcedb01395b06418f94b3f70683c224f304dbe03ccfe1f6db"
 dependencies = [
  "proc-macro2",
  "quote",
- "rustc-hash 1.1.0",
+ "rustc-hash 2.1.0",
  "syn 2.0.87",
  "tl-scheme",
 ]
 
 [[package]]
 name = "tl-scheme"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c495d2f03b113ab2ac9eab55168855ef43c04e0097b58f3eb1287a5da73e51b8"
+checksum = "50d4856ed9f895673dac121a045efb2fbf9679570d2c4b5e7ed0af3176e4e4b4"
 dependencies = [
  "crc",
  "pest",
  "pest_derive",
- "rustc-hash 1.1.0",
- "thiserror",
+ "rustc-hash 2.1.0",
+ "thiserror 2.0.10",
 ]
 
 [[package]]
@@ -3205,34 +3226,15 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?rev=bc09b6072def8e91d1844b834967c90840b778c1#bc09b6072def8e91d1844b834967c90840b778c1"
+source = "git+https://github.com/broxus/ton-labs-executor.git?rev=5c3d76ad2d5fb620d369553278dc7d2bc533176c#5c3d76ad2d5fb620d369553278dc7d2bc533176c"
 dependencies = [
  "ahash",
  "anyhow",
  "everscale-types",
- "thiserror",
- "ton_vm",
+ "num-bigint",
+ "thiserror 2.0.10",
  "tracing",
-]
-
-[[package]]
-name = "ton_vm"
-version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-vm.git?branch=new_cells#06401e4d2b8222c98c696a0c1e48a9e556219d1c"
-dependencies = [
- "ahash",
- "anyhow",
- "everscale-crypto",
- "everscale-types",
- "hex",
- "lazy_static",
- "num",
- "num-derive",
- "num-traits",
- "rand",
- "sha2",
- "thiserror",
- "tracing",
+ "tycho-vm",
 ]
 
 [[package]]
@@ -3301,7 +3303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3566e8ce28cc0a3fe42519fc80e6b4c943cc4c8cef275620eb8dac2d3d4e06cf"
 dependencies = [
  "crossbeam-channel",
- "thiserror",
+ "thiserror 1.0.66",
  "time",
  "tracing-subscriber",
 ]
@@ -3381,7 +3383,7 @@ dependencies = [
  "Inflector",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 1.0.66",
  "time",
  "tracing-core",
  "tracing-subscriber",
@@ -3445,7 +3447,7 @@ dependencies = [
  "everscale-types",
  "hex",
  "parking_lot",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto",
  "tycho-util",
 ]
@@ -3520,7 +3522,7 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto",
  "tokio",
  "tokio-util",
@@ -3535,6 +3537,7 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+ "tycho-vm",
  "weedb",
 ]
 
@@ -3562,7 +3565,7 @@ dependencies = [
  "rayon",
  "scopeguard",
  "serde",
- "thiserror",
+ "thiserror 2.0.10",
  "tikv-jemallocator",
  "tl-proto",
  "tokio",
@@ -3591,7 +3594,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "tarpc",
- "thiserror",
+ "thiserror 2.0.10",
  "tokio",
  "tracing",
  "tycho-block-util",
@@ -3621,7 +3624,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto",
  "tokio",
  "tracing",
@@ -3693,7 +3696,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto",
  "tokio",
  "tokio-util",
@@ -3720,7 +3723,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.10",
  "tokio",
  "tower",
  "tower-http",
@@ -3777,7 +3780,7 @@ dependencies = [
  "smallvec",
  "sysinfo",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.10",
  "tl-proto",
  "tokio",
  "tracing",
@@ -3811,7 +3814,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.10",
  "tikv-jemalloc-ctl",
  "tl-proto",
  "tokio",
@@ -3821,6 +3824,39 @@ dependencies = [
  "tracing-subscriber",
  "zstd-safe",
  "zstd-sys",
+]
+
+[[package]]
+name = "tycho-vm"
+version = "0.1.0"
+source = "git+https://github.com/broxus/tycho-vm.git#7f2537ba94ee0505c387554b3e26e94f81f217ce"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bitflags",
+ "blake2",
+ "bumpalo",
+ "castaway",
+ "dyn-clone",
+ "everscale-crypto",
+ "everscale-types",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "sha2",
+ "thiserror 2.0.10",
+ "tycho-vm-proc",
+]
+
+[[package]]
+name = "tycho-vm-proc"
+version = "0.1.0"
+source = "git+https://github.com/broxus/tycho-vm.git#7f2537ba94ee0505c387554b3e26e94f81f217ce"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.87",
 ]
 
 [[package]]
@@ -4031,7 +4067,7 @@ dependencies = [
  "librocksdb-sys",
  "metrics",
  "rocksdb",
- "thiserror",
+ "thiserror 1.0.66",
  "tracing",
 ]
 

@@ -15,6 +15,7 @@ use ton_executor::{
 use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
+use tycho_vm::{SafeRc, SmcInfoTonV6, Tuple};
 
 use super::mq_iterator_adapter::{InitIteratorMode, QueueIteratorAdapter};
 use super::types::{
@@ -604,17 +605,33 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
+        let accounts_cache = Arc::new(&self.accounts_cache);
         let result = group
             .into_par_iter()
-            .map_with(
-                (config, params, Arc::new(&self.accounts_cache)),
-                |(config, params, accounts_cache), (account_id, msgs)| {
+            .map_init(
+                move || {
+                    // TEMP: There will be a per-thread executor state.
+                    let unpacked = SmcInfoTonV6::unpack_config(
+                        &config.raw_config().params,
+                        params.block_unixtime,
+                    )
+                    .ok();
+
+                    (
+                        config.clone(),
+                        params.clone(),
+                        accounts_cache.clone(),
+                        unpacked,
+                    )
+                },
+                |(config, params, accounts_cache, unpacked), (account_id, msgs)| {
                     Self::execute_subgroup(
                         account_id,
                         msgs,
                         accounts_cache,
                         min_next_lt,
                         config,
+                        unpacked.clone().unwrap_or_default(),
                         params,
                     )
                 },
@@ -689,10 +706,18 @@ impl MessagesExecutor {
         accounts_cache: &AccountsCache,
         min_next_lt: u64,
         config: &Arc<PreloadedBlockchainConfig>,
+        unpacked_config: SafeRc<Tuple>,
         params: &Arc<ExecuteParams>,
     ) -> Result<ExecutedTransactions> {
         let shard_account_stuff = accounts_cache.get_account_stuff(&account_id)?;
-        Self::execute_messages(shard_account_stuff, msgs, min_next_lt, config, params)
+        Self::execute_messages(
+            shard_account_stuff,
+            msgs,
+            min_next_lt,
+            config,
+            unpacked_config,
+            params,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -762,6 +787,7 @@ impl MessagesExecutor {
         msgs: Vec<Box<ParsedMessage>>,
         min_next_lt: u64,
         config: &Arc<PreloadedBlockchainConfig>,
+        unpacked_config: SafeRc<Tuple>,
         params: &Arc<ExecuteParams>,
     ) -> Result<ExecutedTransactions> {
         let mut ext_msgs_skipped = 0;
@@ -780,6 +806,7 @@ impl MessagesExecutor {
                 msg,
                 min_next_lt,
                 config,
+                unpacked_config.clone(),
                 params,
             )?);
         }
@@ -802,11 +829,16 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
+        // TEMP: There will be a per-thread cached state for a new executor.
+        let unpacked_config =
+            SmcInfoTonV6::unpack_config(&config.raw_config().params, params.block_unixtime)?;
+
         let (account_stuff, executed) = execute_ordinary_transaction_impl(
             &mut account_stuff,
             in_message,
             min_next_lt,
             &config,
+            unpacked_config,
             &params,
         )
         .map(|executed| (account_stuff, executed))?;
@@ -828,11 +860,16 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
+        // TEMP: There will be a per-thread cached state for a new executor.
+        let unpacked_config =
+            SmcInfoTonV6::unpack_config(&config.raw_config().params, params.block_unixtime)?;
+
         let (account_stuff, executed) = execute_ticktock_transaction(
             &mut account_stuff,
             tick_tock,
             min_next_lt,
             &config,
+            unpacked_config,
             &params,
         )
         .map(|executed| (account_stuff, executed))?;
@@ -929,6 +966,7 @@ fn execute_ordinary_transaction_impl(
     in_message: Box<ParsedMessage>,
     min_lt: u64,
     config: &PreloadedBlockchainConfig,
+    unpacked_config: SafeRc<Tuple>,
     params: &ExecuteParams,
 ) -> Result<ExecutedOrdinaryTransaction> {
     tracing::trace!(
@@ -948,6 +986,7 @@ fn execute_ordinary_transaction_impl(
         min_lt,
         params,
         config,
+        unpacked_config,
     );
 
     let result = match result {
@@ -973,6 +1012,7 @@ fn execute_ticktock_transaction(
     tick_tock: TickTock,
     min_lt: u64,
     config: &PreloadedBlockchainConfig,
+    unpacked_config: SafeRc<Tuple>,
     params: &ExecuteParams,
 ) -> Result<ExecutedTransaction> {
     tracing::trace!(
@@ -999,6 +1039,7 @@ fn execute_ticktock_transaction(
         min_lt,
         params,
         config,
+        unpacked_config,
     )?;
 
     let tx_lt = shard_account.last_trans_lt;
