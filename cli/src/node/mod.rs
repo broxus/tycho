@@ -285,7 +285,7 @@ impl Node {
                     if let Some(consensus_config) = &global.consensus_config {
                         config.set_consensus_config(consensus_config);
                     } // else: will be set from mc state after sync
-                    config.set_genesis(global.start_round, global.genesis_time_millis);
+                    config.set_genesis(global.genesis_info);
                 })
                 .await;
         };

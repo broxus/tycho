@@ -118,7 +118,7 @@ impl MempoolAdapterStdImpl {
         let estimated_sync_bottom = last_state_update
             .top_processed_to_anchor_id
             .saturating_sub(mempool_config.consensus.reset_rounds())
-            .max(mempool_config.genesis.start_round);
+            .max(mempool_config.genesis_info.start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
@@ -138,7 +138,7 @@ impl MempoolAdapterStdImpl {
                  is older than prev vset switch round {}; \
                  start round {}, top processed to anchor {} in block {}",
                 last_state_update.consensus_info.prev_vset_switch_round,
-                mempool_config.genesis.start_round,
+                mempool_config.genesis_info.start_round,
                 last_state_update.top_processed_to_anchor_id,
                 last_state_update.mc_block_id,
             )
@@ -283,8 +283,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             );
 
             if let Some(genesis) = (config_guard.builder.get_genesis()).filter(|genesis| {
-                genesis.start_round >= new_cx.consensus_info.genesis_round
-                    && genesis.time_millis > new_cx.consensus_info.genesis_millis
+                genesis.start_round >= new_cx.consensus_info.genesis_info.start_round
+                    && genesis.millis > new_cx.consensus_info.genesis_info.millis
             }) {
                 // Note: assume that global config is applied to mempool adapter
                 //   before collator is run in synchronous code, so this method is called later
@@ -293,7 +293,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 // will be saved into next block, so genesis can have values GEQ than in prev block
                 anyhow::ensure!(
                     genesis.start_round >= new_cx.top_processed_to_anchor_id
-                        && genesis.time_millis >= new_cx.mc_block_chain_time,
+                        && genesis.millis >= new_cx.mc_block_chain_time,
                     "new {genesis:?} should be >= \
                     top processed_to_anchor_id {} and block gen chain_time {}",
                     new_cx.top_processed_to_anchor_id,
@@ -327,10 +327,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     }
                 }
             } else {
-                config_guard.builder.set_genesis(
-                    new_cx.consensus_info.genesis_round,
-                    new_cx.consensus_info.genesis_millis,
-                );
+                let genesis_info = new_cx.consensus_info.genesis_info;
+                config_guard.builder.set_genesis(genesis_info);
                 (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
             };
 

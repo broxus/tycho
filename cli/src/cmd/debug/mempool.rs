@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use everscale_crypto::ed25519;
+use everscale_types::models::GenesisInfo;
 use tokio::sync::mpsc;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore, MempoolConfigBuilder};
@@ -229,13 +230,11 @@ impl Mempool {
 
         // FIXME load genesis data from McStateExtra instead of using default
         let global_config = self.config_override.unwrap_or(MempoolGlobalConfig {
-            start_round: 0,
-            genesis_time_millis: 0,
+            genesis_info: GenesisInfo::default(),
             consensus_config: None,
         });
 
-        self.config_builder
-            .set_genesis(global_config.start_round, global_config.genesis_time_millis);
+        self.config_builder.set_genesis(global_config.genesis_info);
 
         let consensus_config = match &global_config.consensus_config {
             Some(consensus_config) => consensus_config,
