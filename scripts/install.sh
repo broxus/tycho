@@ -14,19 +14,24 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 And add its environment variables:
 
-source ~/.cargo/env
+. ~/.cargo/env
 
 EOF
     exit 1
 fi
 
+# Combine rustflags
 features=""
+base_rustflags="-Ctarget_cpu=native -Cforce-frame-pointers=true"
+
 if set_clang_env 19; then
   features="$features --features lto"
   echo "INFO: Building node with lto"
-  export RUSTFLAGS="-Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=$LD"
+  export RUSTFLAGS="$base_rustflags -Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=$LD"
 fi
 
+echo "RUSTFLAGS: $RUSTFLAGS"
+# shellcheck disable=SC2086 # we want to expand the flags
 cargo install $features --path ./cli --locked
 
 cat << EOF
