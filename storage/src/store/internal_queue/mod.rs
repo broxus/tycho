@@ -81,107 +81,6 @@ impl InternalQueueStorage {
         .await?
     }
 
-    pub fn snapshot(&self) -> OwnedSnapshot {
-        self.db.owned_snapshot()
-    }
-
-    pub fn build_iterator_persistent(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
-        self.build_iterator(
-            self.db.shards_internal_messages.cf(),
-            self.db.shards_internal_messages.new_read_config(),
-            snapshot,
-        )
-    }
-
-    pub fn build_iterator_session(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
-        self.build_iterator(
-            self.db.shards_internal_messages_session.cf(),
-            self.db.shards_internal_messages_session.new_read_config(),
-            snapshot,
-        )
-    }
-
-    fn clear_queue(&self, cf: &BoundedCfHandle<'_>) -> Result<()> {
-        let start_key = [0x00; ShardsInternalMessagesKey::SIZE_HINT];
-        let end_key = [0xFF; ShardsInternalMessagesKey::SIZE_HINT];
-        self.db
-            .rocksdb()
-            .delete_range_cf(cf, &start_key, &end_key)?;
-        self.db
-            .rocksdb()
-            .compact_range_cf(cf, Some(start_key), Some(end_key));
-        Ok(())
-    }
-
-    pub fn clear_session_queue(&self) -> Result<()> {
-        let cf = self.db.shards_internal_messages_session.cf();
-        self.clear_queue(&cf)
-    }
-
-    pub fn clear_persistent_queue(&self) -> Result<()> {
-        let cf = self.db.shards_internal_messages.cf();
-        self.clear_queue(&cf)
-    }
-
-    pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
-        self.db.rocksdb().write(batch)?;
-        Ok(())
-    }
-
-    pub fn create_batch(&self) -> WriteBatch {
-        WriteBatch::default()
-    }
-
-    pub fn insert_message_session(
-        &self,
-        batch: &mut WriteBatch,
-        key: ShardsInternalMessagesKey,
-        dest: &IntAddr,
-        value: &[u8],
-    ) -> Result<()> {
-        let cf = self.db.shards_internal_messages_session.cf();
-        Self::insert_message(batch, cf, key, dest.workchain() as i8, dest.prefix(), value)
-    }
-
-    fn build_iterator(
-        &self,
-        cf: BoundedCfHandle<'_>,
-        mut read_config: ReadOptions,
-        snapshot: &OwnedSnapshot,
-    ) -> OwnedIterator {
-        read_config.set_snapshot(snapshot);
-        let iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
-
-        OwnedIterator::new(iter, self.db.rocksdb().clone())
-    }
-
-    fn insert_message(
-        batch: &mut WriteBatch,
-        cf: BoundedCfHandle<'_>,
-        key: ShardsInternalMessagesKey,
-        dest_workchain: i8,
-        dest_prefix: u64,
-        cell: &[u8],
-    ) -> Result<()> {
-        let mut buffer = Vec::with_capacity(1 + 8 + cell.len());
-
-        unsafe {
-            let ptr = buffer.as_mut_ptr();
-
-            std::ptr::copy_nonoverlapping(dest_workchain.to_be_bytes().as_ptr(), ptr, 1);
-
-            std::ptr::copy_nonoverlapping(dest_prefix.to_be_bytes().as_ptr(), ptr.add(1), 8);
-
-            std::ptr::copy_nonoverlapping(cell.as_ptr(), ptr.add(1 + 8), cell.len());
-
-            buffer.set_len(1 + 8 + cell.len());
-        }
-
-        batch.put_cf(&cf, key.to_vec().as_slice(), &buffer);
-
-        Ok(())
-    }
-
     pub fn delete_messages(
         &self,
         source_shard: ShardIdent,
@@ -226,15 +125,19 @@ impl InternalQueueStorage {
                 internal_message_key: range.1,
             };
 
-            let mut readopts = self.db.shards_internal_messages_session.new_read_config();
+            let mut readopts = self
+                .db
+                .shards_internal_messages_uncommitted
+                .new_read_config();
             readopts.set_snapshot(&snapshot);
 
-            let internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
+            let internal_messages_uncommitted_cf =
+                self.db.shards_internal_messages_uncommitted.cf();
             let internal_messages_cf = self.db.shards_internal_messages.cf();
             let mut iter = self
                 .db
                 .rocksdb()
-                .raw_iterator_cf_opt(&internal_messages_session_cf, readopts);
+                .raw_iterator_cf_opt(&internal_messages_uncommitted_cf, readopts);
 
             iter.seek(from.to_vec().as_slice());
 
@@ -249,26 +152,117 @@ impl InternalQueueStorage {
                 if current_position > to || current_position < from {
                     break;
                 }
-
-                let dest_workchain = value[0] as i8;
-                let dest_prefix = u64::from_be_bytes(value[1..9].try_into().unwrap());
-                let cell_bytes = &value[9..];
-
-                batch.delete_cf(&internal_messages_session_cf, current_position.to_vec());
-                Self::insert_message(
-                    &mut batch,
-                    internal_messages_cf,
-                    current_position,
-                    dest_workchain,
-                    dest_prefix,
-                    cell_bytes,
-                )?;
+                let current_position_vec = current_position.to_vec();
+                batch.delete_cf(&internal_messages_uncommitted_cf, &current_position_vec);
+                batch.put_cf(&internal_messages_cf, &current_position_vec, value);
 
                 iter.next();
             }
         }
 
         self.db.rocksdb().write(batch)?;
+
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> OwnedSnapshot {
+        self.db.owned_snapshot()
+    }
+
+    pub fn build_iterator_committed(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
+        self.build_iterator(
+            self.db.shards_internal_messages.cf(),
+            self.db.shards_internal_messages.new_read_config(),
+            snapshot,
+        )
+    }
+
+    pub fn build_iterator_uncommitted(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
+        self.build_iterator(
+            self.db.shards_internal_messages_uncommitted.cf(),
+            self.db
+                .shards_internal_messages_uncommitted
+                .new_read_config(),
+            snapshot,
+        )
+    }
+    pub fn clear_uncommitted_queue(&self) -> Result<()> {
+        let cf = self.db.shards_internal_messages_uncommitted.cf();
+        self.clear_queue(&cf)
+    }
+
+    pub fn clear_committed_queue(&self) -> Result<()> {
+        let cf = self.db.shards_internal_messages.cf();
+        self.clear_queue(&cf)
+    }
+
+    pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
+        self.db.rocksdb().write(batch)?;
+        Ok(())
+    }
+
+    pub fn create_batch(&self) -> WriteBatch {
+        WriteBatch::default()
+    }
+
+    pub fn insert_message_uncommitted(
+        &self,
+        batch: &mut WriteBatch,
+        key: ShardsInternalMessagesKey,
+        dest: &IntAddr,
+        value: &[u8],
+    ) -> Result<()> {
+        let cf = self.db.shards_internal_messages_uncommitted.cf();
+        Self::insert_message(batch, cf, key, dest.workchain() as i8, dest.prefix(), value)
+    }
+
+    fn clear_queue(&self, cf: &BoundedCfHandle<'_>) -> Result<()> {
+        let start_key = [0x00; ShardsInternalMessagesKey::SIZE_HINT];
+        let end_key = [0xFF; ShardsInternalMessagesKey::SIZE_HINT];
+        self.db
+            .rocksdb()
+            .delete_range_cf(cf, &start_key, &end_key)?;
+        self.db
+            .rocksdb()
+            .compact_range_cf(cf, Some(start_key), Some(end_key));
+        Ok(())
+    }
+
+    fn build_iterator(
+        &self,
+        cf: BoundedCfHandle<'_>,
+        mut read_config: ReadOptions,
+        snapshot: &OwnedSnapshot,
+    ) -> OwnedIterator {
+        read_config.set_snapshot(snapshot);
+        let iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+
+        OwnedIterator::new(iter, self.db.rocksdb().clone())
+    }
+
+    fn insert_message(
+        batch: &mut WriteBatch,
+        cf: BoundedCfHandle<'_>,
+        key: ShardsInternalMessagesKey,
+        dest_workchain: i8,
+        dest_prefix: u64,
+        cell: &[u8],
+    ) -> Result<()> {
+        let mut buffer = Vec::with_capacity(1 + 8 + cell.len());
+
+        unsafe {
+            let ptr = buffer.as_mut_ptr();
+
+            std::ptr::copy_nonoverlapping(dest_workchain.to_be_bytes().as_ptr(), ptr, 1);
+
+            std::ptr::copy_nonoverlapping(dest_prefix.to_be_bytes().as_ptr(), ptr.add(1), 8);
+
+            std::ptr::copy_nonoverlapping(cell.as_ptr(), ptr.add(1 + 8), cell.len());
+
+            buffer.set_len(1 + 8 + cell.len());
+        }
+
+        batch.put_cf(&cf, key.to_vec().as_slice(), &buffer);
 
         Ok(())
     }

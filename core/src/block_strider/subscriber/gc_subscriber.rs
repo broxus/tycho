@@ -14,6 +14,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_storage::{BlocksGcType, Storage};
 use tycho_util::metrics::HistogramGuard;
 
+use crate::block_strider::subscriber::find_longest_diffs_tail;
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
@@ -254,7 +255,19 @@ impl GcSubscriber {
                     // TODO: Must be in sync with the largest possible archive size (in mc blocks).
                     const MIN_SAFE_DISTANCE: u32 = 100;
 
-                    let safe_distance = std::cmp::max(safe_distance, MIN_SAFE_DISTANCE);
+                    let tail_len = find_longest_diffs_tail(tick.mc_block_id, &storage).await;
+
+                    let tail_len = tail_len.unwrap_or_else(|e| {
+                        tracing::error!(?e, "failed to find longest diffs tail");
+                        0
+                    }) as u32;
+
+                    tracing::info!(tail_len, "found longest diffs tail");
+
+                    let safe_distance = [safe_distance, MIN_SAFE_DISTANCE, tail_len + 1]
+                        .into_iter()
+                        .max()
+                        .unwrap();
 
                     // Compute the target masterchain block seqno
                     let target_seqno = match tick.mc_block_id.seqno.checked_sub(safe_distance) {
@@ -399,6 +412,7 @@ impl GcSubscriber {
             tracing::info!("starting GC for target seqno: {}", target_seqno);
 
             let hist = HistogramGuard::begin("tycho_gc_states_time");
+
             if let Err(e) = storage
                 .shard_state_storage()
                 .remove_outdated_states(target_seqno)

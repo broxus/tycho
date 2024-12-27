@@ -12,8 +12,8 @@ use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
-use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
+use tycho_collator::internal_queue::state::commited_state::CommittedStateImplFactory;
+use tycho_collator::internal_queue::state::uncommitted_state::UncommittedStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
@@ -322,12 +322,12 @@ impl Node {
         // Create collator
         tracing::info!("starting collator");
 
-        let session_state_factory = SessionStateImplFactory::new(self.storage.clone());
-        let persistent_state_factory = PersistentStateImplFactory::new(self.storage.clone());
+        let session_state_factory = UncommittedStateImplFactory::new(self.storage.clone());
+        let persistent_state_factory = CommittedStateImplFactory::new(self.storage.clone());
 
         let queue_factory = QueueFactoryStdImpl {
-            session_state_factory,
-            persistent_state_factory,
+            uncommitted_state_factory: session_state_factory,
+            committed_state_factory: persistent_state_factory,
             config: self.internal_queue_config,
         };
         let queue = queue_factory.create();

@@ -216,10 +216,15 @@ pub struct McData {
     pub top_processed_to_anchor: MempoolAnchorId,
 
     pub ref_mc_state_handle: RefMcStateHandle,
+
+    pub shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
 }
 
 impl McData {
-    pub fn load_from_state(state_stuff: &ShardStateStuff) -> Result<Arc<Self>> {
+    pub fn load_from_state(
+        state_stuff: &ShardStateStuff,
+        shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+    ) -> Result<Arc<Self>> {
         let block_id = *state_stuff.block_id();
         let extra = state_stuff.state_extra()?;
         let state = state_stuff.as_ref();
@@ -260,6 +265,7 @@ impl McData {
             top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
+            shards_processed_to,
         }))
     }
 
@@ -292,6 +298,7 @@ pub struct BlockCandidate {
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub consensus_info: ConsensusInfo,
+    pub processed_to: FastHashMap<ShardIdent, QueueKey>,
 }
 
 #[derive(Default, Clone)]
@@ -433,6 +440,7 @@ pub struct TopBlockDescription {
     pub proof_funds: ProofFunds,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
+    pub processed_to: ProcessedTo,
 }
 
 #[derive(Debug)]
@@ -617,7 +625,7 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for Display
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct ShardDescriptionShort {
     pub ext_processed_to_anchor_id: u32,
     pub top_sc_block_updated: bool,
@@ -670,3 +678,11 @@ where
         Ok(res)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct TopShardBlockInfo {
+    pub block_id: BlockId,
+    pub processed_to: ProcessedTo,
+}
+
+pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
