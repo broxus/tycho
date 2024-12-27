@@ -283,8 +283,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             );
 
             if let Some(genesis) = (config_guard.builder.get_genesis()).filter(|genesis| {
-                genesis.start_round >= new_cx.consensus_info.genesis_round
-                    && genesis.time_millis > new_cx.consensus_info.genesis_millis
+                genesis.start_round >= new_cx.consensus_info.genesis_info.start_round
+                    && genesis.time_millis > new_cx.consensus_info.genesis_info.millis
             }) {
                 // Note: assume that global config is applied to mempool adapter
                 //   before collator is run in synchronous code, so this method is called later
@@ -328,8 +328,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 }
             } else {
                 config_guard.builder.set_genesis(
-                    new_cx.consensus_info.genesis_round,
-                    new_cx.consensus_info.genesis_millis,
+                    new_cx.consensus_info.genesis_info.start_round,
+                    new_cx.consensus_info.genesis_info.millis,
                 );
                 (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
             };

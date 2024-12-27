@@ -120,8 +120,7 @@ zstd-safe = "7.2"
 zstd-sys = "2.0"
 
 # TODO: RIIR
-ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = "bc09b6072def8e91d1844b834967c90840b778c1" }
-ton_vm = { git = "https://github.com/broxus/ton-labs-vm.git", rev = "b279cccd93caf4f1edc843a81c8ba2d205632ec4" }
+ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = "6f073123741ac4507fc20e88ba3c7f23859fc3e9" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.1.5" }
@@ -136,6 +135,7 @@ tycho-util = { path = "./util", version = "0.1.5" }
 
 [patch.crates-io]
 weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "59728ea0c8703dd28a4c37dee05c1321cd81b966" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "6e3c289f9bbf46337b11b24656a9c87ce409323e" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

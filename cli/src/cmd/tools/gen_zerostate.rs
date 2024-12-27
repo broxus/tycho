@@ -395,8 +395,10 @@ impl ZerostateConfig {
             consensus_info: ConsensusInfo {
                 vset_switch_round: session_seqno,
                 prev_vset_switch_round: session_seqno,
-                genesis_round: 0,
-                genesis_millis: 0,
+                genesis_info: GenesisInfo {
+                    start_round: 0,
+                    millis: 0,
+                },
                 prev_shuffle_mc_validators: collation_config.shuffle_mc_validators,
             },
             prev_blocks: AugDict::new(),
