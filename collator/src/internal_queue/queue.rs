@@ -97,7 +97,11 @@ where
     /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
     /// load statistics for the given range by accounts
-    fn load_statistics(&self, range: QueueRange) -> Result<QueueStatistics>;
+    fn load_statistics(
+        &self,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
+    ) -> Result<QueueStatistics>;
 }
 
 // IMPLEMENTATION
@@ -355,14 +359,18 @@ where
         Ok(())
     }
 
-    fn load_statistics(&self, range: QueueRange) -> Result<QueueStatistics> {
+    fn load_statistics(
+        &self,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
+    ) -> Result<QueueStatistics> {
         let snapshot = self.committed_state.snapshot();
         let mut statistics = FastHashMap::default();
 
         self.committed_state
-            .load_statistics(&mut statistics, &snapshot, &range)?;
+            .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
         self.uncommitted_state
-            .load_statistics(&mut statistics, &snapshot, &range)?;
+            .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
 
         let statistics = QueueStatistics::new_with_statistics(statistics);
 
