@@ -20,6 +20,7 @@ pub enum CmdControl {
     Status(CmdStatus),
     Ping(CmdPing),
     GetAccount(CmdGetAccount),
+    GetNeighbours(CmdGetNeighbours),
     FindArchive(CmdFindArchive),
     ListArchives(CmdListArchives),
     DumpArchive(CmdDumpArchive),
@@ -40,6 +41,7 @@ impl CmdControl {
             Self::Status(cmd) => cmd.run(args),
             Self::Ping(cmd) => cmd.run(args),
             Self::GetAccount(cmd) => cmd.run(args),
+            Self::GetNeighbours(cmd) => cmd.run(args),
             Self::FindArchive(cmd) => cmd.run(args),
             Self::ListArchives(cmd) => cmd.run(args),
             Self::DumpArchive(cmd) => cmd.run(args),
@@ -159,6 +161,21 @@ impl CmdGetAccount {
                     "state": BASE64_STANDARD.encode(state.state),
                 }))
             }
+        })
+    }
+}
+
+#[derive(Parser)]
+pub struct CmdGetNeighbours {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+impl CmdGetNeighbours {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
+            let neighbours = client.get_neighbours_info().await?;
+            print_json(neighbours)
         })
     }
 }
