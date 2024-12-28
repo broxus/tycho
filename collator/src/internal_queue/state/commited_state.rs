@@ -11,7 +11,7 @@ use crate::internal_queue::state::state_iterator::{
     ShardIteratorWithRange, StateIterator, StateIteratorImpl,
 };
 use crate::internal_queue::types::{InternalMessageValue, QueueRange, QueueShardRange};
-
+use crate::types::processed_upto::PartitionId;
 // CONFIG
 
 pub struct CommittedStateConfig {
@@ -75,7 +75,8 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        range: &QueueRange,
+        partition: QueuePartition,
+        range: &Vec<QueueShardRange>,
     ) -> Result<()>;
 }
 
@@ -133,17 +134,22 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        range: &QueueRange,
+        partition: QueuePartition,
+        ranges: &Vec<QueueShardRange>,
     ) -> Result<()> {
-        self.storage
-            .internal_queue_storage()
-            .collect_commited_stats_in_range(
-                &snapshot,
-                range.shard_ident,
-                range.partition,
-                range.from,
-                range.to,
-                result,
-            )
+        for range in ranges {
+            self.storage
+                .internal_queue_storage()
+                .collect_commited_stats_in_range(
+                    &snapshot,
+                    range.shard_ident,
+                    partition,
+                    range.from,
+                    range.to,
+                    result,
+                )?;
+        }
+
+        Ok(())
     }
 }

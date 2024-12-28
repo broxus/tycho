@@ -92,7 +92,8 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        range: &QueueRange,
+        partition: QueuePartition,
+        ranges: &Vec<QueueShardRange>,
     ) -> Result<()>;
 }
 
@@ -165,18 +166,23 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        range: &QueueRange,
+        partition: QueuePartition,
+        ranges: &Vec<QueueShardRange>,
     ) -> Result<()> {
-        self.storage
-            .internal_queue_storage()
-            .collect_uncommited_stats_in_range(
-                &snapshot,
-                range.shard_ident,
-                range.partition,
-                range.from,
-                range.to,
-                result,
-            )
+        for range in ranges {
+            self.storage
+                .internal_queue_storage()
+                .collect_uncommited_stats_in_range(
+                    &snapshot,
+                    range.shard_ident,
+                    partition,
+                    range.from,
+                    range.to,
+                    result,
+                )?;
+        }
+
+        Ok(())
     }
 }
 

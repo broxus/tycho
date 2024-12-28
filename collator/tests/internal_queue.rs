@@ -24,7 +24,7 @@ use tycho_collator::internal_queue::state::uncommitted_state::{
     UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
 use tycho_collator::internal_queue::types::{
-    InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
+    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
 };
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
@@ -383,7 +383,11 @@ async fn test_statistics() -> anyhow::Result<()> {
         partition_router: Default::default(),
     };
 
-    let statistics = (diff_with_messages.clone(), block.shard).into();
+    let statistics: DiffStatistics = (diff_with_messages.clone(), block.shard).into();
+
+    for stat in statistics.iter() {
+        assert_eq!(stat.1.len(), 1);
+    }
 
     queue.apply_diff(
         diff_with_messages,
@@ -392,15 +396,29 @@ async fn test_statistics() -> anyhow::Result<()> {
         statistics,
     )?;
 
-    let range = QueueRange {
+    let partition = QueuePartition::NormalPriority;
+
+    let range = QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
-        partition: QueuePartition::NormalPriority,
         from: start_key,
         to: end_key,
     };
-    let stat = queue.load_statistics(range)?;
 
-    assert_eq!(stat.show().len(), 1);
+    let ranges = vec![range.clone()];
+
+    let stat = queue.load_statistics(partition, ranges)?;
+
+    for s in stat.show() {
+        println!("{:?}", s);
+    }
+
+    assert_eq!(*stat.show().iter().next().unwrap().1, 1);
+
+    let ranges = vec![range.clone(), range];
+
+    let stat = queue.load_statistics(partition, ranges)?;
+
+    assert_eq!(*stat.show().iter().next().unwrap().1, 2);
 
     Ok(())
 }
