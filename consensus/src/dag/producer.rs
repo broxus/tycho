@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
 use everscale_crypto::ed25519::KeyPair;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
 use crate::effects::AltFormat;
-use crate::engine::{CachedConfig, Genesis, InputBuffer};
+use crate::engine::InputBuffer;
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
     Through, UnixTime,
@@ -36,7 +35,7 @@ impl Producer {
             Some(prev) if prev.round == finished_round.round() => {
                 // previous round's point needs 2F signatures from peers scheduled for current round
                 if prev.evidence.len() >= prev.signers.majority_of_others() {
-                    Some(prev) // prev point is used only once
+                    Some(&prev.digest) // prev point is used only once
                 } else {
                     return None; // cannot produce and has to skip round
                 }
@@ -44,20 +43,22 @@ impl Producer {
             _ => None,
         };
         let local_id = PeerId::from(key_pair.public_key);
-        match current_round.anchor_stage() {
-            // wave leader must skip new round if it failed to produce 3 points in a row
-            Some(stage) if stage.leader == local_id && proven_vertex.is_none() => return None,
-            _ => {}
-        };
-        let includes = Self::includes(finished_round, key_pair);
+        let includes = Self::includes(finished_round);
         let mut anchor_trigger = Self::link_from_includes(
             &local_id,
             current_round,
             &includes,
+            proven_vertex.is_some()
+                && last_own_point.map_or(false, |prev| prev.includes.contains_key(&local_id)),
             AnchorStageRole::Trigger,
         );
-        let mut anchor_proof =
-            Self::link_from_includes(&local_id, current_round, &includes, AnchorStageRole::Proof);
+        let mut anchor_proof = Self::link_from_includes(
+            &local_id,
+            current_round,
+            &includes,
+            proven_vertex.is_some(),
+            AnchorStageRole::Proof,
+        );
         let witness = Self::witness(
             finished_round,
             &local_id,
@@ -77,21 +78,14 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        let (time, anchor_time, payload) = if finished_round.round() == Genesis::id().round {
-            // first produced point is reproducible
-            let time = UnixTime::from_millis(CachedConfig::get().genesis.time_millis);
-            (time.next(), time, Vec::new())
-        } else {
-            let (time, anchor_time) =
-                Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
-            let payload = input_buffer.fetch(last_own_point.as_ref().map_or(false, |last| {
-                // it's not necessary to resend external messages from previous round
-                // if at least 1F+1 peers (one reliable) signed previous point;
-                // also notice that payload elems are deduplicated in mempool adapter
-                last.evidence.len() >= last.signers.reliable_minority()
-            }));
-            (time, anchor_time, payload)
-        };
+        let (time, anchor_time) =
+            Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
+        let payload = input_buffer.fetch(last_own_point.as_ref().map_or(true, |last| {
+            // it's not necessary to resend external messages from previous round
+            // if at least 1F+1 peers (one reliable) signed previous point;
+            // also notice that payload elems are deduplicated in mempool adapter
+            last.evidence.len() >= last.signers.reliable_minority()
+        }));
 
         let includes = includes
             .into_iter()
@@ -99,7 +93,7 @@ impl Producer {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
-            proven_vertex.as_ref().map(|prev| &prev.digest),
+            proven_vertex,
             includes.get(&local_id),
             "must include own point if it exists and vice versa"
         );
@@ -113,7 +107,8 @@ impl Producer {
             key_pair,
             current_round.round(),
             proven_vertex
-                .map(|p| p.evidence.clone())
+                .zip(last_own_point)
+                .map(|(_, p)| p.evidence.clone())
                 .unwrap_or_default(),
             payload,
             PointData {
@@ -128,9 +123,8 @@ impl Producer {
         ))
     }
 
-    fn includes(finished_dag_round: &DagRound, key_pair: &KeyPair) -> Vec<PointInfo> {
-        let round = finished_dag_round.round();
-        let includes = Self::references(round, finished_dag_round, Some(key_pair), true);
+    fn includes(finished_dag_round: &DagRound) -> Vec<PointInfo> {
+        let includes = finished_dag_round.threshold().get();
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
             "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
@@ -150,81 +144,44 @@ impl Producer {
         let Some(witness_round) = finished_dag_round.prev().upgrade() else {
             return Vec::new();
         };
-        // have to make additional signatures because there still may be spawned tasks to Signer
-        let references = Self::references(round, &witness_round, key_pair, false);
-        let Some(includes) = last_own_point
+
+        let includes = last_own_point
             .filter(|l| l.round == round)
-            .map(|l| &l.includes)
-        else {
-            // have to link all @ r-2 if r-1 was skipped - because we made signatures;
-            // exclude own point from failed round - do not make other nodes massively ask for it;
-            return references
-                .into_iter()
-                .filter(|witness| witness.data().author != local_id)
-                .collect();
-        };
-        // do not repeat includes from previous point if it existed (they also contain own point)
-        references
-            .into_iter()
-            .filter(|witness| !includes.contains_key(&witness.data().author))
-            .collect()
-    }
+            .map(|l| &l.includes);
 
-    fn references(
-        round: Round,
-        dag_round: &DagRound,
-        key_pair: Option<&KeyPair>,
-        include_certified: bool,
-    ) -> Vec<PointInfo> {
-        let mut last_references = Vec::new();
-        let mut references = dag_round
-            .select(|(_, loc)| {
-                loc.state
-                    .signable()
-                    .and_then(|signable| match signable.signed() {
-                        Some(Ok(_sig)) => signable.first_resolved.valid().map(|v| v.info.clone()),
-                        _ if include_certified && signable.first_resolved.certified().is_some() => {
-                            signable.first_resolved.certified().map(|v| v.info.clone())
-                        }
-                        None if key_pair.is_some() => {
-                            last_references.push(loc.state.clone());
-                            None
-                        }
-                        Some(Err(_)) | None => None,
-                    })
+        // have to link all @ r-2 if r-1 was skipped - because we made signatures;
+        witness_round
+            .select(|(peer, loc)| {
+                let skip = match includes {
+                    // do not repeat previous point's includes (they also contain own point)
+                    Some(includes) => includes.contains_key(peer),
+                    // exclude own point from failed round - do not make others massively ask for it
+                    _ => peer == local_id,
+                };
+                if skip {
+                    None
+                } else {
+                    // there still may be spawned tasks to Signer, so have to make signatures
+                    loc.state
+                        .sign_or_reject(round, key_pair)
+                        .ok()
+                        .map(|signed| signed.first_resolved.info.clone())
+                }
             })
-            .collect::<Vec<_>>();
-
-        if last_references.is_empty() {
-            return references;
-        }
-
-        // support known points
-        let mut last_references = last_references
-            .into_par_iter()
-            .filter_map(|state| {
-                state.signable().and_then(|signable| {
-                    signable.sign(round, key_pair);
-                    match signable.signed() {
-                        Some(Ok(_sig)) => signable.first_resolved.valid().map(|v| v.info.clone()),
-                        Some(Err(_)) | None => None,
-                    }
-                })
-            })
-            .collect();
-
-        references.append(&mut last_references);
-        references
+            .collect::<Vec<_>>()
     }
 
     fn link_from_includes(
         local_id: &PeerId,
         current_round: &DagRound,
         includes: &[PointInfo],
+        has_candidate: bool,
         link_field: AnchorStageRole,
     ) -> Link {
         match current_round.anchor_stage() {
-            Some(stage) if stage.role == link_field && stage.leader == local_id => {
+            Some(stage)
+                if stage.role == link_field && stage.leader == local_id && has_candidate =>
+            {
                 return Link::ToSelf;
             }
             _ => {}
@@ -281,7 +238,7 @@ impl Producer {
     fn get_time(
         anchor_proof: &Link,
         local_id: &PeerId,
-        proven_vertex: Option<&LastOwnPoint>,
+        proven_vertex: Option<&Digest>,
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
@@ -289,10 +246,16 @@ impl Producer {
             .iter()
             .find(|point| point.data().author == local_id);
 
+        // DB removal is a corner case: local node will download own points as dependencies
+        // of other's points. And local node may try to produce a new point with previous
+        // in includes, but there are no evidence for it, thus panic. Then, after restart
+        // the local node will re-broadcast those downloaded point, collect signatures for it
+        // and produce a new point at round it panicked.
         assert_eq!(
             prev_info.map(|prev| prev.digest()),
-            proven_vertex.map(|prev| &prev.digest),
-            "included prev point digest does not match broadcasted one"
+            proven_vertex,
+            "included prev point digest does not match broadcasted one. \
+             This may be OK after DB deletion: try to restart the node a couple of times."
         );
 
         let anchor_time = match anchor_proof {

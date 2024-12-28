@@ -1,4 +1,3 @@
-use std::cmp;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
@@ -76,42 +75,20 @@ impl PointBody {
     }
 
     pub fn is_well_formed(&self) -> bool {
-        let genesis_round = Genesis::id().round;
-        let genesis_round_next = genesis_round.next();
-
-        // any genesis is suitable, round number may be taken from configs
-        let is_special_ok = match self.round.cmp(&genesis_round) {
-            cmp::Ordering::Equal => {
-                self.payload.is_empty()
-                    && self.evidence.is_empty()
-                    && self.data.includes.is_empty()
-                    && self.data.witness.is_empty()
-                    && self.data.anchor_trigger == Link::ToSelf
-                    && self.data.anchor_proof == Link::ToSelf
-                    && self.data.time == self.data.anchor_time
-            }
-            cmp::Ordering::Greater => {
-                (self.round > genesis_round_next || (
-                    // first point after genesis is reproducible for node to safely restart
-                    self.payload.is_empty()
-                        && self.evidence.is_empty()
-                        && self.data.includes.len() == PeerCount::GENESIS.full()
-                        && self.data.witness.is_empty()
-                        && self.data.anchor_trigger == self.data.anchor_proof
-                        && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next)
-                            .map_or(false, |anchor| anchor == *Genesis::id())
-                        && self.data.time == self.data.anchor_time.next()
-                        && self.data.anchor_time.millis() == CachedConfig::get().genesis.time_millis
-                ))
-                    // leader must maintain its chain of proofs,
-                    // while others must link to previous points (checked at the end of this method);
-                    // its decided later (using dag round data) whether current point belongs to leader
-                    && !(self.data.anchor_proof == Link::ToSelf && self.evidence.is_empty())
-                    && !(self.data.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
-                    && self.data.time > self.data.anchor_time
-            }
-
-            cmp::Ordering::Less => false,
+        // check for being earlier than genesis takes place with other peer checks
+        #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
+        let is_special_ok = if self.round == Genesis::id().round {
+            self.payload.is_empty()
+                && self.data.anchor_trigger == Link::ToSelf
+                && self.data.anchor_proof == Link::ToSelf
+                && self.data.time == self.data.anchor_time
+        } else {
+            // leader must maintain its chain of proofs,
+            // while others must link to previous points (checked at the end of this method);
+            // its decided later (using dag round data) whether current point belongs to leader
+            !(self.data.anchor_proof == Link::ToSelf && self.evidence.is_empty())
+                && !(self.data.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
+                && self.data.time > self.data.anchor_time
         };
         is_special_ok
             && CachedConfig::get().consensus.payload_batch_bytes as usize
@@ -125,20 +102,9 @@ impl PointBody {
             && !self.data.witness.contains_key(&self.data.author)
             && self.is_link_well_formed(AnchorStageRole::Trigger)
             && self.is_link_well_formed(AnchorStageRole::Proof)
-            && match (
-            self.data.anchor_round(AnchorStageRole::Proof, self.round),
-            self.data.anchor_round(AnchorStageRole::Trigger, self.round)
-        ) {
-            (x, y) if y == genesis_round => x >= genesis_round,
-            (x, y) if x == genesis_round => y >= genesis_round,
-            // equality is impossible due to commit waves do not start every round;
-            // anchor trigger may belong to a later round than proof and vice versa;
-            // no indirect links over genesis tombstone
-            (x, y) => x != y && x > genesis_round && y > genesis_round,
-        }
     }
 
-    pub fn is_link_well_formed(&self, link_field: AnchorStageRole) -> bool {
+    fn is_link_well_formed(&self, link_field: AnchorStageRole) -> bool {
         match self.data.anchor_link(link_field) {
             Link::ToSelf => true,
             Link::Direct(Through::Includes(peer)) => self.data.includes.contains_key(peer),
