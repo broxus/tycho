@@ -64,7 +64,11 @@ impl ExternalsReader {
             .unwrap_or_default();
         for (seqno, mut range_reader) in self.range_readers {
             // update offset in the last range reader state
-            if seqno == last_seqno {
+            // we should update only if current offset is greater than stored one
+            if seqno == last_seqno
+                && self.reader_state.curr_processed_offset
+                    > range_reader.reader_state.processed_offset
+            {
                 range_reader.reader_state.processed_offset =
                     self.reader_state.curr_processed_offset;
             }
