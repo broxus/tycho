@@ -13,6 +13,7 @@ use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManag
 use crate::internal_queue::state::uncommitted_state::UncommittedStateStdImpl;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
+    QueueStatistics,
 };
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayNestedMap, DisplayTuple, DisplayTupleRef};
@@ -32,6 +33,15 @@ where
         partition: QueuePartition,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
+
+    /// Returns statistics for the specified ranges by partition
+    /// and source shards (equal to iterator ranges)
+    fn get_statistics(
+        &self,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
+    ) -> Result<QueueStatistics>;
+
     /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
     fn apply_diff(
         &self,
@@ -74,7 +84,7 @@ impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdImpl<V> {
-    #[instrument(skip_all, fields(%for_shard_id, ranges = ?ranges))]
+    #[instrument(skip_all, fields(%for_shard_id, partition, ranges = ?ranges))]
     fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
@@ -93,6 +103,25 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             "Iterator created"
         );
         Ok(Box::new(iterator))
+    }
+
+    #[instrument(skip_all, fields(partition, ranges = ?ranges))]
+    fn get_statistics(
+        &self,
+        partition: QueuePartition,
+        ranges: Vec<QueueShardRange>,
+    ) -> Result<QueueStatistics> {
+        let time_start = std::time::Instant::now();
+
+        let stats = self.queue.load_statistics(partition, ranges)?;
+
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(time_start.elapsed()),
+            "Loaded statistics"
+        );
+
+        Ok(stats)
     }
 
     #[instrument(skip_all, fields(%block_id_short))]
