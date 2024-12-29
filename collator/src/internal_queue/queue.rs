@@ -372,7 +372,7 @@ where
         self.uncommitted_state
             .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
 
-        let statistics = QueueStatistics::new_with_statistics(statistics);
+        let statistics = QueueStatistics::with_statistics(statistics);
 
         Ok(statistics)
     }

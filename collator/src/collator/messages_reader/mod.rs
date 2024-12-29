@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
+use rayon::range;
 use tycho_block_util::queue::QueueKey;
+use tycho_util::FastHashMap;
 
 use super::messages_buffer::{FastIndexSet, MessageGroup, MessagesBufferLimits};
 use super::types::AnchorsCache;
@@ -97,7 +99,7 @@ impl MessagesReader {
     pub fn new(
         cx: MessagesReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Self {
+    ) -> Result<Self> {
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
             .set(cx.msgs_exec_params.buffer_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit")
@@ -107,7 +109,7 @@ impl MessagesReader {
 
         // group limits by msgs kinds
         let msgs_buffer_max_count = cx.msgs_exec_params.buffer_limit as usize;
-        let group_vert_size = cx.msgs_exec_params.group_vert_size as usize;
+        let group_vert_size = (cx.msgs_exec_params.group_vert_size as usize).max(1);
         let group_limit = cx.msgs_exec_params.group_limit as usize;
         // TODO: msgs-v3: should move the fraction value to params in blockchain config
         // internals: normal partition 0: 70% of `group_limit`, but min 1
@@ -116,6 +118,12 @@ impl MessagesReader {
         let par_1_slots_count = group_limit.saturating_mul(80).saturating_div(100).max(2);
         // externals: + 20%, but min 1
         let ext_slots_count = group_limit.max(3);
+
+        let max_limits = MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: ext_slots_count,
+            slot_vert_size: group_vert_size,
+        };
 
         // create externals reader
         let externals_reader = ExternalsReader::new(
@@ -156,18 +164,19 @@ impl MessagesReader {
                 partition_id: 0,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
-                messages_buffer_limits: MessagesBufferLimits {
+                target_limits: MessagesBufferLimits {
                     max_count: msgs_buffer_max_count,
                     slots_count: par_0_slots_count,
                     slot_vert_size: group_vert_size,
                 },
+                max_limits,
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts.clone(),
                 reader_state: par_reader_state,
             },
             mq_adapter.clone(),
-        );
+        )?;
         res.internals_partition_readers.insert(0, par_reader);
         res.readers_stages
             .insert(0, MessagesReaderStage::ExistingMessages);
@@ -179,23 +188,24 @@ impl MessagesReader {
                 partition_id: 1,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
-                messages_buffer_limits: MessagesBufferLimits {
+                target_limits: MessagesBufferLimits {
                     max_count: msgs_buffer_max_count,
                     slots_count: par_1_slots_count,
                     slot_vert_size: group_vert_size,
                 },
+                max_limits,
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts,
                 reader_state: par_reader_state,
             },
             mq_adapter,
-        );
+        )?;
         res.internals_partition_readers.insert(1, par_reader);
         res.readers_stages
             .insert(1, MessagesReaderStage::ExistingMessages);
 
-        res
+        Ok(res)
     }
 
     pub fn reset_read_state(&mut self) {
@@ -390,7 +400,7 @@ impl MessagesReader {
 
         // collect internals after reading
         let mut unused_buffer_accounts_by_partitions =
-            BTreeMap::<(PartitionId, BlockSeqno), FastIndexSet<HashBytes>>::default();
+            FastHashMap::<(PartitionId, BlockSeqno), FastIndexSet<HashBytes>>::default();
         let mut par_readers = BTreeMap::<PartitionId, InternalsParitionReader>::default();
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             match par_reader_stage {
@@ -402,30 +412,51 @@ impl MessagesReader {
                         .remove(par_id)
                         .context("reader for partition should exist")?;
 
-                    // try to fill messages group
-                    let unused_buffer_accounts = par_reader.reader_state.buffer.fill_message_group(
-                        &mut msg_group,
-                        par_reader.messages_buffer_limits.slots_count,
-                        par_reader.messages_buffer_limits.slot_vert_size,
-                        unused_buffer_accounts_by_partitions.remove(&(*par_id, 0)),
-                        |account_id| {
-                            for prev_reader in par_readers.values() {
-                                if prev_reader
-                                    .reader_state
-                                    .buffer
-                                    .account_messages_count(account_id)
-                                    > 0
-                                {
-                                    return true;
+                    // collect internals from partition
+                    let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader>::default();
+                    // extract range readers from state to use previous readers buffers
+                    // to check for account skip on collecting messages from current one
+                    while let Some((seqno, mut reader)) = par_reader.pop_first_range_reader() {
+                        // try to fill messages group
+                        let unused_buffer_accounts = reader.reader_state.buffer.fill_message_group(
+                            &mut msg_group,
+                            par_reader.target_limits.slots_count,
+                            par_reader.target_limits.slot_vert_size,
+                            unused_buffer_accounts_by_partitions.remove(&(*par_id, seqno)),
+                            |account_id| {
+                                // check by previous partitions
+                                for prev_partition in par_readers.values() {
+                                    for prev_reader in prev_partition.range_readers().values() {
+                                        if prev_reader
+                                            .reader_state
+                                            .buffer
+                                            .account_messages_count(account_id)
+                                            > 0
+                                        {
+                                            return true;
+                                        }
+                                    }
                                 }
-                            }
-                            false
-                        },
-                    );
-                    unused_buffer_accounts_by_partitions
-                        .insert((*par_id, 0), unused_buffer_accounts);
+                                // check by previous ranges
+                                for prev_reader in range_readers.values() {
+                                    if prev_reader
+                                        .reader_state
+                                        .buffer
+                                        .account_messages_count(account_id)
+                                        > 0
+                                    {
+                                        return true;
+                                    }
+                                }
+                                false
+                            },
+                        );
+                        unused_buffer_accounts_by_partitions
+                            .insert((*par_id, seqno), unused_buffer_accounts);
 
-                    // TODO: msgs-v3: read from ranges buffers as well
+                        range_readers.insert(seqno, reader);
+                    }
+                    par_reader.set_range_readers(range_readers);
 
                     // TODO: msgs-v3: should drop offset when all ranges read
                     par_reader.reader_state.curr_processed_offset += 1;
@@ -480,6 +511,7 @@ impl MessagesReader {
         // return range readers to state
         self.externals_reader.set_range_readers(range_readers);
 
+        // TODO: msgs-v3: should drop offset when all ranges read
         self.externals_reader.reader_state.curr_processed_offset += 1;
 
         // check if all externals collected
