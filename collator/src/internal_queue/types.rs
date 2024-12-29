@@ -228,7 +228,7 @@ impl QueueStatistics {
 
     pub fn apply_diff_statistics(&mut self, diff_statistics: DiffStatistics) {
         let diff_statistics = diff_statistics.inner.statistics.clone();
-        for (_, values) in diff_statistics.iter() {
+        for values in diff_statistics.values() {
             for value in values.iter() {
                 *self.statistics.entry(value.0.clone()).or_insert(0) += *value.1;
             }
@@ -278,7 +278,7 @@ impl<V: InternalMessageValue> From<(QueueDiffWithMessages<V>, ShardIdent)> for D
 
         let mut statistics = FastHashMap::default();
 
-        for (_, message) in diff.messages {
+        for message in diff.messages.values() {
             let destination = message.destination();
 
             let partition = diff

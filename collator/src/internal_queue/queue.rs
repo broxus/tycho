@@ -251,10 +251,8 @@ where
 
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
         let mut shards_to_commit = FastHashMap::default();
-        #[cfg(FALSE)]
         let mut gc_ranges = FastHashMap::default();
 
-        #[cfg(FALSE)]
         for (block_id_short, top_shard_block_changed) in mc_top_blocks {
             let mut diffs_to_commit = vec![];
 
@@ -301,7 +299,17 @@ where
             }
         }
 
-        self.uncommitted_state.commit_messages(&shards_to_commit)?;
+        let commit_ranges: Vec<QueueShardRange> = shards_to_commit
+            .into_iter()
+            .map(|(shard_ident, end_key)| QueueShardRange {
+                shard_ident,
+                from: QueueKey::default(),
+                to: end_key,
+            })
+            .collect();
+
+        self.uncommitted_state
+            .commit(QueuePartition::all().as_slice(), commit_ranges.as_slice())?;
 
         let uncommitted_diffs_count: usize =
             self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
