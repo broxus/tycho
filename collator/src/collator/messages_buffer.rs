@@ -405,6 +405,34 @@ impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     }
 }
 
+pub enum BufferFillStateByCount {
+    IsFull,
+    NotFull,
+}
+
+pub enum BufferFillStateBySlots {
+    CanFill,
+    CanNotFill,
+}
+
+impl MessagesBufferV2 {
+    pub fn check_is_filled(
+        &self,
+        limits: &MessagesBufferLimits,
+    ) -> (BufferFillStateByCount, BufferFillStateBySlots) {
+        let by_count = if self.msgs_count() >= limits.max_count {
+            BufferFillStateByCount::IsFull
+        } else {
+            BufferFillStateByCount::NotFull
+        };
+
+        // TODO: msgs-v3: check if we can already fill required slots
+        let by_slots = BufferFillStateBySlots::CanNotFill;
+
+        (by_count, by_slots)
+    }
+}
+
 struct DebugMessagesBufferIndexMap<'a>(
     pub &'a FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
 );

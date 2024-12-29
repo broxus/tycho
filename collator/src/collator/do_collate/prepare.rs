@@ -110,7 +110,7 @@ impl Phase<PrepareState> {
                 anchors_cache: self.extra.anchors_cache,
             },
             self.extra.mq_adapter.clone(),
-        );
+        )?;
 
         // refill messages buffer and skip groups upto offset (on node restart)
         if messages_reader.check_need_refill() {

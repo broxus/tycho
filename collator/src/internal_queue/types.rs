@@ -1,5 +1,5 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{hash_map, BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -196,22 +196,28 @@ pub struct QueueRange {
     pub to: QueueKey,
 }
 
+#[derive(Default, Clone)]
 pub struct QueueStatistics {
     statistics: FastHashMap<IntAddr, u64>,
 }
 
 impl QueueStatistics {
-    pub fn new() -> Self {
-        Self {
-            statistics: Default::default(),
-        }
-    }
-    pub fn new_with_statistics(statistics: FastHashMap<IntAddr, u64>) -> Self {
+    pub fn with_statistics(statistics: FastHashMap<IntAddr, u64>) -> Self {
         Self { statistics }
     }
 
-    pub fn show(&self) -> FastHashMap<IntAddr, u64> {
-        self.statistics.clone()
+    pub fn statistics(&self) -> &FastHashMap<IntAddr, u64> {
+        &self.statistics
+    }
+
+    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        if let hash_map::Entry::Occupied(mut occupied) = self.statistics.entry(account_addr) {
+            let value = occupied.get_mut();
+            *value -= count;
+            if *value == 0 {
+                occupied.remove();
+            }
+        }
     }
 
     pub fn append(&mut self, other: &Self) {
