@@ -8,7 +8,7 @@ use everscale_types::models::{IntAddr, ShardIdent};
 use everscale_types::prelude::Boc;
 use serde::Serialize;
 use tycho_block_util::queue::{QueueKey, QueuePartition};
-use tycho_storage::model::StatKey;
+use tycho_storage::model::{QueueRange, StatKey};
 use tycho_storage::Storage;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
@@ -18,7 +18,7 @@ use crate::internal_queue::state::state_iterator::{
     ShardIteratorWithRange, StateIterator, StateIteratorImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, QueueRange, QueueShardRange, QueueStatistics,
+    DiffStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
 };
 
 // CONFIG
@@ -70,14 +70,6 @@ pub trait UncommittedStateFactory<V: InternalMessageValue> {
 
 #[trait_variant::make(UncommittedState: Send)]
 pub trait LocalUncommittedState<V: InternalMessageValue> {
-    fn add_messages_with_statistics(
-        &self,
-        source: ShardIdent,
-        partition_router: &FastHashMap<IntAddr, QueuePartition>,
-        messages: &BTreeMap<QueueKey, Arc<V>>,
-        statistics: DiffStatistics,
-    ) -> Result<()>;
-
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
@@ -86,8 +78,17 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
-    fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, QueueKey>) -> Result<()>;
+    fn commit(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()>;
     fn truncate(&self) -> Result<()>;
+
+    fn add_messages_with_statistics(
+        &self,
+        source: ShardIdent,
+        partition_router: &FastHashMap<IntAddr, QueuePartition>,
+        messages: &BTreeMap<QueueKey, Arc<V>>,
+        statistics: DiffStatistics,
+    ) -> Result<()>;
+
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
@@ -148,14 +149,6 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         Ok(Box::new(iterator))
     }
 
-    fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, QueueKey>) -> Result<()> {
-        #[cfg(FALSE)]
-        let ranges = ranges.iter().map(|(shard, key)| (*shard, *key)).collect();
-        #[cfg(FALSE)]
-        self.storage.internal_queue_storage().commit(ranges);
-        Ok(())
-    }
-
     fn truncate(&self) -> Result<()> {
         self.storage
             .internal_queue_storage()
@@ -183,6 +176,21 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         }
 
         Ok(())
+    }
+
+    fn commit(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()> {
+        let mut queue_ranges = vec![];
+        for partition in partitions {
+            for range in ranges {
+                queue_ranges.push(QueueRange {
+                    partition: *partition,
+                    shard_ident: range.shard_ident,
+                    from: range.from,
+                    to: range.to,
+                });
+            }
+        }
+        self.storage.internal_queue_storage().commit(queue_ranges)
     }
 }
 

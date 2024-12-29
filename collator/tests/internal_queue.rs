@@ -107,6 +107,8 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
         queue_factory.create();
+
+    // create first block with queue diff
     let block = BlockIdShort {
         shard: ShardIdent::new_full(0),
         seqno: 0,
@@ -166,6 +168,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     queue.commit_diff(&top_blocks)?;
 
+    // create second block with queue diff
     let block2 = BlockIdShort {
         shard: ShardIdent::new_full(1),
         seqno: 1,
@@ -215,7 +218,7 @@ async fn test_queue() -> anyhow::Result<()> {
         partition_router,
     };
 
-    let statistics = (diff_with_messages.clone(), block.shard).into();
+    let statistics = (diff_with_messages.clone(), block2.shard).into();
 
     queue.apply_diff(
         diff_with_messages,
@@ -396,6 +399,10 @@ async fn test_statistics() -> anyhow::Result<()> {
         statistics,
     )?;
 
+    let top_blocks = vec![(block, true)];
+
+    queue.commit_diff(&top_blocks)?;
+
     let partition = QueuePartition::NormalPriority;
 
     let range = QueueShardRange {
@@ -407,10 +414,6 @@ async fn test_statistics() -> anyhow::Result<()> {
     let ranges = vec![range.clone()];
 
     let stat = queue.load_statistics(partition, ranges)?;
-
-    for s in stat.statistics() {
-        println!("{:?}", s);
-    }
 
     assert_eq!(*stat.statistics().iter().next().unwrap().1, 1);
 
