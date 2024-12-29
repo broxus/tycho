@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ConsensusConfig, ShardIdent};
+use everscale_types::models::{BlockId, ConsensusConfig, GenesisInfo, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_network::{OverlayId, PeerInfo};
 
@@ -60,10 +60,11 @@ impl ZerostateId {
 /// Also, this genesis must have round not less than in last applied mc block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MempoolGlobalConfig {
-    /// must be set to the `processed_to_anchor_id` from last signed master chain block
-    /// actual genesis round may be greater (or still equal) after alignment
-    pub start_round: u32,
-    pub genesis_time_millis: u64,
+    /// start round must be set to the `processed_to_anchor_id` from last applied master chain block
+    /// actual genesis round may be greater (or still equal) after alignment;
+    /// millis must be set not less than last applied mc block time, or better use actual time
+    #[serde(flatten)]
+    pub genesis_info: GenesisInfo,
     #[serde(flatten)]
     pub consensus_config: Option<ConsensusConfig>,
 }
