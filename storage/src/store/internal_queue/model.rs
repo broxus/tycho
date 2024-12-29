@@ -3,7 +3,6 @@ use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::{QueueKey, QueuePartition};
 
 use crate::util::{StoredValue, StoredValueBuffer};
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShardsInternalMessagesKey {
     pub shard_ident: ShardIdent,
@@ -164,7 +163,7 @@ impl StoredValue for StatKey {
         self.partition.serialize(buffer);
         self.min_message.serialize(buffer);
         self.max_message.serialize(buffer);
-        buffer.write_raw_slice(&self.index.to_le_bytes());
+        buffer.write_raw_slice(&self.index.to_be_bytes());
     }
 
     fn deserialize(reader: &mut &[u8]) -> Self {
@@ -177,10 +176,10 @@ impl StoredValue for StatKey {
         let min_message = QueueKey::deserialize(reader);
         let max_message = QueueKey::deserialize(reader);
 
-        let mut index_bytes = [0u8; std::mem::size_of::<usize>()];
-        index_bytes.copy_from_slice(&reader[..std::mem::size_of::<usize>()]);
-        let index = u64::from_le_bytes(index_bytes);
-        *reader = &reader[std::mem::size_of::<usize>()..];
+        let mut index_bytes = [0u8; std::mem::size_of::<u64>()];
+        index_bytes.copy_from_slice(&reader[..std::mem::size_of::<u64>()]);
+        let index = u64::from_be_bytes(index_bytes);
+        *reader = &reader[std::mem::size_of::<u64>()..];
 
         Self {
             shard_ident,

@@ -185,6 +185,12 @@ impl From<u8> for QueuePartition {
     }
 }
 
+impl QueuePartition {
+    pub const fn all() -> [QueuePartition; 2] {
+        [QueuePartition::NormalPriority, QueuePartition::LowPriority]
+    }
+}
+
 impl QueueKey {
     const SIZE_HINT: usize = 8 + 32;
 
