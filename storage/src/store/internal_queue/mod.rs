@@ -27,6 +27,10 @@ pub struct InternalQueueStorage {
 }
 
 impl InternalQueueStorage {
+    pub fn new(db: BaseDb) -> Self {
+        Self { db }
+    }
+
     pub fn insert_destination_stat_uncommitted(
         &self,
         batch: &mut WriteBatchWithTransaction<false>,
@@ -40,16 +44,8 @@ impl InternalQueueStorage {
 
         let mut value_buffer = Vec::with_capacity(std::mem::size_of::<u64>() + dest.len());
 
-        unsafe {
-            let count_bytes = count.to_be_bytes();
-            let ptr = value_buffer.as_mut_ptr();
-
-            std::ptr::copy_nonoverlapping(count_bytes.as_ptr(), ptr, count_bytes.len());
-
-            std::ptr::copy_nonoverlapping(dest.as_ptr(), ptr.add(count_bytes.len()), dest.len());
-
-            value_buffer.set_len(count_bytes.len() + dest.len());
-        }
+        value_buffer.extend_from_slice(&count.to_be_bytes());
+        value_buffer.extend_from_slice(dest);
 
         batch.put_cf(&cf, &key_buffer, &value_buffer);
 
@@ -158,10 +154,6 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn new(db: BaseDb) -> Self {
-        Self { db }
-    }
-
     pub async fn insert_from_file(
         &self,
         shard_ident: ShardIdent,
@@ -251,54 +243,136 @@ impl InternalQueueStorage {
 
         let mut batch = WriteBatch::default();
 
-        for range in ranges {
-            let from = ShardsInternalMessagesKey {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                internal_message_key: range.from,
-            };
-            let to = ShardsInternalMessagesKey {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                internal_message_key: range.to,
-            };
+        for range in &ranges {
+            self.commit_messages_range(&mut batch, &snapshot, range)?;
 
-            let mut readopts = self
-                .db
-                .shards_internal_messages_uncommitted
-                .new_read_config();
-            readopts.set_snapshot(&snapshot);
-
-            let internal_messages_uncommitted_cf =
-                self.db.shards_internal_messages_uncommitted.cf();
-            let internal_messages_cf = self.db.shards_internal_messages.cf();
-            let mut iter = self
-                .db
-                .rocksdb()
-                .raw_iterator_cf_opt(&internal_messages_uncommitted_cf, readopts);
-
-            iter.seek(from.to_vec().as_slice());
-
-            while iter.valid() {
-                let (mut key, value) = match (iter.key(), iter.value()) {
-                    (Some(key), Some(value)) => (key, value),
-                    _ => break,
-                };
-
-                let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
-
-                if current_position > to || current_position < from {
-                    break;
-                }
-                let current_position_vec = current_position.to_vec();
-                batch.delete_cf(&internal_messages_uncommitted_cf, &current_position_vec);
-                batch.put_cf(&internal_messages_cf, &current_position_vec, value);
-
-                iter.next();
-            }
+            self.commit_statistics_range(&mut batch, &snapshot, range)?;
         }
 
         self.db.rocksdb().write(batch)?;
+
+        Ok(())
+    }
+
+    fn commit_statistics_range(
+        &self,
+        batch: &mut WriteBatch,
+        snapshot: &OwnedSnapshot,
+        range: &QueueRange,
+    ) -> Result<()> {
+        let from = StatKey {
+            shard_ident: range.shard_ident,
+            partition: range.partition,
+            min_message: range.from,
+            max_message: QueueKey::MIN,
+            index: 0,
+        };
+
+        let mut readopts = self
+            .db
+            .internal_messages_dest_stat_uncommitted
+            .new_read_config();
+        readopts.set_snapshot(&snapshot);
+
+        let internal_messages_dest_stat_uncommitted_cf =
+            self.db.internal_messages_dest_stat_uncommitted.cf();
+
+        let internal_messages_dest_stat_cf = self.db.internal_messages_dest_stat.cf();
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&internal_messages_dest_stat_uncommitted_cf, readopts);
+
+        iter.seek(from.to_vec().as_slice());
+
+        while iter.valid() {
+            let (mut key, value) = match (iter.key(), iter.value()) {
+                (Some(key), Some(value)) => (key, value),
+                _ => break,
+            };
+
+            let current_position = StatKey::deserialize(&mut key);
+
+            if current_position < from {
+                iter.next();
+                continue;
+            }
+
+            if current_position.max_message > range.to {
+                break;
+            }
+
+            let current_position_vec = current_position.to_vec();
+            batch.delete_cf(
+                &internal_messages_dest_stat_uncommitted_cf,
+                &current_position_vec,
+            );
+            batch.put_cf(
+                &internal_messages_dest_stat_cf,
+                &current_position_vec,
+                value,
+            );
+
+            iter.next();
+        }
+
+        Ok(())
+    }
+
+    fn commit_messages_range(
+        &self,
+        batch: &mut WriteBatch,
+        snapshot: &OwnedSnapshot,
+        range: &QueueRange,
+    ) -> Result<()> {
+        let from = ShardsInternalMessagesKey {
+            partition: range.partition,
+            shard_ident: range.shard_ident,
+            internal_message_key: range.from,
+        };
+        let to = ShardsInternalMessagesKey {
+            partition: range.partition,
+            shard_ident: range.shard_ident,
+            internal_message_key: range.to,
+        };
+
+        let mut readopts = self
+            .db
+            .shards_internal_messages_uncommitted
+            .new_read_config();
+        readopts.set_snapshot(&snapshot);
+
+        let internal_messages_uncommitted_cf = self.db.shards_internal_messages_uncommitted.cf();
+        let internal_messages_cf = self.db.shards_internal_messages.cf();
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&internal_messages_uncommitted_cf, readopts);
+
+        iter.seek(from.to_vec().as_slice());
+
+        while iter.valid() {
+            let (mut key, value) = match (iter.key(), iter.value()) {
+                (Some(key), Some(value)) => (key, value),
+                _ => break,
+            };
+
+            let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
+
+            if current_position < from {
+                iter.next();
+                continue;
+            }
+            if current_position > to {
+                break;
+            }
+
+            let current_position_vec = current_position.to_vec();
+            batch.delete_cf(&internal_messages_uncommitted_cf, &current_position_vec);
+            batch.put_cf(&internal_messages_cf, &current_position_vec, value);
+
+            iter.next();
+        }
 
         Ok(())
     }
@@ -387,18 +461,9 @@ impl InternalQueueStorage {
         cell: &[u8],
     ) -> Result<()> {
         let mut buffer = Vec::with_capacity(1 + 8 + cell.len());
-
-        unsafe {
-            let ptr = buffer.as_mut_ptr();
-
-            std::ptr::copy_nonoverlapping(dest_workchain.to_be_bytes().as_ptr(), ptr, 1);
-
-            std::ptr::copy_nonoverlapping(dest_prefix.to_be_bytes().as_ptr(), ptr.add(1), 8);
-
-            std::ptr::copy_nonoverlapping(cell.as_ptr(), ptr.add(1 + 8), cell.len());
-
-            buffer.set_len(1 + 8 + cell.len());
-        }
+        buffer.extend_from_slice(&dest_workchain.to_be_bytes());
+        buffer.extend_from_slice(&dest_prefix.to_be_bytes());
+        buffer.extend_from_slice(cell);
 
         batch.put_cf(&cf, key.to_vec().as_slice(), &buffer);
 
