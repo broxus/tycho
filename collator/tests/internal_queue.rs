@@ -408,17 +408,17 @@ async fn test_statistics() -> anyhow::Result<()> {
 
     let stat = queue.load_statistics(partition, ranges)?;
 
-    for s in stat.show() {
+    for s in stat.statistics() {
         println!("{:?}", s);
     }
 
-    assert_eq!(*stat.show().iter().next().unwrap().1, 1);
+    assert_eq!(*stat.statistics().iter().next().unwrap().1, 1);
 
     let ranges = vec![range.clone(), range];
 
     let stat = queue.load_statistics(partition, ranges)?;
 
-    assert_eq!(*stat.show().iter().next().unwrap().1, 2);
+    assert_eq!(*stat.statistics().iter().next().unwrap().1, 2);
 
     Ok(())
 }
