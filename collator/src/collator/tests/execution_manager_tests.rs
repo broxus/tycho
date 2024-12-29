@@ -22,8 +22,8 @@ use super::{
 };
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{
-    EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff, QueueRange,
-    ShardPartition,
+    DiffStatistics, EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
+    QueueRange, QueueShardRange, QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::try_init_test_tracing;
@@ -51,7 +51,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorTestImpl<V> {
         unimplemented!()
     }
 
-    fn current_position(&self) -> FastHashMap<ShardPartition, QueueKey> {
+    fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey> {
         unimplemented!()
     }
 
@@ -67,11 +67,11 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorTestImpl<V> {
         unimplemented!()
     }
 
-    fn commit(&mut self, _messages: Vec<(ShardPartition, QueueKey)>) -> Result<()> {
+    fn commit(&mut self, _messages: Vec<(ShardIdent, QueueKey)>) -> Result<()> {
         Ok(())
     }
 
-    fn add_message(&mut self, _partition: QueuePartition, _message: V) -> Result<()> {
+    fn add_message(&mut self, _message: V) -> Result<()> {
         unimplemented!()
     }
 }
@@ -86,10 +86,19 @@ struct MessageQueueAdapterTestImpl<V: InternalMessageValue> {
 impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueAdapterTestImpl<V> {
     fn create_iterator(
         &self,
-        for_shard_id: ShardIdent,
-        ranges: Vec<QueueRange>,
+        _for_shard_id: ShardIdent,
+        _partition: QueuePartition,
+        _ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         Ok(Box::new(QueueIteratorTestImpl::default()))
+    }
+
+    fn get_statistics(
+        &self,
+        partition: QueuePartition,
+        _ranges: Vec<QueueShardRange>,
+    ) -> Result<QueueStatistics> {
+        unimplemented!()
     }
 
     fn apply_diff(
@@ -97,20 +106,19 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         _diff: QueueDiffWithMessages<V>,
         _block_id_short: BlockIdShort,
         _diff_hash: &HashBytes,
-        _end_key: QueueKey,
+        _statistics: DiffStatistics,
     ) -> Result<()> {
         unimplemented!()
     }
 
-    fn commit_diff(&self, _mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
+    fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
         unimplemented!()
     }
 
     fn add_message_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator<V>>,
-        partition: QueuePartition,
-        message: V,
+        _iterator: &mut Box<dyn QueueIterator<V>>,
+        _message: V,
     ) -> Result<()> {
         unimplemented!()
     }
@@ -118,7 +126,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
     fn commit_messages_to_iterator(
         &self,
         _iterator: &mut Box<dyn QueueIterator<V>>,
-        _messages: Vec<(ShardPartition, QueueKey)>,
+        _messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()> {
         unimplemented!()
     }

@@ -1282,7 +1282,7 @@ impl CollatorStdImpl {
                 anchors_cache: Default::default(),
             },
             self.mq_adapter.clone(),
-        );
+        )?;
 
         // check if has pending internals
         let has_pending_internals = messages_reader.check_has_pending_internals_in_iterators()?;

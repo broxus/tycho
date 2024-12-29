@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
-use tycho_util::FastHashMap;
 
 use super::super::messages_buffer::MessagesBufferV2;
 use crate::mempool::MempoolAnchorId;
@@ -99,7 +97,6 @@ impl ReaderState {
             .fold(0, |acc, range| acc + range.buffer.msgs_count());
         let int_count = self.internals.partitions.values().fold(0, |p_acc, p| {
             p_acc
-                + p.buffer.msgs_count()
                 + p.ranges
                     .values()
                     .fold(0, |r_acc, r| r_acc + r.buffer.msgs_count())
@@ -228,10 +225,9 @@ impl InternalsReaderState {
 
 #[derive(Default)]
 pub struct PartitionReaderState {
-    /// Buffer to store messages from partition
-    /// before collect them to the next execution group
-    pub buffer: MessagesBufferV2,
-
+    // /// Buffer to store messages from partition
+    // /// before collect them to the next execution group
+    // pub buffer: MessagesBufferV2,
     pub ranges: BTreeMap<BlockSeqno, InternalsRangeReaderState>,
     pub processed_to: BTreeMap<ShardIdent, QueueKey>,
 
@@ -243,7 +239,7 @@ pub struct PartitionReaderState {
 impl From<&PartitionProcessedUptoStuff> for PartitionReaderState {
     fn from(value: &PartitionProcessedUptoStuff) -> Self {
         Self {
-            buffer: Default::default(),
+            // buffer: Default::default(),
             curr_processed_offset: 0,
             processed_to: value.processed_to.clone(),
             ranges: value.ranges.iter().map(|(k, v)| (*k, v.into())).collect(),
@@ -272,15 +268,12 @@ pub struct InternalsRangeReaderState {
     /// Every range contains offset that was reached when range was the last.
     /// So the current last range contains the actual offset.
     pub processed_offset: u16,
-
-    pub remaning_msgs_stats: FastHashMap<HashBytes, usize>,
 }
 
 impl From<&InternalsRangeStuff> for InternalsRangeReaderState {
     fn from(value: &InternalsRangeStuff) -> Self {
         Self {
             buffer: Default::default(),
-            remaning_msgs_stats: Default::default(),
             processed_offset: value.processed_offset,
             shards: value.shards.iter().map(|(k, v)| (*k, v.into())).collect(),
         }
