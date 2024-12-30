@@ -12,11 +12,13 @@ use tycho_util::FastHashMap;
 use super::state::state_iterator::MessageExt;
 use crate::types::ProcessedTo;
 
+pub type PartitionRouter = FastHashMap<IntAddr, QueuePartition>;
+
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
     pub processed_to: ProcessedTo,
-    pub partition_router: FastHashMap<IntAddr, QueuePartition>,
+    pub partition_router: PartitionRouter,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -221,18 +223,32 @@ impl QueueStatistics {
     }
 
     pub fn append(&mut self, other: &Self) {
-        for (key, value) in other.statistics.iter() {
-            *self.statistics.entry(key.clone()).or_insert(0) += *value;
+        for (account_addr, &msgs_count) in &other.statistics {
+            self.statistics
+                .entry(account_addr.clone())
+                .and_modify(|count| *count += msgs_count)
+                .or_insert(msgs_count);
         }
     }
 
-    pub fn apply_diff_statistics(&mut self, diff_statistics: DiffStatistics) {
-        let diff_statistics = diff_statistics.inner.statistics.clone();
-        for values in diff_statistics.values() {
-            for value in values.iter() {
-                *self.statistics.entry(value.0.clone()).or_insert(0) += *value.1;
+    pub fn append_diff_statistics(&mut self, diff_statistics: &DiffStatistics) {
+        for (_, par_stats) in diff_statistics.inner.statistics.clone() {
+            for (account_addr, msgs_count) in par_stats {
+                self.statistics
+                    .entry(account_addr)
+                    .and_modify(|count| *count += msgs_count)
+                    .or_insert(msgs_count);
             }
         }
+    }
+}
+
+impl IntoIterator for QueueStatistics {
+    type Item = (IntAddr, u64);
+    type IntoIter = hash_map::IntoIter<IntAddr, u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.statistics.into_iter()
     }
 }
 
@@ -265,8 +281,8 @@ struct DiffStatisticsInner {
     statistics: FastHashMap<QueuePartition, FastHashMap<IntAddr, u64>>,
 }
 
-impl<V: InternalMessageValue> From<(QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
-    fn from(value: (QueueDiffWithMessages<V>, ShardIdent)) -> Self {
+impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
+    fn from(value: (&QueueDiffWithMessages<V>, ShardIdent)) -> Self {
         let (diff, shard_ident) = value;
         let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
         let max_message = diff
