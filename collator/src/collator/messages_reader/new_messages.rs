@@ -3,9 +3,8 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{IntAddr, MsgInfo, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition};
-use tycho_util::FastHashMap;
+use everscale_types::models::{MsgInfo, ShardIdent};
+use tycho_block_util::queue::QueueKey;
 
 use super::internals_reader::{
     InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
@@ -14,7 +13,9 @@ use super::{InternalsRangeReaderState, ShardReaderState};
 use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages};
+use crate::internal_queue::types::{
+    EnqueuedMessage, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+};
 use crate::tracing_targets;
 use crate::types::processed_upto::PartitionId;
 use crate::types::ProcessedTo;
@@ -26,7 +27,7 @@ use crate::types::ProcessedTo;
 pub(super) struct NewMessagesState<V: InternalMessageValue> {
     current_shard: ShardIdent,
     messages: BTreeMap<QueueKey, Arc<V>>,
-    partition_router: FastHashMap<IntAddr, QueuePartition>,
+    partition_router: PartitionRouter,
 
     messages_for_current_shard: BTreeMap<PartitionId, BinaryHeap<Reverse<MessageExt<V>>>>,
 }
@@ -39,6 +40,19 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
             partition_router: Default::default(),
 
             messages_for_current_shard: Default::default(),
+        }
+    }
+
+    pub fn init_partition_router<'a>(
+        &mut self,
+        partition_id: u8,
+        partition_all_ranges_msgs_stats: impl Iterator<Item = &'a QueueStatistics>,
+    ) {
+        for stats in partition_all_ranges_msgs_stats {
+            for account_addr in stats.statistics().keys() {
+                self.partition_router
+                    .insert(account_addr.clone(), partition_id.into());
+            }
         }
     }
 
