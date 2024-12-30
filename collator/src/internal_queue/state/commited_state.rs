@@ -70,7 +70,7 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
-    fn delete_messages(&self, range: QueueRange) -> anyhow::Result<()>;
+    fn delete(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()>;
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
@@ -119,15 +119,19 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         Ok(Box::new(iterator))
     }
 
-    fn delete_messages(&self, range: QueueRange) -> anyhow::Result<()> {
-        self.storage
-            .internal_queue_storage()
-            .delete_messages(tycho_storage::model::QueueRange {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                from: range.from,
-                to: range.to,
-            })
+    fn delete(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()> {
+        let mut queue_ranges = vec![];
+        for partition in partitions {
+            for range in ranges {
+                queue_ranges.push(tycho_storage::model::QueueRange {
+                    partition: *partition,
+                    shard_ident: range.shard_ident,
+                    from: range.from,
+                    to: range.to,
+                });
+            }
+        }
+        self.storage.internal_queue_storage().delete(queue_ranges)
     }
 
     fn load_statistics(
