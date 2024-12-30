@@ -155,7 +155,7 @@ async fn test_queue() -> anyhow::Result<()> {
         partition_router,
     };
 
-    let statistics = (diff_with_messages.clone(), block.shard).into();
+    let statistics = (&diff_with_messages, block.shard).into();
 
     queue.apply_diff(
         diff_with_messages,
@@ -218,7 +218,7 @@ async fn test_queue() -> anyhow::Result<()> {
         partition_router,
     };
 
-    let statistics = (diff_with_messages.clone(), block2.shard).into();
+    let statistics = (&diff_with_messages, block2.shard).into();
 
     queue.apply_diff(
         diff_with_messages,
@@ -304,7 +304,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
         partition_router: Default::default(),
     };
 
-    let statistics = (diff_with_messages.clone(), block.shard).into();
+    let statistics = (&diff_with_messages, block.shard).into();
 
     queue.apply_diff(
         diff_with_messages,
@@ -386,7 +386,7 @@ async fn test_statistics() -> anyhow::Result<()> {
         partition_router: Default::default(),
     };
 
-    let statistics: DiffStatistics = (diff_with_messages.clone(), block.shard).into();
+    let statistics: DiffStatistics = (&diff_with_messages, block.shard).into();
 
     for stat in statistics.iter() {
         assert_eq!(stat.1.len(), 1);

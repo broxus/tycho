@@ -473,7 +473,7 @@ where
         let queue_diff_with_msgs =
             QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
 
-        let statistics = (queue_diff_with_msgs.clone(), queue_diff.block_id().shard).into();
+        let statistics = (&queue_diff_with_msgs, queue_diff.block_id().shard).into();
 
         mq_adapter.apply_diff(
             queue_diff_with_msgs,
@@ -1309,7 +1309,7 @@ where
 
         // apply required previous queue diffs
         while let Some((diff, diff_hash, block_id, max_message_key)) = prev_queue_diffs.pop() {
-            let statistics = (diff.clone(), block_id.shard).into();
+            let statistics = (&diff, block_id.shard).into();
             self.mq_adapter
                 .apply_diff(diff, block_id.as_short_id(), &diff_hash, statistics)?;
         }
