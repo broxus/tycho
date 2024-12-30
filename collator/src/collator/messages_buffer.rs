@@ -118,7 +118,7 @@ impl MessagesBufferV2 {
         // we will collect updates for slots index and apply them at the end
         let mut slots_index_updates = BTreeMap::<SlotId, SlotIndexUpdate>::default();
 
-        // cache buffer accounts to track whose messages were not used in group
+        // track accounts whose messages were not used to fill group
         let mut unused_buffer_accounts =
             unused_buffer_accounts.unwrap_or_else(|| self.msgs.keys().copied().collect());
 
@@ -233,6 +233,12 @@ impl MessagesBufferV2 {
                 // try to get messages of accounts which are already included in slot
                 let mut used_buffer_accounts = vec![];
                 for account_id in slot_cx.slot.accounts.clone() {
+                    // skip accounts that do not pass the provided check
+                    if check_skip_account(&account_id) {
+                        used_buffer_accounts.push(account_id);
+                        continue;
+                    }
+
                     self.move_account_messages_to_slot(
                         account_id,
                         msg_group,
