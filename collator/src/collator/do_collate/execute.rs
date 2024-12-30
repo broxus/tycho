@@ -24,10 +24,7 @@ impl Phase<ExecuteState> {
             &self.state.mc_data.config,
             &mut self.state.collation_data,
         )?;
-        self.extra
-            .messages_reader
-            .new_messages_mut()
-            .add_messages(new_messages);
+        self.extra.messages_reader.add_new_messages(new_messages);
         Ok(())
     }
 
@@ -37,10 +34,7 @@ impl Phase<ExecuteState> {
             TickTock::Tick,
             &mut self.state.collation_data,
         )?;
-        self.extra
-            .messages_reader
-            .new_messages_mut()
-            .add_messages(new_messages);
+        self.extra.messages_reader.add_new_messages(new_messages);
         Ok(())
     }
 
@@ -50,10 +44,7 @@ impl Phase<ExecuteState> {
             TickTock::Tock,
             &mut self.state.collation_data,
         )?;
-        self.extra
-            .messages_reader
-            .new_messages_mut()
-            .add_messages(new_messages);
+        self.extra.messages_reader.add_new_messages(new_messages);
         Ok(())
     }
 
@@ -71,10 +62,10 @@ impl Phase<ExecuteState> {
         let mut executed_groups_count = 0;
         loop {
             let mut timer = std::time::Instant::now();
-            let msg_group_opt = self
-                .extra
-                .messages_reader
-                .get_next_message_group(GetNextMessageGroupMode::Continue)?;
+            let msg_group_opt = self.extra.messages_reader.get_next_message_group(
+                GetNextMessageGroupMode::Continue,
+                self.extra.executor.executor.min_next_lt(),
+            )?;
             fill_msgs_total_elapsed += timer.elapsed();
 
             if let Some(msg_group) = msg_group_opt {
@@ -106,10 +97,7 @@ impl Phase<ExecuteState> {
                         Some(item.in_message),
                         &mut self.state.collation_data,
                     )?;
-                    self.extra
-                        .messages_reader
-                        .new_messages_mut()
-                        .add_messages(new_messages);
+                    self.extra.messages_reader.add_new_messages(new_messages);
                 }
                 process_txs_total_elapsed += timer.elapsed();
 

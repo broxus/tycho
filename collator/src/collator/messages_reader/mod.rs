@@ -1,29 +1,28 @@
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{MsgsExecutionParams, ShardIdent};
-use rayon::range;
+use everscale_types::models::{IntAddr, MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::{FastIndexSet, MessageGroup, MessagesBufferLimits};
 use super::types::AnchorsCache;
-use crate::internal_queue::state::state_iterator::MessageExt;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages};
+use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
 
 mod externals_reader;
 mod internals_reader;
+mod new_messages;
 mod reader_state;
 
 use externals_reader::*;
 use internals_reader::*;
+use new_messages::*;
 pub(super) use reader_state::*;
 
 #[derive(Debug, Default)]
@@ -250,13 +249,15 @@ impl MessagesReader {
                 .insert(par_id, par_reader_state);
         }
 
-        // TODO: msgs-v3: set processed_to in queue diff
+        let min_internals_processed_to = reader_state.internals.get_min_processed_to_by_shards();
 
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
             reader_state,
             anchors_cache,
-            queue_diff_with_msgs: self.new_messages.queue_diff_with_msgs,
+            queue_diff_with_msgs: self
+                .new_messages
+                .into_queue_diff_with_messages(min_internals_processed_to),
         })
     }
 
@@ -270,8 +271,8 @@ impl MessagesReader {
         &self.metrics
     }
 
-    pub fn new_messages_mut(&mut self) -> &mut NewMessagesState<EnqueuedMessage> {
-        &mut self.new_messages
+    pub fn add_new_messages(&mut self, messages: impl IntoIterator<Item = Arc<EnqueuedMessage>>) {
+        self.new_messages.add_messages(messages);
     }
 
     pub fn has_messages_in_buffers(&self) -> bool {
@@ -327,7 +328,7 @@ impl MessagesReader {
         self.check_has_non_zero_processed_offset()
     }
 
-    pub fn refill_buffers_upto_offsets(&mut self) -> Result<()> {
+    pub fn refill_buffers_upto_offsets(&mut self, prev_block_gen_lt: u64) -> Result<()> {
         // holds the max LT_HASH of a new created messages to current shard
         // it needs to define the read range for new messages when we get next message group
         let max_new_message_key_to_current_shard = QueueKey::MIN;
@@ -349,7 +350,8 @@ impl MessagesReader {
 
         // while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
         loop {
-            let msg_group = self.get_next_message_group(GetNextMessageGroupMode::Refill)?;
+            let msg_group =
+                self.get_next_message_group(GetNextMessageGroupMode::Refill, prev_block_gen_lt)?;
             if msg_group.is_none() {
                 // on restart from a new genesis we will not be able to refill buffer with externals
                 // so we stop refilling when there is no more groups in buffer
@@ -375,6 +377,7 @@ impl MessagesReader {
     pub fn get_next_message_group(
         &mut self,
         read_mode: GetNextMessageGroupMode,
+        current_max_lt: u64,
     ) -> Result<Option<MessageGroup>> {
         let mut msg_group = MessageGroup::default();
 
@@ -393,7 +396,40 @@ impl MessagesReader {
                     par_reader.read_into_buffers()?;
                 }
                 MessagesReaderStage::NewMessages => {
-                    todo!()
+                    let par_reader = self
+                        .internals_partition_readers
+                        .get_mut(par_id)
+                        .context("reader for partition should exist")?;
+
+                    // update new messages reader "to" boundary
+                    par_reader.update_new_messages_reader_to_boundary(current_max_lt)?;
+
+                    // check if has pending new messages
+                    if !self
+                        .new_messages
+                        .has_pending_messages_from_partition(par_id)
+                    {
+                        par_reader.set_new_messages_range_reader_fully_read()?;
+                        continue;
+                    }
+
+                    // take new messages from state
+                    if let Some(mut new_messages_for_current_shard) =
+                        self.new_messages.take_messages_for_current_shard(par_id)
+                    {
+                        // read from new messages to buffers
+                        let taken_messages = par_reader.read_new_messages_into_buffer(
+                            &mut new_messages_for_current_shard,
+                            current_max_lt,
+                        )?;
+
+                        // return new messages to state
+                        self.new_messages.restore_messages_for_current_shard(
+                            *par_id,
+                            new_messages_for_current_shard,
+                            &taken_messages,
+                        );
+                    }
                 }
             }
         }
@@ -403,78 +439,120 @@ impl MessagesReader {
             FastHashMap::<(PartitionId, BlockSeqno), FastIndexSet<HashBytes>>::default();
         let mut par_readers = BTreeMap::<PartitionId, InternalsParitionReader>::default();
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
-            match par_reader_stage {
-                MessagesReaderStage::ExistingMessages => {
-                    // extract partition reader from state to use partition 0 buffer
-                    // to check for account skip on collecting messages from partition 1
-                    let mut par_reader = self
-                        .internals_partition_readers
-                        .remove(par_id)
-                        .context("reader for partition should exist")?;
+            // extract partition reader from state to use partition 0 buffer
+            // to check for account skip on collecting messages from partition 1
+            let mut par_reader = self
+                .internals_partition_readers
+                .remove(par_id)
+                .context("reader for partition should exist")?;
 
-                    // collect internals from partition
-                    let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader>::default();
-                    // extract range readers from state to use previous readers buffers
-                    // to check for account skip on collecting messages from current one
-                    while let Some((seqno, mut reader)) = par_reader.pop_first_range_reader() {
-                        // try to fill messages group
-                        let unused_buffer_accounts = reader.reader_state.buffer.fill_message_group(
-                            &mut msg_group,
-                            par_reader.target_limits.slots_count,
-                            par_reader.target_limits.slot_vert_size,
-                            unused_buffer_accounts_by_partitions.remove(&(*par_id, seqno)),
-                            |account_id| {
-                                // check by previous partitions
-                                for prev_partition in par_readers.values() {
-                                    for prev_reader in prev_partition.range_readers().values() {
-                                        if prev_reader
-                                            .reader_state
-                                            .buffer
-                                            .account_messages_count(account_id)
-                                            > 0
-                                        {
-                                            return true;
-                                        }
-                                    }
+            // update processing offset in current partition
+            par_reader.reader_state.curr_processed_offset += 1;
+
+            // collect internals from partition
+            let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader>::default();
+            // extract range readers from state to use previous readers buffers
+            // to check for account skip on collecting messages from current one
+            while let Some((seqno, mut reader)) = par_reader.pop_first_range_reader() {
+                // try to fill messages group
+                let unused_buffer_accounts = reader.reader_state.buffer.fill_message_group(
+                    &mut msg_group,
+                    par_reader.target_limits.slots_count,
+                    par_reader.target_limits.slot_vert_size,
+                    unused_buffer_accounts_by_partitions.remove(&(*par_id, seqno)),
+                    |account_id| {
+                        let dst_addr =
+                            IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
+                        // check by previous partitions
+                        for prev_partition in par_readers.values() {
+                            for prev_reader in prev_partition.range_readers().values() {
+                                if prev_reader
+                                    .reader_state
+                                    .buffer
+                                    .account_messages_count(account_id)
+                                    > 0
+                                {
+                                    return true;
                                 }
-                                // check by previous ranges
-                                for prev_reader in range_readers.values() {
-                                    if prev_reader
-                                        .reader_state
-                                        .buffer
-                                        .account_messages_count(account_id)
-                                        > 0
-                                    {
-                                        return true;
-                                    }
+                                if prev_reader
+                                    .remaning_msgs_stats
+                                    .statistics()
+                                    .contains_key(&dst_addr)
+                                {
+                                    return true;
                                 }
-                                false
-                            },
-                        );
-                        unused_buffer_accounts_by_partitions
-                            .insert((*par_id, seqno), unused_buffer_accounts);
+                            }
+                        }
+                        // check by previous ranges in current partition
+                        for prev_reader in range_readers.values() {
+                            if prev_reader
+                                .reader_state
+                                .buffer
+                                .account_messages_count(account_id)
+                                > 0
+                            {
+                                return true;
+                            }
+                            if prev_reader
+                                .remaning_msgs_stats
+                                .statistics()
+                                .contains_key(&dst_addr)
+                            {
+                                return true;
+                            }
+                        }
+                        false
+                    },
+                );
+                unused_buffer_accounts_by_partitions
+                    .insert((*par_id, seqno), unused_buffer_accounts);
 
-                        range_readers.insert(seqno, reader);
-                    }
-                    par_reader.set_range_readers(range_readers);
+                let range_reader_processed_offset = reader.reader_state.processed_offset;
 
-                    // TODO: msgs-v3: should drop offset when all ranges read
-                    par_reader.reader_state.curr_processed_offset += 1;
+                range_readers.insert(seqno, reader);
 
-                    // check if should switch on reading of new messages
-                    if par_reader.all_ranges_fully_read && !par_reader.has_messages_in_buffers() {
-                        *par_reader_stage = MessagesReaderStage::NewMessages;
-
-                        // we can update processed_to when we collected all messages from the partition
-                        par_reader.set_processed_to_current_position()?;
-                    }
-
-                    par_readers.insert(*par_id, par_reader);
-                }
-                MessagesReaderStage::NewMessages => {
-                    todo!()
+                // get messages from the next range
+                // only when current range processed offset is reached
+                if par_reader.reader_state.curr_processed_offset <= range_reader_processed_offset {
+                    break;
                 }
             }
+            par_reader.set_range_readers(range_readers);
+
+            // check if should switch to next reading stage
+            match par_reader_stage {
+                MessagesReaderStage::ExistingMessages => {
+                    // check if all existing messages read and collected
+                    if par_reader.all_ranges_fully_read && !par_reader.has_messages_in_buffers() {
+                        // we can update processed_to when we collected all messages from the partition
+                        par_reader.set_processed_to_current_position()?;
+
+                        // drop processing offset when all ranges read
+                        par_reader.drop_processing_offset()?;
+
+                        // drop all ranges except the last one
+                        par_reader.retain_only_last_range_reader()?;
+
+                        *par_reader_stage = MessagesReaderStage::NewMessages;
+                    }
+                }
+                MessagesReaderStage::NewMessages => {
+                    // check if all new messages read and collected
+                    if !self
+                        .new_messages
+                        .has_pending_messages_from_partition(par_id)
+                        && !par_reader.has_messages_in_buffers()
+                    {
+                        // we can update processed_to when we collected all messages from the partition
+                        par_reader.set_processed_to_current_position()?;
+
+                        // drop processing offset when all new messages read
+                        par_reader.drop_processing_offset()?;
+                    }
+                }
+            }
+
+            par_readers.insert(*par_id, par_reader);
         }
         // return partion readers to state
         self.internals_partition_readers = par_readers;
@@ -531,60 +609,10 @@ impl MessagesReader {
             // TODO: msgs-v3: fill messages group with internals again
         }
 
-        if msg_group.len() == 0 {
-            // TODO: msgs-v3: and no pending new messages
+        if msg_group.len() == 0 && !self.new_messages.has_pending_messages() {
             Ok(Some(msg_group))
         } else {
             Ok(None)
-        }
-    }
-}
-
-//=========
-// NEW MESSAGES
-//=========
-
-pub(super) struct NewMessagesState<V: InternalMessageValue> {
-    current_shard: ShardIdent,
-    queue_diff_with_msgs: QueueDiffWithMessages<V>,
-    messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
-    max_message_key_for_current_shard: QueueKey,
-}
-
-impl<V: InternalMessageValue> NewMessagesState<V> {
-    pub fn new(current_shard: ShardIdent) -> Self {
-        Self {
-            current_shard,
-            queue_diff_with_msgs: QueueDiffWithMessages {
-                messages: Default::default(),
-                processed_to: Default::default(),
-                partition_router: Default::default(),
-            },
-            messages_for_current_shard: Default::default(),
-            max_message_key_for_current_shard: QueueKey::MIN,
-        }
-    }
-
-    pub fn has_pending_messages(&self) -> bool {
-        !self.messages_for_current_shard.is_empty()
-    }
-
-    pub fn add_message(&mut self, message: Arc<V>) {
-        self.queue_diff_with_msgs
-            .messages
-            .insert(message.key(), message.clone());
-        if self.current_shard.contains_address(message.destination()) {
-            self.max_message_key_for_current_shard =
-                std::cmp::max(self.max_message_key_for_current_shard, message.key());
-            let message_with_source = MessageExt::new(self.current_shard, message);
-            self.messages_for_current_shard
-                .push(Reverse(message_with_source));
-        };
-    }
-
-    pub fn add_messages(&mut self, messages: impl IntoIterator<Item = Arc<V>>) {
-        for message in messages {
-            self.add_message(message);
         }
     }
 }
