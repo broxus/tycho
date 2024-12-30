@@ -19,9 +19,9 @@ use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
 // INTERNALS READER
 //=========
 pub(super) struct InternalsParitionReader {
-    partition_id: PartitionId,
-    for_shard_id: ShardIdent,
-    block_seqno: BlockSeqno,
+    pub(super) partition_id: PartitionId,
+    pub(super) for_shard_id: ShardIdent,
+    pub(super) block_seqno: BlockSeqno,
 
     pub(super) target_limits: MessagesBufferLimits,
     pub(super) max_limits: MessagesBufferLimits,
@@ -33,7 +33,7 @@ pub(super) struct InternalsParitionReader {
     /// end lt list from top shards of mc block
     mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
 
-    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    pub(super) mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 
     pub(super) reader_state: PartitionReaderState,
     range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>,
@@ -129,18 +129,59 @@ impl InternalsParitionReader {
         &self.range_readers
     }
 
+    pub fn retain_only_last_range_reader(&mut self) -> Result<()> {
+        let (last_seqno, last_range_reader) = self
+            .range_readers
+            .pop_last()
+            .context("partition reader should have at least one range reader")?;
+        self.range_readers.clear();
+        self.range_readers.insert(last_seqno, last_range_reader);
+        Ok(())
+    }
+
     pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, InternalsRangeReader)> {
         self.range_readers.pop_first()
     }
 
-    pub fn set_range_readers(&mut self, range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>) {
-        self.range_readers = range_readers;
+    pub fn set_range_readers(
+        &mut self,
+        mut range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>,
+    ) {
+        self.range_readers.append(&mut range_readers);
+    }
+
+    pub(super) fn insert_range_reader(
+        &mut self,
+        seqno: BlockSeqno,
+        reader: InternalsRangeReader,
+    ) -> &mut InternalsRangeReader {
+        self.range_readers.insert(seqno, reader);
+        self.range_readers
+            .get_mut(&seqno)
+            .expect("just inserted range reader should exist")
+    }
+
+    pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &InternalsRangeReader)> {
+        self.range_readers
+            .last_key_value()
+            .context("partition reader should have at least one range reader")
+    }
+
+    pub fn get_last_range_reader_mut(&mut self) -> Result<&mut InternalsRangeReader> {
+        let (&last_seqno, _) = self.get_last_range_reader()?;
+        Ok(self.range_readers.get_mut(&last_seqno).unwrap())
+    }
+
+    /// Drop current offset and offset in the last range reader state
+    pub fn drop_processing_offset(&mut self) -> Result<()> {
+        self.reader_state.curr_processed_offset = 0;
+        let last_range_reader = self.get_last_range_reader_mut()?;
+        last_range_reader.reader_state.processed_offset = 0;
+        Ok(())
     }
 
     pub fn set_processed_to_current_position(&mut self) -> Result<()> {
-        let (_, last_range_reader) = self.range_readers.last_key_value().context(
-            "partition reader should have at least one range reader after reading into buffer",
-        )?;
+        let (_, last_range_reader) = self.get_last_range_reader()?;
         self.reader_state.processed_to = last_range_reader
             .reader_state
             .shards
@@ -218,12 +259,13 @@ impl InternalsParitionReader {
             seqno,
             kind: InternalsRangeReaderKind::Existing,
             reader_state: range_reader_state,
-            msgs_stats: stats.clone(),
-            remaning_msgs_stats: stats,
             fully_read,
             mq_adapter: self.mq_adapter.clone(),
             iterator_opt: None,
             initialized: false,
+
+            msgs_stats: stats.clone(),
+            remaning_msgs_stats: stats,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -299,12 +341,13 @@ impl InternalsParitionReader {
                 shards: shard_reader_states,
                 processed_offset: 0,
             },
-            msgs_stats: stats.clone(),
-            remaning_msgs_stats: stats,
             fully_read,
             mq_adapter: self.mq_adapter.clone(),
             iterator_opt: None,
             initialized: false,
+
+            msgs_stats: stats.clone(),
+            remaning_msgs_stats: stats,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -472,26 +515,29 @@ impl InternalsParitionReader {
     }
 }
 
-enum InternalsRangeReaderKind {
+#[derive(Clone, Copy)]
+pub(super) enum InternalsRangeReaderKind {
     Existing,
     Next,
+    NewMessages,
 }
 
 pub(super) struct InternalsRangeReader {
-    partition_id: PartitionId,
-    for_shard_id: ShardIdent,
-    seqno: BlockSeqno,
-    kind: InternalsRangeReaderKind,
+    pub(super) partition_id: PartitionId,
+    pub(super) for_shard_id: ShardIdent,
+    pub(super) seqno: BlockSeqno,
+    pub(super) kind: InternalsRangeReaderKind,
     pub(super) reader_state: InternalsRangeReaderState,
+    pub(super) fully_read: bool,
+    pub(super) mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    pub(super) iterator_opt: Option<Box<dyn QueueIterator<EnqueuedMessage>>>,
+    pub(super) initialized: bool,
+
     /// Statistics shows all messages in current range
-    msgs_stats: QueueStatistics,
+    pub(super) msgs_stats: QueueStatistics,
     /// Statistics shows remaining not read messages from currebt range.
     /// We reduce initial statistics by the number of messages that were read.
-    remaning_msgs_stats: QueueStatistics,
-    fully_read: bool,
-    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    iterator_opt: Option<Box<dyn QueueIterator<EnqueuedMessage>>>,
-    initialized: bool,
+    pub(super) remaning_msgs_stats: QueueStatistics,
 }
 
 impl InternalsRangeReader {

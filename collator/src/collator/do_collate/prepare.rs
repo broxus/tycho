@@ -114,7 +114,7 @@ impl Phase<PrepareState> {
 
         // refill messages buffer and skip groups upto offset (on node restart)
         if messages_reader.check_need_refill() {
-            messages_reader.refill_buffers_upto_offsets()?;
+            messages_reader.refill_buffers_upto_offsets(self.state.prev_shard_data.gen_lt())?;
         }
 
         Ok(Phase::<ExecuteState> {
