@@ -532,6 +532,12 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut messages = vec![message1_hash, message2_hash, message3_hash];
     messages.sort_unstable();
 
+    let mut partition_router = FastHashMap::default();
+    partition_router.insert(
+        IntAddr::Std(StdAddr::new(-1, HashBytes::ZERO)),
+        QueuePartition::LowPriority,
+    );
+
     let diff = QueueDiff {
         hash: HashBytes::ZERO,
         prev_hash: HashBytes::from([0x33; 32]),
@@ -556,6 +562,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
             hash: message2_hash,
         },
         messages,
+        partition_router,
     };
     let data = tl_proto::serialize(&diff);
 
@@ -594,7 +601,6 @@ fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
     .unwrap()
 }
 
-#[cfg(FALSE)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_tail() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
@@ -659,11 +665,23 @@ async fn test_queue_tail() -> anyhow::Result<()> {
     }
 
     let end_key_mc1 = *diff_mc1.messages.iter().last().unwrap().0;
-    let end_key_mc2 = *diff_mc2.messages.iter().last().unwrap().0;
+
+    let statistics_mc1 = (&diff_mc1, block_mc1.shard).into();
+    let statistics_mc2 = (&diff_mc2, block_mc2.shard).into();
 
     // apply two diffs
-    queue.apply_diff(diff_mc1, block_mc1, &HashBytes::from([1; 32]), end_key_mc1)?;
-    queue.apply_diff(diff_mc2, block_mc2, &HashBytes::from([2; 32]), end_key_mc2)?;
+    queue.apply_diff(
+        diff_mc1,
+        block_mc1,
+        &HashBytes::from([1; 32]),
+        statistics_mc1,
+    )?;
+    queue.apply_diff(
+        diff_mc2,
+        block_mc2,
+        &HashBytes::from([2; 32]),
+        statistics_mc2,
+    )?;
 
     let diff_len_mc = queue.get_diffs_count_by_shard(&ShardIdent::new_full(-1));
 
