@@ -111,22 +111,6 @@ impl UncommittedStateStdImpl {
 }
 
 impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
-    fn add_messages_with_statistics(
-        &self,
-        source: ShardIdent,
-        partition_router: &PartitionRouter,
-        messages: &BTreeMap<QueueKey, Arc<V>>,
-        statistics: DiffStatistics,
-    ) -> Result<()> {
-        let mut batch = WriteBatch::default();
-
-        self.add_messages(&mut batch, source, partition_router, messages)?;
-        self.add_statistics(&mut batch, statistics)?;
-
-        self.storage.internal_queue_storage().write_batch(batch)?;
-        Ok(())
-    }
-
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
@@ -149,10 +133,41 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         Ok(Box::new(iterator))
     }
 
+    fn commit(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()> {
+        let mut queue_ranges = vec![];
+        for partition in partitions {
+            for range in ranges {
+                queue_ranges.push(QueueRange {
+                    partition: *partition,
+                    shard_ident: range.shard_ident,
+                    from: range.from,
+                    to: range.to,
+                });
+            }
+        }
+        self.storage.internal_queue_storage().commit(queue_ranges)
+    }
+
     fn truncate(&self) -> Result<()> {
         self.storage
             .internal_queue_storage()
             .clear_uncommitted_queue()
+    }
+
+    fn add_messages_with_statistics(
+        &self,
+        source: ShardIdent,
+        partition_router: &PartitionRouter,
+        messages: &BTreeMap<QueueKey, Arc<V>>,
+        statistics: DiffStatistics,
+    ) -> Result<()> {
+        let mut batch = WriteBatch::default();
+
+        self.add_messages(&mut batch, source, partition_router, messages)?;
+        self.add_statistics(&mut batch, statistics)?;
+
+        self.storage.internal_queue_storage().write_batch(batch)?;
+        Ok(())
     }
 
     fn load_statistics(
@@ -176,21 +191,6 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         }
 
         Ok(())
-    }
-
-    fn commit(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()> {
-        let mut queue_ranges = vec![];
-        for partition in partitions {
-            for range in ranges {
-                queue_ranges.push(QueueRange {
-                    partition: *partition,
-                    shard_ident: range.shard_ident,
-                    from: range.from,
-                    to: range.to,
-                });
-            }
-        }
-        self.storage.internal_queue_storage().commit(queue_ranges)
     }
 }
 
@@ -228,6 +228,7 @@ impl UncommittedStateStdImpl {
         Ok(())
     }
 
+    /// write new statistics to storage
     fn add_statistics(
         &self,
         batch: &mut WriteBatch,

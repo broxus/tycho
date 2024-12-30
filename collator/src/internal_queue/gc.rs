@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use everscale_types::models::ShardIdent;
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::internal_queue::state::commited_state::CommittedState;
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
 use crate::tracing_targets;
 
 pub struct GcManager {
@@ -69,27 +69,33 @@ fn gc_task<V: InternalMessageValue>(
     committed_state: Arc<dyn CommittedState<V>>,
     delete_until: HashMap<ShardIdent, QueueKey>,
 ) {
-    // let _histogram = HistogramGuard::begin("tycho_internal_queue_gc_execute_task_time");
-    //
-    // let mut gc_state = gc_state.lock().unwrap();
-    //
-    // for (shard, current_last_key) in delete_until.iter() {
-    //     let can_delete = gc_state
-    //         .get(shard)
-    //         .map_or(true, |last_key| *current_last_key > *last_key);
-    //
-    //     if can_delete {
-    //         if let Err(e) = committed_state.delete_messages(*shard, current_last_key) {
-    //             tracing::error!(target: tracing_targets::MQ, "failed to delete messages: {e:?}");
-    //         }
-    //
-    //         let labels = [("workchain", shard.workchain().to_string())];
-    //         metrics::gauge!("tycho_internal_queue_processed_upto", &labels)
-    //             .set(current_last_key.lt as f64);
-    //
-    //         gc_state.insert(*shard, *current_last_key);
-    //     }
-    // }
+    let _histogram = HistogramGuard::begin("tycho_internal_queue_gc_execute_task_time");
+
+    let mut gc_state = gc_state.lock().unwrap();
+
+    for (shard, current_last_key) in delete_until.iter() {
+        let can_delete = gc_state
+            .get(shard)
+            .map_or(true, |last_key| *current_last_key > *last_key);
+
+        if can_delete {
+            let range = vec![QueueShardRange {
+                shard_ident: *shard,
+                from: QueueKey::default(),
+                to: *current_last_key,
+            }];
+
+            if let Err(e) = committed_state.delete(&QueuePartition::all(), range.as_slice()) {
+                tracing::error!(target: tracing_targets::MQ, "failed to delete messages: {e:?}");
+            }
+
+            let labels = [("workchain", shard.workchain().to_string())];
+            metrics::gauge!("tycho_internal_queue_processed_upto", &labels)
+                .set(current_last_key.lt as f64);
+
+            gc_state.insert(*shard, *current_last_key);
+        }
+    }
 }
 
 type GcRange = HashMap<ShardIdent, QueueKey>;
