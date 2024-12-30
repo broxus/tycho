@@ -5,12 +5,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{IntAddr, MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::{FastIndexSet, MessageGroup, MessagesBufferLimits};
 use super::types::AnchorsCache;
-use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
+use crate::internal_queue::types::{
+    EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
@@ -204,6 +206,17 @@ impl MessagesReader {
         res.readers_stages
             .insert(1, MessagesReaderStage::ExistingMessages);
 
+        // get full statistics from partition 1 and init partition router in new messages state
+        let par_1_all_ranges_msgs_stats = res
+            .internals_partition_readers
+            .get(&1)
+            .unwrap()
+            .range_readers()
+            .values()
+            .map(|r| &r.msgs_stats);
+        res.new_messages
+            .init_partition_router(1, par_1_all_ranges_msgs_stats);
+
         Ok(res)
     }
 
@@ -235,8 +248,17 @@ impl MessagesReader {
             internals: Default::default(),
         };
 
+        // aggregated messages stats from all ranges
+        // we need it to detect target ratition for new messages from queue diff
+        let mut aggregated_stats = QueueStatistics::default();
+
         // collect internals partition readers states
         for (par_id, mut par_reader) in self.internals_partition_readers {
+            // collect aggregated messages stats
+            for range_reader in par_reader.range_readers().values() {
+                aggregated_stats.append(&range_reader.msgs_stats);
+            }
+
             // check pending internals in iterators
             if !has_unprocessed_messages {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
@@ -249,16 +271,44 @@ impl MessagesReader {
                 .insert(par_id, par_reader_state);
         }
 
+        // build queue diff
         let min_internals_processed_to = reader_state.internals.get_min_processed_to_by_shards();
+        let mut queue_diff_with_msgs = self
+            .new_messages
+            .into_queue_diff_with_messages(min_internals_processed_to);
+
+        // get current queue diff messages stats and merge with aggregated stats
+        let queue_diff_msgs_stats = (&queue_diff_with_msgs, self.for_shard_id).into();
+        aggregated_stats.append_diff_statistics(&queue_diff_msgs_stats);
+
+        // reset queue diff partition router
+        // according to actual aggregated stats
+        Self::reset_partition_rounter_by_stats(
+            &mut queue_diff_with_msgs.partition_router,
+            aggregated_stats,
+        );
 
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
             reader_state,
             anchors_cache,
-            queue_diff_with_msgs: self
-                .new_messages
-                .into_queue_diff_with_messages(min_internals_processed_to),
+            queue_diff_with_msgs,
         })
+    }
+
+    pub fn reset_partition_rounter_by_stats(
+        partition_router: &mut PartitionRouter,
+        stats: QueueStatistics,
+    ) {
+        // TODO: msgs-v3: store limit in msgs_exec_params
+        const MAX_PAR_0_MSGS_COUNT_LIMIT: u64 = 100_000;
+
+        partition_router.clear();
+        for (account_addr, msgs_count) in stats.into_iter() {
+            if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                partition_router.insert(account_addr, QueuePartition::LowPriority);
+            }
+        }
     }
 
     pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
