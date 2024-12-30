@@ -38,7 +38,7 @@ impl InternalQueueStorage {
         dest: &[u8],
         count: u64,
     ) -> Result<()> {
-        let cf = self.db.internal_messages_dest_stat_uncommitted.cf();
+        let cf = self.db.internal_messages_statistics_uncommitted.cf();
         let mut key_buffer = Vec::with_capacity(StatKey::SIZE_HINT);
         key.serialize(&mut key_buffer);
 
@@ -61,9 +61,12 @@ impl InternalQueueStorage {
         to: QueueKey,
         result: &mut FastHashMap<IntAddr, u64>,
     ) -> Result<()> {
-        let mut read_config = self.db.internal_messages_dest_stat.new_read_config();
+        let mut read_config = self
+            .db
+            .internal_messages_statistics_commited
+            .new_read_config();
         read_config.set_snapshot(snapshot);
-        let cf = self.db.internal_messages_dest_stat.cf();
+        let cf = self.db.internal_messages_statistics_commited.cf();
 
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
@@ -81,10 +84,10 @@ impl InternalQueueStorage {
     ) -> Result<()> {
         let mut read_config = self
             .db
-            .internal_messages_dest_stat_uncommitted
+            .internal_messages_statistics_uncommitted
             .new_read_config();
         read_config.set_snapshot(snapshot);
-        let cf = self.db.internal_messages_dest_stat_uncommitted.cf();
+        let cf = self.db.internal_messages_statistics_uncommitted.cf();
 
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
@@ -213,40 +216,67 @@ impl InternalQueueStorage {
         .await?
     }
 
-    pub fn delete_messages(&self, range: QueueRange) -> Result<()> {
-        let start_key =
-            ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.from);
-        let end_key = ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.to);
-
-        let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
-
-        let mut batch = WriteBatch::default();
-
-        let start_key = start_key.to_vec();
-        let end_key = end_key.to_vec();
-
-        batch.delete_range_cf(&shards_internal_messages_cf, &start_key, &end_key);
-        batch.delete_cf(&shards_internal_messages_cf, &end_key);
-
-        self.db.rocksdb().write(batch)?;
-        self.db.rocksdb().compact_range_cf(
-            &shards_internal_messages_cf,
-            Some(&start_key),
-            Some(&end_key),
-        );
-
-        Ok(())
-    }
-
     pub fn commit(&self, ranges: Vec<QueueRange>) -> Result<()> {
         let snapshot = self.snapshot();
 
         let mut batch = WriteBatch::default();
 
         for range in &ranges {
-            self.commit_messages_range(&mut batch, &snapshot, range)?;
+            let mut readopts = self
+                .db
+                .shards_internal_messages_uncommitted
+                .new_read_config();
+            readopts.set_snapshot(&snapshot);
 
-            self.commit_statistics_range(&mut batch, &snapshot, range)?;
+            let from_message_key = ShardsInternalMessagesKey {
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.from,
+            };
+            let to_message_key = ShardsInternalMessagesKey {
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.to,
+            };
+
+            self.commit_range(
+                &mut batch,
+                readopts,
+                &from_message_key.to_vec(),
+                &to_message_key.to_vec(),
+                &self.db.shards_internal_messages_uncommitted.cf(),
+                &self.db.shards_internal_messages.cf(),
+            )?;
+
+            let mut readopts = self
+                .db
+                .internal_messages_statistics_uncommitted
+                .new_read_config();
+            readopts.set_snapshot(&snapshot);
+
+            let from_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.from,
+                max_message: QueueKey::MIN,
+                index: 0,
+            };
+            let to_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.to,
+                max_message: QueueKey::MAX,
+                index: u64::MAX,
+            };
+
+            self.commit_range(
+                &mut batch,
+                readopts,
+                &from_stat_key.to_vec(),
+                &to_stat_key.to_vec(),
+                &self.db.internal_messages_statistics_uncommitted.cf(),
+                &self.db.internal_messages_statistics_commited.cf(),
+            )?;
         }
 
         self.db.rocksdb().write(batch)?;
@@ -254,64 +284,36 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    fn commit_statistics_range(
+    fn commit_range(
         &self,
         batch: &mut WriteBatch,
-        snapshot: &OwnedSnapshot,
-        range: &QueueRange,
+        readopts: ReadOptions,
+        from_key: &[u8],
+        to_key: &[u8],
+        source_cf: &BoundedCfHandle<'_>,
+        target_cf: &BoundedCfHandle<'_>,
     ) -> Result<()> {
-        let from = StatKey {
-            shard_ident: range.shard_ident,
-            partition: range.partition,
-            min_message: range.from,
-            max_message: QueueKey::MIN,
-            index: 0,
-        };
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(source_cf, readopts);
 
-        let mut readopts = self
-            .db
-            .internal_messages_dest_stat_uncommitted
-            .new_read_config();
-        readopts.set_snapshot(&snapshot);
-
-        let internal_messages_dest_stat_uncommitted_cf =
-            self.db.internal_messages_dest_stat_uncommitted.cf();
-
-        let internal_messages_dest_stat_cf = self.db.internal_messages_dest_stat.cf();
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&internal_messages_dest_stat_uncommitted_cf, readopts);
-
-        iter.seek(from.to_vec().as_slice());
+        iter.seek(from_key);
 
         while iter.valid() {
-            let (mut key, value) = match (iter.key(), iter.value()) {
-                (Some(key), Some(value)) => (key, value),
-                _ => break,
+            let key = match iter.key() {
+                Some(key) => key,
+                None => break,
             };
 
-            let current_position = StatKey::deserialize(&mut key);
-
-            if current_position < from {
-                iter.next();
-                continue;
-            }
-
-            if current_position.max_message > range.to {
+            if key > to_key {
                 break;
             }
 
-            let current_position_vec = current_position.to_vec();
-            batch.delete_cf(
-                &internal_messages_dest_stat_uncommitted_cf,
-                &current_position_vec,
-            );
-            batch.put_cf(
-                &internal_messages_dest_stat_cf,
-                &current_position_vec,
-                value,
-            );
+            let value = match iter.value() {
+                Some(value) => value,
+                None => break,
+            };
+
+            batch.delete_cf(source_cf, key);
+            batch.put_cf(target_cf, key, value);
 
             iter.next();
         }
@@ -319,61 +321,64 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    fn commit_messages_range(
-        &self,
-        batch: &mut WriteBatch,
-        snapshot: &OwnedSnapshot,
-        range: &QueueRange,
-    ) -> Result<()> {
-        let from = ShardsInternalMessagesKey {
-            partition: range.partition,
-            shard_ident: range.shard_ident,
-            internal_message_key: range.from,
-        };
-        let to = ShardsInternalMessagesKey {
-            partition: range.partition,
-            shard_ident: range.shard_ident,
-            internal_message_key: range.to,
-        };
+    pub fn delete(&self, ranges: Vec<QueueRange>) -> Result<()> {
+        let mut batch = WriteBatch::default();
 
-        let mut readopts = self
-            .db
-            .shards_internal_messages_uncommitted
-            .new_read_config();
-        readopts.set_snapshot(&snapshot);
-
-        let internal_messages_uncommitted_cf = self.db.shards_internal_messages_uncommitted.cf();
-        let internal_messages_cf = self.db.shards_internal_messages.cf();
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&internal_messages_uncommitted_cf, readopts);
-
-        iter.seek(from.to_vec().as_slice());
-
-        while iter.valid() {
-            let (mut key, value) = match (iter.key(), iter.value()) {
-                (Some(key), Some(value)) => (key, value),
-                _ => break,
-            };
-
-            let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
-
-            if current_position < from {
-                iter.next();
-                continue;
+        for range in &ranges {
+            let start_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.from,
+                max_message: QueueKey::MIN,
+                index: 0,
             }
-            if current_position > to {
-                break;
+            .to_vec();
+
+            let end_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.to,
+                max_message: QueueKey::MAX,
+                index: u64::MAX,
             }
+            .to_vec();
 
-            let current_position_vec = current_position.to_vec();
-            batch.delete_cf(&internal_messages_uncommitted_cf, &current_position_vec);
-            batch.put_cf(&internal_messages_cf, &current_position_vec, value);
+            let start_message_key =
+                ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.from)
+                    .to_vec();
+            let end_message_key =
+                ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.to)
+                    .to_vec();
 
-            iter.next();
+            self.delete_range(
+                &mut batch,
+                &self.db.internal_messages_statistics_commited.cf(),
+                &start_stat_key,
+                &end_stat_key,
+            )?;
+
+            self.delete_range(
+                &mut batch,
+                &self.db.shards_internal_messages.cf(),
+                &start_message_key,
+                &end_message_key,
+            )?;
         }
 
+        self.db.rocksdb().write(batch)?;
+
+        Ok(())
+    }
+
+    fn delete_range(
+        &self,
+        batch: &mut WriteBatch,
+        cf: &BoundedCfHandle<'_>,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<()> {
+        batch.delete_range_cf(cf, start_key, end_key);
+        batch.delete_cf(cf, end_key);
         Ok(())
     }
 

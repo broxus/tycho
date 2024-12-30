@@ -317,7 +317,6 @@ where
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
 
-        #[cfg(FALSE)]
         for (shard, end_key) in gc_ranges {
             self.gc.update_delete_until(shard, end_key);
         }
