@@ -18,7 +18,7 @@ use crate::internal_queue::state::state_iterator::{
     ShardIteratorWithRange, StateIterator, StateIteratorImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
+    DiffStatistics, InternalMessageValue, PartitionRouter, QueueShardRange, QueueStatistics,
 };
 
 // CONFIG
@@ -84,7 +84,7 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
     fn add_messages_with_statistics(
         &self,
         source: ShardIdent,
-        partition_router: &FastHashMap<IntAddr, QueuePartition>,
+        partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
         statistics: DiffStatistics,
     ) -> Result<()>;
@@ -114,7 +114,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
     fn add_messages_with_statistics(
         &self,
         source: ShardIdent,
-        partition_router: &FastHashMap<IntAddr, QueuePartition>,
+        partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
         statistics: DiffStatistics,
     ) -> Result<()> {
@@ -200,7 +200,7 @@ impl UncommittedStateStdImpl {
         &self,
         batch: &mut WriteBatch,
         source: ShardIdent,
-        partition_router: &FastHashMap<IntAddr, QueuePartition>,
+        partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
     ) -> Result<()> {
         for (internal_message_key, message) in messages {
