@@ -9,7 +9,7 @@ use tycho_block_util::queue::QueueKey;
 use super::internals_reader::{
     InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
 };
-use super::{InternalsRangeReaderState, ShardReaderState};
+use super::{DebugInternalsRangeReaderState, InternalsRangeReaderState, ShardReaderState};
 use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
@@ -164,7 +164,18 @@ impl InternalsParitionReader {
                     remaning_msgs_stats: Default::default(),
                 };
 
-                Ok(self.insert_range_reader(reader.seqno, reader))
+                let reader = self.insert_range_reader(reader.seqno, reader);
+
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    partition_id = reader.partition_id,
+                    for_shard_id = %reader.for_shard_id,
+                    seqno = reader.seqno,
+                    fully_read = reader.fully_read,
+                    reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
+                    "created new messages reader",
+                );
+
+                Ok(reader)
             }
         }
     }
