@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::state_iterator::{IterRange, MessageExt};

@@ -8,7 +8,7 @@ use everscale_types::prelude::*;
 use tl_proto::TlRead;
 
 use crate::archive::WithArchiveData;
-use crate::queue::proto::{QueueDiff, QueueKey, QueuePartition};
+use crate::queue::proto::{QueueDiff, QueueKey};
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 

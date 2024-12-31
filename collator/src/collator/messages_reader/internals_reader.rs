@@ -258,7 +258,7 @@ impl InternalsParitionReader {
         // get statistics for the range
         let stats = self
             .mq_adapter
-            .get_statistics(self.partition_id.into(), ranges)?;
+            .get_statistics(self.partition_id.try_into()?, ranges)?;
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
@@ -336,7 +336,7 @@ impl InternalsParitionReader {
         // get statistics for the range
         let stats = self
             .mq_adapter
-            .get_statistics(self.partition_id.into(), ranges)?;
+            .get_statistics(self.partition_id.try_into()?, ranges)?;
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
@@ -564,7 +564,7 @@ impl InternalsRangeReader {
 
             let iterator = self.mq_adapter.create_iterator(
                 self.for_shard_id,
-                self.partition_id.into(),
+                self.partition_id.try_into()?,
                 ranges,
             )?;
 
