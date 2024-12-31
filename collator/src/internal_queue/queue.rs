@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
+use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
@@ -19,8 +19,7 @@ use crate::internal_queue::state::uncommitted_state::{
     UncommittedState, UncommittedStateFactory, UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionQueueKey, QueueDiffWithMessages, QueueRange,
-    QueueShardRange, QueueStatistics,
+    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueShardRange, QueueStatistics,
 };
 use crate::tracing_targets;
 use crate::types::ProcessedTo;
@@ -163,12 +162,9 @@ where
     ) -> Result<Vec<Box<dyn StateIterator<V>>>> {
         let snapshot = self.committed_state.snapshot();
 
-        let committed_state_iterator = self.committed_state.iterator(
-            &snapshot,
-            for_shard_id,
-            partition.clone(),
-            ranges.clone(),
-        )?;
+        let committed_state_iterator =
+            self.committed_state
+                .iterator(&snapshot, for_shard_id, partition, ranges.clone())?;
 
         let uncommitted_state_iterator =
             self.uncommitted_state

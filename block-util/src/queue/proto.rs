@@ -1,15 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use anyhow::bail;
 use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tl_proto::{TlRead, TlWrite};
-use tycho_util::FastHashMap;
+use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 
 use crate::tl;
 
 /// Representation of an internal messages queue diff.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct QueueDiff {
     /// Computed hash of this diff.
     ///
@@ -32,7 +32,7 @@ pub struct QueueDiff {
     /// List of message hashes (sorted ASC).
     pub messages: Vec<HashBytes>,
     /// Partition router
-    pub partition_router: FastHashMap<IntAddr, QueuePartition>,
+    pub partition_router: BTreeMap<QueuePartition, BTreeSet<DestAddr>>,
 }
 
 impl QueueDiff {
@@ -76,6 +76,7 @@ impl TlWrite for QueueDiff {
         self.min_message.write_to(packet);
         self.max_message.write_to(packet);
         messages_list::write(&self.messages, packet);
+        partition_router_list::write(&self.partition_router, packet);
     }
 }
 
@@ -97,8 +98,7 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             min_message: QueueKey::read_from(data)?,
             max_message: QueueKey::read_from(data)?,
             messages: messages_list::read(data)?,
-            // TODO !!! add read for partition_router
-            partition_router: Default::default(),
+            partition_router: partition_router_list::read(data)?,
         };
 
         if result.max_message < result.min_message {
@@ -115,7 +115,7 @@ impl<'tl> TlRead<'tl> for QueueDiff {
 }
 
 /// Persistent internal messages queue state.
-#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[derive(Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueState", scheme = "proto.tl")]
 pub struct QueueState {
     pub header: QueueStateHeader,
@@ -129,7 +129,7 @@ pub struct QueueState {
 /// Persistent internal messages queue state.
 ///
 /// A non-owned version of [`QueueState`].
-#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[derive(Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueState", scheme = "proto.tl")]
 pub struct QueueStateRef<'tl> {
     pub header: QueueStateHeader,
@@ -141,7 +141,7 @@ pub struct QueueStateRef<'tl> {
 }
 
 /// A header for a persistent internal messages queue state.
-#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[derive(Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueStateHeader", scheme = "proto.tl")]
 pub struct QueueStateHeader {
     #[tl(with = "tl::shard_ident")]
@@ -175,13 +175,16 @@ impl Default for QueuePartition {
     }
 }
 
-impl From<u8> for QueuePartition {
-    fn from(value: u8) -> Self {
-        match value {
+impl TryFrom<u8> for QueuePartition {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        let partition = match value {
             0 => Self::NormalPriority,
             1 => Self::LowPriority,
-            _ => panic!("Invalid value for QueuePartition"),
-        }
+            _ => bail!("Invalid queue partition: {}", value),
+        };
+        Ok(partition)
     }
 }
 
@@ -411,6 +414,67 @@ mod messages_list {
     }
 }
 
+mod partition_router_list {
+    use super::*;
+
+    const MAX_PARTITIONS: usize = QueuePartition::all().len() - 1;
+    const MAX_DEST_ADDRS: usize = 1_000_000;
+
+    pub fn size_hint(items: &BTreeMap<QueuePartition, BTreeSet<DestAddr>>) -> usize {
+        4 + items
+            .iter()
+            .map(|(_, set)| 1 + 4 + set.len() * DestAddr::SIZE_HINT)
+            .sum::<usize>()
+    }
+
+    pub fn write<P: tl_proto::TlPacket>(
+        items: &BTreeMap<QueuePartition, BTreeSet<DestAddr>>,
+        packet: &mut P,
+    ) {
+        packet.write_u32(items.len() as u32);
+
+        for (partition, dest_addrs) in items {
+            packet.write_raw_slice(&[*partition as u8]);
+            packet.write_u32(dest_addrs.len() as u32);
+
+            for dest_addr in dest_addrs {
+                dest_addr.write_to(packet);
+            }
+        }
+    }
+
+    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<QueuePartition, BTreeSet<DestAddr>>> {
+        let len = u32::read_from(data)? as usize;
+        if len > MAX_PARTITIONS {
+            return Err(TlError::InvalidData);
+        }
+
+        let mut map = BTreeMap::new();
+
+        for _ in 0..len {
+            let partition = {
+                let partition_id = data[0];
+                *data = &data[1..];
+                QueuePartition::try_from(partition_id).unwrap()
+            };
+
+            let dest_len = u32::read_from(data)? as usize;
+            if dest_len > MAX_DEST_ADDRS {
+                return Err(TlError::InvalidData);
+            }
+
+            let mut dest_set = BTreeSet::new();
+            for _ in 0..dest_len {
+                dest_set.insert(DestAddr::read_from(data)?);
+            }
+
+            map.insert(partition, dest_set);
+        }
+
+        Ok(map)
+    }
+}
+
 mod state_messages_list {
     use super::*;
 
@@ -476,6 +540,86 @@ mod state_messages_list_ref {
         }
 
         Ok(items)
+    }
+}
+
+/// Std dest addr
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DestAddr {
+    pub workchain: i8,
+    pub account: HashBytes,
+}
+
+impl DestAddr {
+    pub const MIN: Self = Self {
+        workchain: i8::MIN,
+        account: HashBytes::ZERO,
+    };
+
+    pub const MAX: Self = Self {
+        workchain: i8::MAX,
+        account: HashBytes([0xff; 32]),
+    };
+}
+
+impl TryFrom<IntAddr> for DestAddr {
+    type Error = anyhow::Error;
+
+    fn try_from(value: IntAddr) -> Result<Self, Self::Error> {
+        match value {
+            IntAddr::Std(addr) => Ok(Self {
+                workchain: addr.workchain,
+                account: addr.address,
+            }),
+            IntAddr::Var(_) => {
+                bail!("VarAddr is not supported")
+            }
+        }
+    }
+}
+
+impl TlWrite for DestAddr {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        1 + tl::hash_bytes::SIZE_HINT
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: tl_proto::TlPacket,
+    {
+        packet.write_raw_slice(&[self.workchain as u8]);
+        tl::hash_bytes::write(&self.account, packet);
+    }
+}
+
+impl<'tl> TlRead<'tl> for DestAddr {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(data: &mut &'tl [u8]) -> tl_proto::TlResult<Self> {
+        if data.is_empty() {
+            return Err(tl_proto::TlError::UnexpectedEof);
+        }
+
+        let workchain = data[0] as i8;
+        *data = &data[1..];
+
+        let account = tl::hash_bytes::read(data)?;
+
+        Ok(Self { workchain, account })
+    }
+}
+
+impl DestAddr {
+    pub const SIZE_HINT: usize = 1 + 32;
+
+    pub fn to_int_addr(&self) -> IntAddr {
+        IntAddr::Std(StdAddr {
+            anycast: None,
+            workchain: self.workchain,
+            address: self.account,
+        })
     }
 }
 
