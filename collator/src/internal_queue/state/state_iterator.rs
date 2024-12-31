@@ -11,7 +11,7 @@ use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
-use crate::internal_queue::types::{InternalMessageValue, QueueRange, QueueShardRange};
+use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
 
 pub struct ShardIteratorWithRange {
     pub iter: OwnedIterator,
@@ -78,7 +78,6 @@ pub struct StateIteratorImpl<V: InternalMessageValue> {
     in_queue: HashSet<ShardIdent>,
     current_position: FastHashMap<ShardIdent, QueueKey>,
     iters_to_remove: Vec<ShardIdent>,
-    partition: QueuePartition,
 }
 
 impl<V: InternalMessageValue> StateIteratorImpl<V> {
@@ -111,7 +110,6 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
 
         Ok(Self {
             iters,
-            partition,
             message_queue: BinaryHeap::new(),
             in_queue: HashSet::new(),
             current_position: Default::default(),
@@ -123,7 +121,7 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
         self.iters_to_remove.clear();
 
         for (shard_ident, iter) in &mut self.iters {
-            if self.in_queue.contains(&shard_ident) {
+            if self.in_queue.contains(shard_ident) {
                 continue;
             }
 
@@ -136,7 +134,7 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
                         let message_ext = MessageExt::new(*shard_ident, Arc::new(message));
 
                         self.message_queue.push(Reverse(message_ext));
-                        self.in_queue.insert(shard_ident.clone());
+                        self.in_queue.insert(*shard_ident);
                         iter.shift();
                         break;
                     }
@@ -148,7 +146,7 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
                         iter.shift();
                     }
                     None => {
-                        self.iters_to_remove.push(shard_ident.clone());
+                        self.iters_to_remove.push(*shard_ident);
                         break;
                     }
                 }
@@ -169,8 +167,7 @@ impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
 
         if let Some(Reverse(message)) = self.message_queue.pop() {
             let message_key = message.message.key();
-            self.current_position
-                .insert(message.source.clone(), message_key);
+            self.current_position.insert(message.source, message_key);
 
             self.in_queue.remove(&message.source);
             return Ok(Some(message));

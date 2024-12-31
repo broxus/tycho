@@ -1,17 +1,10 @@
-use std::collections::HashMap;
 use std::fs::File;
 
-use ahash::RandomState;
-use anyhow::{Error, Result};
-use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, CellSlice, Load};
+use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::{DestAddr, QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
-use weedb::rocksdb::{
-    DBCommon, DBRawIterator, DBRawIteratorWithThreadMode, MultiThreaded, ReadOptions, WriteBatch,
-    WriteBatchWithTransaction,
-};
+use weedb::rocksdb::{DBRawIterator, ReadOptions, WriteBatch, WriteBatchWithTransaction};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
 
 use crate::db::*;
@@ -31,7 +24,7 @@ impl InternalQueueStorage {
         Self { db }
     }
 
-    pub fn insert_destination_stat_uncommitted(
+    pub fn insert_statistics_uncommitted(
         &self,
         batch: &mut WriteBatchWithTransaction<false>,
         key: &StatKey,
@@ -52,7 +45,7 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn collect_commited_stats_in_range(
+    pub fn collect_committed_stats_in_range(
         &self,
         snapshot: &OwnedSnapshot,
         shard_ident: ShardIdent,
@@ -73,7 +66,7 @@ impl InternalQueueStorage {
         self.collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
     }
 
-    pub fn collect_uncommited_stats_in_range(
+    pub fn collect_uncommitted_stats_in_range(
         &self,
         snapshot: &OwnedSnapshot,
         shard_ident: ShardIdent,
@@ -137,13 +130,10 @@ impl InternalQueueStorage {
                     }
 
                     let (count_bytes, dest_bytes) = v.split_at(8);
+                    let dest_addr = tl_proto::deserialize::<DestAddr>(dest_bytes)?;
                     let count = u64::from_be_bytes(count_bytes.try_into().unwrap());
 
-                    let cell = Boc::decode(dest_bytes)?;
-
-                    let int_addr = IntAddr::load_from(&mut cell.as_slice()?)?;
-
-                    let entry = result.entry(int_addr).or_insert(0);
+                    let entry = result.entry(dest_addr.to_int_addr()).or_insert(0);
                     *entry += count;
                 }
                 _ => {
