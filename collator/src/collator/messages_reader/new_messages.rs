@@ -51,7 +51,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         for stats in partition_all_ranges_msgs_stats {
             for account_addr in stats.statistics().keys() {
                 self.partition_router
-                    .insert(account_addr.clone(), partition_id.into());
+                    .insert(account_addr.clone(), partition_id.try_into().unwrap());
             }
         }
     }
@@ -71,11 +71,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn add_message(&mut self, message: Arc<V>) {
         self.messages.insert(message.key(), message.clone());
         if self.current_shard.contains_address(message.destination()) {
-            let partition = self
-                .partition_router
-                .get(message.destination())
-                .cloned()
-                .unwrap_or_default();
+            let partition = self.partition_router.get_partition(message.destination());
             self.messages_for_current_shard
                 .entry(partition as u8)
                 .or_default()
