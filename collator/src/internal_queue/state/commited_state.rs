@@ -1,17 +1,12 @@
-use ahash::HashMapExt;
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition};
-use tycho_storage::model::StatKey;
+use tycho_block_util::queue::QueuePartition;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 use weedb::OwnedSnapshot;
 
-use crate::internal_queue::state::state_iterator::{
-    ShardIteratorWithRange, StateIterator, StateIteratorImpl,
-};
-use crate::internal_queue::types::{InternalMessageValue, QueueRange, QueueShardRange};
-use crate::types::processed_upto::PartitionId;
+use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
+use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
 // CONFIG
 
 pub struct CommittedStateConfig {
@@ -76,7 +71,7 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
         partition: QueuePartition,
-        range: &Vec<QueueShardRange>,
+        range: &[QueueShardRange],
     ) -> Result<()>;
 }
 
@@ -139,13 +134,13 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
         partition: QueuePartition,
-        ranges: &Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<()> {
         for range in ranges {
             self.storage
                 .internal_queue_storage()
-                .collect_commited_stats_in_range(
-                    &snapshot,
+                .collect_committed_stats_in_range(
+                    snapshot,
                     range.shard_ident,
                     partition,
                     range.from,

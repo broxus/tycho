@@ -304,7 +304,7 @@ impl MessagesReader {
         const MAX_PAR_0_MSGS_COUNT_LIMIT: u64 = 100_000;
 
         partition_router.clear();
-        for (account_addr, msgs_count) in stats.into_iter() {
+        for (account_addr, msgs_count) in stats {
             if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
                 partition_router.insert(account_addr, QueuePartition::LowPriority);
             }

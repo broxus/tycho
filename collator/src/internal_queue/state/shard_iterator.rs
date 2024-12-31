@@ -35,8 +35,6 @@ pub enum IterResult<'a> {
 }
 
 pub struct ShardIterator {
-    partition: QueuePartition,
-    shard_ident: ShardIdent,
     range: Range,
     receiver: ShardIdent,
     iterator: OwnedIterator,
@@ -56,8 +54,6 @@ impl ShardIterator {
         let range = Range::from((partition, shard_ident, from, to));
 
         Self {
-            partition,
-            shard_ident,
             range,
             receiver,
             iterator,

@@ -1,5 +1,5 @@
 pub use self::proto::{
-    QueueDiff, QueueKey, QueuePartition, QueueState, QueueStateHeader, QueueStateRef,
+    DestAddr, QueueDiff, QueueKey, QueuePartition, QueueState, QueueStateHeader, QueueStateRef,
 };
 pub use self::queue_diff::{
     QueueDiffMessagesIter, QueueDiffStuff, QueueDiffStuffAug, SerializedQueueDiff,
