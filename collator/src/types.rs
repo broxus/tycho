@@ -497,20 +497,6 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display
     }
 }
 
-pub(super) struct DisplayTuple<T1, T2>(pub (T1, T2));
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTuple<T1, T2> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple<T1, T2> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, {})", self.0 .0, self.0 .1)
-    }
-}
-
-pub(super) struct DisplayNestedMap<'a, OK, IK, V>(pub &'a BTreeMap<OK, BTreeMap<IK, V>>);
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct ShardDescriptionShort {
     pub ext_processed_to_anchor_id: u32,

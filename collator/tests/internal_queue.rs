@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use everscale_types::models::{
     Transaction, TxInfo,
 };
 use everscale_types::num::Tokens;
-use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartition};
+use tycho_block_util::queue::{DestAddr, QueueDiff, QueueDiffStuff, QueueKey, QueuePartition};
 use tycho_collator::internal_queue::queue::{
     Queue, QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
 };
@@ -24,7 +24,7 @@ use tycho_collator::internal_queue::state::uncommitted_state::{
     UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
 use tycho_collator::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
+    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
 };
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
@@ -143,7 +143,7 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    let mut partition_router = FastHashMap::default();
+    let mut partition_router = PartitionRouter::default();
 
     for stored_object in &stored_objects {
         partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority);
@@ -206,7 +206,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let top_blocks = vec![(block2, true)];
 
-    let mut partition_router = FastHashMap::default();
+    let mut partition_router = PartitionRouter::default();
 
     for stored_object in &stored_objects2 {
         partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority);
@@ -426,7 +426,6 @@ async fn test_statistics() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(FALSE)]
 #[test]
 fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut out_msg = OutMsgDescr::default();
@@ -532,10 +531,15 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut messages = vec![message1_hash, message2_hash, message3_hash];
     messages.sort_unstable();
 
-    let mut partition_router = FastHashMap::default();
+    let mut partition_router = BTreeMap::default();
+
     partition_router.insert(
-        IntAddr::Std(StdAddr::new(-1, HashBytes::ZERO)),
         QueuePartition::LowPriority,
+        BTreeSet::from_iter(vec![
+            DestAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
+            DestAddr::try_from(IntAddr::Std(StdAddr::new(1, HashBytes::ZERO)))?,
+            DestAddr::try_from(IntAddr::Std(StdAddr::new(2, HashBytes::ZERO)))?,
+        ]),
     );
 
     let diff = QueueDiff {
@@ -578,6 +582,10 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let diff_with_messages = QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msg)?;
 
     assert_eq!(diff_with_messages.processed_to, diff.processed_to,);
+    assert_eq!(
+        diff_with_messages.partition_router,
+        PartitionRouter::from(diff.partition_router),
+    );
 
     assert_eq!(
         diff_with_messages
