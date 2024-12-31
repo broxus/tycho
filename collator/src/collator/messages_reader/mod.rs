@@ -378,7 +378,7 @@ impl MessagesReader {
         self.check_has_non_zero_processed_offset()
     }
 
-    pub fn refill_buffers_upto_offsets(&mut self) -> Result<()> {
+    pub fn refill_buffers_upto_offsets(&mut self, prev_block_gen_lt: u64) -> Result<()> {
         // holds the max LT_HASH of a new created messages to current shard
         // it needs to define the read range for new messages when we get next message group
         let max_new_message_key_to_current_shard = QueueKey::MIN;
@@ -400,7 +400,8 @@ impl MessagesReader {
 
         // while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
         loop {
-            let msg_group = self.get_next_message_group(GetNextMessageGroupMode::Refill)?;
+            let msg_group =
+                self.get_next_message_group(GetNextMessageGroupMode::Refill, prev_block_gen_lt)?;
             if msg_group.is_none() {
                 // on restart from a new genesis we will not be able to refill buffer with externals
                 // so we stop refilling when there is no more groups in buffer
@@ -426,6 +427,7 @@ impl MessagesReader {
     pub fn get_next_message_group(
         &mut self,
         read_mode: GetNextMessageGroupMode,
+        current_max_lt: u64,
     ) -> Result<Option<MessageGroup>> {
         let mut msg_group = MessageGroup::default();
 
@@ -444,25 +446,32 @@ impl MessagesReader {
                     par_reader.read_into_buffers()?;
                 }
                 MessagesReaderStage::NewMessages => {
+                    let par_reader = self
+                        .internals_partition_readers
+                        .get_mut(par_id)
+                        .context("reader for partition should exist")?;
+
+                    // update new messages reader "to" boundary
+                    par_reader.update_new_messages_reader_to_boundary(current_max_lt)?;
+
                     // check if has pending new messages
                     if !self
                         .new_messages
                         .has_pending_messages_from_partition(par_id)
                     {
+                        par_reader.set_new_messages_range_reader_fully_read()?;
                         continue;
                     }
 
-                    // take new messages
+                    // take new messages from state
                     if let Some(mut new_messages_for_current_shard) =
                         self.new_messages.take_messages_for_current_shard(par_id)
                     {
                         // read from new messages to buffers
-                        let par_reader = self
-                            .internals_partition_readers
-                            .get_mut(par_id)
-                            .context("reader for partition should exist")?;
-                        let taken_messages = par_reader
-                            .read_new_messages_into_buffer(&mut new_messages_for_current_shard)?;
+                        let taken_messages = par_reader.read_new_messages_into_buffer(
+                            &mut new_messages_for_current_shard,
+                            current_max_lt,
+                        )?;
 
                         // return new messages to state
                         self.new_messages.restore_messages_for_current_shard(
@@ -486,6 +495,9 @@ impl MessagesReader {
                 .internals_partition_readers
                 .remove(par_id)
                 .context("reader for partition should exist")?;
+
+            // update processing offset in current partition
+            par_reader.reader_state.curr_processed_offset += 1;
 
             // collect internals from partition
             let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader>::default();
@@ -545,12 +557,17 @@ impl MessagesReader {
                 unused_buffer_accounts_by_partitions
                     .insert((*par_id, seqno), unused_buffer_accounts);
 
+                let range_reader_processed_offset = reader.reader_state.processed_offset;
+
                 range_readers.insert(seqno, reader);
+
+                // get messages from the next range
+                // only when current range processed offset is reached
+                if par_reader.reader_state.curr_processed_offset <= range_reader_processed_offset {
+                    break;
+                }
             }
             par_reader.set_range_readers(range_readers);
-
-            // update processing offset in current partition
-            par_reader.reader_state.curr_processed_offset += 1;
 
             // check if should switch to next reading stage
             match par_reader_stage {
@@ -558,7 +575,7 @@ impl MessagesReader {
                     // check if all existing messages read and collected
                     if par_reader.all_ranges_fully_read && !par_reader.has_messages_in_buffers() {
                         // we can update processed_to when we collected all messages from the partition
-                        par_reader.set_processed_offset_to_current_position()?;
+                        par_reader.set_processed_to_current_position()?;
 
                         // drop processing offset when all ranges read
                         par_reader.drop_processing_offset()?;
@@ -577,7 +594,7 @@ impl MessagesReader {
                         && !par_reader.has_messages_in_buffers()
                     {
                         // we can update processed_to when we collected all messages from the partition
-                        par_reader.set_processed_offset_to_current_position()?;
+                        par_reader.set_processed_to_current_position()?;
 
                         // drop processing offset when all new messages read
                         par_reader.drop_processing_offset()?;
@@ -642,8 +659,7 @@ impl MessagesReader {
             // TODO: msgs-v3: fill messages group with internals again
         }
 
-        if msg_group.len() == 0 {
-            // TODO: msgs-v3: and no pending new messages
+        if msg_group.len() == 0 && !self.new_messages.has_pending_messages() {
             Ok(Some(msg_group))
         } else {
             Ok(None)
