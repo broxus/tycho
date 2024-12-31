@@ -435,6 +435,7 @@ impl MessagesReader {
 
         // TODO: msgs-v3: read internals from partitions and externals in parallel
 
+        //--------------------
         // read internals
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             match par_reader_stage {
@@ -561,7 +562,7 @@ impl MessagesReader {
 
                 range_readers.insert(seqno, reader);
 
-                // get messages from the next range
+                // collect messages from the next range
                 // only when current range processed offset is reached
                 if par_reader.reader_state.curr_processed_offset <= range_reader_processed_offset {
                     break;
@@ -607,8 +608,12 @@ impl MessagesReader {
         // return partion readers to state
         self.internals_partition_readers = par_readers;
 
+        //--------------------
         // read externals
         self.externals_reader.read_into_buffers();
+
+        // update processing offset
+        self.externals_reader.reader_state.curr_processed_offset += 1;
 
         // collect externals
         let mut range_readers = BTreeMap::<BlockSeqno, ExternalsRangeReader>::default();
@@ -634,13 +639,21 @@ impl MessagesReader {
                     false
                 },
             );
+
+            let range_reader_processed_offset = reader.reader_state.processed_offset;
+
             range_readers.insert(seqno, reader);
+
+            // collect messages from the next range
+            // only when current range processed offset is reached
+            if self.externals_reader.reader_state.curr_processed_offset
+                <= range_reader_processed_offset
+            {
+                break;
+            }
         }
         // return range readers to state
         self.externals_reader.set_range_readers(range_readers);
-
-        // TODO: msgs-v3: should drop offset when all ranges read
-        self.externals_reader.reader_state.curr_processed_offset += 1;
 
         // check if all externals collected
         if self.externals_reader.all_ranges_fully_read
@@ -648,6 +661,12 @@ impl MessagesReader {
         {
             // we can update processed_to when we collected all externals
             self.externals_reader.set_processed_to_current_position()?;
+
+            // drop processing offset when all ranges read
+            self.externals_reader.drop_processing_offset()?;
+
+            // drop all ranges except the last one
+            self.externals_reader.retain_only_last_range_reader()?;
         }
 
         // if message group was not fully filled after externals

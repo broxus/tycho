@@ -57,17 +57,15 @@ impl ExternalsReader {
 
     pub fn finalize(mut self) -> FinalizedExternalsReader {
         // collect range reader states
-        let last_seqno = self
-            .range_readers
-            .last_key_value()
-            .map(|(k, _)| *k)
-            .unwrap_or_default();
-        for (seqno, mut range_reader) in self.range_readers {
+        let mut range_readers = self.range_readers.into_iter().peekable();
+        let mut max_processed_offset = 0;
+        while let Some((seqno, mut range_reader)) = range_readers.next() {
             // update offset in the last range reader state
-            // we should update only if current offset is greater than stored one
-            if seqno == last_seqno
-                && self.reader_state.curr_processed_offset
-                    > range_reader.reader_state.processed_offset
+            // if current offset is greater than the maximum stored one among all ranges
+            max_processed_offset =
+                max_processed_offset.max(range_reader.reader_state.processed_offset);
+            if self.reader_state.curr_processed_offset > max_processed_offset
+                && range_readers.peek().is_none()
             {
                 range_reader.reader_state.processed_offset =
                     self.reader_state.curr_processed_offset;
@@ -101,18 +99,47 @@ impl ExternalsReader {
         self.anchors_cache.has_pending_externals()
     }
 
+    pub fn retain_only_last_range_reader(&mut self) -> Result<()> {
+        let (last_seqno, last_range_reader) = self.range_readers.pop_last().context(
+            "externals reader should have at least one range reader after reading into buffer",
+        )?;
+        self.range_readers.clear();
+        self.range_readers.insert(last_seqno, last_range_reader);
+        Ok(())
+    }
+
     pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, ExternalsRangeReader)> {
         self.range_readers.pop_first()
     }
 
-    pub fn set_range_readers(&mut self, range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>) {
-        self.range_readers = range_readers;
+    pub fn set_range_readers(
+        &mut self,
+        mut range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
+    ) {
+        self.range_readers.append(&mut range_readers);
+    }
+
+    pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &ExternalsRangeReader)> {
+        self.range_readers.last_key_value().context(
+            "externals reader should have at least one range reader after reading into buffer",
+        )
+    }
+
+    pub fn get_last_range_reader_mut(&mut self) -> Result<&mut ExternalsRangeReader> {
+        let (&last_seqno, _) = self.get_last_range_reader()?;
+        Ok(self.range_readers.get_mut(&last_seqno).unwrap())
+    }
+
+    /// Drop current offset and offset in the last range reader state
+    pub fn drop_processing_offset(&mut self) -> Result<()> {
+        self.reader_state.curr_processed_offset = 0;
+        let last_range_reader = self.get_last_range_reader_mut()?;
+        last_range_reader.reader_state.processed_offset = 0;
+        Ok(())
     }
 
     pub fn set_processed_to_current_position(&mut self) -> Result<()> {
-        let (_, last_range_reader) = self.range_readers.last_key_value().context(
-            "externals reader should have at least one range reader after reading into buffer",
-        )?;
+        let (_, last_range_reader) = self.get_last_range_reader()?;
         self.reader_state.processed_to = last_range_reader.reader_state.current_position;
         Ok(())
     }
