@@ -3,20 +3,17 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartition};
-use tycho_util::FastHashMap;
 
-use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
+use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::commited_state::CommittedStateStdImpl;
-use crate::internal_queue::state::state_iterator::IterRange;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::uncommitted_state::UncommittedStateStdImpl;
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueRange, QueueShardRange,
-    QueueStatistics,
+    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueShardRange, QueueStatistics,
 };
 use crate::tracing_targets;
-use crate::types::{DisplayIter, DisplayNestedMap, DisplayTuple, DisplayTupleRef};
+use crate::types::{DisplayIter, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>,
