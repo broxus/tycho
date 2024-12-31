@@ -143,26 +143,22 @@ impl InternalsParitionReader {
         self.range_readers.pop_first()
     }
 
-    pub fn set_range_readers(&mut self, range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>) {
-        self.range_readers = range_readers;
+    pub fn set_range_readers(
+        &mut self,
+        mut range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>,
+    ) {
+        self.range_readers.append(&mut range_readers);
     }
 
     pub(super) fn insert_range_reader(
         &mut self,
         seqno: BlockSeqno,
         reader: InternalsRangeReader,
-    ) -> Result<&mut InternalsRangeReader> {
+    ) -> &mut InternalsRangeReader {
         self.range_readers.insert(seqno, reader);
-        self.get_range_reader_mut(&seqno)
-    }
-
-    pub fn get_range_reader_mut(
-        &mut self,
-        seqno: &BlockSeqno,
-    ) -> Result<&mut InternalsRangeReader> {
         self.range_readers
-            .get_mut(seqno)
-            .context("partition reader should have at least one range reader")
+            .get_mut(&seqno)
+            .expect("just inserted range reader should exist")
     }
 
     pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &InternalsRangeReader)> {
@@ -172,11 +168,8 @@ impl InternalsParitionReader {
     }
 
     pub fn get_last_range_reader_mut(&mut self) -> Result<&mut InternalsRangeReader> {
-        let (&last_seqno, _) = self
-            .range_readers
-            .last_key_value()
-            .context("partition reader should have at least one range reader")?;
-        self.get_range_reader_mut(&last_seqno)
+        let (&last_seqno, _) = self.get_last_range_reader()?;
+        Ok(self.range_readers.get_mut(&last_seqno).unwrap())
     }
 
     /// Drop current offset and offset in the last range reader state
@@ -187,7 +180,7 @@ impl InternalsParitionReader {
         Ok(())
     }
 
-    pub fn set_processed_offset_to_current_position(&mut self) -> Result<()> {
+    pub fn set_processed_to_current_position(&mut self) -> Result<()> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
         self.reader_state.processed_to = last_range_reader
             .reader_state
