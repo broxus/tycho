@@ -622,7 +622,11 @@ impl MessagesExecutor {
             let subgroup_size = self.wu_params_execute.subgroup_size.max(1) as usize;
             group_horizontal_size.div_ceil(subgroup_size)
         };
-        let total_exec_wu = (total_exec_wu / subgroup_count as u128) as u64;
+        let total_exec_wu = if subgroup_count == 0 {
+            0
+        } else {
+            total_exec_wu.saturating_div(subgroup_count as u128) as u64
+        };
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)
