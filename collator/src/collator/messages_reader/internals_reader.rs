@@ -5,10 +5,14 @@ use anyhow::{bail, Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 
-use super::super::messages_buffer::MessagesBufferLimits;
-use super::super::types::{Dequeued, ParsedMessage};
-use super::{InternalsRangeReaderState, PartitionReaderState, ShardReaderState};
-use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
+use super::{
+    DebugInternalsRangeReaderState, InternalsRangeReaderState, PartitionReaderState,
+    ShardReaderState,
+};
+use crate::collator::messages_buffer::{
+    BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
+};
+use crate::collator::types::{Dequeued, ParsedMessage};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -273,7 +277,7 @@ impl InternalsParitionReader {
             for_shard_id = %reader.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
-            shard_reader_states = ?reader.reader_state.shards,
+            reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
             "created existing range reader",
         );
 
@@ -355,7 +359,7 @@ impl InternalsParitionReader {
             for_shard_id = %reader.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
-            shard_reader_states = ?reader.reader_state.shards,
+            reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
             "created next range reader",
         );
 
@@ -412,6 +416,7 @@ impl InternalsParitionReader {
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             partition_id = self.partition_id,
                             seqno,
+                            reader_state = ?DebugInternalsRangeReaderState(&range_reader.reader_state),
                             "internals reader: can fill message group on ({}x{})",
                             self.max_limits.slots_count, self.max_limits.slot_vert_size,
                         );
@@ -422,6 +427,7 @@ impl InternalsParitionReader {
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             partition_id = self.partition_id,
                             seqno,
+                            reader_state = ?DebugInternalsRangeReaderState(&range_reader.reader_state),
                             "internals reader: message buffer filled on {}/{}",
                             range_reader.reader_state.buffer.msgs_count(), self.max_limits.max_count,
                         );
