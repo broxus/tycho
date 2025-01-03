@@ -8,7 +8,9 @@ use everscale_types::models::{IntAddr, MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
 
-use super::messages_buffer::{FastIndexSet, MessageGroup, MessagesBufferLimits};
+use super::messages_buffer::{
+    DisplayMessageGroup, FastIndexSet, MessageGroup, MessagesBufferLimits,
+};
 use super::types::AnchorsCache;
 use crate::internal_queue::types::{
     EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
@@ -585,6 +587,14 @@ impl MessagesReader {
                         par_reader.retain_only_last_range_reader()?;
 
                         *par_reader_stage = MessagesReaderStage::NewMessages;
+
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            partition_id = *par_id,
+                            int_processed_to = ?par_reader.reader_state.processed_to,
+                            int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
+                            last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                            "all existing internals collected from partition",
+                        );
                     }
                 }
                 MessagesReaderStage::NewMessages => {
@@ -599,6 +609,14 @@ impl MessagesReader {
 
                         // drop processing offset when all new messages read
                         par_reader.drop_processing_offset()?;
+
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            partition_id = *par_id,
+                            int_processed_to = ?par_reader.reader_state.processed_to,
+                            int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
+                            last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                            "all new internals collected from partition",
+                        );
                     }
                 }
             }
@@ -667,6 +685,13 @@ impl MessagesReader {
 
             // drop all ranges except the last one
             self.externals_reader.retain_only_last_range_reader()?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                ext_processed_to = ?self.externals_reader.reader_state.processed_to,
+                ext_curr_processed_offset = self.externals_reader.reader_state.curr_processed_offset,
+                last_range_reader_state = ?self.externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(&r.reader_state))),
+                "all externals collected",
+            );
         }
 
         // if message group was not fully filled after externals
@@ -678,10 +703,15 @@ impl MessagesReader {
             // TODO: msgs-v3: fill messages group with internals again
         }
 
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "message group collected: {}",
+            DisplayMessageGroup(&msg_group),
+        );
+
         if msg_group.len() == 0 && !self.new_messages.has_pending_messages() {
-            Ok(Some(msg_group))
-        } else {
             Ok(None)
+        } else {
+            Ok(Some(msg_group))
         }
     }
 }
