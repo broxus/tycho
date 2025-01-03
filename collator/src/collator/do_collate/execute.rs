@@ -62,10 +62,10 @@ impl Phase<ExecuteState> {
         let mut executed_groups_count = 0;
         loop {
             let mut timer = std::time::Instant::now();
-            let msg_group_opt = self
-                .extra
-                .messages_reader
-                .get_next_message_group(GetNextMessageGroupMode::Continue)?;
+            let msg_group_opt = self.extra.messages_reader.get_next_message_group(
+                GetNextMessageGroupMode::Continue,
+                self.extra.executor.executor.min_next_lt(),
+            )?;
             fill_msgs_total_elapsed += timer.elapsed();
 
             if let Some(msg_group) = msg_group_opt {

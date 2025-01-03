@@ -5,10 +5,14 @@ use anyhow::{bail, Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 
-use super::super::messages_buffer::MessagesBufferLimits;
-use super::super::types::{Dequeued, ParsedMessage};
-use super::{InternalsRangeReaderState, PartitionReaderState, ShardReaderState};
-use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
+use super::{
+    DebugInternalsRangeReaderState, InternalsRangeReaderState, PartitionReaderState,
+    ShardReaderState,
+};
+use crate::collator::messages_buffer::{
+    BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
+};
+use crate::collator::types::{Dequeued, ParsedMessage};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -143,26 +147,22 @@ impl InternalsParitionReader {
         self.range_readers.pop_first()
     }
 
-    pub fn set_range_readers(&mut self, range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>) {
-        self.range_readers = range_readers;
+    pub fn set_range_readers(
+        &mut self,
+        mut range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>,
+    ) {
+        self.range_readers.append(&mut range_readers);
     }
 
     pub(super) fn insert_range_reader(
         &mut self,
         seqno: BlockSeqno,
         reader: InternalsRangeReader,
-    ) -> Result<&mut InternalsRangeReader> {
+    ) -> &mut InternalsRangeReader {
         self.range_readers.insert(seqno, reader);
-        self.get_range_reader_mut(&seqno)
-    }
-
-    pub fn get_range_reader_mut(
-        &mut self,
-        seqno: &BlockSeqno,
-    ) -> Result<&mut InternalsRangeReader> {
         self.range_readers
-            .get_mut(seqno)
-            .context("partition reader should have at least one range reader")
+            .get_mut(&seqno)
+            .expect("just inserted range reader should exist")
     }
 
     pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &InternalsRangeReader)> {
@@ -172,11 +172,8 @@ impl InternalsParitionReader {
     }
 
     pub fn get_last_range_reader_mut(&mut self) -> Result<&mut InternalsRangeReader> {
-        let (&last_seqno, _) = self
-            .range_readers
-            .last_key_value()
-            .context("partition reader should have at least one range reader")?;
-        self.get_range_reader_mut(&last_seqno)
+        let (&last_seqno, _) = self.get_last_range_reader()?;
+        Ok(self.range_readers.get_mut(&last_seqno).unwrap())
     }
 
     /// Drop current offset and offset in the last range reader state
@@ -187,7 +184,7 @@ impl InternalsParitionReader {
         Ok(())
     }
 
-    pub fn set_processed_offset_to_current_position(&mut self) -> Result<()> {
+    pub fn set_processed_to_current_position(&mut self) -> Result<()> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
         self.reader_state.processed_to = last_range_reader
             .reader_state
@@ -280,7 +277,7 @@ impl InternalsParitionReader {
             for_shard_id = %reader.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
-            shard_reader_states = ?reader.reader_state.shards,
+            reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
             "created existing range reader",
         );
 
@@ -362,7 +359,7 @@ impl InternalsParitionReader {
             for_shard_id = %reader.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
-            shard_reader_states = ?reader.reader_state.shards,
+            reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
             "created next range reader",
         );
 
@@ -419,6 +416,7 @@ impl InternalsParitionReader {
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             partition_id = self.partition_id,
                             seqno,
+                            reader_state = ?DebugInternalsRangeReaderState(&range_reader.reader_state),
                             "internals reader: can fill message group on ({}x{})",
                             self.max_limits.slots_count, self.max_limits.slot_vert_size,
                         );
@@ -429,6 +427,7 @@ impl InternalsParitionReader {
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             partition_id = self.partition_id,
                             seqno,
+                            reader_state = ?DebugInternalsRangeReaderState(&range_reader.reader_state),
                             "internals reader: message buffer filled on {}/{}",
                             range_reader.reader_state.buffer.msgs_count(), self.max_limits.max_count,
                         );
