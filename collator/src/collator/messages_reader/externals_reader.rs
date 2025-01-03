@@ -217,14 +217,15 @@ impl ExternalsReader {
             return;
         }
 
+        let mut last_seqno = 0;
+        let mut seqno = self
+            .range_readers
+            .first_key_value()
+            .map(|(k, _)| *k)
+            .unwrap_or_default();
+
         loop {
             let mut last_ext_read_res = ReadExternalsRangeResult::default();
-            let mut last_seqno = 0;
-            let mut seqno = self
-                .range_readers
-                .first_key_value()
-                .map(|(k, _)| *k)
-                .unwrap_or_default();
             let mut all_ranges_fully_read = true;
             while let Some(range_reader) = self.range_readers.get_mut(&seqno) {
                 // remember last existing range
@@ -253,6 +254,16 @@ impl ExternalsReader {
                 // next time the method is called
                 if !range_reader.fully_read {
                     all_ranges_fully_read = false;
+                } else if seqno == self.block_seqno {
+                    // if current range is a last one and fully read
+                    // then set current position to the end of the last imported anchor
+                    if let Some(last_imported_anchor) = self.anchors_cache.last_imported_anchor() {
+                        range_reader.reader_state.current_position = ExternalKey {
+                            anchor_id: last_imported_anchor.id,
+                            msgs_offset: last_imported_anchor.all_exts_count as u64,
+                        };
+                        range_reader.reader_state.to = range_reader.reader_state.current_position;
+                    }
                 }
 
                 // try to get next range
@@ -270,13 +281,16 @@ impl ExternalsReader {
 
             // if all ranges fully read try create next one
             if all_ranges_fully_read {
-                if last_seqno != self.block_seqno {
-                    let last_range_reader_state_to_opt =
-                        self.reader_state.ranges.get(&last_seqno).map(|r_s| r_s.to);
+                if last_seqno < self.block_seqno {
+                    let last_range_reader_state_to_opt = self
+                        .range_readers
+                        .get(&last_seqno)
+                        .map(|r| r.reader_state.to);
                     let reader =
                         self.create_next_externals_range_reader(last_range_reader_state_to_opt);
                     self.range_readers.insert(self.block_seqno, reader);
                     self.all_ranges_fully_read = false;
+                    seqno = self.block_seqno;
                 } else {
                     // if cannot create next one then store flag and exit
                     self.all_ranges_fully_read = true;
@@ -318,6 +332,7 @@ impl ExternalsRangeReader {
 
         let mut prev_to_reached = false;
 
+        // TODO: msgs-v3: use buffer method for check
         // check if buffer is full
         // or we can already fill required slots
         let mut buffer_filled = Self::check_message_buffer_filled(
@@ -512,6 +527,7 @@ impl ExternalsRangeReader {
                             "collected ext_msg dst: {}", ext_msg.info.dst,
                         );
 
+                        // TODO: msgs-v3: use buffer method for check
                         // check if buffer is full
                         // or we can already fill required slots
                         buffer_filled = Self::check_message_buffer_filled(
