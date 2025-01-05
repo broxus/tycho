@@ -370,17 +370,25 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         tracing::info!(i, chunk_size = %ByteSize(chunk.len() as u64));
     }
 
-    let mut read_messages = 0;
-    while let Some(cell) = reader.read_next_message()? {
-        let msg = cell.parse::<Message<'_>>()?;
-        let MsgInfo::Int(_) = msg.info else {
-            panic!("unexpected message type");
-        };
-        assert!(msg.init.is_none());
-        assert!(msg.body.is_empty());
-        read_messages += 1;
+    let mut read_messages = FastHashSet::default();
+    let mut next_diff_index = 0;
+    while let Some(_) = reader.read_next_diff()? {
+        next_diff_index += 1;
+        while let Some(cell) = reader.read_next_message()? {
+            let exists = read_messages.insert(*cell.repr_hash());
+            assert!(exists, "duplicate message");
+
+            let msg = cell.parse::<Message<'_>>()?;
+
+            matches!(msg.info, MsgInfo::Int(_));
+
+            assert!(msg.init.is_none());
+            assert!(msg.body.is_empty());
+        }
+        assert_eq!(reader.next_queue_diff_index(), next_diff_index);
+        assert_eq!(read_messages.len(), next_diff_index * 5000);
     }
-    assert_eq!(read_messages, target_message_count);
+    assert_eq!(read_messages.len(), target_message_count);
 
     reader.finish()?;
 

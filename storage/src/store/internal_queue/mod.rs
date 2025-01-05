@@ -32,17 +32,18 @@ impl InternalQueueStorage {
         count: u64,
     ) -> Result<()> {
         let cf = self.db.internal_messages_statistics_uncommitted.cf();
-        let mut key_buffer = Vec::with_capacity(StatKey::SIZE_HINT);
-        key.serialize(&mut key_buffer);
+        self.insert_statistics(batch, &cf, key, dest, count)
+    }
 
-        let mut value_buffer = Vec::with_capacity(std::mem::size_of::<u64>() + dest.len());
-
-        value_buffer.extend_from_slice(&count.to_be_bytes());
-        value_buffer.extend_from_slice(dest);
-
-        batch.put_cf(&cf, &key_buffer, &value_buffer);
-
-        Ok(())
+    pub fn insert_statistics_committed(
+        &self,
+        batch: &mut WriteBatchWithTransaction<false>,
+        key: &StatKey,
+        dest: &[u8],
+        count: u64,
+    ) -> Result<()> {
+        let cf = self.db.internal_messages_statistics_committed.cf();
+        self.insert_statistics(batch, &cf, key, dest, count)
     }
 
     pub fn collect_committed_stats_in_range(
@@ -56,10 +57,10 @@ impl InternalQueueStorage {
     ) -> Result<()> {
         let mut read_config = self
             .db
-            .internal_messages_statistics_commited
+            .internal_messages_statistics_committed
             .new_read_config();
         read_config.set_snapshot(snapshot);
-        let cf = self.db.internal_messages_statistics_commited.cf();
+        let cf = self.db.internal_messages_statistics_committed.cf();
 
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
@@ -166,36 +167,79 @@ impl InternalQueueStorage {
 
             let mut reader = QueueStateReader::begin_from_mapped(mapped.as_slice(), &top_update)?;
 
-            let cf = this.db.shards_internal_messages.cf();
+            let messages_cf = this.db.shards_internal_messages.cf();
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
             let mut buffer = Vec::new();
-            while let Some(cell) = reader.read_next_message()? {
-                let msg_hash = cell.repr_hash();
-                let msg = cell.parse::<Message<'_>>()?;
-                let MsgInfo::Int(int_msg_info) = &msg.info else {
-                    anyhow::bail!("non-internal message in the queue in msg {msg_hash}");
-                };
+            let mut statistics: FastHashMap<QueuePartition, FastHashMap<DestAddr, u64>> =
+                FastHashMap::default();
+            while let Some(_) = reader.read_next_diff()? {
+                let current_diff_index = reader.next_queue_diff_index() - 1;
 
-                let IntAddr::Std(dest) = &int_msg_info.dst else {
-                    anyhow::bail!("non-std destination address in msg {msg_hash}");
-                };
+                while let Some(cell) = reader.read_next_message()? {
+                    let msg_hash = cell.repr_hash();
+                    let msg = cell.parse::<Message<'_>>()?;
+                    let MsgInfo::Int(int_msg_info) = &msg.info else {
+                        anyhow::bail!("non-internal message in the queue in msg {msg_hash}");
+                    };
 
-                let key = ShardsInternalMessagesKey {
-                    // TODO !!! read it
-                    partition: QueuePartition::NormalPriority,
-                    shard_ident,
-                    internal_message_key: QueueKey {
-                        lt: int_msg_info.created_lt,
-                        hash: *msg_hash,
-                    },
-                };
+                    let IntAddr::Std(dest) = &int_msg_info.dst else {
+                        anyhow::bail!("non-std destination address in msg {msg_hash}");
+                    };
 
-                buffer.clear();
-                buffer.push(dest.workchain as u8);
-                buffer.extend_from_slice(&dest.prefix().to_be_bytes());
-                BocHeader::<ahash::RandomState>::with_root(cell.as_ref()).encode(&mut buffer);
-                batch.put_cf(&cf, key.to_vec(), &buffer);
+                    let dest_addr = DestAddr {
+                        workchain: dest.workchain,
+                        account: dest.address,
+                    };
+                    let current_diff = &reader.state().header.queue_diffs[current_diff_index];
+                    let partition = current_diff
+                        .partition_router
+                        .iter()
+                        .find_map(|(key, value)| {
+                            if value.contains(&dest_addr) {
+                                Some(key)
+                            } else {
+                                None
+                            }
+                        })
+                        .cloned()
+                        .unwrap_or(QueuePartition::NormalPriority);
+
+                    let key = ShardsInternalMessagesKey {
+                        partition,
+                        shard_ident,
+                        internal_message_key: QueueKey {
+                            lt: int_msg_info.created_lt,
+                            hash: *msg_hash,
+                        },
+                    };
+
+                    buffer.clear();
+                    buffer.push(dest.workchain as u8);
+                    buffer.extend_from_slice(&dest.prefix().to_be_bytes());
+                    BocHeader::<ahash::RandomState>::with_root(cell.as_ref()).encode(&mut buffer);
+                    batch.put_cf(&messages_cf, key.to_vec(), &buffer);
+
+                    let partition_stats = statistics.entry(partition).or_default();
+                    *partition_stats.entry(dest_addr).or_insert(0) += 1;
+                }
+
+                let current_diff = &reader.state().header.queue_diffs[current_diff_index];
+
+                for (partition, statistics) in statistics.drain() {
+                    for (index, (dest, count)) in statistics.iter().enumerate() {
+                        let key = StatKey {
+                            shard_ident,
+                            partition,
+                            min_message: current_diff.min_message,
+                            max_message: current_diff.max_message,
+                            index: index as u64,
+                        };
+
+                        let acc = tl_proto::serialize(dest);
+                        this.insert_statistics_committed(&mut batch, &key, &acc, *count)?;
+                    }
+                }
             }
 
             reader.finish()?;
@@ -265,7 +309,7 @@ impl InternalQueueStorage {
                 &from_stat_key.to_vec(),
                 &to_stat_key.to_vec(),
                 &self.db.internal_messages_statistics_uncommitted.cf(),
-                &self.db.internal_messages_statistics_commited.cf(),
+                &self.db.internal_messages_statistics_committed.cf(),
             )?;
         }
 
@@ -342,7 +386,7 @@ impl InternalQueueStorage {
 
             self.delete_range(
                 &mut batch,
-                &self.db.internal_messages_statistics_commited.cf(),
+                &self.db.internal_messages_statistics_committed.cf(),
                 &start_stat_key,
                 &end_stat_key,
             )?;
@@ -461,6 +505,26 @@ impl InternalQueueStorage {
         buffer.extend_from_slice(cell);
 
         batch.put_cf(&cf, key.to_vec().as_slice(), &buffer);
+
+        Ok(())
+    }
+
+    fn insert_statistics(
+        &self,
+        batch: &mut WriteBatchWithTransaction<false>,
+        cf: &BoundedCfHandle<'_>,
+        key: &StatKey,
+        dest: &[u8],
+        count: u64,
+    ) -> Result<()> {
+        let mut key_buffer = Vec::with_capacity(StatKey::SIZE_HINT);
+        key.serialize(&mut key_buffer);
+
+        let mut value_buffer = Vec::with_capacity(std::mem::size_of::<u64>() + dest.len());
+        value_buffer.extend_from_slice(&count.to_be_bytes());
+        value_buffer.extend_from_slice(dest);
+
+        batch.put_cf(cf, &key_buffer, &value_buffer);
 
         Ok(())
     }
