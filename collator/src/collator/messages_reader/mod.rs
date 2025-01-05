@@ -308,7 +308,9 @@ impl MessagesReader {
         partition_router.clear();
         for (account_addr, msgs_count) in stats {
             if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
-                partition_router.insert(account_addr, QueuePartition::LowPriority);
+                partition_router
+                    .insert(account_addr, QueuePartition::LowPriority)
+                    .unwrap();
             }
         }
     }
