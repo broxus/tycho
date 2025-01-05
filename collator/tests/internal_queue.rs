@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,8 +25,7 @@ use tycho_collator::internal_queue::state::uncommitted_state::{
 use tycho_collator::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
 };
-use tycho_collator::test_utils::prepare_test_storage;
-use tycho_util::FastHashMap;
+use tycho_storage::Storage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredObject {
@@ -86,20 +84,128 @@ impl InternalMessageValue for StoredObject {
     }
 }
 
-fn create_stored_object(key: u64, dest_str: &str) -> anyhow::Result<Arc<StoredObject>> {
-    let dest = IntAddr::Std(StdAddr::from_str(dest_str)?);
+fn create_stored_object(key: u64, dest_addr: DestAddr) -> anyhow::Result<Arc<StoredObject>> {
+    let dest = dest_addr.to_int_addr();
     Ok(Arc::new(StoredObject { key, dest }))
+}
+
+fn test_statistics_check_statistics(
+    queue: &QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject>,
+    dest_1_low_priority: DestAddr,
+    dest_2_low_priority: DestAddr,
+    dest_3_normal_priority: DestAddr,
+) -> anyhow::Result<()> {
+    // check two diff statistics
+    let statistics_low_priority_partition =
+        queue.load_statistics(QueuePartition::LowPriority, vec![QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            },
+        }])?;
+
+    let addr_1_stat = statistics_low_priority_partition
+        .statistics()
+        .get(&dest_1_low_priority.to_int_addr())
+        .unwrap();
+    let addr_2_stat = statistics_low_priority_partition
+        .statistics()
+        .get(&dest_2_low_priority.to_int_addr())
+        .unwrap();
+
+    assert_eq!(*addr_1_stat, 20000);
+    assert_eq!(*addr_2_stat, 10000);
+
+    let statistics_normal_priority_partition =
+        queue.load_statistics(QueuePartition::NormalPriority, vec![QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            },
+        }])?;
+
+    let addr_3_stat = statistics_normal_priority_partition
+        .statistics()
+        .get(&dest_3_normal_priority.to_int_addr())
+        .unwrap();
+    assert_eq!(*addr_3_stat, 2000);
+
+    // check first diff
+    let statistics_low_priority_partition =
+        queue.load_statistics(QueuePartition::LowPriority, vec![QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 16000,
+                hash: HashBytes::default(),
+            },
+        }])?;
+
+    let addr_1_stat = statistics_low_priority_partition
+        .statistics()
+        .get(&dest_1_low_priority.to_int_addr())
+        .unwrap();
+    let addr_2_stat = statistics_low_priority_partition
+        .statistics()
+        .get(&dest_2_low_priority.to_int_addr())
+        .unwrap();
+
+    assert_eq!(*addr_1_stat, 10000);
+    assert_eq!(*addr_2_stat, 5000);
+
+    // check second diff
+    let statistics_low_priority_partition =
+        queue.load_statistics(QueuePartition::LowPriority, vec![QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 20000,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            },
+        }])?;
+
+    let addr_1_stat = statistics_low_priority_partition
+        .statistics()
+        .get(&dest_1_low_priority.to_int_addr())
+        .unwrap();
+    let addr_2_stat = statistics_low_priority_partition
+        .statistics()
+        .get(&dest_2_low_priority.to_int_addr())
+        .unwrap();
+
+    assert_eq!(*addr_1_stat, 10000);
+    assert_eq!(*addr_2_stat, 5000);
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         uncommitted_state_factory: UncommittedStateImplFactory {
             storage: storage.clone(),
         },
-        committed_state_factory: CommittedStateImplFactory { storage },
+        committed_state_factory: CommittedStateImplFactory {
+            storage: storage.clone(),
+        },
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
@@ -109,45 +215,56 @@ async fn test_queue() -> anyhow::Result<()> {
         queue_factory.create();
 
     // create first block with queue diff
-    let block = BlockIdShort {
+    let block1 = BlockIdShort {
         shard: ShardIdent::new_full(0),
         seqno: 0,
     };
     let mut diff = QueueDiffWithMessages::new();
 
-    let stored_objects = vec![
-        create_stored_object(
-            1,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            2,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            3,
-            "0:7d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            4,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            5,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-    ];
+    let mut partition_router = PartitionRouter::default();
 
-    for stored_object in &stored_objects {
+    let dest_1_low_priority =
+        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
+    let dest_2_low_priority =
+        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
+
+    // low priority
+    for i in 1..=10000 {
+        let stored_object = create_stored_object(i, dest_1_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+    }
+
+    for i in 10001..=15000 {
+        let stored_object = create_stored_object(i, dest_2_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+    }
+
+    let dest_3_normal_priority =
+        DestAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::from([3; 32]))))?;
+
+    // normal priority
+    for i in 15001..=16000 {
+        let stored_object = create_stored_object(i, dest_3_normal_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    let mut partition_router = PartitionRouter::default();
-
-    for stored_object in &stored_objects {
-        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority);
-    }
+    assert_eq!(
+        partition_router.get_partition(&dest_1_low_priority.to_int_addr()),
+        QueuePartition::LowPriority
+    );
+    assert_eq!(
+        partition_router.get_partition(&dest_2_low_priority.to_int_addr()),
+        QueuePartition::LowPriority
+    );
+    assert_eq!(
+        partition_router.get_partition(&dest_3_normal_priority.to_int_addr()),
+        QueuePartition::NormalPriority
+    );
 
     let diff_with_messages = QueueDiffWithMessages {
         messages: diff.messages,
@@ -155,62 +272,95 @@ async fn test_queue() -> anyhow::Result<()> {
         partition_router,
     };
 
-    let statistics = (&diff_with_messages, block.shard).into();
+    let diff_statistics: DiffStatistics = (&diff_with_messages, block1.shard).into();
+    assert_eq!(diff_with_messages.messages.len(), 16000);
+
+    // check low priority statistics
+    diff_statistics
+        .iter()
+        .filter(|(partition, _)| partition == &&QueuePartition::LowPriority)
+        .for_each(|(_partition, statistics)| {
+            assert_eq!(statistics.iter().count(), 2);
+
+            let addr1_count = statistics.get(&dest_1_low_priority.to_int_addr()).unwrap();
+            assert_eq!(*addr1_count, 10000);
+
+            let addr2_count = statistics.get(&dest_2_low_priority.to_int_addr()).unwrap();
+            assert_eq!(*addr2_count, 5000);
+        });
+
+    // check normal priority statistics
+    diff_statistics
+        .iter()
+        .filter(|(partition, _)| partition == &&QueuePartition::NormalPriority)
+        .for_each(|(_partition, statistics)| {
+            assert_eq!(statistics.iter().count(), 1);
+
+            let addr3_count = statistics
+                .get(&dest_3_normal_priority.to_int_addr())
+                .unwrap();
+            assert_eq!(*addr3_count, 1000);
+        });
 
     queue.apply_diff(
         diff_with_messages,
-        block,
+        block1,
         &HashBytes::from([1; 32]),
-        statistics,
+        diff_statistics,
     )?;
-
-    let top_blocks = vec![(block, true)];
-
-    queue.commit_diff(&top_blocks)?;
+    // end block 1 diff
 
     // create second block with queue diff
     let block2 = BlockIdShort {
-        shard: ShardIdent::new_full(1),
+        shard: ShardIdent::new_full(0),
         seqno: 1,
     };
-
     let mut diff = QueueDiffWithMessages::new();
 
-    let stored_objects2 = vec![
-        create_stored_object(
-            1,
-            "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            2,
-            "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            3,
-            "0:7d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            4,
-            "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            5,
-            "0:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-    ];
+    let mut partition_router = PartitionRouter::default();
 
-    for stored_object in &stored_objects2 {
+    let dest_1_low_priority =
+        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
+    let dest_2_low_priority =
+        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
+
+    // low priority
+    for i in 20001..=30000 {
+        let stored_object = create_stored_object(i, dest_1_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+    }
+
+    for i in 30001..=35000 {
+        let stored_object = create_stored_object(i, dest_2_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+    }
+
+    let dest_3_normal_priority =
+        DestAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::from([3; 32]))))?;
+
+    // normal priority
+    for i in 35001..=36000 {
+        let stored_object = create_stored_object(i, dest_3_normal_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    let top_blocks = vec![(block2, true)];
-
-    let mut partition_router = PartitionRouter::default();
-
-    for stored_object in &stored_objects2 {
-        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority);
-    }
+    assert_eq!(
+        partition_router.get_partition(&dest_1_low_priority.to_int_addr()),
+        QueuePartition::LowPriority
+    );
+    assert_eq!(
+        partition_router.get_partition(&dest_2_low_priority.to_int_addr()),
+        QueuePartition::LowPriority
+    );
+    assert_eq!(
+        partition_router.get_partition(&dest_3_normal_priority.to_int_addr()),
+        QueuePartition::NormalPriority
+    );
 
     let diff_with_messages = QueueDiffWithMessages {
         messages: diff.messages,
@@ -218,57 +368,169 @@ async fn test_queue() -> anyhow::Result<()> {
         partition_router,
     };
 
-    let statistics = (&diff_with_messages, block2.shard).into();
+    let diff_statistics: DiffStatistics = (&diff_with_messages, block2.shard).into();
+    assert_eq!(diff_with_messages.messages.len(), 16000);
+
+    // check low priority statistics
+    diff_statistics
+        .iter()
+        .filter(|(partition, _)| partition == &&QueuePartition::LowPriority)
+        .for_each(|(_partition, statistics)| {
+            assert_eq!(statistics.iter().count(), 2);
+
+            let addr1_count = statistics.get(&dest_1_low_priority.to_int_addr()).unwrap();
+            assert_eq!(*addr1_count, 10000);
+
+            let addr2_count = statistics.get(&dest_2_low_priority.to_int_addr()).unwrap();
+            assert_eq!(*addr2_count, 5000);
+        });
+
+    // check normal priority statistics
+    diff_statistics
+        .iter()
+        .filter(|(partition, _)| partition == &&QueuePartition::NormalPriority)
+        .for_each(|(_partition, statistics)| {
+            assert_eq!(statistics.iter().count(), 1);
+
+            let addr3_count = statistics
+                .get(&dest_3_normal_priority.to_int_addr())
+                .unwrap();
+            assert_eq!(*addr3_count, 1000);
+        });
 
     queue.apply_diff(
         diff_with_messages,
         block2,
-        &HashBytes::from([0; 32]),
-        statistics,
+        &HashBytes::from([1; 32]),
+        diff_statistics,
     )?;
-    queue.commit_diff(&top_blocks)?;
 
+    // end block 2 diff
+
+    test_statistics_check_statistics(
+        &queue,
+        dest_1_low_priority,
+        dest_2_low_priority,
+        dest_3_normal_priority,
+    )?;
+
+    queue.commit_diff(&vec![(block1, true)])?;
+    test_statistics_check_statistics(
+        &queue,
+        dest_1_low_priority,
+        dest_2_low_priority,
+        dest_3_normal_priority,
+    )?;
+
+    // test iterator
+    // test first diff iterator
     let mut ranges = Vec::new();
 
     let queue_range = QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
-            lt: 1,
+            lt: 0,
             hash: HashBytes::default(),
         },
         to: QueueKey {
-            lt: 4,
+            lt: 16000,
             hash: HashBytes::default(),
         },
     };
 
     ranges.push(queue_range);
 
-    let partition = QueuePartition::LowPriority;
-    let iterators = queue.iterator(partition, ranges, ShardIdent::new_full(-1))?;
+    let iterators = queue.iterator(
+        QueuePartition::LowPriority,
+        ranges.clone(),
+        ShardIdent::new_full(-1),
+    )?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
-    iterator_manager.next().ok();
-    let loaded_stored_object = iterator_manager.next();
+    let mut read_count = 0;
+    while let Some(_) = iterator_manager.next()? {
+        read_count += 1;
+    }
+    assert_eq!(read_count, 15000);
 
-    let loaded_stored_object = loaded_stored_object.unwrap().unwrap();
-    assert_eq!(stored_objects[3], loaded_stored_object.message);
+    let iterators = queue.iterator(
+        QueuePartition::NormalPriority,
+        ranges,
+        ShardIdent::new_full(0),
+    )?;
+    let mut iterator_manager = StatesIteratorsManager::new(iterators);
+    let mut read_count = 0;
+    while let Some(_) = iterator_manager.next()? {
+        read_count += 1;
+    }
 
-    let current_position = iterator_manager.current_position();
-    let mut expected_position = FastHashMap::default();
-    expected_position.insert(ShardIdent::new_full(0), QueueKey {
-        lt: 4,
-        hash: HashBytes::default(),
-    });
+    assert_eq!(read_count, 1000);
 
-    assert_eq!(expected_position, current_position);
+    // check two diff iterator
+    let mut ranges = Vec::new();
+
+    let queue_range = QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 0,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 36000,
+            hash: HashBytes::default(),
+        },
+    };
+
+    ranges.push(queue_range);
+
+    let iterators = queue.iterator(
+        QueuePartition::LowPriority,
+        ranges.clone(),
+        ShardIdent::new_full(-1),
+    )?;
+
+    let mut iterator_manager = StatesIteratorsManager::new(iterators);
+    let mut read_count = 0;
+    while let Some(_) = iterator_manager.next()? {
+        read_count += 1;
+    }
+    assert_eq!(read_count, 30000);
+
+    let iterators = queue.iterator(
+        QueuePartition::NormalPriority,
+        ranges,
+        ShardIdent::new_full(0),
+    )?;
+    let mut iterator_manager = StatesIteratorsManager::new(iterators);
+    let mut read_count = 0;
+    while let Some(_) = iterator_manager.next()? {
+        read_count += 1;
+    }
+
+    assert_eq!(read_count, 2000);
+
+    // test commit all diffs and check statistics
+    queue.commit_diff(&vec![(block2, true)])?;
+    test_statistics_check_statistics(
+        &queue,
+        dest_1_low_priority,
+        dest_2_low_priority,
+        dest_3_normal_priority,
+    )?;
+    queue.clear_uncommitted_state()?;
+    test_statistics_check_statistics(
+        &queue,
+        dest_1_low_priority,
+        dest_2_low_priority,
+        dest_3_normal_priority,
+    )?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_clear() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         uncommitted_state_factory: UncommittedStateImplFactory {
@@ -288,10 +550,10 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     };
     let mut diff = QueueDiffWithMessages::new();
 
-    let stored_objects = vec![create_stored_object(
-        1,
-        "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-    )?];
+    let stored_objects = vec![create_stored_object(1, DestAddr {
+        workchain: 1,
+        account: HashBytes::from([1; 32]),
+    })?];
 
     for stored_object in &stored_objects {
         diff.messages
@@ -330,7 +592,6 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     ranges.push(queue_range);
 
     let partition = QueuePartition::NormalPriority;
-
     let iterators = queue.iterator(partition, ranges.clone(), ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
@@ -342,86 +603,6 @@ async fn test_queue_clear() -> anyhow::Result<()> {
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next()?.is_none());
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_statistics() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
-
-    let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory: UncommittedStateImplFactory {
-            storage: storage.clone(),
-        },
-        committed_state_factory: CommittedStateImplFactory { storage },
-        config: QueueConfig {
-            gc_interval: Duration::from_secs(1),
-        },
-    };
-
-    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
-        queue_factory.create();
-    let block = BlockIdShort {
-        shard: ShardIdent::new_full(0),
-        seqno: 0,
-    };
-    let mut diff = QueueDiffWithMessages::new();
-
-    let stored_objects = vec![create_stored_object(
-        1,
-        "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-    )?];
-
-    for stored_object in &stored_objects {
-        diff.messages
-            .insert(stored_object.key(), stored_object.clone());
-    }
-
-    let start_key = *diff.messages.iter().next().unwrap().0;
-    let end_key = *diff.messages.iter().last().unwrap().0;
-    let diff_with_messages = QueueDiffWithMessages {
-        messages: diff.messages,
-        processed_to: diff.processed_to,
-        partition_router: Default::default(),
-    };
-
-    let statistics: DiffStatistics = (&diff_with_messages, block.shard).into();
-
-    for stat in statistics.iter() {
-        assert_eq!(stat.1.len(), 1);
-    }
-
-    queue.apply_diff(
-        diff_with_messages,
-        block,
-        &HashBytes::from([1; 32]),
-        statistics,
-    )?;
-
-    let top_blocks = vec![(block, true)];
-
-    queue.commit_diff(&top_blocks)?;
-
-    let partition = QueuePartition::NormalPriority;
-
-    let range = QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: start_key,
-        to: end_key,
-    };
-
-    let ranges = vec![range.clone()];
-
-    let stat = queue.load_statistics(partition, ranges)?;
-
-    assert_eq!(*stat.statistics().iter().next().unwrap().1, 1);
-
-    let ranges = vec![range.clone(), range];
-
-    let stat = queue.load_statistics(partition, ranges)?;
-
-    assert_eq!(*stat.statistics().iter().next().unwrap().1, 2);
 
     Ok(())
 }
@@ -608,10 +789,9 @@ fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
     })
     .unwrap()
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_tail() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         uncommitted_state_factory: UncommittedStateImplFactory {
@@ -638,26 +818,22 @@ async fn test_queue_tail() -> anyhow::Result<()> {
     let mut diff_mc2 = QueueDiffWithMessages::new();
 
     let stored_objects = vec![
-        create_stored_object(
-            1,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            2,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            3,
-            "0:7d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            4,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
-        create_stored_object(
-            5,
-            "-1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
-        )?,
+        create_stored_object(1, DestAddr {
+            workchain: -1,
+            account: HashBytes::from([1; 32]),
+        })?,
+        create_stored_object(2, DestAddr {
+            workchain: -1,
+            account: HashBytes::from([2; 32]),
+        })?,
+        create_stored_object(3, DestAddr {
+            workchain: 0,
+            account: HashBytes::from([3; 32]),
+        })?,
+        create_stored_object(4, DestAddr {
+            workchain: -1,
+            account: HashBytes::from([4; 32]),
+        })?,
     ];
 
     if let Some(stored_object) = stored_objects.first() {
