@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 
 use anyhow::bail;
 use bytes::Bytes;
@@ -9,7 +11,7 @@ use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 use crate::tl;
 
 /// Representation of an internal messages queue diff.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueDiff {
     /// Computed hash of this diff.
     ///
@@ -62,6 +64,7 @@ impl TlWrite for QueueDiff {
             + processed_to_map::size_hint(&self.processed_to)
             + 2 * QueueKey::SIZE_HINT
             + messages_list::size_hint(&self.messages)
+            + partition_router_list::size_hint(&self.partition_router)
     }
 
     fn write_to<P>(&self, packet: &mut P)
@@ -141,7 +144,7 @@ pub struct QueueStateRef<'tl> {
 }
 
 /// A header for a persistent internal messages queue state.
-#[derive(Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueStateHeader", scheme = "proto.tl")]
 pub struct QueueStateHeader {
     #[tl(with = "tl::shard_ident")]
@@ -629,6 +632,23 @@ mod tests {
 
     #[test]
     fn queue_diff_binary_repr() {
+        let mut partition_router = BTreeMap::new();
+
+        let addr1 = DestAddr {
+            workchain: 0,
+            account: HashBytes::from([0x01; 32]),
+        };
+        let addr2 = DestAddr {
+            workchain: 1,
+            account: HashBytes::from([0x02; 32]),
+        };
+
+        partition_router.insert(QueuePartition::LowPriority, {
+            let mut set = BTreeSet::new();
+            set.insert(addr1);
+            set
+        });
+
         let mut diff = QueueDiff {
             hash: HashBytes::ZERO, // NOTE: Uninitialized
             prev_hash: HashBytes::from([0x33; 32]),
@@ -657,7 +677,7 @@ mod tests {
                 HashBytes::from([0x02; 32]),
                 HashBytes::from([0x03; 32]),
             ],
-            partition_router: Default::default(),
+            partition_router,
         };
 
         let bytes = tl_proto::serialize(&diff);
@@ -675,6 +695,23 @@ mod tests {
         let mut queue_diffs = Vec::<QueueDiff>::new();
         for seqno in 1..=10 {
             let prev_hash = queue_diffs.last().map(|diff| diff.hash).unwrap_or_default();
+
+            let mut partition_router = BTreeMap::new();
+
+            let addr1 = DestAddr {
+                workchain: 0,
+                account: HashBytes::from([0x01; 32]),
+            };
+            let addr2 = DestAddr {
+                workchain: 1,
+                account: HashBytes::from([0x02; 32]),
+            };
+
+            partition_router.insert(QueuePartition::LowPriority, {
+                let mut set = BTreeSet::new();
+                set.insert(addr2);
+                set
+            });
 
             let mut diff = QueueDiff {
                 hash: HashBytes::ZERO, // NOTE: Uninitialized
@@ -704,7 +741,7 @@ mod tests {
                     HashBytes::from([0x02; 32]),
                     HashBytes::from([0x03; 32]),
                 ],
-                partition_router: Default::default(),
+                partition_router,
             };
 
             // NOTE: We need this for the hash computation.
