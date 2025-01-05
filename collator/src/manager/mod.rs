@@ -1295,7 +1295,6 @@ where
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
-                        queue_diff_stuff.diff().max_message,
                     ));
 
                     let prev_ids_info = block_stuff.construct_prev_id()?;
@@ -1308,7 +1307,7 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id, max_message_key)) = prev_queue_diffs.pop() {
+        while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
             let statistics = (&diff, block_id.shard).into();
             self.mq_adapter
                 .apply_diff(diff, block_id.as_short_id(), &diff_hash, statistics)?;

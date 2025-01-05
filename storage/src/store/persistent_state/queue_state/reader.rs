@@ -3,7 +3,7 @@ use everscale_types::boc::de::ProcessedCells;
 use everscale_types::cell::{Cell, CellFamily};
 use everscale_types::models::OutMsgQueueUpdates;
 use tl_proto::TlRead;
-use tycho_block_util::queue::{QueueStateHeader, QueueStateRef};
+use tycho_block_util::queue::{QueueDiff, QueueStateHeader, QueueStateRef};
 
 pub struct QueueStateReader<'a> {
     state: QueueStateRef<'a>,
@@ -52,55 +52,74 @@ impl<'a> QueueStateReader<'a> {
         &self.state.header
     }
 
+    pub fn next_queue_diff_index(&self) -> usize {
+        self.queue_diff_index
+    }
+
+    pub fn read_next_diff(&mut self) -> Result<Option<&QueueDiff>> {
+        if let Some(queue_diff) = self.state.header.queue_diffs.get(self.queue_diff_index) {
+            self.queue_diff_index += 1;
+            self.message_index = 0;
+            Ok(Some(queue_diff))
+        } else {
+            anyhow::ensure!(self.parsed_boc.is_none(), "too many messages");
+            Ok(None)
+        }
+    }
+
     pub fn read_next_message(&mut self) -> Result<Option<Cell>> {
         use everscale_types::boc::de;
 
         const MAX_ALLOWED_ROOTS_PER_CHUNK: usize = 10000;
 
+        // get current queue diff
+        let queue_diff = match self
+            .state
+            .header
+            .queue_diffs
+            .get(self.queue_diff_index.saturating_sub(1))
+        {
+            Some(diff) => diff,
+            None => return Ok(None),
+        };
+
+        // get message hash
+        let expected_hash = match queue_diff.messages.get(self.message_index) {
+            Some(hash) => hash,
+            None => return Ok(None),
+        };
+
         loop {
-            let Some(queue_diff) = self.state.header.queue_diffs.get(self.queue_diff_index) else {
-                anyhow::ensure!(self.parsed_boc.is_none(), "too many messages");
-                return Ok(None);
-            };
-
-            let Some(expected_hash) = queue_diff.messages.get(self.message_index) else {
-                // Move to the queue diff
-                self.queue_diff_index += 1;
-                self.message_index = 0;
-                continue;
-            };
-
-            loop {
-                if let Some(boc) = &mut self.parsed_boc {
-                    if let Some(cell) = boc.next() {
-                        if boc.roots.is_empty() {
-                            self.parsed_boc = None;
-                            self.boc_index += 1;
-                        }
-
-                        self.message_index += 1;
-                        anyhow::ensure!(cell.repr_hash() == expected_hash, "message hash mismatch");
-                        return Ok(Some(cell));
+            if let Some(boc) = &mut self.parsed_boc {
+                if let Some(cell) = boc.next() {
+                    if boc.roots.is_empty() {
+                        self.parsed_boc = None;
+                        self.boc_index += 1;
                     }
+
+                    self.message_index += 1;
+                    anyhow::ensure!(cell.repr_hash() == expected_hash, "message hash mismatch");
+
+                    return Ok(Some(cell));
                 }
-
-                let Some(data) = self.state.messages.get(self.boc_index) else {
-                    anyhow::bail!("not enough messages");
-                };
-                let boc = de::BocHeader::decode(data, &de::Options {
-                    min_roots: None,
-                    // NOTE: We must specify the max number of roots to avoid the default
-                    //       limit (which is quite low since it is rarely used in practice).
-                    max_roots: Some(MAX_ALLOWED_ROOTS_PER_CHUNK),
-                })?;
-
-                let mut roots = boc.roots().to_vec();
-                let cells = boc.finalize(&mut Cell::empty_context())?;
-
-                // NOTE: Reverse root indices here to allow the `ParsedBoc` iterator to just pop them.
-                roots.reverse();
-                self.parsed_boc = Some(ParsedBoc { roots, cells });
             }
+
+            let Some(data) = self.state.messages.get(self.boc_index) else {
+                anyhow::bail!("not enough messages");
+            };
+            let boc = de::BocHeader::decode(data, &de::Options {
+                min_roots: None,
+                // NOTE: We must specify the max number of roots to avoid the default
+                //       limit (which is quite low since it is rarely used in practice).
+                max_roots: Some(MAX_ALLOWED_ROOTS_PER_CHUNK),
+            })?;
+
+            let mut roots = boc.roots().to_vec();
+            let cells = boc.finalize(&mut Cell::empty_context())?;
+
+            // NOTE: Reverse root indices here to allow the `ParsedBoc` iterator to just pop them.
+            roots.reverse();
+            self.parsed_boc = Some(ParsedBoc { roots, cells });
         }
     }
 
