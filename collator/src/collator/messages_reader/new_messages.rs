@@ -51,7 +51,8 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         for stats in partition_all_ranges_msgs_stats {
             for account_addr in stats.statistics().keys() {
                 self.partition_router
-                    .insert(account_addr.clone(), partition_id.try_into().unwrap());
+                    .insert(account_addr.clone(), partition_id.try_into().unwrap())
+                    .unwrap();
             }
         }
     }
