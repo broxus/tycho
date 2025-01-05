@@ -28,22 +28,20 @@ impl InternalQueueStorage {
         &self,
         batch: &mut WriteBatchWithTransaction<false>,
         key: &StatKey,
-        dest: &[u8],
         count: u64,
     ) -> Result<()> {
         let cf = self.db.internal_messages_statistics_uncommitted.cf();
-        self.insert_statistics(batch, &cf, key, dest, count)
+        self.insert_statistics(batch, &cf, key, count)
     }
 
     pub fn insert_statistics_committed(
         &self,
         batch: &mut WriteBatchWithTransaction<false>,
         key: &StatKey,
-        dest: &[u8],
         count: u64,
     ) -> Result<()> {
         let cf = self.db.internal_messages_statistics_committed.cf();
-        self.insert_statistics(batch, &cf, key, dest, count)
+        self.insert_statistics(batch, &cf, key, count)
     }
 
     pub fn collect_committed_stats_in_range(
@@ -102,7 +100,7 @@ impl InternalQueueStorage {
             partition,
             min_message: from,
             max_message: QueueKey::MIN,
-            index: 0,
+            dest: DestAddr::MIN,
         };
 
         let from_key_bytes = {
@@ -130,11 +128,11 @@ impl InternalQueueStorage {
                         break;
                     }
 
-                    let (count_bytes, dest_bytes) = v.split_at(8);
-                    let dest_addr = tl_proto::deserialize::<DestAddr>(dest_bytes)?;
+                    let count_bytes = v;
+
                     let count = u64::from_be_bytes(count_bytes.try_into().unwrap());
 
-                    let entry = result.entry(dest_addr.to_int_addr()).or_insert(0);
+                    let entry = result.entry(current_key.dest.to_int_addr()).or_insert(0);
                     *entry += count;
                 }
                 _ => {
@@ -227,17 +225,16 @@ impl InternalQueueStorage {
                 let current_diff = &reader.state().header.queue_diffs[current_diff_index];
 
                 for (partition, statistics) in statistics.drain() {
-                    for (index, (dest, count)) in statistics.iter().enumerate() {
+                    for (dest, count) in statistics.iter() {
                         let key = StatKey {
                             shard_ident,
                             partition,
                             min_message: current_diff.min_message,
                             max_message: current_diff.max_message,
-                            index: index as u64,
+                            dest: *dest,
                         };
 
-                        let acc = tl_proto::serialize(dest);
-                        this.insert_statistics_committed(&mut batch, &key, &acc, *count)?;
+                        this.insert_statistics_committed(&mut batch, &key, *count)?;
                     }
                 }
             }
@@ -293,14 +290,14 @@ impl InternalQueueStorage {
                 partition: range.partition,
                 min_message: range.from,
                 max_message: QueueKey::MIN,
-                index: 0,
+                dest: DestAddr::MIN,
             };
             let to_stat_key = StatKey {
                 shard_ident: range.shard_ident,
                 partition: range.partition,
                 min_message: range.to,
                 max_message: QueueKey::MAX,
-                index: u64::MAX,
+                dest: DestAddr::MAX,
             };
 
             self.commit_range(
@@ -364,7 +361,7 @@ impl InternalQueueStorage {
                 partition: range.partition,
                 min_message: range.from,
                 max_message: QueueKey::MIN,
-                index: 0,
+                dest: DestAddr::MIN,
             }
             .to_vec();
 
@@ -373,7 +370,7 @@ impl InternalQueueStorage {
                 partition: range.partition,
                 min_message: range.to,
                 max_message: QueueKey::MAX,
-                index: u64::MAX,
+                dest: DestAddr::MAX,
             }
             .to_vec();
 
@@ -514,15 +511,13 @@ impl InternalQueueStorage {
         batch: &mut WriteBatchWithTransaction<false>,
         cf: &BoundedCfHandle<'_>,
         key: &StatKey,
-        dest: &[u8],
         count: u64,
     ) -> Result<()> {
         let mut key_buffer = Vec::with_capacity(StatKey::SIZE_HINT);
         key.serialize(&mut key_buffer);
 
-        let mut value_buffer = Vec::with_capacity(std::mem::size_of::<u64>() + dest.len());
+        let mut value_buffer = Vec::with_capacity(std::mem::size_of::<u64>());
         value_buffer.extend_from_slice(&count.to_be_bytes());
-        value_buffer.extend_from_slice(dest);
 
         batch.put_cf(cf, &key_buffer, &value_buffer);
 
