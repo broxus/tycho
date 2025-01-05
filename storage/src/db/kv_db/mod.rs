@@ -134,7 +134,7 @@ weedb::tables! {
         pub block_connections: tables::BlockConnections,
         pub shards_internal_messages: tables::ShardsInternalMessages,
         pub shards_internal_messages_uncommitted: tables::ShardsInternalMessagesSession,
-        pub internal_messages_statistics_commited: tables::InternalMessagesDestStat,
+        pub internal_messages_statistics_committed: tables::InternalMessagesDestStat,
         pub internal_messages_statistics_uncommitted: tables::InternalMessagesDestStatUncommitted,
     }
 }
