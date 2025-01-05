@@ -229,22 +229,21 @@ impl UncommittedStateStdImpl {
         let min_message = diff_statistics.min_message();
         let max_message = diff_statistics.max_message();
 
-        for (index, (partition, values)) in diff_statistics.iter().enumerate() {
+        for (partition, values) in diff_statistics.iter() {
             for value in values {
                 let (addr, count) = value;
-                let dest_addr = DestAddr::try_from(addr.clone())?;
-                let addr = tl_proto::serialize(dest_addr);
+                let dest = DestAddr::try_from(addr.clone())?;
                 let key = StatKey {
                     shard_ident: *shard_ident,
                     partition: *partition,
                     min_message: *min_message,
                     max_message: *max_message,
-                    index: index as u64,
+                    dest,
                 };
 
                 self.storage
                     .internal_queue_storage()
-                    .insert_statistics_uncommitted(batch, &key, &addr, *count)?;
+                    .insert_statistics_uncommitted(batch, &key, *count)?;
             }
         }
 

@@ -555,6 +555,18 @@ pub struct DestAddr {
     pub account: HashBytes,
 }
 
+impl DestAddr {
+    pub const MIN: Self = Self {
+        workchain: i8::MIN,
+        account: HashBytes::ZERO,
+    };
+
+    pub const MAX: Self = Self {
+        workchain: i8::MAX,
+        account: HashBytes([0xff; 32]),
+    };
+}
+
 impl TryFrom<IntAddr> for DestAddr {
     type Error = anyhow::Error;
 
