@@ -150,7 +150,8 @@ impl ExecutorWrapper {
                 dst_in_current_shard: true,
                 cell,
                 special_origin: Some(special_origin),
-                dequeued: None,
+                block_seqno: Some(collation_data.block_id_short.seqno),
+                from_same_shard: None,
             })
         };
 
@@ -296,7 +297,8 @@ fn new_transaction(
                     dst_in_current_shard,
                     cell: out_msg_cell,
                     special_origin: None,
-                    dequeued: None,
+                    block_seqno: Some(collation_data.block_id_short.seqno),
+                    from_same_shard: None,
                 }));
             }
             MsgInfo::ExtOut(_) => {
@@ -365,14 +367,17 @@ fn process_in_message(
             }))?
         }
         // Dequeued messages have a dedicated `InMsg` type
-        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) if in_msg.dequeued.is_some() => {
+        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _)
+        // check if the message is dequeued or moved from previous collation
+            if in_msg.block_seqno.unwrap_or_default() < collation_data.block_id_short.seqno =>
+        {
             collation_data.execute_count_int += 1;
 
-            let same_shard = in_msg.dequeued.map(|d| d.same_shard).unwrap_or_default();
+            let from_same_shard = in_msg.from_same_shard.unwrap_or_default();
 
             let envelope = Lazy::new(&MsgEnvelope {
                 // NOTE: `cur_addr` is not used in current routing between shards logic
-                cur_addr: if same_shard {
+                cur_addr: if from_same_shard {
                     IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
                 } else {
                     IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
@@ -391,7 +396,7 @@ fn process_in_message(
 
             let in_msg = Lazy::new(&in_msg)?;
 
-            if same_shard {
+            if from_same_shard {
                 let out_msg = OutMsg::DequeueImmediate(OutMsgDequeueImmediate {
                     out_msg_envelope: envelope.clone(),
                     reimport: in_msg.clone(),
