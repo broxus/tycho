@@ -3,7 +3,7 @@ use std::time::Instant;
 use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
 
-use super::{DebugMessageGroup, DebugMessagesBuffer, MessageGroup, MessagesBufferV2};
+use super::{DebugMessageGroup, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{make_stub_external, MempoolAnchorId};
@@ -58,10 +58,10 @@ fn fill_test_buffers(
     mc_shard: ShardIdent,
     dst_shard: ShardIdent,
 ) -> (
-    MessagesBufferV2,
-    MessagesBufferV2,
-    MessagesBufferV2,
-    MessagesBufferV2,
+    MessagesBuffer,
+    MessagesBuffer,
+    MessagesBuffer,
+    MessagesBuffer,
 ) {
     let mut dst_addrs = vec![];
     for i in 1..=20 {
@@ -71,7 +71,7 @@ fn fill_test_buffers(
         )));
     }
 
-    let add_int_msgs = |buffer: &mut MessagesBufferV2,
+    let add_int_msgs = |buffer: &mut MessagesBuffer,
                         src_shard: ShardIdent,
                         dst_addr_num: usize,
                         lt: u64,
@@ -87,7 +87,7 @@ fn fill_test_buffers(
         });
     };
 
-    let add_ext_msgs = |buffer: &mut MessagesBufferV2,
+    let add_ext_msgs = |buffer: &mut MessagesBuffer,
                         anchor_id: MempoolAnchorId,
                         chain_time: u64,
                         msg_idx: &mut u32,
@@ -108,7 +108,7 @@ fn fill_test_buffers(
     //  addr:   1   3   4   6   8   10  12  13  14  15  16
     //  count:  10  3   2   7   10  2   1       2       10
     //          10      2   2       1       2   5   10  1
-    let mut int_buffer_par_0 = MessagesBufferV2::default();
+    let mut int_buffer_par_0 = MessagesBuffer::default();
     add_int_msgs(&mut int_buffer_par_0, dst_shard, 1, 1000, false, 10);
     add_int_msgs(&mut int_buffer_par_0, mc_shard, 3, 1000, false, 3);
     add_int_msgs(&mut int_buffer_par_0, dst_shard, 4, 1000, false, 2);
@@ -137,7 +137,7 @@ fn fill_test_buffers(
     //  count:      10
     //              20
     //          30  20
-    let mut int_buffer_par_1 = MessagesBufferV2::default();
+    let mut int_buffer_par_1 = MessagesBuffer::default();
     add_int_msgs(&mut int_buffer_par_1, dst_shard, 2, 1000, false, 10);
     add_int_msgs(&mut int_buffer_par_1, dst_shard, 2, 1100, false, 20);
     add_int_msgs(&mut int_buffer_par_1, dst_shard, 2, 1200, false, 20);
@@ -153,7 +153,7 @@ fn fill_test_buffers(
     //  count:  5   2   2   2       8   2
     //          5       1   2   10      5   14
     let mut msg_idx;
-    let mut ext_buffer_range_1 = MessagesBufferV2::default();
+    let mut ext_buffer_range_1 = MessagesBuffer::default();
     msg_idx = 0;
     add_ext_msgs(&mut ext_buffer_range_1, 1, 11000, &mut msg_idx, 1, 5);
     add_ext_msgs(&mut ext_buffer_range_1, 1, 11000, &mut msg_idx, 2, 2);
@@ -179,7 +179,7 @@ fn fill_test_buffers(
     //  count:      7   5       4       1
     //          2   3       3       8   2
     //              3       1           3
-    let mut ext_buffer_range_2 = MessagesBufferV2::default();
+    let mut ext_buffer_range_2 = MessagesBuffer::default();
     msg_idx = 0;
     add_ext_msgs(&mut ext_buffer_range_2, 3, 13000, &mut msg_idx, 11, 7);
     add_ext_msgs(&mut ext_buffer_range_2, 3, 13000, &mut msg_idx, 18, 5);

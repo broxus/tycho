@@ -7,7 +7,7 @@ use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState, ExternalsReaderState,
     MessagesReaderMetrics,
 };
-use crate::collator::messages_buffer::{MessagesBufferLimits, MessagesBufferV2};
+use crate::collator::messages_buffer::{MessagesBuffer, MessagesBufferLimits};
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -643,7 +643,7 @@ impl ExternalsRangeReader {
 
     fn check_message_buffer_filled(
         seqno: BlockSeqno,
-        messages_buffer: &MessagesBufferV2,
+        messages_buffer: &MessagesBuffer,
         messages_buffer_limits: &MessagesBufferLimits,
     ) -> bool {
         if messages_buffer.msgs_count() >= messages_buffer_limits.max_count {
