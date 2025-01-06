@@ -24,14 +24,14 @@ pub struct MessagesBufferLimits {
 }
 
 #[derive(Default)]
-pub struct MessagesBufferV2 {
+pub struct MessagesBuffer {
     msgs: FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
     int_count: usize,
     ext_count: usize,
     sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
 }
 
-impl MessagesBufferV2 {
+impl MessagesBuffer {
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
         self.msgs
             .get(account_id)
@@ -400,7 +400,9 @@ impl MessagesBufferV2 {
     }
 }
 
-pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBufferV2);
+#[cfg(test)]
+pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
+#[cfg(test)]
 impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessagesBuffer")
@@ -421,7 +423,7 @@ pub enum BufferFillStateBySlots {
     CanNotFill,
 }
 
-impl MessagesBufferV2 {
+impl MessagesBuffer {
     pub fn check_is_filled(
         &self,
         limits: &MessagesBufferLimits,
@@ -439,9 +441,11 @@ impl MessagesBufferV2 {
     }
 }
 
+#[cfg(test)]
 struct DebugMessagesBufferIndexMap<'a>(
     pub &'a FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
 );
+#[cfg(test)]
 impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map()
@@ -535,7 +539,9 @@ impl std::fmt::Display for DisplayMessageGroup<'_> {
     }
 }
 
+#[cfg(test)]
 pub(super) struct DebugMessageGroup<'a>(pub &'a MessageGroup);
+#[cfg(test)]
 impl std::fmt::Debug for DebugMessageGroup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageGroup")
@@ -545,8 +551,10 @@ impl std::fmt::Debug for DebugMessageGroup<'_> {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::vec_box)]
 struct DebugMessageGroupHashMap<'a>(pub &'a FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>);
+#[cfg(test)]
 impl std::fmt::Debug for DebugMessageGroupHashMap<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map()
@@ -562,7 +570,6 @@ impl std::fmt::Debug for DebugMessageGroupHashMap<'_> {
 #[derive(Debug, Default)]
 pub(super) struct SlotsInfo {
     slots: BTreeMap<SlotId, SlotInfo>,
-    index_by_account: FastHashMap<HashBytes, SlotId>,
     index_by_msgs_count: BTreeMap<usize, FastIndexSet<SlotId>>,
     int_count: usize,
     ext_count: usize,
@@ -574,7 +581,9 @@ impl SlotsInfo {
     }
 }
 
+#[cfg(test)]
 struct DebugSlotsInfo<'a>(pub &'a SlotsInfo);
+#[cfg(test)]
 impl std::fmt::Debug for DebugSlotsInfo<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlotsInfo")
