@@ -371,7 +371,7 @@ impl CollatorStdImpl {
 
         assert_eq!(
             finalized.collation_data.int_enqueue_count,
-            finalized.collation_data.inserted_new_msgs_to_iterator_count
+            finalized.collation_data.inserted_new_msgs_count
                 - finalized.collation_data.execute_count_new_int
         );
 
@@ -894,9 +894,9 @@ impl CollatorStdImpl {
             "tycho_do_collate_new_msgs_inserted_to_iterator_count",
             &labels
         )
-        .increment(collation_data.inserted_new_msgs_to_iterator_count);
+        .increment(collation_data.inserted_new_msgs_count);
         metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
-            .increment(collation_data.read_new_msgs_from_iterator_count);
+            .increment(collation_data.read_new_msgs_count);
         metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
             .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
@@ -982,7 +982,7 @@ impl CollatorStdImpl {
             collation_data.new_msgs_created_count, final_result.queue_diff_messages_count,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
-            collation_data.read_new_msgs_from_iterator_count, collation_data.inserted_new_msgs_to_iterator_count, final_result.has_unprocessed_messages,
+            collation_data.read_new_msgs_count, collation_data.inserted_new_msgs_count, final_result.has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
             execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total, collation_data.diff_tail_len,
         );
