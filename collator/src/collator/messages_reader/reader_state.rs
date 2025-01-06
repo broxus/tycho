@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
 
-use super::super::messages_buffer::MessagesBufferV2;
+use super::super::messages_buffer::MessagesBuffer;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{
     BlockSeqno, ExternalsProcessedUptoStuff, ExternalsRangeInfo, InternalsProcessedUptoStuff,
@@ -130,7 +130,7 @@ pub struct ExternalsReaderState {
 pub struct ExternalsRangeReaderState {
     /// Buffer to store external messages
     /// before collect them to the next execution group
-    pub buffer: MessagesBufferV2,
+    pub buffer: MessagesBuffer,
 
     pub from: ExternalKey,
     pub to: ExternalKey,
@@ -260,7 +260,7 @@ pub struct InternalsRangeReaderState {
     /// Buffer to store messages from the next iterator
     /// for accounts that have messages in the previous iterator
     /// until all messages from previous iterator are not read
-    pub buffer: MessagesBufferV2,
+    pub buffer: MessagesBuffer,
 
     pub shards: BTreeMap<ShardIdent, ShardReaderState>,
 
