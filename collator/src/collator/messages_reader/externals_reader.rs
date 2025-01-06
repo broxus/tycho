@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
 
-use super::super::messages_buffer::{MessagesBufferLimits, MessagesBufferV2};
-use super::super::types::{AnchorsCache, ParsedMessage};
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState, ExternalsReaderState,
+    MessagesReaderMetrics,
 };
+use crate::collator::messages_buffer::{MessagesBufferLimits, MessagesBufferV2};
+use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 
@@ -211,10 +212,12 @@ impl ExternalsReader {
         reader
     }
 
-    pub fn read_into_buffers(&mut self) {
+    pub fn read_into_buffers(&mut self) -> MessagesReaderMetrics {
+        let mut metrics = MessagesReaderMetrics::default();
+
         // skip if all ranges fully read
         if self.all_ranges_fully_read {
-            return;
+            return metrics;
         }
 
         let mut last_seqno = 0;
@@ -248,6 +251,8 @@ impl ExternalsReader {
                     &mut self.anchors_cache,
                     read_mode,
                 );
+
+                metrics.append(last_ext_read_res.metrics);
 
                 // if range was not fully read then buffer is full
                 // and we should continue to read current range
@@ -301,6 +306,8 @@ impl ExternalsReader {
                 break;
             }
         }
+
+        metrics
     }
 }
 
@@ -323,9 +330,14 @@ impl ExternalsRangeReader {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+            next_chain_time,
+            ?read_mode,
             fully_read = self.fully_read,
             "read externals",
         );
+
+        let mut metrics = MessagesReaderMetrics::default();
+        metrics.read_ext_messages_timer.start();
 
         let was_read_to = self.reader_state.current_position;
         let prev_to = self.reader_state.to;
@@ -509,6 +521,7 @@ impl ExternalsRangeReader {
 
                     if self.for_shard_id.contains_address(&ext_msg.info.dst) {
                         // add message to buffer
+                        metrics.add_to_message_groups_timer.start();
                         self.reader_state
                             .buffer
                             .add_message(Box::new(ParsedMessage {
@@ -519,6 +532,9 @@ impl ExternalsRangeReader {
                                 block_seqno: None,
                                 from_same_shard: None,
                             }));
+                        metrics.add_to_message_groups_timer.stop();
+
+                        metrics.read_ext_msgs_count += 1;
 
                         total_msgs_collected += 1;
                         msgs_collected_from_last_anchor += 1;
@@ -614,9 +630,14 @@ impl ExternalsRangeReader {
             has_pending_externals,
         );
 
+        metrics.read_ext_messages_timer.stop();
+        metrics.read_ext_messages_timer.total_elapsed -=
+            metrics.add_to_message_groups_timer.total_elapsed;
+
         ReadExternalsRangeResult {
             has_pending_externals,
             last_read_to_anchor_chain_time,
+            metrics,
         }
     }
 
@@ -652,4 +673,6 @@ struct ReadExternalsRangeResult {
     /// The chain time of the last read anchor.
     /// Used to calc externals time diff.
     last_read_to_anchor_chain_time: Option<u64>,
+
+    metrics: MessagesReaderMetrics,
 }
