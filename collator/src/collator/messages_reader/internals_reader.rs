@@ -12,7 +12,7 @@ use super::{
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
 };
-use crate::collator::types::{Dequeued, ParsedMessage};
+use crate::collator::types::ParsedMessage;
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -402,8 +402,8 @@ impl InternalsParitionReader {
                     (&BufferFillStateByCount::IsFull, _) | (_, &BufferFillStateBySlots::CanFill)
                 ) {
                     // update current position from iterator
-                    let iterator_curent_positions = iterator.current_position();
-                    for (shard_id, curr_pos) in iterator_curent_positions {
+                    let iterator_current_positions = iterator.current_position();
+                    for (shard_id, curr_pos) in iterator_current_positions {
                         let Some(shard_reader_state) =
                             range_reader.reader_state.shards.get_mut(&shard_id)
                         else {
@@ -442,14 +442,13 @@ impl InternalsParitionReader {
                             dst_in_current_shard: true,
                             cell: int_msg.item.message.cell.clone(),
                             special_origin: None,
-                            dequeued: Some(Dequeued {
-                                same_shard: int_msg.item.source == self.for_shard_id,
-                            }),
+                            block_seqno: None,
+                            from_same_shard: Some(int_msg.item.source == self.for_shard_id),
                         });
 
                         range_reader.reader_state.buffer.add_message(msg);
 
-                        // update remaning messages statistics in iterator
+                        // update remaining messages statistics in iterator
                         range_reader
                             .remaning_msgs_stats
                             .decrement_for_account(int_msg.item.message.destination().clone(), 1);
