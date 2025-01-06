@@ -315,8 +315,8 @@ impl BlockCollationDataBuilder {
             read_ext_msgs_count: 0,
             read_int_msgs_from_iterator_count: 0,
             new_msgs_created_count: 0,
-            inserted_new_msgs_to_iterator_count: 0,
-            read_new_msgs_from_iterator_count: 0,
+            inserted_new_msgs_count: 0,
+            read_new_msgs_count: 0,
             in_msgs: Default::default(),
             out_msgs: Default::default(),
             mint_msg: None,
@@ -356,8 +356,8 @@ pub(super) struct BlockCollationData {
     pub read_ext_msgs_count: u64,
     pub read_int_msgs_from_iterator_count: u64,
     pub new_msgs_created_count: u64,
-    pub inserted_new_msgs_to_iterator_count: u64,
-    pub read_new_msgs_from_iterator_count: u64,
+    pub inserted_new_msgs_count: u64,
+    pub read_new_msgs_count: u64,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from MessagesPreparer.max_lt
