@@ -13,7 +13,7 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
 };
 use crate::collator::types::ParsedMessage;
-use crate::internal_queue::iterator::{IterItem, QueueIterator};
+use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
