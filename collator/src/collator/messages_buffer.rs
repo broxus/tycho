@@ -423,6 +423,12 @@ pub enum BufferFillStateBySlots {
     CanNotFill,
 }
 
+impl Default for BufferFillStateBySlots {
+    fn default() -> Self {
+        Self::CanNotFill
+    }
+}
+
 impl MessagesBuffer {
     pub fn check_is_filled(
         &self,
