@@ -58,7 +58,7 @@ impl ExecutorWrapper {
                     std::cmp::max(self.max_new_message_key_to_current_shard, new_message_key);
             }
 
-            collation_data.inserted_new_msgs_to_iterator_count += 1;
+            collation_data.inserted_new_msgs_count += 1;
             new_messages.push(Arc::new(EnqueuedMessage::from((
                 int_msg_info,
                 out_msg.cell,

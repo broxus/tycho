@@ -29,28 +29,6 @@ use internals_reader::*;
 use new_messages::*;
 pub(super) use reader_state::*;
 
-#[derive(Debug, Default)]
-pub(super) struct MessagesReaderMetrics {
-    /// sum total time of initializations of internal messages iterators
-    pub init_iterator_total_elapsed: Duration,
-
-    /// sum total time of reading existing internal messages
-    pub read_existing_messages_total_elapsed: Duration,
-    /// sum total time of reading new internal messages
-    pub read_new_messages_total_elapsed: Duration,
-    /// sum total time of reading external messages
-    pub read_ext_messages_total_elapsed: Duration,
-    /// sum total time of adding messages to buffers
-    pub add_to_message_groups_total_elapsed: Duration,
-
-    /// num of existing internal messages read
-    pub read_int_msgs_from_iterator_count: u64,
-    /// num of external messages read
-    pub read_ext_msgs_count: u64,
-    /// num of new internal messages read
-    pub read_new_msgs_from_iterator_count: u64,
-}
-
 pub(super) struct FinalizedMessagesReader {
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
@@ -435,8 +413,6 @@ impl MessagesReader {
     ) -> Result<Option<MessageGroup>> {
         let mut msg_group = MessageGroup::default();
 
-        // TODO: msgs-v3: fill metrics during reading
-
         // TODO: msgs-v3: read internals from partitions and externals in parallel
 
         //--------------------
@@ -448,7 +424,8 @@ impl MessagesReader {
                         .internals_partition_readers
                         .get_mut(par_id)
                         .context("reader for partition should exist")?;
-                    par_reader.read_into_buffers()?;
+                    let par_metrics = par_reader.read_into_buffers()?;
+                    self.metrics.append(par_metrics);
                 }
                 MessagesReaderStage::NewMessages => {
                     let par_reader = self
@@ -473,16 +450,18 @@ impl MessagesReader {
                         self.new_messages.take_messages_for_current_shard(par_id)
                     {
                         // read from new messages to buffers
-                        let taken_messages = par_reader.read_new_messages_into_buffer(
+                        let read_new_messages_res = par_reader.read_new_messages_into_buffer(
                             &mut new_messages_for_current_shard,
                             current_max_lt,
                         )?;
+
+                        self.metrics.append(read_new_messages_res.metrics);
 
                         // return new messages to state
                         self.new_messages.restore_messages_for_current_shard(
                             *par_id,
                             new_messages_for_current_shard,
-                            &taken_messages,
+                            &read_new_messages_res.taken_messages,
                         );
                     }
                 }
@@ -510,6 +489,7 @@ impl MessagesReader {
             // to check for account skip on collecting messages from current one
             while let Some((seqno, mut reader)) = par_reader.pop_first_range_reader() {
                 // try to fill messages group
+                self.metrics.add_to_message_groups_timer.start();
                 let unused_buffer_accounts = reader.reader_state.buffer.fill_message_group(
                     &mut msg_group,
                     par_reader.target_limits.slots_count,
@@ -559,6 +539,7 @@ impl MessagesReader {
                         false
                     },
                 );
+                self.metrics.add_to_message_groups_timer.stop();
                 unused_buffer_accounts_by_partitions
                     .insert((*par_id, seqno), unused_buffer_accounts);
 
@@ -640,6 +621,7 @@ impl MessagesReader {
         // extract range readers from state to use previous readers buffers
         // to check for account skip on collecting messages from current one
         while let Some((seqno, mut reader)) = self.externals_reader.pop_first_range_reader() {
+            self.metrics.add_to_message_groups_timer.start();
             reader.reader_state.buffer.fill_message_group(
                 &mut msg_group,
                 self.externals_reader.messages_buffer_limits.slots_count,
@@ -659,6 +641,7 @@ impl MessagesReader {
                     false
                 },
             );
+            self.metrics.add_to_message_groups_timer.stop();
 
             let range_reader_processed_offset = reader.reader_state.processed_offset;
 
@@ -715,5 +698,70 @@ impl MessagesReader {
         } else {
             Ok(Some(msg_group))
         }
+    }
+}
+
+#[derive(Default)]
+pub struct MetricsTimer {
+    timer: Option<std::time::Instant>,
+    pub total_elapsed: Duration,
+}
+impl std::fmt::Debug for MetricsTimer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.total_elapsed)
+    }
+}
+impl MetricsTimer {
+    pub fn start(&mut self) {
+        self.timer = Some(std::time::Instant::now());
+    }
+    pub fn stop(&mut self) -> Duration {
+        match self.timer.take() {
+            Some(timer) => {
+                let elapsed = timer.elapsed();
+                self.total_elapsed += elapsed;
+                elapsed
+            }
+            None => Duration::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct MessagesReaderMetrics {
+    /// sum total time of initializations of internal messages iterators
+    pub init_iterator_timer: MetricsTimer,
+
+    /// sum total time of reading existing internal messages
+    pub read_existing_messages_timer: MetricsTimer,
+    /// sum total time of reading new internal messages
+    pub read_new_messages_timer: MetricsTimer,
+    /// sum total time of reading external messages
+    pub read_ext_messages_timer: MetricsTimer,
+    /// sum total time of adding messages to buffers
+    pub add_to_message_groups_timer: MetricsTimer,
+
+    /// num of existing internal messages read
+    pub read_int_msgs_from_iterator_count: u64,
+    /// num of external messages read
+    pub read_ext_msgs_count: u64,
+    /// num of new internal messages read
+    pub read_new_msgs_count: u64,
+}
+
+impl MessagesReaderMetrics {
+    fn append(&mut self, other: Self) {
+        self.init_iterator_timer.total_elapsed += other.init_iterator_timer.total_elapsed;
+
+        self.read_existing_messages_timer.total_elapsed +=
+            other.read_existing_messages_timer.total_elapsed;
+        self.read_new_messages_timer.total_elapsed += other.read_new_messages_timer.total_elapsed;
+        self.read_ext_messages_timer.total_elapsed += other.read_ext_messages_timer.total_elapsed;
+        self.add_to_message_groups_timer.total_elapsed +=
+            other.add_to_message_groups_timer.total_elapsed;
+
+        self.read_int_msgs_from_iterator_count += other.read_int_msgs_from_iterator_count;
+        self.read_ext_msgs_count += other.read_ext_msgs_count;
+        self.read_new_msgs_count += other.read_new_msgs_count;
     }
 }
