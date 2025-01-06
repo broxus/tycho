@@ -516,7 +516,8 @@ impl ExternalsRangeReader {
                                 dst_in_current_shard: true,
                                 cell: ext_msg.cell.clone(),
                                 special_origin: None,
-                                dequeued: None,
+                                block_seqno: None,
+                                from_same_shard: None,
                             }));
 
                         total_msgs_collected += 1;
