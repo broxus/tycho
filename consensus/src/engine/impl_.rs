@@ -272,41 +272,28 @@ impl Engine {
             Default::default()
         };
 
-        // also last 3 rounds is enough to create point at last round with all witness deps
-        let head_min_round = dag_top_round.prev().prev(); // 3 DagHead rounds inclusive
         for ((round, _), point_restores) in preloaded {
             let dag_round = self.dag.top().scan(round).expect("must exist");
+            let mut dag_restore = FuturesUnordered::new();
             for point_restore in point_restores {
-                dag_round.restore(
+                dag_restore.push(dag_round.restore(
                     point_restore,
                     &self.round_task.state.downloader,
                     &self.round_task.state.store,
                     &round_ctx,
-                    round >= head_min_round,
-                );
+                ));
             }
-        }
-
-        // all dependencies are spawned, wait for DagHead rounds to resolve
-
-        let mut dag_restore = FuturesUnordered::new();
-        for head_round in (head_min_round.0..=dag_top_round.0).map(Round) {
-            let dag_round = self.dag.top().scan(head_round).expect("must exist");
-            let iter = dag_round.select(|(_, loc)| {
-                // each restore future is eager, as it has a spawned task inside
-                dag_restore.extend(loc.versions.values().cloned());
-                None::<()>
-            });
-            _ = iter.collect::<Vec<_>>();
-        }
-        while !dag_restore.is_empty() {
-            _ = dag_restore.next().await;
+            while !dag_restore.is_empty() {
+                _ = dag_restore.next().await;
+            }
         }
 
         // to repeat broadcasts from two last determined consensus rounds
         // in case DB was deleted and point received - find and use it
 
         let mut last_broadcast = None;
+        // also last 3 rounds is enough to create point at last round with all witness deps
+        let head_min_round = dag_top_round.prev().prev(); // 3 DagHead rounds inclusive
         for round in (head_min_round.0..=dag_top_round.0).map(Round) {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
