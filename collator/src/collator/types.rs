@@ -22,7 +22,7 @@ use tycho_util::FastHashMap;
 
 use super::messages_reader::ReaderState;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::types::processed_upto::ProcessedUptoInfoStuff;
+use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, ProofFunds, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
@@ -835,7 +835,8 @@ pub struct ParsedMessage {
     pub dst_in_current_shard: bool,
     pub cell: Cell,
     pub special_origin: Option<SpecialOrigin>,
-    pub dequeued: Option<Dequeued>,
+    pub block_seqno: Option<BlockSeqno>,
+    pub from_same_shard: Option<bool>,
 }
 
 impl ParsedMessage {

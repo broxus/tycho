@@ -4,7 +4,7 @@ use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
 
 use super::{DebugMessageGroup, DebugMessagesBuffer, MessageGroup, MessagesBufferV2};
-use crate::collator::types::{Dequeued, ParsedMessage};
+use crate::collator::types::ParsedMessage;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{make_stub_external, MempoolAnchorId};
 
@@ -31,9 +31,8 @@ pub(crate) fn make_stub_internal_parsed_message(
         dst_in_current_shard: true,
         cell: enq_msg.cell,
         special_origin: None,
-        dequeued: (!is_new).then(|| Dequeued {
-            same_shard: dst_wc == src_shard.workchain(),
-        }),
+        block_seqno: None,
+        from_same_shard: (!is_new).then(|| dst_wc == src_shard.workchain()),
     };
     Box::new(msg)
 }
@@ -50,7 +49,8 @@ pub(crate) fn make_stub_external_parsed_message(
         dst_in_current_shard: true,
         cell: ext_msg.cell,
         special_origin: None,
-        dequeued: None,
+        block_seqno: None,
+        from_same_shard: None,
     })
 }
 
