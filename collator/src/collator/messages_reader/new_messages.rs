@@ -225,6 +225,7 @@ impl InternalsParitionReader {
         current_max_lt: u64,
     ) -> Result<Vec<QueueKey>> {
         let mut taken_messages = vec![];
+        let block_seqno = self.block_seqno;
 
         // if there are no new messages, return early
         if new_messages.is_empty() {
@@ -253,7 +254,6 @@ impl InternalsParitionReader {
 
                     // remember taken message
                     taken_messages.push(msg.message.key());
-
                     // add message to buffer
                     range_reader
                         .reader_state
@@ -263,7 +263,8 @@ impl InternalsParitionReader {
                             dst_in_current_shard: true,
                             cell: msg.message.cell.clone(),
                             special_origin: None,
-                            dequeued: None,
+                            block_seqno: Some(block_seqno),
+                            from_same_shard: Some(msg.source == for_shard_id),
                         }));
                 }
                 None => {
