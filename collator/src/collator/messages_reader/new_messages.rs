@@ -9,7 +9,10 @@ use tycho_block_util::queue::QueueKey;
 use super::internals_reader::{
     InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
 };
-use super::{DebugInternalsRangeReaderState, InternalsRangeReaderState, ShardReaderState};
+use super::{
+    DebugInternalsRangeReaderState, InternalsRangeReaderState, MessagesReaderMetrics,
+    ShardReaderState,
+};
 use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
@@ -223,15 +226,17 @@ impl InternalsParitionReader {
         &mut self,
         new_messages: &mut BinaryHeap<Reverse<MessageExt<EnqueuedMessage>>>,
         current_max_lt: u64,
-    ) -> Result<Vec<QueueKey>> {
-        let mut taken_messages = vec![];
+    ) -> Result<ReadNewMessagesResult> {
+        let mut res = ReadNewMessagesResult::default();
         let block_seqno = self.block_seqno;
 
         // if there are no new messages, return early
         if new_messages.is_empty() {
             self.set_new_messages_range_reader_fully_read()?;
-            return Ok(taken_messages);
+            return Ok(res);
         }
+
+        res.metrics.read_new_messages_timer.start();
 
         // get range reader for new messages, create if not exists
         let partition_id = self.partition_id;
@@ -253,8 +258,10 @@ impl InternalsParitionReader {
                     shard_reader_state.current_position = msg.message.key();
 
                     // remember taken message
-                    taken_messages.push(msg.message.key());
+                    res.taken_messages.push(msg.message.key());
+
                     // add message to buffer
+                    res.metrics.add_to_message_groups_timer.start();
                     range_reader
                         .reader_state
                         .buffer
@@ -266,6 +273,9 @@ impl InternalsParitionReader {
                             block_seqno: Some(block_seqno),
                             from_same_shard: Some(msg.source == for_shard_id),
                         }));
+                    res.metrics.add_to_message_groups_timer.stop();
+
+                    res.metrics.read_new_msgs_count += 1;
                 }
                 None => {
                     self.set_new_messages_range_reader_fully_read()?;
@@ -302,6 +312,16 @@ impl InternalsParitionReader {
             }
         }
 
-        Ok(taken_messages)
+        res.metrics.read_new_messages_timer.stop();
+        res.metrics.read_new_messages_timer.total_elapsed -=
+            res.metrics.add_to_message_groups_timer.total_elapsed;
+
+        Ok(res)
     }
+}
+
+#[derive(Default)]
+pub(super) struct ReadNewMessagesResult {
+    pub taken_messages: Vec<QueueKey>,
+    pub metrics: MessagesReaderMetrics,
 }
