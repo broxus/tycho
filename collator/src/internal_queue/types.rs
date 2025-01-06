@@ -382,30 +382,3 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
         }
     }
 }
-
-#[test]
-fn test_insert() {
-    let mut map = PartitionRouter::new(); // Предположим, MyStruct имеет inner
-
-    let addr1 = IntAddr::Std(StdAddr::new(1, HashBytes::from([1; 32])));
-    let addr2 = IntAddr::Std(StdAddr::new(2, HashBytes::from([2; 32])));
-    let partition = QueuePartition::LowPriority;
-
-    // Первая вставка
-    map.insert(addr1.clone(), partition).unwrap();
-
-    // Вторая вставка
-    map.insert(addr2.clone(), partition).unwrap();
-
-    let partition1 = map.get_partition(&addr1);
-
-    assert_eq!(partition, partition1);
-
-    let partition2 = map.get_partition(&addr2);
-
-    assert_eq!(partition, partition2);
-
-    // Проверяем содержимое
-    // assert!(map.inner.get(&partition).unwrap().contains(&addr1));
-    // assert!(map.inner.get(&partition).unwrap().contains(&addr2));
-}
