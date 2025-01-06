@@ -1507,7 +1507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3086,9 +3086,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a6732eb43532a3f636dbd7e3ad8f438af07430aee7ec3c0ac8daf1bbae20317"
+checksum = "32253fd484586f01479781e46dd147005d314844d00303df6100f130435b2e8d"
 dependencies = [
  "bytes",
  "digest",
