@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 
 use anyhow::bail;
 use bytes::Bytes;
@@ -639,10 +638,6 @@ mod tests {
             workchain: 0,
             account: HashBytes::from([0x01; 32]),
         };
-        let addr2 = DestAddr {
-            workchain: 1,
-            account: HashBytes::from([0x02; 32]),
-        };
 
         partition_router.insert(QueuePartition::LowPriority, {
             let mut set = BTreeSet::new();
@@ -700,17 +695,13 @@ mod tests {
             let mut partition_router = BTreeMap::new();
 
             let addr1 = DestAddr {
-                workchain: 0,
-                account: HashBytes::from([0x01; 32]),
-            };
-            let addr2 = DestAddr {
                 workchain: 1,
                 account: HashBytes::from([0x02; 32]),
             };
 
             partition_router.insert(QueuePartition::LowPriority, {
                 let mut set = BTreeSet::new();
-                set.insert(addr2);
+                set.insert(addr1);
                 set
             });
 
