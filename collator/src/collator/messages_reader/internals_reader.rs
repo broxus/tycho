@@ -6,8 +6,8 @@ use everscale_types::models::{MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 
 use super::{
-    DebugInternalsRangeReaderState, InternalsRangeReaderState, PartitionReaderState,
-    ShardReaderState,
+    DebugInternalsRangeReaderState, InternalsRangeReaderState, MessagesReaderMetrics,
+    PartitionReaderState, ShardReaderState,
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
@@ -366,11 +366,15 @@ impl InternalsParitionReader {
         Ok(reader)
     }
 
-    pub fn read_into_buffers(&mut self) -> Result<()> {
+    pub fn read_into_buffers(&mut self) -> Result<MessagesReaderMetrics> {
+        let mut metrics = MessagesReaderMetrics::default();
+
         // skip if all ranges fully read
         if self.all_ranges_fully_read {
-            return Ok(());
+            return Ok(metrics);
         }
+
+        metrics.read_existing_messages_timer.start();
 
         // take next not fully read range and continue reading
         let mut all_ranges_fully_read = true;
@@ -382,7 +386,9 @@ impl InternalsParitionReader {
 
             // init reader if not initialized
             if !range_reader.initialized {
+                metrics.init_iterator_timer.start();
                 range_reader.init()?;
+                metrics.init_iterator_timer.stop();
             }
 
             // read into buffer from the range
@@ -446,7 +452,11 @@ impl InternalsParitionReader {
                             from_same_shard: Some(int_msg.item.source == self.for_shard_id),
                         });
 
+                        metrics.add_to_message_groups_timer.start();
                         range_reader.reader_state.buffer.add_message(msg);
+                        metrics.add_to_message_groups_timer.stop();
+
+                        metrics.read_int_msgs_from_iterator_count += 1;
 
                         // update remaining messages statistics in iterator
                         range_reader
@@ -474,7 +484,13 @@ impl InternalsParitionReader {
 
         self.all_ranges_fully_read = all_ranges_fully_read;
 
-        Ok(())
+        metrics.read_existing_messages_timer.stop();
+        metrics.read_existing_messages_timer.total_elapsed -=
+            metrics.init_iterator_timer.total_elapsed;
+        metrics.read_existing_messages_timer.total_elapsed -=
+            metrics.add_to_message_groups_timer.total_elapsed;
+
+        Ok(metrics)
     }
 
     pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
@@ -580,21 +596,5 @@ impl InternalsRangeReader {
         );
 
         Ok(())
-    }
-
-    fn next(&mut self) -> Result<Option<IterItem<EnqueuedMessage>>> {
-        if !self.initialized {
-            bail!("should run `init()` first")
-        }
-
-        if self.fully_read {
-            return Ok(None);
-        }
-
-        let Some(iterator) = self.iterator_opt.as_mut() else {
-            bail!("not fully read range should have iterator");
-        };
-
-        iterator.next(false)
     }
 }
