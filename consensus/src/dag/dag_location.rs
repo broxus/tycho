@@ -226,6 +226,7 @@ impl InclusionState {
                 }
                 FirstResolved::NotValid(digest)
                     if digest == dag_point.digest() && dag_point.valid().is_none() => {}
+                FirstResolved::Closed => {} // concurrently closed during local point creation
                 _ => panic!(
                     "{:?} {} has first_resolved flag, but state is acquired by another {:?}",
                     dag_point.id().alt(),
@@ -302,24 +303,21 @@ impl InclusionState {
         }
     }
 
-    /// `None` if not yet defined, `Some::<Result>` is irreversible
-    pub fn sign_or_reject(&self, at: Round, key_pair: Option<&KeyPair>) -> Result<Signed<'_>, ()> {
+    /// irreversible
+    pub fn get_or_reject(&self) -> Result<Signed<'_>, ()> {
         let resolved = self.0.resolved.get_or_init(|| FirstResolved::Closed);
         let maybe_signable = match resolved {
             FirstResolved::Valid(_, once) => once.get_or_init(|| Err(())),
             FirstResolved::NotValid(_) | FirstResolved::Closed => return Err(()),
         };
         let signable = maybe_signable.as_ref().map_err(|_ignore| ())?;
-        match signable.sign(at, key_pair) {
-            Some(result) => result,
-            // intentionally no metrics for rejection at last chance: no sig request was received
-            None => match signable.signature.get_or_init(|| Err(())) {
-                Ok(signature) => Ok(Signed {
-                    first_resolved: &signable.valid,
-                    signature,
-                }),
-                Err(()) => Err(()),
-            },
+        // intentionally no metrics for rejection at last chance: no sig request was received
+        match signable.signature.get_or_init(|| Err(())) {
+            Ok(signature) => Ok(Signed {
+                first_resolved: &signable.valid,
+                signature,
+            }),
+            Err(()) => Err(()),
         }
     }
 }
