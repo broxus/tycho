@@ -95,7 +95,7 @@ impl CollatorStdImpl {
             ..
         }) = self.anchors_cache.last_imported_anchor()
         else {
-            bail!("last_imported_anchor should exist when we collationg block")
+            bail!("last_imported_anchor should exist when we collating block")
         };
         let created_by = author.to_bytes().into();
 
