@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use everscale_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
@@ -59,12 +58,7 @@ impl Producer {
             proven_vertex.is_some(),
             AnchorStageRole::Proof,
         );
-        let witness = Self::witness(
-            finished_round,
-            &local_id,
-            head.keys().to_witness_prev.as_deref(),
-            last_own_point,
-        );
+        let witness = Self::witness(finished_round, &local_id, last_own_point);
         Self::update_link_from_witness(
             &mut anchor_trigger,
             current_round.round(),
@@ -137,7 +131,6 @@ impl Producer {
     fn witness(
         finished_dag_round: &DagRound,
         local_id: &PeerId,
-        key_pair: Option<&KeyPair>,
         last_own_point: Option<&LastOwnPoint>,
     ) -> Vec<PointInfo> {
         let round = finished_dag_round.round();
@@ -161,9 +154,9 @@ impl Producer {
                 if skip {
                     None
                 } else {
-                    // there still may be spawned tasks to Signer, so have to make signatures
+                    // there still may be spawned tasks to Signer
                     loc.state
-                        .sign_or_reject(round, key_pair)
+                        .get_or_reject()
                         .ok()
                         .map(|signed| signed.first_resolved.info.clone())
                 }
