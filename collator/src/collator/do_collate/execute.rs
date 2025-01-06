@@ -139,11 +139,8 @@ impl Phase<ExecuteState> {
             .read_int_msgs_from_iterator_count;
         self.state.collation_data.read_ext_msgs_count =
             self.extra.messages_reader.metrics().read_ext_msgs_count;
-        self.state.collation_data.read_new_msgs_from_iterator_count = self
-            .extra
-            .messages_reader
-            .metrics()
-            .read_new_msgs_from_iterator_count;
+        self.state.collation_data.read_new_msgs_count =
+            self.extra.messages_reader.metrics().read_new_msgs_count;
 
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
             .set(executed_groups_count as f64);
@@ -155,35 +152,40 @@ impl Phase<ExecuteState> {
             .extra
             .messages_reader
             .metrics()
-            .init_iterator_total_elapsed;
+            .init_iterator_timer
+            .total_elapsed;
         metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
             .record(init_iterator_elapsed);
         let read_existing_messages_elapsed = self
             .extra
             .messages_reader
             .metrics()
-            .read_existing_messages_total_elapsed;
+            .read_existing_messages_timer
+            .total_elapsed;
         metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
             .record(read_existing_messages_elapsed);
         let read_new_messages_elapsed = self
             .extra
             .messages_reader
             .metrics()
-            .read_new_messages_total_elapsed;
+            .read_new_messages_timer
+            .total_elapsed;
         metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
             .record(read_new_messages_elapsed);
         let read_ext_messages_elapsed = self
             .extra
             .messages_reader
             .metrics()
-            .read_ext_messages_total_elapsed;
+            .read_ext_messages_timer
+            .total_elapsed;
         metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
             .record(read_ext_messages_elapsed);
         let add_to_message_groups_elapsed = self
             .extra
             .messages_reader
             .metrics()
-            .add_to_message_groups_total_elapsed;
+            .add_to_message_groups_timer
+            .total_elapsed;
         metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
             .record(add_to_message_groups_elapsed);
 
@@ -255,7 +257,7 @@ fn calc_process_txs_wu(
         .saturating_mul(serialize_enqueue as u64)
         .saturating_add((collation_data.int_dequeue_count).saturating_mul(serialize_dequeue as u64))
         .saturating_add(
-            (collation_data.inserted_new_msgs_to_iterator_count)
+            (collation_data.inserted_new_msgs_count)
                 .saturating_mul(insert_new_msgs_to_iterator as u64),
         )
 }
@@ -284,7 +286,7 @@ fn calc_prepare_groups_wu_total(
         )
         .saturating_add(
             collation_data
-                .read_new_msgs_from_iterator_count
+                .read_new_msgs_count
                 .saturating_mul(read_new_msgs as u64),
         )
 }
