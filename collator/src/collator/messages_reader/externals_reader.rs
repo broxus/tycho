@@ -7,7 +7,9 @@ use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState, ExternalsReaderState,
     MessagesReaderMetrics,
 };
-use crate::collator::messages_buffer::{MessagesBuffer, MessagesBufferLimits};
+use crate::collator::messages_buffer::{
+    BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
+};
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -227,7 +229,7 @@ impl ExternalsReader {
             .map(|(k, _)| *k)
             .unwrap_or_default();
 
-        loop {
+        'main_loop: loop {
             let mut last_ext_read_res = ReadExternalsRangeResult::default();
             let mut all_ranges_fully_read = true;
             while let Some(range_reader) = self.range_readers.get_mut(&seqno) {
@@ -269,6 +271,15 @@ impl ExternalsReader {
                         };
                         range_reader.reader_state.to = range_reader.reader_state.current_position;
                     }
+                }
+
+                // do not try to read from the next range
+                // if we already can fill all slots in messages group
+                if matches!(
+                    last_ext_read_res.fill_state_by_slots,
+                    BufferFillStateBySlots::CanFill
+                ) {
+                    break 'main_loop;
                 }
 
                 // try to get next range
@@ -344,13 +355,15 @@ impl ExternalsRangeReader {
 
         let mut prev_to_reached = false;
 
-        // TODO: msgs-v3: use buffer method for check
         // check if buffer is full
         // or we can already fill required slots
-        let mut buffer_filled = Self::check_message_buffer_filled(
-            self.seqno,
-            &self.reader_state.buffer,
-            &self.messages_buffer_limits,
+        let (mut fill_state_by_count, mut fill_state_by_slots) = self
+            .reader_state
+            .buffer
+            .check_is_filled(&self.messages_buffer_limits);
+        let mut buffer_filled = matches!(
+            (&fill_state_by_count, &fill_state_by_slots),
+            (BufferFillStateByCount::IsFull, _) | (_, BufferFillStateBySlots::CanFill)
         );
 
         let mut last_read_anchor_id_opt = None;
@@ -419,32 +432,6 @@ impl ExternalsRangeReader {
             prev_to_reached = anchor_id > prev_to.anchor_id
                 || (anchor_id == prev_to.anchor_id
                     && msgs_read_offset_in_last_anchor == prev_to.msgs_offset);
-            // if read_mode == ReadNextExternalsMode::ToPreviuosReadTo && prev_to_reached {
-            //     // then do not read externals
-            //     self.fully_read = true;
-
-            //     // when was reading to prev_to and reached it we consider then
-            //     // we do not have pending externals in the range
-            //     return Ok(ReadExternalsRangeResult {
-            //         has_pending_externals: false,
-            //         last_read_to_anchor_chain_time,
-            //     });
-            // }
-
-            // NOTE: fully read anchor will be removed after reading futher
-            // // skip and remove fully read anchor
-            // if anchor_id == was_read_to.anchor_id
-            //     && anchor.externals.len() == was_read_to.msgs_offset as usize
-            // {
-            //     assert_eq!(next_idx, 0);
-            //     anchors_cache.remove(next_idx);
-            //     last_anchor_removed = true;
-            //     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-            //         "anchor with id {} was fully read before, removed from anchors cache", anchor_id,
-            //     );
-            //     // try read next anchor
-            //     continue;
-            // }
 
             // skip expired anchor
             // TODO: msgs-v3: should move this param to blockchain config
@@ -544,13 +531,16 @@ impl ExternalsRangeReader {
                             "collected ext_msg dst: {}", ext_msg.info.dst,
                         );
 
-                        // TODO: msgs-v3: use buffer method for check
                         // check if buffer is full
                         // or we can already fill required slots
-                        buffer_filled = Self::check_message_buffer_filled(
-                            self.seqno,
-                            &self.reader_state.buffer,
-                            &self.messages_buffer_limits,
+                        (fill_state_by_count, fill_state_by_slots) = self
+                            .reader_state
+                            .buffer
+                            .check_is_filled(&self.messages_buffer_limits);
+                        buffer_filled = matches!(
+                            (&fill_state_by_count, &fill_state_by_slots),
+                            (BufferFillStateByCount::IsFull, _)
+                                | (_, BufferFillStateBySlots::CanFill)
                         );
                     }
                 }
@@ -597,6 +587,22 @@ impl ExternalsRangeReader {
             }
         }
 
+        if matches!(fill_state_by_slots, BufferFillStateBySlots::CanFill) {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                seqno = self.seqno,
+                reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
+                "externals reader: can fill message group on ({}x{})",
+                self.messages_buffer_limits.slots_count, self.messages_buffer_limits.slot_vert_size,
+            );
+        } else {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                seqno = self.seqno,
+                reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
+                "externals reader: message buffer filled on {}/{}",
+                self.reader_state.buffer.msgs_count(), self.messages_buffer_limits.max_count,
+            );
+        }
+
         // TODO: msgs-v3: try to merge `has_pending_externals` and a `fully_read` flag
 
         // check if we still have pending externals
@@ -637,26 +643,9 @@ impl ExternalsRangeReader {
         ReadExternalsRangeResult {
             has_pending_externals,
             last_read_to_anchor_chain_time,
+            fill_state_by_slots,
             metrics,
         }
-    }
-
-    fn check_message_buffer_filled(
-        seqno: BlockSeqno,
-        messages_buffer: &MessagesBuffer,
-        messages_buffer_limits: &MessagesBufferLimits,
-    ) -> bool {
-        if messages_buffer.msgs_count() >= messages_buffer_limits.max_count {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "message_groups buffer filled on {}/{}, stop reading range # {}",
-                messages_buffer.msgs_count(), messages_buffer_limits.max_count, seqno,
-            );
-            return true;
-        }
-
-        // TODO: msgs-v3: check if we can already fill required slots
-
-        false
     }
 }
 
@@ -673,6 +662,9 @@ struct ReadExternalsRangeResult {
     /// The chain time of the last read anchor.
     /// Used to calc externals time diff.
     last_read_to_anchor_chain_time: Option<u64>,
+
+    /// Shows if we can fill all slots of message group from buffer
+    fill_state_by_slots: BufferFillStateBySlots,
 
     metrics: MessagesReaderMetrics,
 }
