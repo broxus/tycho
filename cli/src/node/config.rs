@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -22,6 +22,7 @@ use tycho_rpc::RpcConfig;
 use tycho_storage::StorageConfig;
 use tycho_util::cli::config::ThreadPoolConfig;
 use tycho_util::cli::logger::{LoggerConfig, LoggerOutput};
+use tycho_util::cli::metrics::MetricsConfig;
 
 use crate::util::FpTokens;
 
@@ -354,23 +355,6 @@ impl NodeConfig {
         }
 
         self
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MetricsConfig {
-    /// Listen address of metrics. Used by the client to gather prometheus metrics.
-    /// Default: `127.0.0.1:10000`
-    #[serde(with = "tycho_util::serde_helpers::string")]
-    pub listen_addr: SocketAddr,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10000),
-        }
     }
 }
 

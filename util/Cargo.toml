@@ -37,6 +37,9 @@ tracing-subscriber = { workspace = true, optional = true }
 zstd-safe = { workspace = true, features = ["std"] }
 zstd-sys = { workspace = true }
 
+metrics-exporter-prometheus = { workspace = true, optional = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
+
 [dev-dependencies]
 criterion = "0.5.1"
 tempfile = { workspace = true }
@@ -52,6 +55,8 @@ cli = [
     "dep:tracing-stackdriver",
     "dep:tracing-subscriber",
     "tokio/signal",
+    "metrics-exporter-prometheus",
+    "tikv-jemalloc-ctl"
 ]
 
 [[bench]]

@@ -43,9 +43,7 @@ use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{NodeSyncState, Storage};
 use tycho_util::futures::JoinTask;
 
-pub use self::config::{
-    ElectionsConfig, MetricsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig,
-};
+pub use self::config::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
 

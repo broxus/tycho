@@ -29,7 +29,6 @@ futures-util = { workspace = true }
 hex = { workspace = true }
 humantime = { workspace = true }
 metrics = { workspace = true, optional = true }
-metrics-exporter-prometheus = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
