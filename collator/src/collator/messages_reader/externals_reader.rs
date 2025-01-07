@@ -92,6 +92,14 @@ impl ExternalsReader {
             .any(|(_, r)| r.reader_state.processed_offset > 0)
     }
 
+    pub fn last_range_offset_reached(&self) -> bool {
+        self.get_last_range_reader()
+            .map(|(_, r)| {
+                r.reader_state.processed_offset <= self.reader_state.curr_processed_offset
+            })
+            .unwrap_or(true)
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
         self.range_readers
             .iter()
@@ -184,9 +192,9 @@ impl ExternalsReader {
     #[tracing::instrument(skip_all)]
     fn create_next_externals_range_reader(
         &self,
-        last_range_reader_to_opt: Option<ExternalKey>,
+        last_range_reader_to_and_offset_opt: Option<(ExternalKey, u16)>,
     ) -> ExternalsRangeReader {
-        let from = last_range_reader_to_opt.unwrap_or_default();
+        let (from, processed_offset) = last_range_reader_to_and_offset_opt.unwrap_or_default();
 
         let reader = ExternalsRangeReader {
             for_shard_id: self.for_shard_id,
@@ -199,7 +207,7 @@ impl ExternalsReader {
                 to: from,
                 current_position: from,
                 chain_time: self.next_chain_time,
-                processed_offset: 0,
+                processed_offset,
             },
         };
 
@@ -298,12 +306,12 @@ impl ExternalsReader {
             // if all ranges fully read try create next one
             if all_ranges_fully_read {
                 if last_seqno < self.block_seqno {
-                    let last_range_reader_state_to_opt = self
+                    let last_range_reader_to_and_offset_opt = self
                         .range_readers
                         .get(&last_seqno)
-                        .map(|r| r.reader_state.to);
-                    let reader =
-                        self.create_next_externals_range_reader(last_range_reader_state_to_opt);
+                        .map(|r| (r.reader_state.to, r.reader_state.processed_offset));
+                    let reader = self
+                        .create_next_externals_range_reader(last_range_reader_to_and_offset_opt);
                     self.range_readers.insert(self.block_seqno, reader);
                     self.all_ranges_fully_read = false;
                     seqno = self.block_seqno;
