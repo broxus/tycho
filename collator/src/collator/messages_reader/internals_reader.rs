@@ -123,6 +123,14 @@ impl InternalsParitionReader {
             .any(|(_, r)| r.reader_state.processed_offset > 0)
     }
 
+    pub fn last_range_offset_reached(&self) -> bool {
+        self.get_last_range_reader()
+            .map(|(_, r)| {
+                r.reader_state.processed_offset <= self.reader_state.curr_processed_offset
+            })
+            .unwrap_or(true)
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
         self.range_readers
             .iter()
@@ -209,14 +217,22 @@ impl InternalsParitionReader {
         }
 
         // and create next range reader if it not exist
-        let (last_seqno, last_shard_reader_states_opt) = self
+        let (last_seqno, last_range_reader_shards_and_offset_opt) = self
             .range_readers
             .last_key_value()
-            .map(|(seqno, reader)| (Some(*seqno), Some(reader.reader_state.shards.clone())))
+            .map(|(seqno, reader)| {
+                (
+                    Some(*seqno),
+                    Some((
+                        reader.reader_state.shards.clone(),
+                        reader.reader_state.processed_offset,
+                    )),
+                )
+            })
             .unwrap_or_default();
         if !matches!(last_seqno, Some(seqno) if seqno == self.block_seqno) {
             let reader = self.create_next_internals_range_reader(
-                last_shard_reader_states_opt,
+                last_range_reader_shards_and_offset_opt,
                 self.block_seqno,
             )?;
             if reader.fully_read {
@@ -287,7 +303,10 @@ impl InternalsParitionReader {
     #[tracing::instrument(skip_all)]
     fn create_next_internals_range_reader(
         &self,
-        last_shard_reader_states_opt: Option<BTreeMap<ShardIdent, ShardReaderState>>,
+        last_range_reader_shards_and_offset_opt: Option<(
+            BTreeMap<ShardIdent, ShardReaderState>,
+            u32,
+        )>,
         seqno: BlockSeqno,
     ) -> Result<InternalsRangeReader> {
         let mut shard_reader_states = BTreeMap::new();
@@ -300,9 +319,9 @@ impl InternalsParitionReader {
 
         let mut fully_read = true;
         for (shard_id, end_lt) in all_end_lts {
-            let last_to_lt_opt = last_shard_reader_states_opt
+            let last_to_lt_opt = last_range_reader_shards_and_offset_opt
                 .as_ref()
-                .and_then(|s_r| s_r.get(&shard_id).map(|s| s.to));
+                .and_then(|(s_r, _)| s_r.get(&shard_id).map(|s| s.to));
             let shard_range_from =
                 last_to_lt_opt.map_or_else(|| QueueKey::min_for_lt(0), QueueKey::max_for_lt);
 
@@ -343,7 +362,9 @@ impl InternalsParitionReader {
             reader_state: InternalsRangeReaderState {
                 buffer: Default::default(),
                 shards: shard_reader_states,
-                processed_offset: 0,
+                processed_offset: last_range_reader_shards_and_offset_opt
+                    .map(|(_, processed_offset)| processed_offset)
+                    .unwrap_or_default(),
             },
             fully_read,
             mq_adapter: self.mq_adapter.clone(),
