@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, ensure, Result};
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
-use everscale_types::models::ConsensusConfig;
+use everscale_types::models::{ConsensusConfig, GenesisInfo};
 use serde::{Deserialize, Serialize};
 use tycho_network::OverlayId;
 
@@ -30,13 +30,13 @@ impl CachedConfig {
     }
 
     pub fn init(config: &MempoolConfig) -> (Point, OverlayId) {
-        let genesis_round = align_genesis(config.genesis.start_round);
+        let genesis_round = align_genesis(config.genesis_info.start_round);
 
         // reset types to u128 as it does not match fields in `ConsensusConfig`
         // and may be changed just to keep them handy, that must not affect hash
         let mut hasher = blake3::Hasher::new();
         hasher.update(&(genesis_round.0 as u128).to_be_bytes());
-        hasher.update(&(config.genesis.time_millis as u128).to_be_bytes());
+        hasher.update(&(config.genesis_info.genesis_millis as u128).to_be_bytes());
         hasher.update(&(config.consensus.clock_skew_millis as u128).to_be_bytes());
         hasher.update(&(config.consensus.payload_batch_bytes as u128).to_be_bytes());
         hasher.update(&(config.consensus.commit_history_rounds as u128).to_be_bytes());
@@ -56,12 +56,12 @@ impl CachedConfig {
             Default::default(),
             PointData {
                 author: genesis_keys.public_key.into(),
-                time: UnixTime::from_millis(config.genesis.time_millis),
+                time: UnixTime::from_millis(config.genesis_info.genesis_millis),
                 includes: Default::default(),
                 witness: Default::default(),
                 anchor_trigger: Link::ToSelf,
                 anchor_proof: Link::ToSelf,
-                anchor_time: UnixTime::from_millis(config.genesis.time_millis),
+                anchor_time: UnixTime::from_millis(config.genesis_info.genesis_millis),
             },
         );
 
@@ -79,7 +79,7 @@ impl CachedConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MempoolConfig {
-    pub genesis: GenesisData,
+    pub genesis_info: GenesisInfo,
     pub consensus: ConsensusConfig,
     pub node: MempoolNodeConfig,
     /// Estimated hard limit on serialized point size
@@ -88,7 +88,7 @@ pub struct MempoolConfig {
 
 #[derive(Default, Debug)]
 pub struct MempoolConfigBuilder {
-    genesis_data: Option<GenesisData>,
+    genesis_info: Option<GenesisInfo>,
     consensus_config: Option<ConsensusConfig>,
     node_config: Option<MempoolNodeConfig>,
 }
@@ -102,24 +102,21 @@ impl MempoolConfigBuilder {
         self.consensus_config = Some(consensus_config.clone());
     }
 
-    pub fn set_genesis(&mut self, start_round: u32, time_millis: u64) {
-        self.genesis_data = Some(GenesisData {
-            start_round,
-            time_millis,
-        });
+    pub fn set_genesis(&mut self, info: GenesisInfo) {
+        self.genesis_info = Some(info);
     }
 
     pub fn get_consensus_config(&self) -> Option<&ConsensusConfig> {
         self.consensus_config.as_ref()
     }
 
-    pub fn get_genesis(&self) -> Option<GenesisData> {
-        self.genesis_data
+    pub fn get_genesis(&self) -> Option<GenesisInfo> {
+        self.genesis_info
     }
 
     pub fn build(&self) -> Result<MempoolConfig> {
         let genesis_data = *self
-            .genesis_data
+            .genesis_info
             .as_ref()
             .ok_or(anyhow!("mempool genesis data for config is not known"))?;
         let consensus_config = self
@@ -146,21 +143,12 @@ impl MempoolConfigBuilder {
         );
 
         Ok(MempoolConfig {
-            genesis: genesis_data,
+            genesis_info: genesis_data,
             consensus: consensus_config,
             node: node_config,
             point_max_bytes,
         })
     }
-}
-
-// Note: never derive Default for Genesis data
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct GenesisData {
-    /// will be aligned to become genesis round (will not be lesser, may become a bit greater)
-    pub start_round: u32,
-    /// value will be copied to genesis point without changes
-    pub time_millis: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

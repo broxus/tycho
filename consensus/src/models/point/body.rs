@@ -101,7 +101,7 @@ impl PointBody {
                         && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next)
                             .map_or(false, |anchor| anchor == *Genesis::id())
                         && self.data.time == self.data.anchor_time.next()
-                        && self.data.anchor_time.millis() == CachedConfig::get().genesis.time_millis
+                        && self.data.anchor_time.millis() == CachedConfig::get().genesis_info.genesis_millis
                 ))
                     // leader must maintain its chain of proofs,
                     // while others must link to previous points (checked at the end of this method);

@@ -719,11 +719,8 @@ impl Phase<FinalizeState> {
         let mut consensus_info = prev_state_extra.consensus_info;
 
         if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
-            if mp_cfg_override.start_round >= consensus_info.genesis_round
-                && mp_cfg_override.genesis_time_millis > consensus_info.genesis_millis
-            {
-                consensus_info.genesis_round = mp_cfg_override.start_round;
-                consensus_info.genesis_millis = mp_cfg_override.genesis_time_millis;
+            if (mp_cfg_override.genesis_info).overrides(&consensus_info.genesis_info) {
+                consensus_info.genesis_info = mp_cfg_override.genesis_info;
 
                 is_key_block = true;
             }
@@ -780,19 +777,20 @@ impl Phase<FinalizeState> {
                     // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
                     let mempool_last_round_to_create =
                         prev_processed_to_anchor + consensus_config.max_consensus_lag_rounds as u32;
-                    let session_last_round =
-                        if consensus_info.prev_vset_switch_round > consensus_info.genesis_round {
-                            // consensus session cannot abort until reaching full history amount of rounds,
-                            // because mempool has to re-validate historical points during sync,
-                            // and can hold just one previous vset to check peer authority
-                            let full_history_round = consensus_info.prev_vset_switch_round
-                                + consensus_config.max_total_rounds();
-                            mempool_last_round_to_create.max(full_history_round)
-                        } else {
-                            // mempool history does not span across genesis,
-                            // so can change vset earlier without invalidating points
-                            mempool_last_round_to_create
-                        };
+                    let session_last_round = if consensus_info.prev_vset_switch_round
+                        > consensus_info.genesis_info.start_round
+                    {
+                        // consensus session cannot abort until reaching full history amount of rounds,
+                        // because mempool has to re-validate historical points during sync,
+                        // and can hold just one previous vset to check peer authority
+                        let full_history_round = consensus_info.prev_vset_switch_round
+                            + consensus_config.max_total_rounds();
+                        mempool_last_round_to_create.max(full_history_round)
+                    } else {
+                        // mempool history does not span across genesis,
+                        // so can change vset earlier without invalidating points
+                        mempool_last_round_to_create
+                    };
                     // `+1` because it will be the first mempool round in the new session
                     session_last_round + 1
                 };

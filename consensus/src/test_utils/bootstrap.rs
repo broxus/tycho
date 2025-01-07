@@ -1,7 +1,7 @@
 use std::num::NonZeroU16;
 
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
-use everscale_types::models::ConsensusConfig;
+use everscale_types::models::{ConsensusConfig, GenesisInfo};
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayConfig,
     OverlayService, PeerId, PeerInfo, PeerResolver, PeerResolverConfig, Router, ToSocket,
@@ -32,7 +32,7 @@ pub fn default_test_config() -> MempoolConfig {
     };
 
     let mut builder = MempoolConfigBuilder::default();
-    builder.set_genesis(0, 0);
+    builder.set_genesis(GenesisInfo::default());
     builder.set_consensus_config(&consensus_config);
     builder.set_node_config(&node_config);
 
