@@ -56,7 +56,7 @@ where
             dict_root: build_aug_dict_from_sorted_iter(
                 iter.into_iter().map(|(k, a, v)| {
                     // SAFETY: We know that this cell is not a library cell.
-                    let value = unsafe { v.inner().as_slice_unchecked() };
+                    let value = v.inner().as_slice_allow_pruned();
                     (k, a, value)
                 }),
                 K::BITS,

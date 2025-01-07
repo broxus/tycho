@@ -1168,14 +1168,12 @@ where
             let last_consesus_info = self
                 .blocks_cache
                 .get_consensus_info_for_mc_block(&last_applied_mc_block_key)?;
-            if mp_cfg_override.start_round >= last_consesus_info.genesis_round
-                && mp_cfg_override.genesis_time_millis > last_consesus_info.genesis_millis
-            {
+            if (mp_cfg_override.genesis_info).overrides(&last_consesus_info.genesis_info) {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    prev_genesis_start_round = last_consesus_info.genesis_round,
-                    prev_genesis_time_millis = last_consesus_info.genesis_millis,
-                    new_genesis_start_round = mp_cfg_override.start_round,
-                    new_genesis_time_millis = mp_cfg_override.genesis_time_millis,
+                    prev_genesis_start_round = last_consesus_info.genesis_info.start_round,
+                    prev_genesis_time_millis = last_consesus_info.genesis_info.genesis_millis,
+                    new_genesis_start_round = mp_cfg_override.genesis_info.start_round,
+                    new_genesis_time_millis = mp_cfg_override.genesis_info.genesis_millis,
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
                 self.mq_adapter.clear_session_state()?;

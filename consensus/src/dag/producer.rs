@@ -79,7 +79,7 @@ impl Producer {
 
         let (time, anchor_time, payload) = if finished_round.round() == Genesis::id().round {
             // first produced point is reproducible
-            let time = UnixTime::from_millis(CachedConfig::get().genesis.time_millis);
+            let time = UnixTime::from_millis(CachedConfig::get().genesis_info.genesis_millis);
             (time.next(), time, Vec::new())
         } else {
             let (time, anchor_time) =

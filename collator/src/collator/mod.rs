@@ -441,13 +441,17 @@ impl CollatorStdImpl {
         working_state: &WorkingState,
         anchors_proc_info: AnchorsProcessingInfo,
     ) -> Result<Vec<InitAnchorSource>, CollatorError> {
-        let import_init_anchors = match &self.mempool_config_override {
+        let import_init_anchors = match self
+            .mempool_config_override
+            .as_ref()
+            .map(|c| c.genesis_info)
+        {
             // There may be cases when processed to anchor in shard is before anchor in master.
             // We can produce incorrect shard block, then ignore it, take correct from bc and try to collate next one.
-            Some(mempool_config) if mempool_config.start_round > 0 => {
+            Some(new_genesis) if new_genesis.start_round > 0 => {
                 let import_init_anchors =
-                    if anchors_proc_info.processed_to_anchor_id <= mempool_config.start_round {
-                        if anchors_proc_info.processed_to_anchor_id == mempool_config.start_round {
+                    if anchors_proc_info.processed_to_anchor_id <= new_genesis.start_round {
+                        if anchors_proc_info.processed_to_anchor_id == new_genesis.start_round {
                             // when we start from new genesis we unable to import anchor on the start round
                             // because mempool actually is starting from the next round
                             // so we should not try to import init anchors
@@ -482,7 +486,7 @@ impl CollatorStdImpl {
                         .map_err(|e| CollatorError::Anyhow(e.into()))?
                         .created_by;
                     let anchor_info = AnchorInfo {
-                        id: mempool_config.start_round,
+                        id: new_genesis.start_round,
                         ct: anchors_proc_info.last_imported_chain_time,
                         all_exts_count: 0,
                         our_exts_count: 0,

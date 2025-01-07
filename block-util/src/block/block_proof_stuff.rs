@@ -63,8 +63,7 @@ impl BlockProofStuff {
                 consensus_info: ConsensusInfo {
                     vset_switch_round: 0,
                     prev_vset_switch_round: 0,
-                    genesis_round: 0,
-                    genesis_millis: 0,
+                    genesis_info: GenesisInfo::default(),
                     prev_shuffle_mc_validators: true,
                 },
                 signature_count: 0,
