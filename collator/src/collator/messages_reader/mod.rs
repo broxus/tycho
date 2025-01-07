@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{IntAddr, MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::QueuePartition;
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::{
@@ -18,6 +18,7 @@ use crate::internal_queue::types::{
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
+use crate::types::DebugIter;
 
 mod externals_reader;
 mod internals_reader;
@@ -36,6 +37,7 @@ pub(super) struct FinalizedMessagesReader {
     pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum GetNextMessageGroupMode {
     Continue,
     Refill,
@@ -49,7 +51,6 @@ enum MessagesReaderStage {
 
 pub(super) struct MessagesReader {
     for_shard_id: ShardIdent,
-    block_seqno: BlockSeqno,
 
     msgs_exec_params: MsgsExecutionParams,
 
@@ -122,7 +123,6 @@ impl MessagesReader {
 
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
-            block_seqno: cx.block_seqno,
 
             msgs_exec_params: cx.msgs_exec_params,
 
@@ -201,7 +201,13 @@ impl MessagesReader {
     }
 
     pub fn reset_read_state(&mut self) {
+        // reset metrics
         self.metrics = Default::default();
+
+        // reset internals reader stages
+        for (_, par_reader_stage) in self.readers_stages.iter_mut() {
+            *par_reader_stage = MessagesReaderStage::ExistingMessages;
+        }
     }
 
     pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
@@ -361,26 +367,26 @@ impl MessagesReader {
     }
 
     pub fn refill_buffers_upto_offsets(&mut self, prev_block_gen_lt: u64) -> Result<()> {
-        // holds the max LT_HASH of a new created messages to current shard
-        // it needs to define the read range for new messages when we get next message group
-        let max_new_message_key_to_current_shard = QueueKey::MIN;
-
-        // when refill messages buffer on init or resume
-        // we should check externals expiration
-        // against previous block chain time
-
-        // TODO: msgs-v3: But this will not work when there are uprocessed
-        //      externals in messages buffer from blocks before previous.
-        //      We need to redesing how to store exhaustive processed_upto
-        let prev_chain_time = 0;
-
         tracing::debug!(target: tracing_targets::COLLATOR,
-            //prev_processed_offset,
-            // prev_chain_time,
+            internals_processed_offsets = ?DebugIter(self.internals_partition_readers
+                .iter()
+                .map(|(par_id, par_r)| {
+                    (
+                        par_id,
+                        par_r.get_last_range_reader()
+                            .map(|(_, r)| r.reader_state.processed_offset)
+                            .unwrap_or_default(),
+                    )
+                })),
+            externals_processed_offset = self
+                .externals_reader
+                .get_last_range_reader()
+                .map(|(_, r)| r.reader_state.processed_offset)
+                .unwrap_or_default(),
+            prev_block_gen_lt,
             "start: refill messages buffer and skip groups upto",
         );
 
-        // while self.state.msgs_buffer.message_groups_offset() < prev_processed_offset {
         loop {
             let msg_group =
                 self.get_next_message_group(GetNextMessageGroupMode::Refill, prev_block_gen_lt)?;
@@ -392,13 +398,10 @@ impl MessagesReader {
         }
 
         // next time we should read next message group like we did not make refill before
-        // so we need to reset flags that control from where to read messages
+        // so we need to reset flags and states that control the read flow
         self.reset_read_state();
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            // prev_processed_offset,
-            // prev_chain_time,
-            // actual_offset = self.state.msgs_buffer.message_groups_offset(),
             "finished: refill messages buffer and skip groups upto",
         );
 
@@ -415,24 +418,31 @@ impl MessagesReader {
 
         // TODO: msgs-v3: read internals from partitions and externals in parallel
 
+        // count how many times prev processed offset reached in readers
+        let mut prev_processed_offset_reached_count = 0;
+
         //--------------------
         // read internals
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
+            let par_reader = self
+                .internals_partition_readers
+                .get_mut(par_id)
+                .context("reader for partition should exist")?;
+
+            // on refill read only until the last range processed offset reached
+            if read_mode == GetNextMessageGroupMode::Refill
+                && par_reader.last_range_offset_reached()
+            {
+                prev_processed_offset_reached_count += 1;
+                continue;
+            }
+
             match par_reader_stage {
                 MessagesReaderStage::ExistingMessages => {
-                    let par_reader = self
-                        .internals_partition_readers
-                        .get_mut(par_id)
-                        .context("reader for partition should exist")?;
                     let par_metrics = par_reader.read_into_buffers()?;
                     self.metrics.append(par_metrics);
                 }
                 MessagesReaderStage::NewMessages => {
-                    let par_reader = self
-                        .internals_partition_readers
-                        .get_mut(par_id)
-                        .context("reader for partition should exist")?;
-
                     // update new messages reader "to" boundary
                     par_reader.update_new_messages_reader_to_boundary(current_max_lt)?;
 
@@ -479,6 +489,14 @@ impl MessagesReader {
                 .internals_partition_readers
                 .remove(par_id)
                 .context("reader for partition should exist")?;
+
+            // on refill read only until the last range processed offset reached
+            if read_mode == GetNextMessageGroupMode::Refill
+                && par_reader.last_range_offset_reached()
+            {
+                par_readers.insert(*par_id, par_reader);
+                continue;
+            }
 
             // update processing offset in current partition
             par_reader.reader_state.curr_processed_offset += 1;
@@ -611,72 +629,79 @@ impl MessagesReader {
 
         //--------------------
         // read externals
-        self.externals_reader.read_into_buffers();
-
-        // update processing offset
-        self.externals_reader.reader_state.curr_processed_offset += 1;
-
-        // collect externals
-        let mut range_readers = BTreeMap::<BlockSeqno, ExternalsRangeReader>::default();
-        // extract range readers from state to use previous readers buffers
-        // to check for account skip on collecting messages from current one
-        while let Some((seqno, mut reader)) = self.externals_reader.pop_first_range_reader() {
-            self.metrics.add_to_message_groups_timer.start();
-            reader.reader_state.buffer.fill_message_group(
-                &mut msg_group,
-                self.externals_reader.messages_buffer_limits.slots_count,
-                self.externals_reader.messages_buffer_limits.slot_vert_size,
-                None,
-                |account_id| {
-                    for prev_reader in range_readers.values() {
-                        if prev_reader
-                            .reader_state
-                            .buffer
-                            .account_messages_count(account_id)
-                            > 0
-                        {
-                            return true;
-                        }
-                    }
-                    false
-                },
-            );
-            self.metrics.add_to_message_groups_timer.stop();
-
-            let range_reader_processed_offset = reader.reader_state.processed_offset;
-
-            range_readers.insert(seqno, reader);
-
-            // collect messages from the next range
-            // only when current range processed offset is reached
-            if self.externals_reader.reader_state.curr_processed_offset
-                <= range_reader_processed_offset
-            {
-                break;
-            }
-        }
-        // return range readers to state
-        self.externals_reader.set_range_readers(range_readers);
-
-        // check if all externals collected
-        if self.externals_reader.all_ranges_fully_read
-            && !self.externals_reader.has_messages_in_buffers()
+        // on refill read only until the last range processed offset reached
+        if read_mode == GetNextMessageGroupMode::Refill
+            && self.externals_reader.last_range_offset_reached()
         {
-            // we can update processed_to when we collected all externals
-            self.externals_reader.set_processed_to_current_position()?;
+            prev_processed_offset_reached_count += 1;
+        } else {
+            self.externals_reader.read_into_buffers();
 
-            // drop processing offset when all ranges read
-            self.externals_reader.drop_processing_offset()?;
+            // update processing offset
+            self.externals_reader.reader_state.curr_processed_offset += 1;
 
-            // drop all ranges except the last one
-            self.externals_reader.retain_only_last_range_reader()?;
+            // collect externals
+            let mut range_readers = BTreeMap::<BlockSeqno, ExternalsRangeReader>::default();
+            // extract range readers from state to use previous readers buffers
+            // to check for account skip on collecting messages from current one
+            while let Some((seqno, mut reader)) = self.externals_reader.pop_first_range_reader() {
+                self.metrics.add_to_message_groups_timer.start();
+                reader.reader_state.buffer.fill_message_group(
+                    &mut msg_group,
+                    self.externals_reader.messages_buffer_limits.slots_count,
+                    self.externals_reader.messages_buffer_limits.slot_vert_size,
+                    None,
+                    |account_id| {
+                        for prev_reader in range_readers.values() {
+                            if prev_reader
+                                .reader_state
+                                .buffer
+                                .account_messages_count(account_id)
+                                > 0
+                            {
+                                return true;
+                            }
+                        }
+                        false
+                    },
+                );
+                self.metrics.add_to_message_groups_timer.stop();
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                ext_processed_to = ?self.externals_reader.reader_state.processed_to,
-                ext_curr_processed_offset = self.externals_reader.reader_state.curr_processed_offset,
-                last_range_reader_state = ?self.externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(&r.reader_state))),
-                "all externals collected",
-            );
+                let range_reader_processed_offset = reader.reader_state.processed_offset;
+
+                range_readers.insert(seqno, reader);
+
+                // collect messages from the next range
+                // only when current range processed offset is reached
+                if self.externals_reader.reader_state.curr_processed_offset
+                    <= range_reader_processed_offset
+                {
+                    break;
+                }
+            }
+            // return range readers to state
+            self.externals_reader.set_range_readers(range_readers);
+
+            // check if all externals collected
+            if self.externals_reader.all_ranges_fully_read
+                && !self.externals_reader.has_messages_in_buffers()
+            {
+                // we can update processed_to when we collected all externals
+                self.externals_reader.set_processed_to_current_position()?;
+
+                // drop processing offset when all ranges read
+                self.externals_reader.drop_processing_offset()?;
+
+                // drop all ranges except the last one
+                self.externals_reader.retain_only_last_range_reader()?;
+
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    ext_processed_to = ?self.externals_reader.reader_state.processed_to,
+                    ext_curr_processed_offset = self.externals_reader.reader_state.curr_processed_offset,
+                    last_range_reader_state = ?self.externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(&r.reader_state))),
+                    "all externals collected",
+                );
+            }
         }
 
         // if message group was not fully filled after externals
@@ -686,6 +711,7 @@ impl MessagesReader {
             self.msgs_exec_params.group_vert_size as _,
         ) {
             // TODO: msgs-v3: fill messages group with internals again
+            //              skip on refill when prev processed offset reached
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -693,7 +719,16 @@ impl MessagesReader {
             DisplayMessageGroup(&msg_group),
         );
 
-        if msg_group.len() == 0 && !self.new_messages.has_pending_messages() {
+        // check if prev processed offset reached
+        // in all internals partition readers and in externals reader
+        let all_prev_processed_offset_reached =
+            prev_processed_offset_reached_count == self.internals_partition_readers.len() + 1;
+
+        if msg_group.len() == 0
+            && (!self.new_messages.has_pending_messages()
+                || (read_mode == GetNextMessageGroupMode::Refill
+                    && all_prev_processed_offset_reached))
+        {
             Ok(None)
         } else {
             Ok(Some(msg_group))
