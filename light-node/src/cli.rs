@@ -72,6 +72,10 @@ impl CmdRun {
     {
         init_logger(&node_config.logger_config, self.logger_config.clone())?;
 
+        if let Some(metrics) = &node_config.metrics {
+            tycho_util::cli::metrics::init_metrics(metrics)?;
+        }
+
         let keys_path = self.keys.unwrap();
         let keys = if keys_path.exists() {
             NodeKeys::from_file(keys_path).context("failed to load node keys")?
