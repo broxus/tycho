@@ -181,6 +181,7 @@ impl Node {
         overlay_service.add_public_overlay(&public_overlay);
 
         let blockchain_rpc_client = BlockchainRpcClient::builder()
+            .with_config(node_config.blockchain_rpc_client)
             .with_public_overlay_client(PublicOverlayClient::new(
                 network.clone(),
                 public_overlay,

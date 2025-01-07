@@ -149,8 +149,6 @@ pub enum Error {
     NoNeighbours,
     #[error("no neighbour has the requested data")]
     NotFound,
-    #[error("the requested data is too new")]
-    TooNew,
     #[error("network error: {0}")]
     NetworkError(#[source] anyhow::Error),
     #[error("invalid response: {0}")]
