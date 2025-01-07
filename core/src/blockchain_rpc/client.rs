@@ -11,12 +11,14 @@ use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use scopeguard::ScopeGuard;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::PersistentStateKind;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
+use tycho_util::serde_helpers;
 
 use crate::overlay_client::{
     Error, Neighbour, PublicOverlayClient, QueryResponse, QueryResponseHandle,
@@ -32,7 +34,40 @@ pub trait SelfBroadcastListener: Send + Sync + 'static {
     async fn handle_message(&self, message: Bytes);
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct BlockchainRpcClientConfig {
+    /// Timeout to broadcast external messages
+    ///
+    /// Default: 100 ms.
+    #[serde(with = "serde_helpers::humantime")]
+    pub min_broadcast_timeout: Duration,
+
+    /// Minimum number of neighbours with `TooNew`
+    /// response required to switch provider
+    ///
+    /// Default: 4.
+    pub too_new_archive_threshold: usize,
+
+    /// Number of retries to download blocks/archives
+    ///
+    /// Default: 10.
+    pub download_retries: usize,
+}
+
+impl Default for BlockchainRpcClientConfig {
+    fn default() -> Self {
+        Self {
+            min_broadcast_timeout: Duration::from_millis(100),
+            too_new_archive_threshold: 4,
+            download_retries: 10,
+        }
+    }
+}
+
 pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
+    config: BlockchainRpcClientConfig,
     mandatory_fields: MandatoryFields,
     broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
 }
@@ -41,10 +76,9 @@ impl BlockchainRpcClientBuilder<PublicOverlayClient> {
     pub fn build(self) -> BlockchainRpcClient {
         BlockchainRpcClient {
             inner: Arc::new(Inner {
+                config: self.config,
                 overlay_client: self.mandatory_fields,
                 broadcast_listener: self.broadcast_listener,
-                // todo: do we need to move this to config?
-                min_broadcast_timeout: Duration::from_millis(100),
                 response_tracker: Mutex::new(
                     // 5 windows, 60 seconds each, 0.75 quantile
                     tycho_util::time::RollingP2Estimator::new_with_config(
@@ -66,6 +100,7 @@ impl BlockchainRpcClientBuilder<()> {
         client: PublicOverlayClient,
     ) -> BlockchainRpcClientBuilder<PublicOverlayClient> {
         BlockchainRpcClientBuilder {
+            config: self.config,
             mandatory_fields: client,
             broadcast_listener: self.broadcast_listener,
         }
@@ -79,6 +114,12 @@ impl<T> BlockchainRpcClientBuilder<T> {
     }
 }
 
+impl<T> BlockchainRpcClientBuilder<T> {
+    pub fn with_config(self, config: BlockchainRpcClientConfig) -> Self {
+        Self { config, ..self }
+    }
+}
+
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct BlockchainRpcClient {
@@ -88,6 +129,7 @@ pub struct BlockchainRpcClient {
 impl BlockchainRpcClient {
     pub fn builder() -> BlockchainRpcClientBuilder<()> {
         BlockchainRpcClientBuilder {
+            config: Default::default(),
             mandatory_fields: (),
             broadcast_listener: None,
         }
@@ -181,7 +223,7 @@ impl BlockchainRpcClient {
     fn compute_broadcast_timeout(&self) -> Duration {
         let max_broadcast_timeout = std::cmp::max(
             self.inner.overlay_client.config().validators.send_timeout,
-            self.inner.min_broadcast_timeout,
+            self.inner.config.min_broadcast_timeout,
         );
 
         if let Some(prev_time) = self
@@ -192,7 +234,10 @@ impl BlockchainRpcClient {
             .map(|x| Duration::from_millis(x as _))
         {
             metrics::gauge!("tycho_broadcast_timeout", "kind" => "calculated").set(prev_time);
-            let value = prev_time.clamp(self.inner.min_broadcast_timeout, max_broadcast_timeout);
+            let value = prev_time.clamp(
+                self.inner.config.min_broadcast_timeout,
+                max_broadcast_timeout,
+            );
             metrics::gauge!("tycho_broadcast_timeout", "kind" => "clamped").set(value);
             value
         } else {
@@ -226,11 +271,14 @@ impl BlockchainRpcClient {
             return Err(Error::NoNeighbours);
         };
 
+        let retries = self.inner.config.download_retries;
+
         download_block_inner(
             Request::from_tl(rpc::GetBlockFull { block_id: *block }),
             overlay_client,
             neighbour,
             requirement,
+            retries,
         )
         .await
     }
@@ -246,6 +294,8 @@ impl BlockchainRpcClient {
             return Err(Error::NoNeighbours);
         };
 
+        let retries = self.inner.config.download_retries;
+
         download_block_inner(
             Request::from_tl(rpc::GetNextBlockFull {
                 prev_block_id: *prev_block,
@@ -253,6 +303,7 @@ impl BlockchainRpcClient {
             overlay_client,
             neighbour,
             requirement,
+            retries,
         )
         .await
     }
@@ -389,6 +440,7 @@ impl BlockchainRpcClient {
         }
 
         let block_id = state.block_id;
+        let max_retries = self.inner.config.download_retries;
 
         download_compressed(
             state.size,
@@ -405,7 +457,12 @@ impl BlockchainRpcClient {
                         Request::from_tl(rpc::GetPersistentQueueStateChunk { block_id, offset })
                     }
                 };
-                download_with_retries(req, self.overlay_client().clone(), state.neighbour.clone())
+                download_with_retries(
+                    req,
+                    self.overlay_client().clone(),
+                    state.neighbour.clone(),
+                    max_retries,
+                )
             },
             |output, chunk| {
                 output.write_all(chunk)?;
@@ -429,9 +486,6 @@ impl BlockchainRpcClient {
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {
             let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
-
-            // Real neighbours count
-            let neighbour_count = neighbours.len();
 
             // Number of ArchiveInfo::TooNew responses
             let mut new_archive_count = 0usize;
@@ -477,9 +531,8 @@ impl BlockchainRpcClient {
                 }
             }
 
-            // Stop using archives when enough neighbors
-            // have responded ArchiveInfo::TooNew
-            if new_archive_count >= neighbour_count {
+            // Stop using archives if enough neighbors responded TooNew
+            if new_archive_count >= self.inner.config.too_new_archive_threshold {
                 return Ok(PendingArchiveResponse::TooNew);
             }
 
@@ -489,7 +542,7 @@ impl BlockchainRpcClient {
             };
         };
 
-        tracing::debug!(
+        tracing::info!(
             peer_id = %pending_archive.neighbour.peer_id(),
             archive_id = pending_archive.id,
             archive_size = %ByteSize(pending_archive.size.get()),
@@ -514,6 +567,8 @@ impl BlockchainRpcClient {
             tracing::debug!("finished");
         }
 
+        let retries = self.inner.config.download_retries;
+
         download_compressed(
             archive.size,
             archive.chunk_size,
@@ -525,14 +580,16 @@ impl BlockchainRpcClient {
 
                 let started_at = Instant::now();
 
-                tracing::debug!(offset, "downloading archive chunk");
+                tracing::debug!(archive_id, offset, "downloading archive chunk");
                 download_with_retries(
                     Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
                     overlay_client,
                     neighbour,
+                    retries,
                 )
                 .map(move |res| {
                     tracing::info!(
+                        archive_id,
                         offset,
                         elapsed = %humantime::format_duration(started_at.elapsed()),
                         "downloaded archive chunk",
@@ -556,9 +613,9 @@ impl BlockchainRpcClient {
 }
 
 struct Inner {
+    config: BlockchainRpcClientConfig,
     overlay_client: PublicOverlayClient,
     broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
-    min_broadcast_timeout: Duration,
     response_tracker: Mutex<tycho_util::time::RollingP2Estimator>,
 }
 
@@ -617,6 +674,7 @@ async fn download_block_inner(
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
     requirement: DataRequirement,
+    retries: usize,
 ) -> Result<BlockDataFullWithNeighbour, Error> {
     let response = overlay_client
         .query_raw::<BlockFull>(neighbour.clone(), req)
@@ -716,6 +774,7 @@ async fn download_block_inner(
                     Request::from_tl(rpc::GetBlockDataChunk { block_id, offset }),
                     overlay_client,
                     neighbour,
+                    retries,
                 ))
             })
             .buffered(PARALLEL_REQUESTS);
@@ -837,10 +896,8 @@ async fn download_with_retries(
     req: Request,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
+    max_retries: usize,
 ) -> DownloadedChunkResult {
-    // TODO: move to config?
-    const MAX_RETRIES: usize = 10;
-
     let mut retries = 0;
     loop {
         match overlay_client
@@ -854,7 +911,7 @@ async fn download_with_retries(
             Err(e) => {
                 tracing::error!("Failed to download archive slice: {e}");
                 retries += 1;
-                if retries >= MAX_RETRIES {
+                if retries >= max_retries {
                     return Err(e);
                 }
 
