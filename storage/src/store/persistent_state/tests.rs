@@ -372,7 +372,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
 
     let mut read_messages = FastHashSet::default();
     let mut next_diff_index = 0;
-    while let Some(_) = reader.read_next_diff()? {
+    while reader.read_next_diff()?.is_some() {
         next_diff_index += 1;
         while let Some(cell) = reader.read_next_message()? {
             let exists = read_messages.insert(*cell.repr_hash());
