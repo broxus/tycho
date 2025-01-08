@@ -46,6 +46,7 @@ where
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
+        max_message: QueueKey,
     ) -> Result<()>;
 
     /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
@@ -121,19 +122,20 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(stats)
     }
 
-    #[instrument(skip_all, fields(%block_id_short))]
+    #[instrument(skip_all, fields(%block_id_short, %max_message, %diff_hash))]
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        hash: &HashBytes,
+        diff_hash: &HashBytes,
         statistics: DiffStatistics,
+        max_message: QueueKey,
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_to = diff.processed_to.clone();
         self.queue
-            .apply_diff(diff, block_id_short, hash, statistics)?;
+            .apply_diff(diff, block_id_short, diff_hash, statistics, max_message)?;
 
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             new_messages_len = len,
@@ -186,7 +188,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
-        tracing::trace!(
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             source_shard = ?source_shard,
             inclusive_until = ?inclusive_until,
