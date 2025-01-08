@@ -251,7 +251,7 @@ impl std::fmt::Debug for QueueKey {
 
 impl std::fmt::Display for QueueKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LT_HASH({}_{})", self.lt, self.hash)
+        write!(f, "LT_HASH({}_{:.9})", self.lt, format!("{}", self.hash))
     }
 }
 

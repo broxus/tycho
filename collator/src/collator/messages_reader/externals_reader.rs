@@ -106,6 +106,10 @@ impl ExternalsReader {
             .any(|(_, v)| v.reader_state.buffer.msgs_count() > 0)
     }
 
+    pub fn all_messages_collected(&self) -> bool {
+        self.all_ranges_fully_read && !self.has_messages_in_buffers()
+    }
+
     pub fn has_pending_externals(&self) -> bool {
         self.anchors_cache.has_pending_externals()
     }
@@ -602,7 +606,7 @@ impl ExternalsRangeReader {
                 "externals reader: can fill message group on ({}x{})",
                 self.messages_buffer_limits.slots_count, self.messages_buffer_limits.slot_vert_size,
             );
-        } else {
+        } else if matches!(fill_state_by_count, BufferFillStateByCount::IsFull) {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 seqno = self.seqno,
                 reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
