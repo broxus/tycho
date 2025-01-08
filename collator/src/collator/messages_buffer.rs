@@ -467,7 +467,7 @@ impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
 pub(super) struct DebugHashBytesShort<'a>(pub &'a HashBytes);
 impl std::fmt::Debug for DebugHashBytesShort<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.4}", self.0)
+        write!(f, "{:.9}", format!("{}", self.0))
     }
 }
 

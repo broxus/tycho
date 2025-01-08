@@ -587,7 +587,7 @@ impl MessagesReader {
             match par_reader_stage {
                 MessagesReaderStage::ExistingMessages => {
                     // check if all existing messages read and collected
-                    if par_reader.all_ranges_fully_read && !par_reader.has_messages_in_buffers() {
+                    if par_reader.all_existing_messages_collected() {
                         // we can update processed_to when we collected all messages from the partition
                         par_reader.set_processed_to_current_position()?;
 
@@ -617,11 +617,10 @@ impl MessagesReader {
                 }
                 MessagesReaderStage::NewMessages => {
                     // check if all new messages read and collected
-                    if !self
-                        .new_messages
-                        .has_pending_messages_from_partition(par_id)
-                        && !par_reader.has_messages_in_buffers()
-                    {
+                    if par_reader.all_new_messages_collected(
+                        self.new_messages
+                            .has_pending_messages_from_partition(par_id),
+                    ) {
                         // we can update processed_to when we collected all messages from the partition
                         par_reader.set_processed_to_current_position()?;
 
@@ -710,9 +709,7 @@ impl MessagesReader {
             self.externals_reader.set_range_readers(range_readers);
 
             // check if all externals collected
-            if self.externals_reader.all_ranges_fully_read
-                && !self.externals_reader.has_messages_in_buffers()
-            {
+            if self.externals_reader.all_messages_collected() {
                 // we can update processed_to when we collected all externals
                 self.externals_reader.set_processed_to_current_position()?;
 
