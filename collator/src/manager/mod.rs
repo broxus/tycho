@@ -480,6 +480,7 @@ where
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
             statistics,
+            queue_diff.as_ref().max_message,
         )
     }
 
@@ -1293,6 +1294,7 @@ where
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
+                        queue_diff_stuff.as_ref().max_message,
                     ));
 
                     let prev_ids_info = block_stuff.construct_prev_id()?;
@@ -1305,10 +1307,15 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
+        while let Some((diff, diff_hash, block_id, max_message)) = prev_queue_diffs.pop() {
             let statistics = (&diff, block_id.shard).into();
-            self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash, statistics)?;
+            self.mq_adapter.apply_diff(
+                diff,
+                block_id.as_short_id(),
+                &diff_hash,
+                statistics,
+                max_message,
+            )?;
         }
         // trim diffs tails for all shards
         for (shard_id, min_processed_to) in min_processed_to_by_shards {
