@@ -351,12 +351,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
     fn from(value: (&QueueDiffWithMessages<V>, ShardIdent)) -> Self {
         let (diff, shard_ident) = value;
         let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
-        let max_message = diff
-            .messages
-            .keys()
-            .next_back()
-            .cloned()
-            .unwrap_or_default();
+        let max_message = diff.messages.keys().last().cloned().unwrap_or_default();
 
         let mut statistics = FastHashMap::default();
 

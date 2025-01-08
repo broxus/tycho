@@ -136,6 +136,7 @@ impl Phase<FinalizeState> {
                     block_id_short,
                     &queue_diff_hash,
                     statistics,
+                    max_message,
                 )?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
