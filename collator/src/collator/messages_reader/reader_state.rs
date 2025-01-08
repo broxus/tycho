@@ -225,9 +225,6 @@ impl InternalsReaderState {
 
 #[derive(Default)]
 pub struct PartitionReaderState {
-    // /// Buffer to store messages from partition
-    // /// before collect them to the next execution group
-    // pub buffer: MessagesBufferV2,
     pub ranges: BTreeMap<BlockSeqno, InternalsRangeReaderState>,
     pub processed_to: BTreeMap<ShardIdent, QueueKey>,
 
@@ -239,7 +236,6 @@ pub struct PartitionReaderState {
 impl From<&PartitionProcessedUptoStuff> for PartitionReaderState {
     fn from(value: &PartitionProcessedUptoStuff) -> Self {
         Self {
-            // buffer: Default::default(),
             curr_processed_offset: 0,
             processed_to: value.processed_to.clone(),
             ranges: value.ranges.iter().map(|(k, v)| (*k, v.into())).collect(),
@@ -311,7 +307,7 @@ impl From<&ShardRangeInfo> for ShardReaderState {
             from: value.from,
             to: value.to,
             // on init current position is on the from
-            current_position: QueueKey::min_for_lt(value.from),
+            current_position: QueueKey::max_for_lt(value.from),
         }
     }
 }

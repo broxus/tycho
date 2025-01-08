@@ -298,7 +298,7 @@ fn new_transaction(
                     cell: out_msg_cell,
                     special_origin: None,
                     block_seqno: Some(collation_data.block_id_short.seqno),
-                    from_same_shard: None,
+                    from_same_shard: Some(true),
                 }));
             }
             MsgInfo::ExtOut(_) => {

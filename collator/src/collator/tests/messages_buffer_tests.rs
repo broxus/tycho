@@ -4,6 +4,7 @@ use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
 
 use super::{DebugMessageGroup, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
+use crate::collator::messages_buffer::FillMessageGroupResult;
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{make_stub_external, MempoolAnchorId};
@@ -610,7 +611,10 @@ fn test_message_group_filling_from_buffers() {
 
     // first fill group with internals from partition 0
     // should fully fill 5 normal slots
-    let unused_from_par0 = int_buffer_par_0.fill_message_group(
+    let FillMessageGroupResult {
+        unused_buffer_accounts: unused_from_par0,
+        ..
+    } = int_buffer_par_0.fill_message_group(
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
