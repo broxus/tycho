@@ -143,7 +143,7 @@ impl InternalsParitionReader {
                     new_shard_reader_states.insert(*shard_id, ShardReaderState {
                         from: prev_shard_reader_state.to,
                         to: shard_range_to,
-                        current_position: QueueKey::min_for_lt(prev_shard_reader_state.to),
+                        current_position: QueueKey::max_for_lt(prev_shard_reader_state.to),
                     });
                 }
 
@@ -167,6 +167,9 @@ impl InternalsParitionReader {
                     msgs_stats: Default::default(),
                     remaning_msgs_stats: Default::default(),
                 };
+
+                // drop flag when we add new messages range reader
+                self.all_ranges_fully_read = false;
 
                 let reader = self.insert_range_reader(reader.seqno, reader);
 
