@@ -86,6 +86,7 @@ where
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
+        max_message: QueueKey,
     ) -> Result<()>;
     /// Move messages from uncommitted state to committed state and update gc ranges
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
@@ -128,9 +129,10 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
     }
 }
 
+#[derive(Debug)]
 struct ShortQueueDiff {
     pub processed_to: ProcessedTo,
-    pub end_key: QueueKey,
+    pub max_message: QueueKey,
     pub hash: HashBytes,
 }
 
@@ -179,6 +181,7 @@ where
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
+        max_message: QueueKey,
     ) -> Result<()> {
         // Get or insert the shard diffs for the given block_id_short.shard
         let mut shard_diffs = self
@@ -198,7 +201,7 @@ where
             return Ok(());
         }
 
-        let last_applied_seqno = shard_diffs.keys().next_back().cloned();
+        let last_applied_seqno = shard_diffs.keys().last().cloned();
 
         if let Some(last_applied_seqno) = last_applied_seqno {
             // Check if the diff is already applied
@@ -215,14 +218,6 @@ where
                 );
             }
         }
-
-        let max_message = diff
-            .messages
-            .keys()
-            .next_back()
-            .cloned()
-            .unwrap_or_default();
-
         // Add messages to uncommitted_state if there are any
         if !diff.messages.is_empty() {
             self.uncommitted_state.add_messages_with_statistics(
@@ -235,7 +230,7 @@ where
 
         let short_diff = ShortQueueDiff {
             processed_to: diff.processed_to,
-            end_key: max_message,
+            max_message,
             hash: *hash,
         };
 
@@ -262,10 +257,10 @@ where
 
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
-                            .or_insert_with(|| shard_diff.end_key);
+                            .or_insert_with(|| shard_diff.max_message);
 
-                        if shard_diff.end_key > *current_last_key {
-                            *current_last_key = shard_diff.end_key;
+                        if shard_diff.max_message > *current_last_key {
+                            *current_last_key = shard_diff.max_message;
                         }
 
                         // find min processed_to for each shard for GC
@@ -352,12 +347,12 @@ where
         if let Some(mut shard_diffs) = self.uncommitted_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
-                .retain(|_, diff| &diff.end_key > inclusive_until);
+                .retain(|_, diff| &diff.max_message > inclusive_until);
         }
         if let Some(mut shard_diffs) = self.committed_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
-                .retain(|_, diff| &diff.end_key > inclusive_until);
+                .retain(|_, diff| &diff.max_message > inclusive_until);
         }
         Ok(())
     }

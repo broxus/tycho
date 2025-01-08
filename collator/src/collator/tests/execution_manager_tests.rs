@@ -95,7 +95,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
 
     fn get_statistics(
         &self,
-        partition: QueuePartition,
+        _partition: QueuePartition,
         _ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics> {
         unimplemented!()
@@ -107,6 +107,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         _block_id_short: BlockIdShort,
         _diff_hash: &HashBytes,
         _statistics: DiffStatistics,
+        _max_message: QueueKey,
     ) -> Result<()> {
         unimplemented!()
     }

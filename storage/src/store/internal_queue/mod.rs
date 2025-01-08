@@ -171,7 +171,7 @@ impl InternalQueueStorage {
             let mut buffer = Vec::new();
             let mut statistics: FastHashMap<QueuePartition, FastHashMap<DestAddr, u64>> =
                 FastHashMap::default();
-            while let Some(_) = reader.read_next_diff()? {
+            while reader.read_next_diff()?.is_some() {
                 let current_diff_index = reader.next_queue_diff_index() - 1;
 
                 while let Some(cell) = reader.read_next_message()? {
