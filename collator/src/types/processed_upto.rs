@@ -136,10 +136,48 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct ExternalsProcessedUptoStuff {
     pub processed_to: (MempoolAnchorId, u64),
     pub ranges: BTreeMap<BlockSeqno, ExternalsRangeInfo>,
+}
+
+impl std::fmt::Debug for ExternalsProcessedUptoStuff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct ExternalsRangesInfo {
+            seqno: String,
+            processed_offset: String,
+            chain_time: String,
+            from: (MempoolAnchorId, u64),
+            to: (MempoolAnchorId, u64),
+        }
+
+        let (first_seqno, first_processed_offset, first_ct, first_from) = self
+            .ranges
+            .first_key_value()
+            .map(|(seqno, r)| (*seqno, r.processed_offset, r.chain_time, r.from))
+            .unwrap_or_default();
+        let (last_seqno, last_processed_offset, last_ct, last_to) = self
+            .ranges
+            .last_key_value()
+            .map(|(seqno, r)| (*seqno, r.processed_offset, r.chain_time, r.to))
+            .unwrap_or_default();
+
+        let ranges = ExternalsRangesInfo {
+            seqno: format!("{}-{}", first_seqno, last_seqno),
+            processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
+            chain_time: format!("{}-{}", first_ct, last_ct),
+            from: first_from,
+            to: last_to,
+        };
+
+        f.debug_struct("ExternalsProcessedUptoStuff")
+            .field("processed_to", &self.processed_to)
+            .field("ranges", &ranges)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -191,10 +229,51 @@ impl InternalsProcessedUptoStuff {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct PartitionProcessedUptoStuff {
     pub processed_to: BTreeMap<ShardIdent, QueueKey>,
     pub ranges: BTreeMap<BlockSeqno, InternalsRangeStuff>,
+}
+
+impl std::fmt::Debug for PartitionProcessedUptoStuff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct InternalsRangesInfo {
+            seqno: String,
+            processed_offset: String,
+            shards: BTreeMap<ShardIdent, ShardRangeInfo>,
+        }
+
+        let (first_seqno, first_processed_offset, mut first_shards) = self
+            .ranges
+            .first_key_value()
+            .map(|(seqno, r)| (*seqno, r.processed_offset, r.shards.clone()))
+            .unwrap_or_default();
+        let (last_seqno, last_processed_offset, last_shards) = self
+            .ranges
+            .last_key_value()
+            .map(|(seqno, r)| (*seqno, r.processed_offset, r.shards.clone()))
+            .unwrap_or_default();
+
+        for (shard_id, last_shard_range) in last_shards {
+            first_shards
+                .entry(shard_id)
+                .and_modify(|r| r.to = last_shard_range.to)
+                .or_insert(last_shard_range);
+        }
+
+        let ranges = InternalsRangesInfo {
+            seqno: format!("{}-{}", first_seqno, last_seqno),
+            processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
+            shards: first_shards,
+        };
+
+        f.debug_struct("PartitionProcessedUptoStuff")
+            .field("processed_to", &self.processed_to)
+            .field("ranges", &ranges)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
