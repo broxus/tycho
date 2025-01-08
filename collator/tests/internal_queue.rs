@@ -302,11 +302,14 @@ async fn test_queue() -> anyhow::Result<()> {
             assert_eq!(*addr3_count, 1000);
         });
 
+    let max_message = *diff_with_messages.messages.keys().last().unwrap();
+
     queue.apply_diff(
         diff_with_messages,
         block1,
         &HashBytes::from([1; 32]),
         diff_statistics,
+        max_message,
     )?;
     // end block 1 diff
 
@@ -398,11 +401,14 @@ async fn test_queue() -> anyhow::Result<()> {
             assert_eq!(*addr3_count, 1000);
         });
 
+    let max_message = *diff_with_messages.messages.keys().last().unwrap();
+
     queue.apply_diff(
         diff_with_messages,
         block2,
         &HashBytes::from([1; 32]),
         diff_statistics,
+        max_message,
     )?;
 
     // end block 2 diff
@@ -414,7 +420,7 @@ async fn test_queue() -> anyhow::Result<()> {
         dest_3_normal_priority,
     )?;
 
-    queue.commit_diff(&vec![(block1, true)])?;
+    queue.commit_diff(&[(block1, true)])?;
     test_statistics_check_statistics(
         &queue,
         dest_1_low_priority,
@@ -460,7 +466,7 @@ async fn test_queue() -> anyhow::Result<()> {
     )?;
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
-    while let Some(_) = iterator_manager.next()? {
+    while iterator_manager.next()?.is_some() {
         read_count += 1;
     }
 
@@ -491,7 +497,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
-    while let Some(_) = iterator_manager.next()? {
+    while iterator_manager.next()?.is_some() {
         read_count += 1;
     }
     assert_eq!(read_count, 30000);
@@ -503,14 +509,14 @@ async fn test_queue() -> anyhow::Result<()> {
     )?;
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
-    while let Some(_) = iterator_manager.next()? {
+    while iterator_manager.next()?.is_some() {
         read_count += 1;
     }
 
     assert_eq!(read_count, 2000);
 
     // test commit all diffs and check statistics
-    queue.commit_diff(&vec![(block2, true)])?;
+    queue.commit_diff(&[(block2, true)])?;
     test_statistics_check_statistics(
         &queue,
         dest_1_low_priority,
@@ -568,11 +574,13 @@ async fn test_queue_clear() -> anyhow::Result<()> {
 
     let statistics = (&diff_with_messages, block.shard).into();
 
+    let max_message = *diff_with_messages.messages.keys().last().unwrap();
     queue.apply_diff(
         diff_with_messages,
         block,
         &HashBytes::from([1; 32]),
         statistics,
+        max_message,
     )?;
 
     let mut ranges = Vec::new();
@@ -853,18 +861,24 @@ async fn test_queue_tail() -> anyhow::Result<()> {
     let statistics_mc1 = (&diff_mc1, block_mc1.shard).into();
     let statistics_mc2 = (&diff_mc2, block_mc2.shard).into();
 
+    let max_message = *diff_mc1.messages.keys().last().unwrap();
+
     // apply two diffs
     queue.apply_diff(
         diff_mc1,
         block_mc1,
         &HashBytes::from([1; 32]),
         statistics_mc1,
+        max_message,
     )?;
+
+    let max_message = *diff_mc2.messages.keys().last().unwrap();
     queue.apply_diff(
         diff_mc2,
         block_mc2,
         &HashBytes::from([2; 32]),
         statistics_mc2,
+        max_message,
     )?;
 
     let diff_len_mc = queue.get_diffs_count_by_shard(&ShardIdent::new_full(-1));
