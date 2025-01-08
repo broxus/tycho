@@ -8,7 +8,7 @@ use tycho_network::{ConnectionError, Network, PublicOverlay, Request, UnknownPee
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
-pub use self::neighbours::Neighbours;
+pub use self::neighbours::{NeighbourType, Neighbours};
 pub use self::validators::{Validator, ValidatorSetPeers, ValidatorsResolver};
 use crate::proto::overlay;
 

@@ -21,7 +21,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
 use crate::overlay_client::{
-    Error, Neighbour, PublicOverlayClient, QueryResponse, QueryResponseHandle,
+    Error, Neighbour, NeighbourType, PublicOverlayClient, QueryResponse, QueryResponseHandle,
 };
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
@@ -360,10 +360,11 @@ impl BlockchainRpcClient {
     ) -> Result<PendingPersistentState, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
 
+        // Get reliable neighbours with higher weight
         let neighbours = self
             .overlay_client()
             .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT);
+            .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
 
         let req = match kind {
             PersistentStateKind::Shard => Request::from_tl(rpc::GetPersistentShardStateInfo {
@@ -478,10 +479,12 @@ impl BlockchainRpcClient {
 
     pub async fn find_archive(&self, mc_seqno: u32) -> Result<PendingArchiveResponse, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
+
+        // Get reliable neighbours with higher weight
         let neighbours = self
             .overlay_client()
             .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT);
+            .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
 
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {
@@ -911,7 +914,7 @@ async fn download_with_retries(
             Err(e) => {
                 tracing::error!("Failed to download archive slice: {e}");
                 retries += 1;
-                if retries >= max_retries {
+                if retries >= max_retries || !neighbour.is_reliable() {
                     return Err(e);
                 }
 

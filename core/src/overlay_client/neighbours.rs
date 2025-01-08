@@ -50,9 +50,9 @@ impl Neighbours {
         selection_index.choose(&mut rand::thread_rng())
     }
 
-    pub fn choose_multiple(&self, n: usize) -> Vec<Neighbour> {
+    pub fn choose_multiple(&self, n: usize, neighbour_type: NeighbourType) -> Vec<Neighbour> {
         let selection_index = self.inner.selection_index.lock();
-        selection_index.choose_multiple(&mut rand::thread_rng(), n)
+        selection_index.choose_multiple(&mut rand::thread_rng(), n, neighbour_type)
     }
 
     /// Tries to apply neighbours score to selection index.
@@ -223,7 +223,12 @@ impl SelectionIndex {
             .cloned()
     }
 
-    fn choose_multiple<R: Rng + ?Sized>(&self, rng: &mut R, mut n: usize) -> Vec<Neighbour> {
+    fn choose_multiple<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+        mut n: usize,
+        neighbour_type: NeighbourType,
+    ) -> Vec<Neighbour> {
         struct Element<'a> {
             key: f64,
             neighbour: &'a Neighbour,
@@ -280,11 +285,26 @@ impl SelectionIndex {
         let (_, mid, greater) = candidates.select_nth_unstable(self.indices_with_weights.len() - n);
 
         let mut result = Vec::with_capacity(n);
-        result.push(mid.neighbour.clone());
+
+        let check_reliable = matches!(neighbour_type, NeighbourType::Reliable);
+        let is_valid = |neighbour: &Neighbour| !check_reliable || neighbour.is_reliable();
+
+        if is_valid(mid.neighbour) {
+            result.push(mid.neighbour.clone());
+        }
+
         for element in greater {
-            result.push(element.neighbour.clone());
+            if is_valid(element.neighbour) {
+                result.push(element.neighbour.clone());
+            }
         }
 
         result
     }
+}
+
+#[derive(Eq, PartialEq)]
+pub enum NeighbourType {
+    All,
+    Reliable,
 }
