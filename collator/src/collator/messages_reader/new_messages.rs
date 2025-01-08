@@ -63,7 +63,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn has_pending_messages_from_partition(&self, partition_id: &u8) -> bool {
         self.messages_for_current_shard
             .get(partition_id)
-            .map_or(false, |heap| !heap.is_empty())
+            .is_some_and(|heap| !heap.is_empty())
     }
 
     pub fn has_pending_messages(&self) -> bool {
@@ -96,16 +96,17 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         self.messages_for_current_shard.remove(partition_id)
     }
 
-    pub fn restore_messages_for_current_shard(
+    pub fn set_messages_for_current_shard(
         &mut self,
         partition_id: u8,
         messages: BinaryHeap<Reverse<MessageExt<V>>>,
-        taken_messages: &[QueueKey],
     ) {
         self.messages_for_current_shard
             .insert(partition_id, messages);
+    }
 
-        for key in taken_messages {
+    pub fn remove_collected_messages(&mut self, collected_messages: &[QueueKey]) {
+        for key in collected_messages {
             self.messages.remove(key);
         }
     }
@@ -125,7 +126,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
 impl InternalsParitionReader {
     pub fn get_new_messages_range_reader(
         &mut self,
-        current_max_lt: u64,
+        current_next_lt: u64,
     ) -> Result<&mut InternalsRangeReader> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
 
@@ -136,14 +137,14 @@ impl InternalsParitionReader {
                 let mut new_shard_reader_states = BTreeMap::default();
                 for (shard_id, prev_shard_reader_state) in &last_range_reader.reader_state.shards {
                     let shard_range_to = if shard_id == &self.for_shard_id {
-                        current_max_lt
+                        current_next_lt
                     } else {
                         prev_shard_reader_state.to
                     };
                     new_shard_reader_states.insert(*shard_id, ShardReaderState {
                         from: prev_shard_reader_state.to,
                         to: shard_range_to,
-                        current_position: QueueKey::min_for_lt(prev_shard_reader_state.to),
+                        current_position: QueueKey::max_for_lt(prev_shard_reader_state.to),
                     });
                 }
 
@@ -168,6 +169,9 @@ impl InternalsParitionReader {
                     remaning_msgs_stats: Default::default(),
                 };
 
+                // drop flag when we add new messages range reader
+                self.all_ranges_fully_read = false;
+
                 let reader = self.insert_range_reader(reader.seqno, reader);
 
                 tracing::debug!(target: tracing_targets::COLLATOR,
@@ -184,7 +188,7 @@ impl InternalsParitionReader {
         }
     }
 
-    pub fn update_new_messages_reader_to_boundary(&mut self, current_max_lt: u64) -> Result<()> {
+    pub fn update_new_messages_reader_to_boundary(&mut self, current_next_lt: u64) -> Result<()> {
         let for_shard_id = self.for_shard_id;
         let last_range_reader = self.get_last_range_reader_mut()?;
         if matches!(
@@ -196,7 +200,10 @@ impl InternalsParitionReader {
                 .shards
                 .get_mut(&for_shard_id)
                 .context("new messages range reader should have current shard reader state")?;
-            current_shard_reader_state.to = current_max_lt;
+            if current_shard_reader_state.to < current_next_lt {
+                current_shard_reader_state.to = current_next_lt;
+                last_range_reader.fully_read = false;
+            }
         }
         Ok(())
     }
@@ -225,7 +232,7 @@ impl InternalsParitionReader {
     pub fn read_new_messages_into_buffer(
         &mut self,
         new_messages: &mut BinaryHeap<Reverse<MessageExt<EnqueuedMessage>>>,
-        current_max_lt: u64,
+        current_next_lt: u64,
     ) -> Result<ReadNewMessagesResult> {
         let mut res = ReadNewMessagesResult::default();
         let block_seqno = self.block_seqno;
@@ -243,7 +250,7 @@ impl InternalsParitionReader {
         let for_shard_id = self.for_shard_id;
         let max_limits = self.max_limits;
 
-        let range_reader = self.get_new_messages_range_reader(current_max_lt)?;
+        let range_reader = self.get_new_messages_range_reader(current_next_lt)?;
         let shard_reader_state = range_reader
             .reader_state
             .shards

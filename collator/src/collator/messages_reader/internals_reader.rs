@@ -82,7 +82,10 @@ impl InternalsParitionReader {
         Ok(reader)
     }
 
-    pub fn finalize(mut self) -> PartitionReaderState {
+    pub fn finalize(mut self, current_next_lt: u64) -> Result<PartitionReaderState> {
+        // update new messages "to" boundary on current block next lt
+        self.update_new_messages_reader_to_boundary(current_next_lt)?;
+
         // collect range reader states
         // ignore next range reader if it was not initialized
         // and we did not read any messages from it
@@ -97,15 +100,23 @@ impl InternalsParitionReader {
             .peekable();
         let mut max_processed_offset = 0;
         while let Some((seqno, mut range_reader)) = range_readers.next() {
-            // update offset in the last range reader state
-            // if current offset is greater than the maximum stored one among all ranges
-            max_processed_offset =
-                max_processed_offset.max(range_reader.reader_state.processed_offset);
-            if self.reader_state.curr_processed_offset > max_processed_offset
-                && range_readers.peek().is_none()
-            {
-                range_reader.reader_state.processed_offset =
-                    self.reader_state.curr_processed_offset;
+            if matches!(range_reader.kind, InternalsRangeReaderKind::NewMessages) {
+                // when we have new messages range reader it will be the only one
+                // and we can drop processed offset
+                // because processed new messages will not be saved to the queue
+                range_reader.reader_state.processed_offset = 0;
+                self.reader_state.curr_processed_offset = 0;
+            } else {
+                // otherwise update offset in the last range reader state
+                // if current offset is greater than the maximum stored one among all ranges
+                max_processed_offset =
+                    max_processed_offset.max(range_reader.reader_state.processed_offset);
+                if self.reader_state.curr_processed_offset > max_processed_offset
+                    && range_readers.peek().is_none()
+                {
+                    range_reader.reader_state.processed_offset =
+                        self.reader_state.curr_processed_offset;
+                }
             }
 
             self.reader_state
@@ -114,7 +125,7 @@ impl InternalsParitionReader {
         }
 
         // return updated partition reader state
-        self.reader_state
+        Ok(self.reader_state)
     }
 
     pub fn has_non_zero_processed_offset(&self) -> bool {
@@ -135,6 +146,14 @@ impl InternalsParitionReader {
         self.range_readers
             .iter()
             .any(|(_, r)| r.reader_state.buffer.msgs_count() > 0)
+    }
+
+    pub fn all_existing_messages_collected(&self) -> bool {
+        self.all_ranges_fully_read && !self.has_messages_in_buffers()
+    }
+
+    pub fn all_new_messages_collected(&self, has_pending_new_messages: bool) -> bool {
+        !has_pending_new_messages && !self.has_messages_in_buffers()
     }
 
     pub fn range_readers(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReader> {
@@ -516,6 +535,11 @@ impl InternalsParitionReader {
 
     pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
         for (_, range_reader) in self.range_readers.iter_mut() {
+            // skip new messages range readers
+            if matches!(range_reader.kind, InternalsRangeReaderKind::NewMessages) {
+                continue;
+            }
+
             // skip fully read ranges
             if range_reader.fully_read {
                 continue;
