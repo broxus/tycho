@@ -172,7 +172,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         iterator: &mut Box<dyn QueueIterator<V>>,
         messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()> {
-        tracing::trace!(
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             messages_len = messages.len(),
             "Committing messages to iterator"
@@ -181,12 +181,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     fn clear_uncommitted_state(&self) -> Result<()> {
-        tracing::trace!(target: tracing_targets::MQ_ADAPTER, "Clearing uncommitted state");
+        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Clearing uncommitted state");
         self.queue.clear_uncommitted_state()
     }
 
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
-        tracing::trace!(
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             source_shard = ?source_shard,
             inclusive_until = ?inclusive_until,
