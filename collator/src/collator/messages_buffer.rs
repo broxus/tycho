@@ -467,7 +467,7 @@ impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
 pub(super) struct DebugHashBytesShort<'a>(pub &'a HashBytes);
 impl std::fmt::Debug for DebugHashBytesShort<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "'{}'", self.0[0])
+        write!(f, "{:.4}", self.0)
     }
 }
 
@@ -536,12 +536,9 @@ impl std::fmt::Display for DisplayMessageGroup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "int={}, ext={}, ",
-            self.0.slots_info.int_count, self.0.slots_info.ext_count,
-        )?;
-        f.debug_list()
-            .entries(self.0.msgs.values().map(|v| v.len()))
-            .finish()
+            "int={}, ext={}, slots={:?}",
+            self.0.slots_info.int_count, self.0.slots_info.ext_count, self.0.slots_info.slots,
+        )
     }
 }
 

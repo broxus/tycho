@@ -137,6 +137,14 @@ impl InternalsParitionReader {
             .any(|(_, r)| r.reader_state.buffer.msgs_count() > 0)
     }
 
+    pub fn all_existing_messages_collected(&self) -> bool {
+        self.all_ranges_fully_read && !self.has_messages_in_buffers()
+    }
+
+    pub fn all_new_messages_collected(&self, has_pending_new_messages: bool) -> bool {
+        !has_pending_new_messages && !self.has_messages_in_buffers()
+    }
+
     pub fn range_readers(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReader> {
         &self.range_readers
     }

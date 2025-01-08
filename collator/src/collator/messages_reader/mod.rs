@@ -418,6 +418,9 @@ impl MessagesReader {
 
         // TODO: msgs-v3: read internals from partitions and externals in parallel
 
+        // remember if all internals were collected before to reduce spam in logs further
+        let mut all_internals_collected_before = BTreeMap::new();
+
         // count how many times prev processed offset reached in readers
         let mut prev_processed_offset_reached_count = 0;
 
@@ -439,6 +442,9 @@ impl MessagesReader {
 
             match par_reader_stage {
                 MessagesReaderStage::ExistingMessages => {
+                    all_internals_collected_before
+                        .insert(*par_id, par_reader.all_existing_messages_collected());
+
                     let par_metrics = par_reader.read_into_buffers()?;
                     self.metrics.append(par_metrics);
                 }
@@ -447,10 +453,14 @@ impl MessagesReader {
                     par_reader.update_new_messages_reader_to_boundary(current_max_lt)?;
 
                     // check if has pending new messages
-                    if !self
+                    let has_pending_new_messages = self
                         .new_messages
-                        .has_pending_messages_from_partition(par_id)
-                    {
+                        .has_pending_messages_from_partition(par_id);
+                    all_internals_collected_before.insert(
+                        *par_id,
+                        par_reader.all_new_messages_collected(has_pending_new_messages),
+                    );
+                    if !has_pending_new_messages {
                         par_reader.set_new_messages_range_reader_fully_read()?;
                         continue;
                     }
@@ -589,13 +599,20 @@ impl MessagesReader {
 
                         *par_reader_stage = MessagesReaderStage::NewMessages;
 
-                        tracing::debug!(target: tracing_targets::COLLATOR,
-                            partition_id = *par_id,
-                            int_processed_to = ?par_reader.reader_state.processed_to,
-                            int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
-                            last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                            "all existing internals collected from partition",
-                        );
+                        // log only when was collected just now
+                        if !all_internals_collected_before
+                            .get(par_id)
+                            .cloned()
+                            .unwrap_or_default()
+                        {
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                partition_id = *par_id,
+                                int_processed_to = ?par_reader.reader_state.processed_to,
+                                int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
+                                last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                                "all existing internals collected from partition",
+                            );
+                        }
                     }
                 }
                 MessagesReaderStage::NewMessages => {
@@ -611,13 +628,20 @@ impl MessagesReader {
                         // drop processing offset when all new messages read
                         par_reader.drop_processing_offset()?;
 
-                        tracing::debug!(target: tracing_targets::COLLATOR,
-                            partition_id = *par_id,
-                            int_processed_to = ?par_reader.reader_state.processed_to,
-                            int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
-                            last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                            "all new internals collected from partition",
-                        );
+                        // log only when was collected just now
+                        if !all_internals_collected_before
+                            .get(par_id)
+                            .cloned()
+                            .unwrap_or_default()
+                        {
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                partition_id = *par_id,
+                                int_processed_to = ?par_reader.reader_state.processed_to,
+                                int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
+                                last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                                "all new internals collected from partition",
+                            );
+                        }
                     }
                 }
             }
@@ -636,6 +660,9 @@ impl MessagesReader {
             prev_processed_offset_reached_count += 1;
         } else {
             self.externals_reader.read_into_buffers();
+
+            // remember if all externals were collected before to reduce spam in logs further
+            let all_externals_collected_before = self.externals_reader.all_messages_collected();
 
             // update processing offset
             self.externals_reader.reader_state.curr_processed_offset += 1;
@@ -695,12 +722,15 @@ impl MessagesReader {
                 // drop all ranges except the last one
                 self.externals_reader.retain_only_last_range_reader()?;
 
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    ext_processed_to = ?self.externals_reader.reader_state.processed_to,
-                    ext_curr_processed_offset = self.externals_reader.reader_state.curr_processed_offset,
-                    last_range_reader_state = ?self.externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(&r.reader_state))),
-                    "all externals collected",
-                );
+                // log only when was collected just now
+                if !all_externals_collected_before {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        ext_processed_to = ?self.externals_reader.reader_state.processed_to,
+                        ext_curr_processed_offset = self.externals_reader.reader_state.curr_processed_offset,
+                        last_range_reader_state = ?self.externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(&r.reader_state))),
+                        "all externals collected",
+                    );
+                }
             }
         }
 
