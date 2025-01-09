@@ -3692,6 +3692,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "tempfile",
  "thiserror",
  "tl-proto",
  "tokio",

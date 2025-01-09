@@ -54,10 +54,14 @@ tycho-util = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tempfile = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 tycho-util = { workspace = true, features = ["test"] }
+
+[features]
+test = []
 
 [lints]
 workspace = true
