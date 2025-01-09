@@ -84,7 +84,7 @@ impl Producer {
         } else {
             let (time, anchor_time) =
                 Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
-            let payload = input_buffer.fetch(last_own_point.as_ref().map_or(false, |last| {
+            let payload = input_buffer.fetch(last_own_point.as_ref().is_some_and(|last| {
                 // it's not necessary to resend external messages from previous round
                 // if at least 1F+1 peers (one reliable) signed previous point;
                 // also notice that payload elems are deduplicated in mempool adapter

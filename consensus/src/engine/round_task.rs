@@ -349,7 +349,7 @@ impl RoundCtx {
             .increment(own_point.is_none() as _);
         metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_some() as _);
 
-        let no_proof = own_point.map_or(false, |point| point.evidence().is_empty());
+        let no_proof = own_point.is_some_and(|point| point.evidence().is_empty());
         metrics::counter!("tycho_mempool_points_no_proof_produced").increment(no_proof as _);
 
         metrics::counter!("tycho_mempool_point_payload_count")

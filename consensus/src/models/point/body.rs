@@ -98,8 +98,7 @@ impl PointBody {
                         && self.data.includes.len() == PeerCount::GENESIS.full()
                         && self.data.witness.is_empty()
                         && self.data.anchor_trigger == self.data.anchor_proof
-                        && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next)
-                            .map_or(false, |anchor| anchor == *Genesis::id())
+                        && self.data.anchor_link_id(AnchorStageRole::Proof, genesis_round_next).is_some_and(|anchor| anchor == *Genesis::id())
                         && self.data.time == self.data.anchor_time.next()
                         && self.data.anchor_time.millis() == CachedConfig::get().genesis_info.genesis_millis
                 ))

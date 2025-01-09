@@ -73,7 +73,7 @@ impl PeerScheduleStateless {
     }
 
     pub fn peers_for(&self, round: Round) -> &Arc<FastHashSet<PeerId>> {
-        let result = if self.next_epoch_start.map_or(false, |r| round >= r) {
+        let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
             &self.peer_sets[2]
         } else if round >= self.cur_epoch_start {
             &self.peer_sets[1]
@@ -89,7 +89,7 @@ impl PeerScheduleStateless {
     }
 
     pub fn peers_ordered_for(&self, round: Round) -> &Arc<Vec<PeerId>> {
-        let result = if self.next_epoch_start.map_or(false, |r| round >= r) {
+        let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
             &self.peer_vecs[2]
         } else if round >= self.cur_epoch_start {
             &self.peer_vecs[1]
