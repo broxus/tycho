@@ -484,7 +484,7 @@ async fn check_archive(
     let archive_id = storage.block_storage().get_archive_id(seqno);
 
     let ArchiveId::Found(archive_id) = archive_id else {
-        anyhow::bail!("archive not found")
+        anyhow::bail!("archive {seqno} not found")
     };
 
     // Check archive size

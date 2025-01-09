@@ -1239,7 +1239,11 @@ struct ArchiveWriter<'a> {
 impl<'a> ArchiveWriter<'a> {
     fn new(db: &'a BaseDb, archive_id: u32, chunk_len: u64) -> Result<Self> {
         let chunk_len = chunk_len as usize;
-        let zstd_compressor = ZstdCompressStream::new(9, chunk_len)?;
+
+        let mut zstd_compressor = ZstdCompressStream::new(9, chunk_len)?;
+
+        let workers = (std::thread::available_parallelism()?.get() / 4) as u8;
+        zstd_compressor.multithreaded(workers)?;
 
         Ok(Self {
             db,
