@@ -45,7 +45,7 @@ impl PeerScheduleStateful {
 
     /// local peer id is always kept as not resolved
     pub fn peers_state_for(&self, round: Round) -> &'_ Arc<FastHashMap<PeerId, PeerState>> {
-        let result = if self.next_epoch_start.map_or(false, |r| round >= r) {
+        let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
             &self.active_subset[2]
         } else if round >= self.cur_epoch_start {
             &self.active_subset[1]
@@ -82,7 +82,7 @@ impl PeerScheduleStateful {
         for i in 0..self.active_subset.len() {
             if self.active_subset[i]
                 .get(peer_id)
-                .map_or(false, |old| *old != state)
+                .is_some_and(|old| *old != state)
             {
                 Arc::make_mut(&mut self.active_subset[i])
                     .entry(*peer_id)

@@ -79,7 +79,7 @@ impl DagPointFuture {
         let signable = state.init(&dag_point); // only after persisted
         signable.sign(point.round(), key_pair);
         assert!(
-            signable.signed().map_or(false, |sig| sig.is_ok()),
+            signable.signed().is_some_and(|sig| sig.is_ok()),
             "Coding or configuration error: local point cannot be signed; \
             node is not in validator set?"
         );
@@ -312,7 +312,7 @@ impl DagPointFuture {
                 "loaded, start validating",
             );
 
-            if stored_status.map_or(false, |status| status.is_certified) {
+            if stored_status.is_some_and(|status| status.is_certified) {
                 // note if the point contains valid evidence for a vertex,
                 //  the vertex and its dependencies are marked certified, but not the point itself,
                 //  so `Trusted` stored status does not trigger certification mark

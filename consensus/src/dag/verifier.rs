@@ -376,7 +376,7 @@ impl Verifier {
                 .saturating_sub(searched.is_some() as usize),
         );
         for (digest, shared) in &dag_location.versions {
-            if searched.map_or(false, |prev| prev == digest) {
+            if searched == Some(digest) {
                 found = Some(shared.clone());
             } else {
                 others.push(shared.clone());
@@ -390,7 +390,7 @@ impl Verifier {
         dag_location
             .versions
             .iter()
-            .filter(|(digest, _)| except.map_or(true, |except| except != *digest))
+            .filter(|(digest, _)| (except != Some(*digest)))
             .map(|(_, shared)| shared.clone())
             .collect::<Vec<_>>()
     }
