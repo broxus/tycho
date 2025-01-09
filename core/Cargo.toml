@@ -39,6 +39,7 @@ tycho-util = { workspace = true }
 everscale-crypto = { workspace = true }
 tempfile = { workspace = true }
 tycho-block-util = { workspace = true, features = ["test"] }
+tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 

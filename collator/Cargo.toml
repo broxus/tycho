@@ -55,6 +55,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 tycho-block-util = { workspace = true, features = ["test"] }
 tycho-collator = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
+tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 

@@ -1,7 +1,8 @@
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -84,23 +85,23 @@ impl NetworkBuilder {
 
         let socket = bind_address.to_socket().map(socket2::Socket::from)?;
 
-        if let Some(send_buffer_size) = quic_config.socket_send_buffer_size {
-            if let Err(e) = socket.set_send_buffer_size(send_buffer_size) {
-                tracing::warn!(
-                    send_buffer_size,
-                    "failed to set socket send buffer size: {e:?}"
-                );
-            }
-        }
+        let max_socket_size = MaxBufferSize::read()?;
 
-        if let Some(recv_buffer_size) = quic_config.socket_recv_buffer_size {
-            if let Err(e) = socket.set_recv_buffer_size(recv_buffer_size) {
-                tracing::warn!(
-                    recv_buffer_size,
-                    "failed to set socket recv buffer size: {e:?}"
-                );
-            }
-        }
+        set_socket_buffer(
+            &socket,
+            quic_config.socket_send_buffer_size,
+            max_socket_size.map(|m| m.send),
+            |s, size| s.set_send_buffer_size(size),
+            "send",
+        );
+
+        set_socket_buffer(
+            &socket,
+            quic_config.socket_recv_buffer_size,
+            max_socket_size.map(|m| m.recv),
+            |s, size| s.set_recv_buffer_size(size),
+            "recv",
+        );
 
         let config = Arc::new(config);
         let endpoint = Arc::new(Endpoint::new(endpoint_config, socket.into())?);
@@ -134,6 +135,29 @@ impl NetworkBuilder {
             connection_manager_handle,
             keypair,
         })))
+    }
+}
+
+fn set_socket_buffer(
+    socket: &socket2::Socket,
+    config_size: Option<usize>,
+    max_size: Option<usize>,
+    set_buffer_fn: impl Fn(&socket2::Socket, usize) -> std::io::Result<()>,
+    buffer_type: &str,
+) {
+    if let Some(size) = config_size {
+        if let Err(e) = set_buffer_fn(socket, size) {
+            tracing::error!(%size, "failed to set socket {} buffer size: {e:?}", buffer_type);
+        }
+    } else if let Some(max) = max_size {
+        if let Err(e) = set_buffer_fn(socket, max) {
+            tracing::error!(%max, "failed to set socket {} buffer size to max value: {e:?}", buffer_type);
+        }
+        tracing::info!(
+            "set socket {} buffer size to max value: {}",
+            buffer_type,
+            max
+        );
     }
 }
 
@@ -369,6 +393,46 @@ fn bind_socket_to_addr<T: ToSocketAddrs>(bind_address: T) -> Result<std::net::Ud
     Err(err)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MaxBufferSize {
+    send: usize,
+    recv: usize,
+}
+
+impl MaxBufferSize {
+    #[cfg(target_os = "linux")]
+    pub fn read() -> Result<Option<Self>> {
+        const WMEM: &str = "wmem_max";
+        const RMEM: &str = "rmem_max";
+
+        #[cfg(any(feature = "test", test))]
+        let proc_path = std::env::var("MOCK_PROC_PATH").unwrap_or_else(|_| "/proc".to_string());
+        #[cfg(not(any(feature = "test", test)))]
+        let proc_path = "/proc";
+        let proc_path = Path::new(&proc_path);
+        let proc_path = proc_path.join(Path::new("sys/net/core"));
+
+        let read_and_parse = |path: &str| -> Result<usize> {
+            let path = proc_path.join(path);
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?
+                .trim()
+                .parse()
+                .with_context(|| format!("Failed to parse {}", path.display()))
+        };
+
+        Ok(Some(Self {
+            send: read_and_parse(WMEM)?,
+            recv: read_and_parse(RMEM)?,
+        }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn read() -> std::io::Result<Option<Self>> {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectionError {
     #[error("invalid address")]
@@ -586,5 +650,31 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn socket_size_works() {
+        if Path::new("/proc").exists() {
+            let socket_size = MaxBufferSize::read()
+                .unwrap()
+                .expect("socket size not found");
+            assert!(socket_size.send > 0);
+            assert!(socket_size.recv > 0);
+        } else {
+            // github doesn't expose /proc and macos exists
+            let procfs = tempfile::tempdir().unwrap();
+            std::env::set_var("MOCK_PROC_PATH", procfs.path());
+
+            std::fs::create_dir_all(procfs.path().join("sys/net/core")).unwrap();
+            std::fs::write(procfs.path().join("sys/net/core/wmem_max"), "100000\n").unwrap();
+            std::fs::write(procfs.path().join("sys/net/core/rmem_max"), "100000\n").unwrap();
+
+            let socket_size = MaxBufferSize::read()
+                .unwrap()
+                .expect("socket size not found");
+
+            assert_eq!(socket_size.send, 100000);
+            assert_eq!(socket_size.recv, 100000);
+        }
     }
 }
