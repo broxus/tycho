@@ -3,9 +3,10 @@ use std::collections::{btree_map, BTreeMap, VecDeque};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
 use rayon::iter::IntoParallelIterator;
+use tycho_block_util::queue::QueueKey;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use super::types::{ParsedMessage, ParsedMessageKind};
+use super::types::ParsedMessage;
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -97,6 +98,7 @@ impl MessagesBuffer {
 
     /// Returns the set of unused accounts from buffer that we can use
     /// to fill group from the same buffer but with grater limits.
+    /// Returns queue keys of collected internal queue messages.
     ///
     /// E.g. we filled 5 slots from buffer 1, then tried to fill up to 8 slots
     /// from buffer 2, but filled only 6 slots. So we can try to fill the rest slots
@@ -108,7 +110,7 @@ impl MessagesBuffer {
         slot_vert_size: usize,
         unused_buffer_accounts: Option<FastIndexSet<HashBytes>>,
         check_skip_account: F,
-    ) -> FastIndexSet<HashBytes>
+    ) -> FillMessageGroupResult
     where
         F: Fn(&HashBytes) -> bool,
     {
@@ -117,6 +119,9 @@ impl MessagesBuffer {
 
         // we will collect updates for slots index and apply them at the end
         let mut slots_index_updates = BTreeMap::<SlotId, SlotIndexUpdate>::default();
+
+        // track collected queue messages
+        let mut collected_queue_msgs_keys = vec![];
 
         // track accounts whose messages were not used to fill group
         let mut unused_buffer_accounts =
@@ -165,6 +170,7 @@ impl MessagesBuffer {
                         msg_group,
                         &mut slot_cx,
                         &mut used_buffer_accounts,
+                        &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
 
@@ -244,6 +250,7 @@ impl MessagesBuffer {
                         msg_group,
                         &mut slot_cx,
                         &mut used_buffer_accounts,
+                        &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
 
@@ -278,6 +285,7 @@ impl MessagesBuffer {
                         msg_group,
                         &mut slot_cx,
                         &mut used_buffer_accounts,
+                        &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
 
@@ -319,7 +327,10 @@ impl MessagesBuffer {
         // put slots info into group
         std::mem::swap(&mut slots_info, &mut msg_group.slots_info);
 
-        unused_buffer_accounts
+        FillMessageGroupResult {
+            unused_buffer_accounts,
+            collected_queue_msgs_keys,
+        }
     }
 
     fn move_account_messages_to_slot(
@@ -328,6 +339,7 @@ impl MessagesBuffer {
         msg_group: &mut MessageGroup,
         slot_cx: &mut SlotContext<'_>,
         used_buffer_accounts: &mut Vec<HashBytes>,
+        collected_queue_msgs_keys: &mut Vec<QueueKey>,
         slots_index_updates: &mut BTreeMap<SlotId, SlotIndexUpdate>,
     ) {
         let mut amount = 0;
@@ -350,9 +362,16 @@ impl MessagesBuffer {
                 }
 
                 for msg in account_msgs.drain(..amount) {
-                    match msg.kind() {
-                        ParsedMessageKind::Int => int_count += 1,
-                        ParsedMessageKind::ExtIn => ext_count += 1,
+                    match (&msg.info, &msg.special_origin) {
+                        (MsgInfo::Int(int_msg_info), None) => {
+                            let queue_key = QueueKey {
+                                lt: int_msg_info.created_lt,
+                                hash: *msg.cell.repr_hash(),
+                            };
+                            collected_queue_msgs_keys.push(queue_key);
+                            int_count += 1;
+                        }
+                        (MsgInfo::ExtIn(_), None) => ext_count += 1,
                         _ => unreachable!("must contain only Int and ExtIn messages"),
                     }
                     slot_account_msgs.push(msg);
@@ -395,9 +414,12 @@ impl MessagesBuffer {
                 new_int_count: slot_cx.slot.int_count,
                 new_ext_count: slot_cx.slot.ext_count,
             });
-
-        // TODO: update buffer index?
     }
+}
+
+pub struct FillMessageGroupResult {
+    pub unused_buffer_accounts: FastIndexSet<HashBytes>,
+    pub collected_queue_msgs_keys: Vec<QueueKey>,
 }
 
 #[cfg(test)]

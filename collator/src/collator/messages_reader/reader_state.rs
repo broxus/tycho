@@ -307,7 +307,7 @@ impl From<&ShardRangeInfo> for ShardReaderState {
             from: value.from,
             to: value.to,
             // on init current position is on the from
-            current_position: QueueKey::min_for_lt(value.from),
+            current_position: QueueKey::max_for_lt(value.from),
         }
     }
 }

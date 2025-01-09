@@ -81,7 +81,8 @@ impl Phase<FinalizeState> {
                 "tycho_do_collate_create_queue_diff_time",
                 &labels,
             );
-            let finalize_message_reader_res = messages_reader.finalize()?;
+            let finalize_message_reader_res =
+                messages_reader.finalize(self.extra.executor.min_next_lt())?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };

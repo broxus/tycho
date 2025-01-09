@@ -12,6 +12,7 @@ use super::messages_buffer::{
     DisplayMessageGroup, FastIndexSet, MessageGroup, MessagesBufferLimits,
 };
 use super::types::AnchorsCache;
+use crate::collator::messages_buffer::FillMessageGroupResult;
 use crate::internal_queue::types::{
     EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
@@ -219,7 +220,7 @@ impl MessagesReader {
         Ok(false)
     }
 
-    pub fn finalize(self) -> Result<FinalizedMessagesReader> {
+    pub fn finalize(self, current_next_lt: u64) -> Result<FinalizedMessagesReader> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
             || self.has_pending_externals_in_cache();
@@ -250,7 +251,7 @@ impl MessagesReader {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
             }
 
-            let par_reader_state = par_reader.finalize();
+            let par_reader_state = par_reader.finalize(current_next_lt)?;
             reader_state
                 .internals
                 .partitions
@@ -366,7 +367,7 @@ impl MessagesReader {
         self.check_has_non_zero_processed_offset()
     }
 
-    pub fn refill_buffers_upto_offsets(&mut self, prev_block_gen_lt: u64) -> Result<()> {
+    pub fn refill_buffers_upto_offsets(&mut self) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             internals_processed_offsets = ?DebugIter(self.internals_partition_readers
                 .iter()
@@ -383,13 +384,14 @@ impl MessagesReader {
                 .get_last_range_reader()
                 .map(|(_, r)| r.reader_state.processed_offset)
                 .unwrap_or_default(),
-            prev_block_gen_lt,
             "start: refill messages buffer and skip groups upto",
         );
 
         loop {
-            let msg_group =
-                self.get_next_message_group(GetNextMessageGroupMode::Refill, prev_block_gen_lt)?;
+            let msg_group = self.get_next_message_group(
+                GetNextMessageGroupMode::Refill,
+                0, // can pass 0 because new messages reader was not initialized in this case
+            )?;
             if msg_group.is_none() {
                 // on restart from a new genesis we will not be able to refill buffer with externals
                 // so we stop refilling when there is no more groups in buffer
@@ -412,7 +414,7 @@ impl MessagesReader {
     pub fn get_next_message_group(
         &mut self,
         read_mode: GetNextMessageGroupMode,
-        current_max_lt: u64,
+        current_next_lt: u64,
     ) -> Result<Option<MessageGroup>> {
         let mut msg_group = MessageGroup::default();
 
@@ -449,8 +451,10 @@ impl MessagesReader {
                     self.metrics.append(par_metrics);
                 }
                 MessagesReaderStage::NewMessages => {
-                    // update new messages reader "to" boundary
-                    par_reader.update_new_messages_reader_to_boundary(current_max_lt)?;
+                    // TODO: msgs-v3: needs to simplify to remove non obvious logic branches
+
+                    // update new messages reader "to" boundary on current next lt
+                    par_reader.update_new_messages_reader_to_boundary(current_next_lt)?;
 
                     // check if has pending new messages
                     let has_pending_new_messages = self
@@ -472,16 +476,15 @@ impl MessagesReader {
                         // read from new messages to buffers
                         let read_new_messages_res = par_reader.read_new_messages_into_buffer(
                             &mut new_messages_for_current_shard,
-                            current_max_lt,
+                            current_next_lt,
                         )?;
 
                         self.metrics.append(read_new_messages_res.metrics);
 
                         // return new messages to state
-                        self.new_messages.restore_messages_for_current_shard(
+                        self.new_messages.set_messages_for_current_shard(
                             *par_id,
                             new_messages_for_current_shard,
-                            &read_new_messages_res.taken_messages,
                         );
                     }
                 }
@@ -518,7 +521,10 @@ impl MessagesReader {
             while let Some((seqno, mut reader)) = par_reader.pop_first_range_reader() {
                 // try to fill messages group
                 self.metrics.add_to_message_groups_timer.start();
-                let unused_buffer_accounts = reader.reader_state.buffer.fill_message_group(
+                let FillMessageGroupResult {
+                    unused_buffer_accounts,
+                    collected_queue_msgs_keys,
+                } = reader.reader_state.buffer.fill_message_group(
                     &mut msg_group,
                     par_reader.target_limits.slots_count,
                     par_reader.target_limits.slot_vert_size,
@@ -570,6 +576,8 @@ impl MessagesReader {
                 self.metrics.add_to_message_groups_timer.stop();
                 unused_buffer_accounts_by_partitions
                     .insert((*par_id, seqno), unused_buffer_accounts);
+                self.new_messages
+                    .remove_collected_messages(&collected_queue_msgs_keys);
 
                 let range_reader_processed_offset = reader.reader_state.processed_offset;
 
