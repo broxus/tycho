@@ -40,7 +40,7 @@ impl<T: AsPeerInfo> RoutingTable<T> {
         let distance = xor_distance(&self.local_id, peer_id);
         self.buckets
             .get(&distance)
-            .map_or(false, |bucket| bucket.contains(peer_id))
+            .is_some_and(|bucket| bucket.contains(peer_id))
     }
 
     pub fn add<F>(&mut self, peer: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration, f: F) -> bool
