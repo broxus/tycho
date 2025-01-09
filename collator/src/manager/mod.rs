@@ -1932,7 +1932,7 @@ where
             || guard
                 .states
                 .get(&ShardIdent::MASTERCHAIN)
-                .map_or(false, |state| !state.last_imported_chain_times.is_empty());
+                .is_some_and(|state| !state.last_imported_chain_times.is_empty());
 
         // check if master collation hard forced for all shards
         if shard_id.is_masterchain()

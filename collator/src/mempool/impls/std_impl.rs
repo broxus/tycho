@@ -335,7 +335,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        if (config_guard.state_update_ctx.as_ref()).map_or(false, |old_cx| {
+        if (config_guard.state_update_ctx.as_ref()).is_some_and(|old_cx| {
             old_cx.consensus_info.vset_switch_round >= new_cx.consensus_info.vset_switch_round
         }) {
             tracing::debug!(
