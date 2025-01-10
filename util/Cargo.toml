@@ -34,7 +34,7 @@ tracing = { workspace = true }
 tracing-appender = { workspace = true, optional = true }
 tracing-stackdriver = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
-zstd-safe = { workspace = true, features = ["std"] }
+zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 
 metrics-exporter-prometheus = { workspace = true, optional = true }
