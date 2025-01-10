@@ -169,6 +169,19 @@ impl ZstdCompressStream<'_> {
         })
     }
 
+    /// Sets the number of worker threads to use for compression.
+    /// Can be called at any time.
+    /// Setting `workers` to `>= 1` will make compression asynchronous.
+    /// All compression will be done in background threads.
+    /// So it's important to call `finish` before dropping the stream.
+    pub fn multithreaded(&mut self, workers: u8) -> Result<()> {
+        self.cctx
+            .set_parameter(CParameter::NbWorkers(workers as _))
+            .map_err(ZstdError::from_raw)?;
+
+        Ok(())
+    }
+
     pub fn write(&mut self, uncompressed: &[u8], compress_buffer: &mut Vec<u8>) -> Result<()> {
         const MODE: zstd_sys::ZSTD_EndDirective = zstd_sys::ZSTD_EndDirective::ZSTD_e_continue;
         if self.finished {
@@ -188,13 +201,25 @@ impl ZstdCompressStream<'_> {
         loop {
             let mut output = self.out_buffer(compress_buffer);
 
-            // Compress the input
-            let read = self
-                .cctx
+            self.cctx
                 .compress_stream2(&mut output, &mut input, MODE)
                 .map_err(ZstdError::from_raw)?;
 
-            if read == 0 {
+            // from the https://facebook.github.io/zstd/zstd_manual.html
+            //
+            //   Select how many threads will be spawned to compress in parallel.
+            //   When nbWorkers >= 1, triggers asynchronous mode when invoking ZSTD_compressStream*() :
+            //   ZSTD_compressStream*() consumes input and flush output if possible, but immediately gives back control to caller,
+            //   while compression is performed in parallel, within worker thread(s).
+            //   (note : a strong exception to this rule is when first invocation of ZSTD_compressStream2() sets ZSTD_e_end :
+            //    in which case, ZSTD_compressStream2() delegates to ZSTD_compress2(), which is always a blocking call).
+            //   More workers improve speed, but also increase memory usage.
+            //   Default value is `0`, aka "single-threaded mode" : no worker is spawned,
+            //   compression is performed inside Caller's thread, and all invocations are blocking
+
+            // For multithreaded compression, we should continue if there's more input to process
+
+            if input.pos() >= input.src.len() {
                 break Ok(());
             }
         }
@@ -403,7 +428,7 @@ mod tests {
     fn test_streaming() {
         for size in [10usize, 1021, 1024, 1024 * 1024, 10 * 1024 * 1024] {
             let input = vec![0; size];
-            check_compression(input);
+            check_compression(input, false);
 
             // NOTE: streaming compression will give slightly different results with one shot compression,
             // so we can't compare the compressed data directly, only that decompression works
@@ -412,14 +437,37 @@ mod tests {
         let pseudo_random = (0..1024)
             .map(|i: u32| i.overflowing_mul(13).0 as u8)
             .collect::<Vec<_>>();
-        check_compression(pseudo_random);
+        check_compression(pseudo_random, false);
 
         let hello_world = Vec::from_iter(b"Hello, world!".repeat(1023));
-        check_compression(hello_world);
+        check_compression(hello_world, false);
     }
 
-    fn check_compression(input: Vec<u8>) {
+    // split on 2 tests because it's too long for a single test
+    #[test]
+    fn test_steaming_mt() {
+        for size in [10usize, 1021, 1024, 1024 * 1024, 10 * 1024 * 1024] {
+            let input = vec![0; size];
+            check_compression(input, true);
+
+            // NOTE: streaming compression will give slightly different results with one shot compression,
+            // so we can't compare the compressed data directly, only that decompression works
+        }
+
+        let pseudo_random = (0..1024)
+            .map(|i: u32| i.overflowing_mul(13).0 as u8)
+            .collect::<Vec<_>>();
+        check_compression(pseudo_random, true);
+
+        let hello_world = Vec::from_iter(b"Hello, world!".repeat(1023));
+        check_compression(hello_world, true);
+    }
+
+    fn check_compression(input: Vec<u8>, multithreaded: bool) {
         let mut compressor = ZstdCompressStream::new(3, 128).unwrap();
+        if multithreaded {
+            compressor.multithreaded(4).unwrap();
+        }
 
         let mut compress_buffer = Vec::new();
         let mut result_buf = Vec::new();
