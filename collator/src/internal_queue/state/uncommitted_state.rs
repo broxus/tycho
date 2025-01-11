@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
-use tycho_block_util::queue::{DestAddr, QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr};
 use tycho_storage::model::{QueueRange, StatKey};
 use tycho_storage::Storage;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::OwnedSnapshot;
 
@@ -72,7 +72,11 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
-    fn commit(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()>;
+    fn commit(
+        &self,
+        partitions: FastHashSet<QueuePartition>,
+        ranges: &[QueueShardRange],
+    ) -> Result<()>;
     fn truncate(&self) -> Result<()>;
 
     fn add_messages_with_statistics(
@@ -127,12 +131,16 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         Ok(Box::new(iterator))
     }
 
-    fn commit(&self, partitions: &[QueuePartition], ranges: &[QueueShardRange]) -> Result<()> {
+    fn commit(
+        &self,
+        partitions: FastHashSet<QueuePartition>,
+        ranges: &[QueueShardRange],
+    ) -> Result<()> {
         let mut queue_ranges = vec![];
         for partition in partitions {
             for range in ranges {
                 queue_ranges.push(QueueRange {
-                    partition: *partition,
+                    partition,
                     shard_ident: range.shard_ident,
                     from: range.from,
                     to: range.to,
@@ -200,7 +208,7 @@ impl UncommittedStateStdImpl {
         for (internal_message_key, message) in messages {
             let destination = message.destination();
 
-            let partition = partition_router.get_partition(destination);
+            let partition = partition_router.get_partition(Some(message.source()), destination);
 
             self.storage
                 .internal_queue_storage()
@@ -232,7 +240,7 @@ impl UncommittedStateStdImpl {
         for (partition, values) in diff_statistics.iter() {
             for value in values {
                 let (addr, count) = value;
-                let dest = DestAddr::try_from(addr.clone())?;
+                let dest = RouterAddr::try_from(addr.clone())?;
                 let key = StatKey {
                     shard_ident: *shard_ident,
                     partition: *partition,
