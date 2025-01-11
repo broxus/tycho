@@ -147,7 +147,7 @@ impl UnixTime {
         Self(millis)
     }
     pub fn now() -> Self {
-        Self(tycho_util::time::now_millis())
+        Self(tycho_util::time::MonotonicClock::now_millis())
     }
 
     pub fn next(&self) -> Self {
