@@ -160,9 +160,10 @@ pub struct MempoolNodeConfig {
     /// How often (in rounds) delete obsolete data and trigger rocksDB compaction.
     pub clean_db_period_rounds: NonZeroU16,
 
-    /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
-    /// to extend [`Dag`](crate::dag::DagFront) without downloading points for locally skipped rounds
-    pub cache_future_broadcasts_rounds: NonZeroU16,
+    /// amount of future [Round]s (beyond current [`Dag`](crate::dag::DagHead))
+    /// that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
+    /// to extend [`Dag`](crate::engine::ConsensusConfigExt) without downloading points
+    pub cache_future_broadcasts_rounds: u16,
 }
 
 impl Default for MempoolNodeConfig {
@@ -170,7 +171,7 @@ impl Default for MempoolNodeConfig {
         Self {
             log_truncate_long_values: true,
             clean_db_period_rounds: NonZeroU16::new(105).unwrap(),
-            cache_future_broadcasts_rounds: NonZeroU16::new(105).unwrap(),
+            cache_future_broadcasts_rounds: 105,
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::MempoolStorage;
 /// Flags are stored in their order from left to right
 /// and may be merged from `false` to `true` but not vice versa.
 /// Point must be committed at single round.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq)]
 pub struct PointStatus {
     // points are stored only after verified: points with sig or digest mismatch are never stored;
     // certified points are validated, and validation takes place only after verification;
@@ -20,7 +20,7 @@ pub struct PointStatus {
     pub committed_at_round: Option<u32>, // not committed are stored with impossible zero round
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AnchorChainRole {
     Trigger, // not necessarily unique; contained in some point field
     Anchor,  // unique; not contained in point
