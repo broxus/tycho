@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use anyhow::bail;
 use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tl_proto::{TlError, TlRead, TlResult, TlWrite};
+use tl_proto::{TlRead, TlWrite};
 
 use crate::tl;
 
@@ -33,7 +33,7 @@ pub struct QueueDiff {
     /// List of message hashes (sorted ASC).
     pub messages: Vec<HashBytes>,
     /// Partition router
-    pub partition_router: BTreeMap<QueuePartition, BTreeSet<DestAddr>>,
+    pub partition_router: BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>,
 }
 
 impl QueueDiff {
@@ -161,40 +161,7 @@ pub struct QueueKey {
     pub hash: HashBytes,
 }
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
-#[tl(boxed)]
-pub enum QueuePartition {
-    #[tl(id = 0)]
-    NormalPriority = 0,
-    #[tl(id = 1)]
-    LowPriority = 1,
-}
-
-impl Default for QueuePartition {
-    fn default() -> Self {
-        Self::NormalPriority
-    }
-}
-
-impl TryFrom<u8> for QueuePartition {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        let partition = match value {
-            0 => Self::NormalPriority,
-            1 => Self::LowPriority,
-            _ => bail!("Invalid queue partition: {}", value),
-        };
-        Ok(partition)
-    }
-}
-
-impl QueuePartition {
-    pub const fn all() -> [QueuePartition; 2] {
-        [QueuePartition::NormalPriority, QueuePartition::LowPriority]
-    }
-}
+pub type QueuePartition = u8;
 
 impl QueueKey {
     const SIZE_HINT: usize = 8 + 32;
@@ -417,63 +384,70 @@ mod messages_list {
 }
 
 mod partition_router_list {
+    use tl_proto::{TlPacket, TlResult};
+
     use super::*;
 
-    const MAX_PARTITIONS: usize = QueuePartition::all().len() - 1;
-    const MAX_DEST_ADDRS: usize = 1_000_000;
+    const MAX_DIRECTIONS: usize = 2;
+    const MAX_ENTRIES_PER_DIRECTION: usize = 1_000_000;
 
-    pub fn size_hint(items: &BTreeMap<QueuePartition, BTreeSet<DestAddr>>) -> usize {
-        4 + items
-            .iter()
-            .map(|(_, set)| 1 + 4 + set.len() * DestAddr::SIZE_HINT)
-            .sum::<usize>()
+    pub fn size_hint(
+        items: &BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>,
+    ) -> usize {
+        let mut size = 4;
+        for (direction, map) in items {
+            size += direction.max_size_hint();
+            size += 4;
+            size += map.len() * (RouterAddr::SIZE_HINT + 1);
+        }
+        size
     }
-
-    pub fn write<P: tl_proto::TlPacket>(
-        items: &BTreeMap<QueuePartition, BTreeSet<DestAddr>>,
+    pub fn write<P: TlPacket>(
+        items: &BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>,
         packet: &mut P,
     ) {
         packet.write_u32(items.len() as u32);
-
-        for (partition, dest_addrs) in items {
-            packet.write_raw_slice(&[*partition as u8]);
-            packet.write_u32(dest_addrs.len() as u32);
-
-            for dest_addr in dest_addrs {
-                dest_addr.write_to(packet);
+        for (direction, map) in items {
+            direction.write_to(packet);
+            packet.write_u32(map.len() as u32);
+            for (addr, partition) in map {
+                addr.write_to(packet);
+                packet.write_raw_slice(&partition.to_le_bytes());
             }
         }
     }
 
-    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<QueuePartition, BTreeSet<DestAddr>>> {
+    pub fn read(
+        data: &mut &[u8],
+    ) -> TlResult<BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>> {
         let len = u32::read_from(data)? as usize;
-        if len > MAX_PARTITIONS {
-            return Err(TlError::InvalidData);
+        if len > MAX_DIRECTIONS {
+            return Err(tl_proto::TlError::InvalidData);
         }
 
-        let mut map = BTreeMap::new();
+        let mut result = BTreeMap::new();
 
         for _ in 0..len {
-            let partition = {
-                let partition_id = data[0];
+            let direction = RouterDirection::read_from(data)?;
+
+            let inner_len = u32::read_from(data)? as usize;
+            if inner_len > MAX_ENTRIES_PER_DIRECTION {
+                return Err(tl_proto::TlError::InvalidData);
+            }
+
+            let mut map = BTreeMap::new();
+            for _ in 0..inner_len {
+                let addr = RouterAddr::read_from(data)?;
+                let partition_byte = data[0];
                 *data = &data[1..];
-                QueuePartition::try_from(partition_id).unwrap()
-            };
 
-            let dest_len = u32::read_from(data)? as usize;
-            if dest_len > MAX_DEST_ADDRS {
-                return Err(TlError::InvalidData);
+                map.insert(addr, partition_byte);
             }
 
-            let mut dest_set = BTreeSet::new();
-            for _ in 0..dest_len {
-                dest_set.insert(DestAddr::read_from(data)?);
-            }
-
-            map.insert(partition, dest_set);
+            result.insert(direction, map);
         }
 
-        Ok(map)
+        Ok(result)
     }
 }
 
@@ -547,12 +521,12 @@ mod state_messages_list_ref {
 
 /// Std dest addr
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DestAddr {
+pub struct RouterAddr {
     pub workchain: i8,
     pub account: HashBytes,
 }
 
-impl DestAddr {
+impl RouterAddr {
     pub const MIN: Self = Self {
         workchain: i8::MIN,
         account: HashBytes::ZERO,
@@ -564,7 +538,17 @@ impl DestAddr {
     };
 }
 
-impl TryFrom<IntAddr> for DestAddr {
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+#[tl(boxed)]
+pub enum RouterDirection {
+    #[tl(id = 0)]
+    Dest = 0,
+    #[tl(id = 1)]
+    Src = 1,
+}
+
+impl TryFrom<IntAddr> for RouterAddr {
     type Error = anyhow::Error;
 
     fn try_from(value: IntAddr) -> Result<Self, Self::Error> {
@@ -580,7 +564,7 @@ impl TryFrom<IntAddr> for DestAddr {
     }
 }
 
-impl TlWrite for DestAddr {
+impl TlWrite for RouterAddr {
     type Repr = tl_proto::Boxed;
 
     fn max_size_hint(&self) -> usize {
@@ -596,7 +580,7 @@ impl TlWrite for DestAddr {
     }
 }
 
-impl<'tl> TlRead<'tl> for DestAddr {
+impl<'tl> TlRead<'tl> for RouterAddr {
     type Repr = tl_proto::Boxed;
 
     fn read_from(data: &mut &'tl [u8]) -> tl_proto::TlResult<Self> {
@@ -613,7 +597,7 @@ impl<'tl> TlRead<'tl> for DestAddr {
     }
 }
 
-impl DestAddr {
+impl RouterAddr {
     pub const SIZE_HINT: usize = 1 + 32;
 
     pub fn to_int_addr(&self) -> IntAddr {
@@ -633,16 +617,14 @@ mod tests {
     fn queue_diff_binary_repr() {
         let mut partition_router = BTreeMap::new();
 
-        let addr1 = DestAddr {
+        let addr1 = RouterAddr {
             workchain: 0,
             account: HashBytes::from([0x01; 32]),
         };
 
-        partition_router.insert(QueuePartition::LowPriority, {
-            let mut set = BTreeSet::new();
-            set.insert(addr1);
-            set
-        });
+        partition_router.insert(addr1, 1);
+
+        let partition_router = BTreeMap::from([(RouterDirection::Dest, partition_router)]);
 
         let mut diff = QueueDiff {
             hash: HashBytes::ZERO, // NOTE: Uninitialized
@@ -693,16 +675,14 @@ mod tests {
 
             let mut partition_router = BTreeMap::new();
 
-            let addr1 = DestAddr {
+            let addr1 = RouterAddr {
                 workchain: 1,
                 account: HashBytes::from([0x02; 32]),
             };
 
-            partition_router.insert(QueuePartition::LowPriority, {
-                let mut set = BTreeSet::new();
-                set.insert(addr1);
-                set
-            });
+            partition_router.insert(addr1, 1);
+
+            let partition_router = BTreeMap::from([(RouterDirection::Dest, partition_router)]);
 
             let mut diff = QueueDiff {
                 hash: HashBytes::ZERO, // NOTE: Uninitialized

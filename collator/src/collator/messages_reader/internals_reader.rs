@@ -308,9 +308,7 @@ impl InternalsParitionReader {
         }
 
         // get statistics for the range
-        let stats = self
-            .mq_adapter
-            .get_statistics(self.partition_id.try_into()?, ranges)?;
+        let stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
@@ -390,9 +388,7 @@ impl InternalsParitionReader {
         }
 
         // get statistics for the range
-        let stats = self
-            .mq_adapter
-            .get_statistics(self.partition_id.try_into()?, ranges)?;
+        let stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
 
         let processed_offset = last_range_reader_shards_and_offset_opt
             .map(|(_, processed_offset)| processed_offset)
@@ -526,7 +522,7 @@ impl InternalsParitionReader {
                         // update remaining messages statistics in iterator
                         range_reader
                             .remaning_msgs_stats
-                            .decrement_for_account(int_msg.item.message.destination().clone(), 1);
+                            .decrement_for_account(int_msg.item.message.dest().clone(), 1);
                     }
                     None => {
                         range_reader.fully_read = true;
@@ -717,11 +713,9 @@ impl InternalsRangeReader {
                 });
             }
 
-            let iterator = self.mq_adapter.create_iterator(
-                self.for_shard_id,
-                self.partition_id.try_into()?,
-                ranges,
-            )?;
+            let iterator =
+                self.mq_adapter
+                    .create_iterator(self.for_shard_id, self.partition_id, ranges)?;
 
             self.iterator_opt = Some(iterator);
         }
