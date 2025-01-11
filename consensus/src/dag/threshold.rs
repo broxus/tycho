@@ -10,7 +10,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
-use crate::engine::CachedConfig;
+use crate::engine::MempoolConfig;
 use crate::models::{PeerCount, PointInfo, Round, UnixTime, ValidPoint};
 
 /// NOTE see [`Threshold::reached()`] for comments on limited usability
@@ -31,7 +31,7 @@ struct ThresholdWork {
 }
 
 impl Threshold {
-    pub fn new(round: Round, peer_count: PeerCount) -> Self {
+    pub fn new(round: Round, peer_count: PeerCount, conf: &MempoolConfig) -> Self {
         let (sender, receiver) = mpsc::channel(peer_count.full());
         let target_count = peer_count.majority();
         let count = ThresholdCount {
@@ -44,7 +44,7 @@ impl Threshold {
             round,
             target_count,
             count: AtomicU32::new(count.pack()),
-            clock_skew: UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _),
+            clock_skew: UnixTime::from_millis(conf.consensus.clock_skew_millis as _),
             sender,
             work: Mutex::new(ThresholdWork {
                 is_reached: false,
@@ -284,7 +284,6 @@ mod test {
 
     use super::*;
     use crate::dag::threshold::Threshold;
-    use crate::engine::CachedConfig;
     use crate::models::{
         DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
     };
@@ -294,11 +293,12 @@ mod test {
     async fn test() {
         let total_peers = 10;
         let round = Round(5);
-        CachedConfig::init(&default_test_config());
+
+        let conf = default_test_config().conf;
 
         let peer_count = PeerCount::try_from(total_peers).expect("cannot fail");
 
-        let thresh = Arc::new(Threshold::new(round, peer_count));
+        let thresh = Arc::new(Threshold::new(round, peer_count, &conf));
 
         let handle = tokio::spawn({
             let thresh = thresh.clone();
@@ -311,13 +311,11 @@ mod test {
             }
         });
 
-        CachedConfig::init(&default_test_config());
-
         let now = UnixTime::now();
 
         for i in 1..=total_peers {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let dag_point = new_valid_point(round, now);
+            let dag_point = new_valid_point(round, now, &conf);
             let valid = dag_point.valid().expect("created as valid");
             thresh.add(valid);
             println!("added #{i} total count {}", thresh.count());
@@ -389,7 +387,7 @@ mod test {
         );
     }
 
-    fn new_valid_point(round: Round, now: UnixTime) -> DagPoint {
+    fn new_valid_point(round: Round, now: UnixTime, conf: &MempoolConfig) -> DagPoint {
         let mut status = PointStatusValidated::default();
         status.is_valid = true;
         let keypair = KeyPair::generate(&mut thread_rng());
@@ -410,6 +408,7 @@ mod test {
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },
+            conf,
         ));
 
         DagPoint::new_validated(info, &status)
