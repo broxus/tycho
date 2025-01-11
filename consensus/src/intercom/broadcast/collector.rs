@@ -46,7 +46,7 @@ impl Collector {
         task.run(bcaster_signal).await;
 
         metrics::counter!("tycho_mempool_collected_broadcasts_count")
-            .increment(head.current().threshold().count() as u64);
+            .increment(head.current().threshold().count().total() as u64);
         Self {
             consensus_round: task.consensus_round,
         }
@@ -73,7 +73,8 @@ impl CollectorTask {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             CachedConfig::get().consensus.broadcast_retry_millis as _,
         ));
-        let mut threshold = self.current_dag_round.threshold().reached();
+        let current_dag_round = self.current_dag_round.clone();
+        let mut threshold = std::pin::pin!(current_dag_round.threshold().reached());
 
         loop {
             tokio::select! {
@@ -140,8 +141,7 @@ impl CollectorTask {
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         tracing::debug!(
             parent: self.ctx.span(),
-            includes = self.current_dag_round.threshold().count(),
-            "2F+1" = self.current_dag_round.peer_count().majority(),
+            includes = display(self.current_dag_round.threshold().count()),
             bcaster_ready = self.is_bcaster_ready_ok,
             result = result,
             "ready?",
