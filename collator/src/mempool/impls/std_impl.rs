@@ -50,8 +50,7 @@ impl MempoolAdapterStdImpl {
         mempool_storage: &MempoolStorage,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Self {
-        let mut config_builder = MempoolConfigBuilder::default();
-        config_builder.set_node_config(mempool_node_config);
+        let config_builder = MempoolConfigBuilder::new(mempool_node_config);
 
         Self {
             config: Mutex::new(ConfigAdapter {
@@ -93,7 +92,7 @@ impl MempoolAdapterStdImpl {
         let mempool_config = config_guard.builder.build()?;
 
         // TODO support config change; payload size is bound to mempool rounds
-        self.input_buffer.apply_config(&mempool_config.consensus);
+        self.input_buffer.apply_config(mempool_config.consensus());
 
         // Note: mempool is always run from applied mc block
         self.top_known_anchor
@@ -117,8 +116,8 @@ impl MempoolAdapterStdImpl {
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = last_state_update
             .top_processed_to_anchor_id
-            .saturating_sub(mempool_config.consensus.reset_rounds())
-            .max(mempool_config.genesis_info.start_round);
+            .saturating_sub(mempool_config.consensus().reset_rounds())
+            .max(mempool_config.genesis_info().start_round);
         if estimated_sync_bottom >= last_state_update.consensus_info.vset_switch_round {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
@@ -138,7 +137,7 @@ impl MempoolAdapterStdImpl {
                  is older than prev vset switch round {}; \
                  start round {}, top processed to anchor {} in block {}",
                 last_state_update.consensus_info.prev_vset_switch_round,
-                mempool_config.genesis_info.start_round,
+                mempool_config.genesis_info().start_round,
                 last_state_update.top_processed_to_anchor_id,
                 last_state_update.mc_block_id,
             )
@@ -155,7 +154,7 @@ impl MempoolAdapterStdImpl {
         tokio::spawn(Self::handle_anchors_task(
             self.cache.clone(),
             self.store.clone(),
-            mempool_config.consensus,
+            mempool_config.consensus().clone(),
             anchor_rx,
         ));
 
@@ -318,7 +317,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                         );
                     }
                     None => {
-                        (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
+                        (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
                         tracing::warn!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             "no consensus config in global config, using one from mc block"
@@ -327,7 +326,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 }
             } else {
                 (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
-                (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
+                (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
             };
 
             config_guard.state_update_ctx = Some(new_cx);
