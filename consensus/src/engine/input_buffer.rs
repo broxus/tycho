@@ -85,6 +85,7 @@ struct InputBufferData {
 impl InputBufferData {
     fn fetch(&mut self) -> Vec<Bytes> {
         let mut taken_bytes = 0;
+        let now = Instant::now();
         let result = self
             .data
             .iter()
@@ -94,7 +95,7 @@ impl InputBufferData {
             })
             .map(|(elem, ingested)| {
                 metrics::histogram!("tycho_mempool_input_buffer_spent_time")
-                    .record(ingested.elapsed());
+                    .record(now.duration_since(*ingested));
                 elem
             })
             .cloned()

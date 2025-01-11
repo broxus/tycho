@@ -13,11 +13,11 @@ use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
-use crate::engine::Genesis;
+use crate::engine::{CachedConfig, Genesis};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PointStatusInvalid,
-    PointStatusValid, PrevPointProof, Round,
+    PointStatusValid, PrevPointProof, Round, UnixTime,
 };
 
 // Note on equivocation.
@@ -418,16 +418,19 @@ impl Verifier {
         let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);
         let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
 
+        let max_allowed_dep_time = info.data().time
+            + UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _);
+
         while let Some(dag_point) = deps_and_prev.next().await {
             if dag_point.round() == prev_round && dag_point.author() == info.data().author {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
-                        let Some(found) = dag_point.trusted() else {
+                        let Some(proven) = dag_point.trusted() else {
                             // author must have skipped current point's round
                             // to clear its bad history
                             return false;
                         };
-                        if !Self::is_proof_ok(&info, found) {
+                        if !Self::is_proof_ok(&info, proven) {
                             return false;
                         } // else ok continue
                     }
@@ -456,31 +459,36 @@ impl Verifier {
                     }
                 }
             } else {
-                let Some(info) = dag_point.trusted() else {
+                let Some(dep) = dag_point.trusted() else {
                     return false; // just invalid dependency
                 };
-                if info.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
-                    || info.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
+                if dep.data().time > max_allowed_dep_time {
+                    // dependency time may exceed those in point only by a small value from config
+                    return false;
+                }
+                if dep.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
+                    || dep.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
                 {
                     // did not actualize the chain
                     return false;
                 }
-                let valid_point_id = info.id();
-                if ({
-                    valid_point_id == anchor_trigger_link_id
-                        && info.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
-                }) || ({
-                    valid_point_id == anchor_proof_link_id
-                        && info.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
-                }) {
+
+                let dep_id = dep.id();
+                if dep_id == anchor_trigger_link_id
+                    && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
+                {
                     // path does not lead to destination
                     return false;
                 }
-                if valid_point_id == anchor_proof_link_id
-                    && info.data().anchor_time != info.data().anchor_time
-                {
-                    // anchor candidate's time is not inherited from its proof
-                    return false;
+                if dep_id == anchor_proof_link_id {
+                    if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
+                        // path does not lead to destination
+                        return false;
+                    }
+                    if dep.data().anchor_time != info.data().anchor_time {
+                        // anchor candidate's time is not inherited from its proof
+                        return false;
+                    }
                 }
             }
         }

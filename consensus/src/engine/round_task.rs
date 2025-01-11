@@ -133,7 +133,7 @@ impl RoundTaskReady {
 
         // must stay lazy: not started until polled
         async move {
-            let mut threshold = head.prev().threshold().reached();
+            let mut threshold = std::pin::pin!(head.prev().threshold().reached());
             let is_in_time = loop {
                 tokio::select!(
                     () = &mut threshold => {
@@ -150,12 +150,9 @@ impl RoundTaskReady {
                     }
                 );
             };
-            metrics::counter!("tycho_mempool_collected_includes_count")
-                .increment(head.prev().threshold().count() as u64);
             if !is_in_time {
                 return None;
             }
-            drop(threshold);
 
             let task_start_time = Instant::now();
 
