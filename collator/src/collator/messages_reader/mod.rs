@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::{
@@ -30,6 +30,7 @@ use externals_reader::*;
 use internals_reader::*;
 use new_messages::*;
 pub(super) use reader_state::*;
+use tycho_block_util::queue::RouterDirection;
 
 pub(super) struct FinalizedMessagesReader {
     pub has_unprocessed_messages: bool,
@@ -333,7 +334,7 @@ impl MessagesReader {
         for (account_addr, msgs_count) in stats {
             if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
                 partition_router
-                    .insert(account_addr, QueuePartition::LowPriority)
+                    .insert(RouterDirection::Dest, account_addr, 1)
                     .unwrap();
             }
         }

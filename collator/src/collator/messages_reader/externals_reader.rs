@@ -817,7 +817,7 @@ impl ExternalsRangeReader {
                         // detect target partition and add message to buffer
                         metrics.add_to_message_groups_timer.start();
                         let target_partition =
-                            partition_router.get_partition(&ext_msg.info.dst) as PartitionId;
+                            partition_router.get_partition(None, &ext_msg.info.dst);
                         // we use one anchors cache for all partitions
                         // and read externals into all partitions at once
                         // so we add message to buffer only when it is above processed_to for partition

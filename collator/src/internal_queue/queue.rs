@@ -8,7 +8,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartition};
-use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
+use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::commited_state::{
@@ -133,6 +133,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 struct ShortQueueDiff {
     pub processed_to: ProcessedTo,
     pub max_message: QueueKey,
+    pub partitions: FastHashSet<QueuePartition>,
     pub hash: HashBytes,
 }
 
@@ -232,6 +233,7 @@ where
             processed_to: diff.processed_to,
             max_message,
             hash: *hash,
+            partitions: diff.partition_router.partitions().clone(),
         };
 
         // Insert the diff into the shard diffs
@@ -241,6 +243,10 @@ where
     }
 
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
+        let mut partitions = FastHashSet::default();
+        // insert default because we doesn't store it in router
+
+        partitions.insert(QueuePartition::default());
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();
 
@@ -258,6 +264,10 @@ where
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
                             .or_insert_with(|| shard_diff.max_message);
+
+                        for partition in &shard_diff.partitions {
+                            partitions.insert(*partition);
+                        }
 
                         if shard_diff.max_message > *current_last_key {
                             *current_last_key = shard_diff.max_message;
@@ -300,7 +310,7 @@ where
             .collect();
 
         self.uncommitted_state
-            .commit(QueuePartition::all().as_slice(), commit_ranges.as_slice())?;
+            .commit(partitions.clone(), commit_ranges.as_slice())?;
 
         let uncommitted_diffs_count: usize =
             self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
@@ -308,8 +318,10 @@ where
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
 
-        for (shard, end_key) in gc_ranges {
-            self.gc.update_delete_until(shard, end_key);
+        for partition in partitions {
+            for (shard, end_key) in &gc_ranges {
+                self.gc.update_delete_until(partition, *shard, *end_key);
+            }
         }
 
         Ok(())
