@@ -50,8 +50,7 @@ impl MempoolAdapterStdImpl {
         mempool_storage: &MempoolStorage,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Self {
-        let mut config_builder = MempoolConfigBuilder::default();
-        config_builder.set_node_config(mempool_node_config);
+        let config_builder = MempoolConfigBuilder::new(mempool_node_config);
 
         Self {
             config: Mutex::new(ConfigAdapter {
@@ -318,7 +317,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                         );
                     }
                     None => {
-                        (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
+                        (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
                         tracing::warn!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             "no consensus config in global config, using one from mc block"
@@ -327,7 +326,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 }
             } else {
                 (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
-                (config_guard.builder).set_consensus_config(&new_cx.consensus_config);
+                (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
             };
 
             config_guard.state_update_ctx = Some(new_cx);

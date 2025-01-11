@@ -9,7 +9,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::WeakDagRound;
 use crate::dyn_event;
 use crate::effects::{AltFmt, AltFormat, ValidateCtx};
-use crate::engine::CachedConfig;
+use crate::engine::MempoolConfig;
 use crate::models::{
     DagPoint, Digest, PointId, PointStatus, Round, Signature, UnixTime, ValidPoint,
 };
@@ -294,13 +294,18 @@ impl InclusionState {
     }
 
     /// `None` if not yet defined, `Some::<Result>` is irreversible
-    pub fn sign(&self, at: Round, key_pair: Option<&KeyPair>) -> Option<Result<Signed<'_>, ()>> {
+    pub fn sign(
+        &self,
+        at: Round,
+        key_pair: Option<&KeyPair>,
+        conf: &MempoolConfig,
+    ) -> Option<Result<Signed<'_>, ()>> {
         let maybe_signable = match &self.0.resolved.get()? {
             FirstResolved::Valid(_, once) => once.get()?,
             FirstResolved::NotValid(_) | FirstResolved::Closed => return Some(Err(())),
         };
         match maybe_signable {
-            Ok(signable) => signable.sign(at, key_pair),
+            Ok(signable) => signable.sign(at, key_pair, conf),
             Err(()) => Some(Err(())),
         }
     }
@@ -339,7 +344,12 @@ pub struct Signed<'a> {
 
 impl Signable {
     /// `None` if not yet defined, `Some::<Result>` is irreversible
-    fn sign(&self, at: Round, key_pair: Option<&KeyPair>) -> Option<Result<Signed<'_>, ()>> {
+    fn sign(
+        &self,
+        at: Round,
+        key_pair: Option<&KeyPair>,
+        conf: &MempoolConfig,
+    ) -> Option<Result<Signed<'_>, ()>> {
         let result = match self.signature.get() {
             Some(ready) => ready,
             None => {
@@ -352,9 +362,7 @@ impl Signable {
                         return None; // retry later
                     }
                     if self.valid.info().data().time - UnixTime::now()
-                        >= UnixTime::from_millis(
-                            CachedConfig::get().consensus.clock_skew_millis as _,
-                        )
+                        >= UnixTime::from_millis(conf.consensus.clock_skew_millis as _)
                     {
                         metrics::counter!(POSTPONED, "kind" => "time").increment(1);
                         return None; // retry later

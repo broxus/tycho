@@ -4,27 +4,37 @@ use std::sync::Arc;
 use tracing::Span;
 
 use crate::effects::AltFormat;
+use crate::engine::MempoolConfig;
 use crate::models::{Point, PointId, PointInfo, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
 pub trait Ctx {
     fn span(&self) -> &Span;
+    fn conf(&self) -> &MempoolConfig;
 }
 
 /// Root context for uninterrupted sequence of engine rounds
 pub struct EngineCtx {
     span: Span,
+    conf: MempoolConfig,
 }
 impl Ctx for EngineCtx {
     fn span(&self) -> &Span {
         &self.span
     }
+    fn conf(&self) -> &MempoolConfig {
+        &self.conf
+    }
 }
 impl EngineCtx {
-    pub fn new(since: Round) -> Self {
+    pub fn new(since: Round, conf: &MempoolConfig) -> Self {
         Self {
             span: tracing::error_span!("rounds", "since" = since.0),
+            conf: conf.clone(),
         }
+    }
+    pub fn update(&mut self, since: Round) {
+        *self = Self::new(since, &self.conf);
     }
     pub fn meter_dag_len(len: usize) {
         metrics::gauge!("tycho_mempool_rounds_dag_length").set(len as u32);
@@ -37,10 +47,14 @@ struct RoundCtxInner {
     current_round: Round,
     download_max_depth: AtomicU32,
     span: Span,
+    conf: MempoolConfig,
 }
 impl Ctx for RoundCtx {
     fn span(&self) -> &Span {
         &self.0.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        &self.0.conf
     }
 }
 impl RoundCtx {
@@ -51,6 +65,7 @@ impl RoundCtx {
             span: parent
                 .span()
                 .in_scope(|| tracing::error_span!("round", "current" = current_round.0)),
+            conf: parent.conf.clone(),
         }))
     }
     pub fn depth(&self, round: Round) -> f64 {
@@ -60,26 +75,35 @@ impl RoundCtx {
 
 pub struct CollectCtx {
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for CollectCtx {
     fn span(&self) -> &Span {
         &self.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.parent.conf()
     }
 }
 impl CollectCtx {
     pub fn new(parent: &RoundCtx) -> Self {
         Self {
             span: parent.span().in_scope(|| tracing::error_span!("collect")),
+            parent: parent.clone(),
         }
     }
 }
 
 pub struct BroadcastCtx {
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for BroadcastCtx {
     fn span(&self) -> &Span {
         &self.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.parent.conf()
     }
 }
 impl BroadcastCtx {
@@ -92,17 +116,21 @@ impl BroadcastCtx {
                     digest = display(point.digest().alt())
                 )
             }),
+            parent: parent.clone(),
         }
     }
 }
 
 pub struct DownloadCtx {
-    parent: RoundCtx,
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for DownloadCtx {
     fn span(&self) -> &Span {
         &self.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.parent.conf()
     }
 }
 impl DownloadCtx {
@@ -148,12 +176,15 @@ impl From<&ValidateCtx> for RoundCtx {
 #[derive(Clone)]
 pub struct ValidateCtx(Arc<ValidateCtxInner>);
 struct ValidateCtxInner {
-    parent: RoundCtx,
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for ValidateCtx {
     fn span(&self) -> &Span {
         &self.0.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.0.parent.conf()
     }
 }
 impl ValidateCtx {
