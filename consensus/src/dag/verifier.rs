@@ -13,7 +13,7 @@ use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
-use crate::engine::{CachedConfig, Genesis};
+use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof, Round,
@@ -96,13 +96,17 @@ pub enum ValidateResult {
 // included into valid anchor chain, i.e. validated by consensus.
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
-    pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
+    pub fn verify(
+        point: &Point,
+        peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
+    ) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
 
         let result = if !point.is_integrity_ok() {
             Err(VerifyError::BadSig)
         } else {
-            Self::verify_impl(point, peer_schedule).map_or(Ok(()), Err)
+            Self::verify_impl(point, peer_schedule, conf).map_or(Ok(()), Err)
         };
 
         ValidateCtx::verified(&result);
@@ -124,7 +128,7 @@ impl Verifier {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = ctx.span().enter();
 
-        match info.round().cmp(&Genesis::id().round) {
+        match info.round().cmp(&ctx.conf().genesis_round) {
             cmp::Ordering::Less => {
                 panic!("Coding error: can only validate points older than genesis")
             }
@@ -157,7 +161,7 @@ impl Verifier {
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
-            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre))
+            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre, ctx.conf()))
         {
             return ctx.validated(ValidateResult::IllFormed(IllFormedReason::AnchorLink));
         };
@@ -247,7 +251,8 @@ impl Verifier {
                 // do not add same prev_digest twice - it is added as one of 'includes';
                 // do not extend listed dependencies as they may become certified by majority
                 .chain(prev_other_versions.into_iter());
-            Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(ctx.span().clone())
+            Self::is_valid(info.clone(), deps_and_prev.collect(), ctx.conf())
+                .instrument(ctx.span().clone())
         });
 
         // drop strong links before await
@@ -312,6 +317,7 @@ impl Verifier {
         link_field: AnchorStageRole,
         info: &PointInfo,     // @ r+0
         dag_round: &DagRound, // start with r+0
+        conf: &MempoolConfig,
     ) -> bool {
         let linked_id = info.anchor_id(link_field);
 
@@ -321,7 +327,7 @@ impl Verifier {
             return true;
         };
 
-        if round.round() == Genesis::id().round {
+        if round.round() == conf.genesis_round {
             // notice that point is required to link to the freshest leader point
             // among all its (in)direct dependencies, which is checked later
             return true;
@@ -404,6 +410,7 @@ impl Verifier {
     async fn is_valid(
         info: PointInfo,
         mut deps_and_prev: FuturesUnordered<DagPointFuture>,
+        conf: &MempoolConfig,
     ) -> bool {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.data().prev_digest();
@@ -419,8 +426,8 @@ impl Verifier {
         let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);
         let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
 
-        let max_allowed_dep_time = info.data().time
-            + UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _);
+        let max_allowed_dep_time =
+            info.data().time + UnixTime::from_millis(conf.consensus.clock_skew_millis as _);
 
         while let Some(dag_point) = deps_and_prev.next().await {
             if dag_point.round() == prev_round && dag_point.author() == info.data().author {
@@ -500,6 +507,7 @@ impl Verifier {
     fn verify_impl(
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
     ) -> Option<VerifyError> {
         fn peer_count_genesis(len: usize, round: Round) -> Result<PeerCount, Round> {
             if len == PeerCount::GENESIS.full() {
@@ -513,7 +521,7 @@ impl Verifier {
             same_round_peers, // @ r+0
             includes_peers,   // @ r-1
             witness_peers,    // @ r-2
-        ) = match (point.round() - Genesis::id().round.prev().0).0 {
+        ) = match (point.round() - conf.genesis_round.prev().0).0 {
             0 => return Some(VerifyError::Fail(VerifyFailReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(point.round()).clone();
@@ -549,18 +557,18 @@ impl Verifier {
         };
 
         // point belongs to current genesis
-        if let Some(reason) = Self::links_across_genesis(point) {
+        if let Some(reason) = Self::links_across_genesis(point, conf) {
             return Some(VerifyError::IllFormed(reason));
         }
 
         // check size only now, as config seems up to date
         let payload_bytes: usize = point.payload().iter().fold(0, |acc, msg| acc + msg.len());
-        if payload_bytes > CachedConfig::get().consensus.payload_batch_bytes as usize {
+        if payload_bytes > conf.consensus.payload_batch_bytes as usize {
             let reason = IllFormedReason::TooLargePayload(payload_bytes);
             return Some(VerifyError::IllFormed(reason));
         }
 
-        if !point.is_well_formed() {
+        if !point.is_well_formed(conf) {
             return Some(VerifyError::IllFormed(IllFormedReason::NotDescribed));
         }
 
@@ -662,8 +670,8 @@ impl Verifier {
         None
     }
 
-    fn links_across_genesis(point: &Point) -> Option<IllFormedReason> {
-        let genesis_round = Genesis::id().round;
+    fn links_across_genesis(point: &Point, conf: &MempoolConfig) -> Option<IllFormedReason> {
+        let genesis_round = conf.genesis_round;
         let proof_round = point.anchor_round(AnchorStageRole::Proof);
         let trigger_round = point.anchor_round(AnchorStageRole::Trigger);
         match (

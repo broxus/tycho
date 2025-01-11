@@ -107,10 +107,8 @@ impl CmdRun {
 
         let mc_zerostate = mempool.load_zerostate(self.import_zerostate).await?;
 
-        let input_buffer = InputBuffer::new_stub(self.payload_step, self.steps_until_full);
-
         let (engine, anchor_consumer) = mempool
-            .boot(input_buffer, mc_zerostate)
+            .boot(mc_zerostate, self.payload_step, self.steps_until_full)
             .await
             .context("failed to init mempool")?;
 
@@ -201,8 +199,7 @@ impl Mempool {
             "initialized storage"
         );
 
-        let mut config_builder = MempoolConfigBuilder::default();
-        config_builder.set_node_config(&node_config.mempool);
+        let config_builder = MempoolConfigBuilder::new(&node_config.mempool);
 
         Ok(Self {
             keypair,
@@ -219,8 +216,9 @@ impl Mempool {
 
     pub async fn boot(
         mut self,
-        input_buffer: InputBuffer,
         zerostate: ShardStateStuff,
+        payload_step: usize,
+        steps_until_full: NonZeroUsize,
     ) -> Result<(Engine, AnchorConsumer)> {
         let local_id = self.dht_client.network().peer_id();
 
@@ -243,7 +241,9 @@ impl Mempool {
                 &config.params.get_consensus_config()?
             }
         };
-        self.config_builder.set_consensus_config(consensus_config);
+        self.config_builder.set_consensus_config(consensus_config)?;
+
+        let input_buffer = InputBuffer::new_stub(payload_step, steps_until_full, consensus_config);
 
         let engine = Engine::new(
             self.keypair.clone(),

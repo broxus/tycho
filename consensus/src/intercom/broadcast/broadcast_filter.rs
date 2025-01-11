@@ -11,7 +11,7 @@ use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, Veri
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
-use crate::engine::{CachedConfig, ConsensusConfigExt};
+use crate::engine::{ConsensusConfigExt, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
 
@@ -156,8 +156,8 @@ impl BroadcastFilterInner {
             Err(CheckError::SenderNotAuthor(*sender))
         } else {
             // have to cache every point when the node lags behind consensus
-            let prune_after = top_round + CachedConfig::get().node.cache_future_broadcasts_rounds;
-            match Verifier::verify(point, &self.peer_schedule) {
+            let prune_after = top_round + NodeConfig::get().cache_future_broadcasts_rounds;
+            match Verifier::verify(point, &self.peer_schedule, round_ctx.conf()) {
                 Ok(()) => Ok(if round > prune_after {
                     ByAuthorItem::OkPruned(digest)
                 } else {
@@ -301,8 +301,8 @@ impl BroadcastFilterInner {
 
         // inclusive bounds on what should be left in cache
         let history_bottom =
-            (head.last_back_bottom()).max(round - CachedConfig::get().consensus.max_total_rounds());
-        let prune_after = round + CachedConfig::get().node.cache_future_broadcasts_rounds;
+            (head.last_back_bottom()).max(round - round_ctx.conf().consensus.max_total_rounds());
+        let prune_after = round + NodeConfig::get().cache_future_broadcasts_rounds;
 
         let mut past_removed = CleanCounter::default();
         let mut current_kept = CleanCounter::default();

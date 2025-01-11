@@ -17,11 +17,10 @@ use tycho_network::{
 use tycho_util::futures::JoinTask;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::Genesis;
 use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
-use crate::models::Round;
+use crate::models::{Point, Round};
 // As validators are elected for wall-clock time range,
 // the round of validator set switch is not known beforehand
 // and will be determined by the time in anchor vertices:
@@ -40,15 +39,15 @@ struct PeerScheduleInner {
 }
 
 impl PeerSchedule {
-    pub fn new(local_keys: Arc<KeyPair>, overlay: PrivateOverlay) -> Self {
+    pub fn new(local_keys: Arc<KeyPair>, overlay: PrivateOverlay, genesis: &Point) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
         let this = Self(Arc::new(PeerScheduleInner {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
         }));
         // validator set is not defined for genesis
-        this.set_next_subset(&[], Genesis::id().round.prev(), &[Genesis::id().author]);
-        this.apply_scheduled(Genesis::id().round);
+        this.set_next_subset(&[], genesis.round().prev(), &[genesis.data().author]);
+        this.apply_scheduled(genesis.round());
 
         this
     }

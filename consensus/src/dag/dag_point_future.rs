@@ -91,10 +91,14 @@ impl DagPointFuture {
 
                 let dag_point = DagPoint::new_validated(PointInfo::from(&point), &status);
 
-                store.insert_point(&point, PointStatusStoredRef::Validated(&status));
+                store.insert_point(
+                    &point,
+                    PointStatusStoredRef::Validated(&status),
+                    round_ctx.conf(),
+                );
                 state.resolve(&dag_point);
 
-                let signed = state.sign(point.round(), key_pair.as_deref());
+                let signed = state.sign(point.round(), key_pair.as_deref(), round_ctx.conf());
                 assert!(
                     signed.as_ref().is_some_and(|sig| sig.is_ok()),
                     "Coding or configuration error: local point cannot be signed; got {:?}",
@@ -130,7 +134,11 @@ impl DagPointFuture {
                 state.acquire(&id, &mut status); // only after persisted
 
                 let dag_point = DagPoint::new_ill_formed(id, &status, reason);
-                store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
+                store.insert_point(
+                    &point,
+                    PointStatusStoredRef::IllFormed(&status),
+                    round_ctx.conf(),
+                );
 
                 state.resolve(&dag_point);
                 dag_point
@@ -196,7 +204,10 @@ impl DagPointFuture {
             let prev_proof = point.prev_proof();
             let stored_fut = tokio::task::spawn_blocking({
                 let store = store.clone();
-                move || store.insert_point(&point, PointStatusStoredRef::Exists)
+                let validate_ctx = validate_ctx.clone();
+                move || {
+                    store.insert_point(&point, PointStatusStoredRef::Exists, validate_ctx.conf());
+                }
             });
             let validated = Verifier::validate(
                 info.clone(),
@@ -273,8 +284,9 @@ impl DagPointFuture {
                     let prev_proof = point.prev_proof();
                     let storage_task = tokio::task::spawn_blocking({
                         let store = store.clone();
+                        let ctx = into_round_ctx.clone();
                         move || {
-                            store.insert_point(&point, PointStatusStoredRef::Exists);
+                            store.insert_point(&point, PointStatusStoredRef::Exists, ctx.conf());
                         }
                     });
                     let validate_ctx = ValidateCtx::new(&into_round_ctx, &info);
@@ -304,7 +316,11 @@ impl DagPointFuture {
                     let dag_point = DagPoint::new_ill_formed(point.id(), &status, reason);
                     tokio::task::spawn_blocking(move || {
                         let _guard = into_round_ctx.span().enter();
-                        store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
+                        store.insert_point(
+                            &point,
+                            PointStatusStoredRef::IllFormed(&status),
+                            into_round_ctx.conf(),
+                        );
                         state.resolve(&dag_point);
                         dag_point
                     })

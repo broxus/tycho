@@ -186,7 +186,6 @@ mod stub {
     use rand::{thread_rng, RngCore};
 
     use super::*;
-    use crate::engine::CachedConfig;
 
     /// External message is limited by 64 KiB
     const EXTERNAL_MSG_MAX_BYTES: usize = 64 * 1024;
@@ -194,28 +193,37 @@ mod stub {
         fetch_count: NonZeroUsize,
         payload_step: usize,
         steps_until_full: NonZeroUsize,
+        payload_batch_bytes: usize,
     }
 
     impl InputBuffer {
-        pub fn new_stub(payload_step: usize, steps_until_full: NonZeroUsize) -> InputBuffer {
+        pub fn new_stub(
+            payload_step: usize,
+            steps_until_full: NonZeroUsize,
+            consensus_config: &ConsensusConfig,
+        ) -> InputBuffer {
             InputBuffer(Arc::new(Mutex::new(InputBufferStub {
                 fetch_count: NonZeroUsize::MIN,
                 steps_until_full,
                 payload_step,
+                payload_batch_bytes: consensus_config.payload_batch_bytes as usize,
             })))
         }
     }
 
     impl InputBufferInner for InputBufferStub {
+        fn push(&mut self, _: Bytes) {
+            panic!("not available for tests");
+        }
+
         fn fetch_inner(&mut self, _: bool) -> Vec<Bytes> {
             if self.payload_step == 0 {
                 return Vec::new();
             }
             let step =
                 (self.fetch_count.get() / self.payload_step).min(self.steps_until_full.get());
-            let msg_count = (CachedConfig::get().consensus.payload_batch_bytes as usize * step)
-                / self.steps_until_full
-                / EXTERNAL_MSG_MAX_BYTES;
+            let msg_count =
+                (self.payload_batch_bytes * step) / self.steps_until_full / EXTERNAL_MSG_MAX_BYTES;
             let mut result = Vec::with_capacity(msg_count);
             for _ in 0..msg_count {
                 let mut data = vec![0; EXTERNAL_MSG_MAX_BYTES];
@@ -224,10 +232,6 @@ mod stub {
             }
             self.fetch_count = self.fetch_count.saturating_add(1);
             result
-        }
-
-        fn push(&mut self, _: Bytes) {
-            panic!("not available for tests");
         }
 
         fn apply_config(&mut self, _: &ConsensusConfig) {

@@ -14,9 +14,9 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
-use crate::effects::AltFormat;
+use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
+use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::models::{
     Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus, PointStatusStored,
     PointStatusStoredRef, PointStatusValidated, Round,
@@ -32,7 +32,12 @@ pub struct MempoolAdapterStore {
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()>;
+    fn insert_point(
+        &self,
+        point: &Point,
+        status: PointStatusStoredRef<'_>,
+        conf: &MempoolConfig,
+    ) -> Result<()>;
 
     fn set_status(
         &self,
@@ -123,9 +128,14 @@ impl MempoolStore {
         Self(Arc::new(()))
     }
 
-    pub fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) {
+    pub fn insert_point(
+        &self,
+        point: &Point,
+        status: PointStatusStoredRef<'_>,
+        conf: &MempoolConfig,
+    ) {
         self.0
-            .insert_point(point, status)
+            .insert_point(point, status, conf)
             .with_context(|| format!("id {:?}", point.id().alt()))
             .expect("DB insert point full");
     }
@@ -202,7 +212,12 @@ impl DbCleaner {
         }
     }
 
-    fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
+    fn least_to_keep(
+        consensus: Round,
+        committed: Round,
+        top_known_anchor: Round,
+        conf: &MempoolConfig,
+    ) -> Round {
         // If the node is not scheduled, then it's paused and does not receive broadcasts:
         // mempool receives fresher TKA (via validator sync)
         // while BcastFilter has outdated consensus round.
@@ -211,29 +226,31 @@ impl DbCleaner {
 
         // So `committed` follows both consensus and TKA, and does not stall while Engine can.
 
-        let least_to_keep = (committed - CachedConfig::get().consensus.reset_rounds()).min(
+        let least_to_keep = (committed - conf.consensus.reset_rounds()).min(
             // consensus for general work and sync:  collator may observe a gap if lags too far
             // TKA for deep sync: consensus round is stalled, history not needed for others
-            consensus.max(top_known_anchor) - CachedConfig::get().consensus.max_total_rounds(),
+            consensus.max(top_known_anchor) - conf.consensus.max_total_rounds(),
         );
-        let remainder =
-            least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32;
-        Genesis::id().round.max(least_to_keep - remainder)
+        let remainder = least_to_keep.0 % NodeConfig::get().clean_db_period_rounds.get() as u32;
+        (conf.genesis_round).max(least_to_keep - remainder)
     }
 
     pub fn new_task(
         &self,
         mut consensus_round: RoundWatcher<Consensus>,
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
+        round_ctx: &RoundCtx,
     ) -> JoinTask<()> {
         let storage = self.storage.clone();
+        let round_ctx = round_ctx.clone();
         let mut committed_round = self.committed_round.receiver();
 
         JoinTask::new(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
             let mut top_known = top_known_anchor.get();
-            let mut prev_least_to_keep = Self::least_to_keep(consensus, committed, top_known);
+            let mut prev_least_to_keep =
+                Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
             loop {
                 tokio::select! {
                     biased;
@@ -250,7 +267,8 @@ impl DbCleaner {
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
                     .set(committed - top_known);
 
-                let new_least_to_keep = Self::least_to_keep(consensus, committed, top_known);
+                let new_least_to_keep =
+                    Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
                     .set(consensus - new_least_to_keep);
 
@@ -299,7 +317,12 @@ impl DbCleaner {
 }
 
 impl MempoolStoreImpl for MempoolStorage {
-    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
+    fn insert_point(
+        &self,
+        point: &Point,
+        status: PointStatusStoredRef<'_>,
+        conf: &MempoolConfig,
+    ) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
@@ -314,7 +337,7 @@ impl MempoolStoreImpl for MempoolStorage {
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
 
-        let mut buffer = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
+        let mut buffer = Vec::<u8>::with_capacity(conf.point_max_bytes);
         point.write_to(&mut buffer);
         batch.put_cf(&points_cf, key.as_slice(), &buffer);
 
@@ -659,7 +682,12 @@ impl MempoolStoreImpl for MempoolStorage {
 
 #[cfg(feature = "test")]
 impl MempoolStoreImpl for () {
-    fn insert_point(&self, _: &Point, _: PointStatusStoredRef<'_>) -> Result<()> {
+    fn insert_point(
+        &self,
+        _: &Point,
+        _: PointStatusStoredRef<'_>,
+        _: &MempoolConfig,
+    ) -> Result<()> {
         Ok(())
     }
 
