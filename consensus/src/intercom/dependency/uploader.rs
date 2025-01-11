@@ -20,7 +20,10 @@ impl Uploader {
         if point_id.round > head.current().round() {
             return PointByIdResponse::TryLater;
         }
-        match Self::from_store(peer_id, point_id, store, round_ctx) {
+        match Self::from_store(peer_id, point_id, store, round_ctx)
+            // point has default status during validation - should retry when finished
+            .filter(|status| *status != PointStatus::default())
+        {
             Some(status) => {
                 if status.is_valid || status.is_trusted || status.is_certified {
                     match store.get_point_raw(point_id.round, point_id.digest) {

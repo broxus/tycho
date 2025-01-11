@@ -28,7 +28,7 @@ pub fn default_test_config() -> MempoolConfig {
     let node_config = MempoolNodeConfig {
         log_truncate_long_values: true,
         clean_db_period_rounds: NonZeroU16::new(10).unwrap(),
-        cache_future_broadcasts_rounds: NonZeroU16::new(105).unwrap(),
+        cache_future_broadcasts_rounds: 105,
     };
 
     let mut builder = MempoolConfigBuilder::default();
