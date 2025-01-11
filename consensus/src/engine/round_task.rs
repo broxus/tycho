@@ -156,8 +156,14 @@ impl RoundTaskReady {
 
             let task_start_time = Instant::now();
 
-            let produced = (round_ctx.span())
-                .in_scope(|| Producer::new_point(last_own_point.as_deref(), &input_buffer, &head));
+            let produced = (round_ctx.span()).in_scope(|| {
+                Producer::new_point(
+                    last_own_point.as_deref(),
+                    &input_buffer,
+                    &head,
+                    round_ctx.conf(),
+                )
+            });
             round_ctx.own_point(produced.as_ref());
             match produced {
                 Some(own_point) => {
@@ -277,7 +283,7 @@ impl RoundTaskReady {
         JoinTask::new(async move {
             point.verify_hash().expect("Hash is invalid for own point");
 
-            if let Err(error) = Verifier::verify(&point, &peer_schedule) {
+            if let Err(error) = Verifier::verify(&point, &peer_schedule, round_ctx.conf()) {
                 let _guard = round_ctx.span().enter();
                 panic!("Failed to verify own point: {error}, {:?}", point)
             }

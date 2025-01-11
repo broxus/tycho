@@ -13,7 +13,7 @@ use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::commit::SyncError;
 use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::{CachedConfig, Genesis};
+use crate::engine::MempoolConfig;
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
@@ -402,6 +402,7 @@ impl DagBack {
         &self,
         full_history_bottom: Round,
         anchor: &PointInfo, // @ r+1
+        conf: &MempoolConfig,
     ) -> Result<VecDeque<ValidPoint>, SyncError> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
             if to.is_empty() {
@@ -414,8 +415,8 @@ impl DagBack {
         }
         // do not commit genesis - we may place some arbitrary payload in it,
         // also mempool adapter does not expect it, and collator cannot use it too
-        let history_limit = (Genesis::id().round.next())
-            .max(anchor.round() - CachedConfig::get().consensus.commit_history_rounds);
+        let history_limit =
+            (conf.genesis_round.next()).max(anchor.round() - conf.consensus.commit_history_rounds);
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], &anchor.data().includes); // points @ r+0

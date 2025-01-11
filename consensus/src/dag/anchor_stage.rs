@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use rand::{Rng, SeedableRng};
 use tycho_network::PeerId;
 
-use crate::engine::Genesis;
+use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Round};
 
@@ -21,11 +21,11 @@ pub struct AnchorStage {
 }
 
 impl AnchorStage {
-    pub fn of(round: Round, peer_schedule: &PeerSchedule) -> Option<Self> {
+    pub fn of(round: Round, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Option<Self> {
         // Genesis point appears as a Proof in anchor chain during commit,
         // so it has to be at a round with Proof role
         let anchor_candidate_round =
-            ((round.0 / WAVE_ROUNDS) * WAVE_ROUNDS).max(Genesis::id().round.0);
+            ((round.0 / WAVE_ROUNDS) * WAVE_ROUNDS).max(conf.genesis_round.0);
 
         let (ordered_peers, current_peers) = {
             let guard = peer_schedule.atomic();
@@ -49,7 +49,7 @@ impl AnchorStage {
             role,
             leader,
             // genesis is a corner case, exclude it from commit chain with explicit "true"
-            is_used: AtomicBool::new(round == Genesis::id().round),
+            is_used: AtomicBool::new(round == conf.genesis_round),
         })
     }
 

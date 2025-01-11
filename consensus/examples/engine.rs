@@ -109,7 +109,7 @@ fn make_network(
         .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()], None)))
         .collect::<Vec<_>>();
 
-    let mempool_config = default_test_config();
+    let merged_conf = default_test_config();
 
     let mut handles = vec![];
 
@@ -126,7 +126,7 @@ fn make_network(
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let top_known_anchor = anchor_consumer.top_known_anchor.clone();
         let commit_round = anchor_consumer.commit_round.clone();
-        let mempool_config = mempool_config.clone();
+        let merged_conf = merged_conf.clone();
         let started = started.clone();
         anchor_consumer.add(peer_id, committed_rx);
         let handle = std::thread::Builder::new()
@@ -176,10 +176,14 @@ fn make_network(
                                 mock_storage.mempool_storage().clone(),
                                 commit_round,
                             ),
-                            InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
+                            InputBuffer::new_stub(
+                                cli.payload_step,
+                                cli.steps_until_full,
+                                merged_conf.consensus(),
+                            ),
                             committed_tx.clone(),
                             &top_known_anchor,
-                            &mempool_config,
+                            &merged_conf,
                         );
                         engine.set_start_peers(&all_peers);
 
@@ -209,7 +213,7 @@ fn make_network(
                         .await
                         .expect("wait nodes start");
                     tokio::try_join!(
-                        anchor_consumer.check().map(|_| Err::<(), ()>(())),
+                        (anchor_consumer.check(&merged_conf)).map(|_| Err::<(), ()>(())),
                         run_guard.until_any_dropped()
                     )
                     .ok();

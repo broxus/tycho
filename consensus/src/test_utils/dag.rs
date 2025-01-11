@@ -13,8 +13,9 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
-use crate::effects::{MempoolStore, RoundCtx, ValidateCtx};
+use crate::effects::{Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
+use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
@@ -37,7 +38,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
     // any peer id will be ok, network is not used
-    let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
+    let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay, genesis);
     peer_schedule.set_next_subset(
         &[],
         genesis.round().next(),
@@ -113,18 +114,14 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             &last_trigger,
             msg_count,
             msg_bytes,
+            round_ctx.conf(),
         );
         points.insert(point.data().author, point);
     }
 
     for point in points.values() {
-        let serialized_point = tl_proto::serialize(point);
-        // skip 4 bytes of Point tag
-        if !Point::verify_hash_inner(&serialized_point[4..]) {
-            panic!("Point hash is not valid");
-        };
-
-        Verifier::verify(point, peer_schedule).expect("well-formed point");
+        point.verify_hash().unwrap();
+        Verifier::verify(point, peer_schedule, round_ctx.conf()).expect("well-formed point");
         let info = PointInfo::from(point);
         let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
@@ -164,6 +161,7 @@ fn point<const PEER_COUNT: usize>(
     last_trigger: &PointId,
     msg_count: usize,
     msg_bytes: usize,
+    conf: &MempoolConfig,
 ) -> Point {
     assert!(idx < PEER_COUNT, "peer index out of range");
     assert!(
@@ -215,15 +213,22 @@ fn point<const PEER_COUNT: usize>(
         max_anchor_time
     };
 
-    Point::new(&peers[idx].1, round, evidence, payload, PointData {
-        author: peers[idx].0,
-        time: max_prev_time.next(),
-        includes: includes.clone(),
-        witness: Default::default(),
-        anchor_trigger,
-        anchor_proof,
-        anchor_time,
-    })
+    Point::new(
+        &peers[idx].1,
+        round,
+        evidence,
+        payload,
+        PointData {
+            author: peers[idx].0,
+            time: max_prev_time.next(),
+            includes: includes.clone(),
+            witness: Default::default(),
+            anchor_trigger,
+            anchor_proof,
+            anchor_time,
+        },
+        conf,
+    )
 }
 
 fn point_anchor_link(
