@@ -11,7 +11,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
 use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
-use crate::engine::Genesis;
+use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
 
@@ -42,20 +42,25 @@ impl WeakDagRound {
 }
 
 impl DagRound {
-    pub fn new_bottom(round: Round, peer_schedule: &PeerSchedule) -> Self {
-        Self::new(round, peer_schedule, WeakDagRound(Weak::new()))
+    pub fn new_bottom(round: Round, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Self {
+        Self::new(round, peer_schedule, WeakDagRound(Weak::new()), conf)
     }
 
-    pub fn new_next(&self, peer_schedule: &PeerSchedule) -> Self {
-        Self::new(self.round().next(), peer_schedule, self.downgrade())
+    pub fn new_next(&self, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Self {
+        Self::new(self.round().next(), peer_schedule, self.downgrade(), conf)
     }
 
-    fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
+    fn new(
+        round: Round,
+        peer_schedule: &PeerSchedule,
+        prev: WeakDagRound,
+        conf: &MempoolConfig,
+    ) -> Self {
         let peers = peer_schedule.atomic().peers_for(round).clone();
 
-        let peer_count = if round > Genesis::id().round {
+        let peer_count = if round > conf.genesis_round {
             PeerCount::try_from(peers.len()).unwrap_or_else(|e| panic!("{e} for {round:?}"))
-        } else if round >= Genesis::id().round.prev() {
+        } else if round >= conf.genesis_round.prev() {
             PeerCount::GENESIS
         } else {
             panic!(
@@ -66,9 +71,9 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            anchor_stage: AnchorStage::of(round, peer_schedule),
+            anchor_stage: AnchorStage::of(round, peer_schedule, conf),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
-            threshold: Threshold::new(round, peer_count),
+            threshold: Threshold::new(round, peer_count, conf),
             prev,
         }));
 

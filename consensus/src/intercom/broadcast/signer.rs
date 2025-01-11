@@ -5,6 +5,7 @@ use tycho_network::PeerId;
 use crate::dag::DagHead;
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
+use crate::engine::MempoolConfig;
 use crate::intercom::dto::{SignatureRejectedReason, SignatureResponse};
 use crate::intercom::BroadcastFilter;
 use crate::models::Round;
@@ -18,7 +19,8 @@ impl Signer {
         broadcast_filter: &BroadcastFilter,
         round_ctx: &RoundCtx,
     ) -> SignatureResponse {
-        let response = Self::make_signature_response(round, author, head, broadcast_filter);
+        let response =
+            Self::make_signature_response(round, author, head, broadcast_filter, round_ctx.conf());
         let level = match response {
             SignatureResponse::Rejected(_) => tracing::Level::WARN,
             _ => tracing::Level::TRACE,
@@ -39,6 +41,7 @@ impl Signer {
         author: &PeerId,
         head: &DagHead,
         broadcast_filter: &BroadcastFilter,
+        conf: &MempoolConfig,
     ) -> SignatureResponse {
         if round >= head.next().round() {
             // first check BroadcastFilter, then DAG for top_dag_round exactly
@@ -82,7 +85,7 @@ impl Signer {
             // only previous to current round
             &head.keys().to_witness
         };
-        match state.sign(current_round, keys.as_deref()) {
+        match state.sign(current_round, keys.as_deref(), conf) {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.signature.clone()),
             Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),
             None => SignatureResponse::TryLater,

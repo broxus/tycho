@@ -1,6 +1,6 @@
 use crate::dag::{Committer, DagHead, DagRound};
-use crate::effects::{AltFmt, AltFormat, EngineCtx};
-use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
+use crate::effects::{AltFmt, AltFormat, Ctx, EngineCtx, RoundCtx};
+use crate::engine::{ConsensusConfigExt, MempoolConfig};
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
@@ -24,10 +24,10 @@ impl Default for DagFront {
 }
 
 impl DagFront {
-    pub fn init(&mut self, dag_bottom_round: DagRound) -> Committer {
+    pub fn init(&mut self, dag_bottom_round: DagRound, conf: &MempoolConfig) -> Committer {
         assert!(self.rounds.is_empty(), "DAG already initialized");
         let mut committer = Committer::default();
-        committer.init(&dag_bottom_round);
+        committer.init(&dag_bottom_round, conf);
         self.last_back_bottom = dag_bottom_round.round();
         self.rounds.push(dag_bottom_round);
         assert_eq!(
@@ -65,7 +65,11 @@ impl DagFront {
         new_top: Round,
         committer: Option<&mut Committer>,
         peer_schedule: &PeerSchedule,
+        round_ctx: &RoundCtx,
     ) -> Option<Round> {
+        let _span = round_ctx.span().enter();
+        let conf = round_ctx.conf();
+
         if let Some(ref committer) = committer {
             // update if we can; if None - use old value;
             // in a rare case committer may have finished its sync, but front decided to have a gap
@@ -79,13 +83,13 @@ impl DagFront {
         //   as dag bottom must be moved and old rounds dropped before subset is forgotten
         peer_schedule.apply_scheduled(new_top);
 
-        if new_top > self.last_back_bottom + CachedConfig::get().consensus.max_total_rounds() {
+        if new_top > self.last_back_bottom + conf.consensus.max_total_rounds() {
             // should drop validation tasks and restart them with new bottom to free memory
             self.rounds.clear();
             let new_bottom_round =
-                (Genesis::id().round).max(new_top - CachedConfig::get().consensus.reset_rounds());
+                (conf.genesis_round).max(new_top - conf.consensus.reset_rounds());
             self.rounds
-                .push(DagRound::new_bottom(new_bottom_round, peer_schedule));
+                .push(DagRound::new_bottom(new_bottom_round, peer_schedule, conf));
             self.has_pending_back_reset = true;
             self.last_back_bottom = new_bottom_round;
         }
@@ -93,7 +97,7 @@ impl DagFront {
         // to preserve contiguity; even if new rounds are drained, they will be passed to Back Dag
         for _ in self.top().round().next().0..=new_top.0 {
             let top = self.top();
-            self.rounds.push(top.new_next(peer_schedule));
+            self.rounds.push(top.new_next(peer_schedule, conf));
         }
 
         let mut new_full_history_bottom = None;
@@ -102,7 +106,7 @@ impl DagFront {
                 self.has_pending_back_reset = false;
                 *committer = Committer::default();
                 let full_history_bottom =
-                    committer.init(self.rounds.first().expect("must be init"));
+                    committer.init(self.rounds.first().expect("must be init"), conf);
                 assert_eq!(
                     self.last_back_bottom,
                     committer.bottom_round(),
@@ -110,9 +114,8 @@ impl DagFront {
                 );
                 new_full_history_bottom = Some(full_history_bottom);
             }
-            committer.extend_from_ahead(
-                &self.drain_upto(new_top - CachedConfig::get().consensus.min_front_rounds()),
-            );
+            committer
+                .extend_from_ahead(&self.drain_upto(new_top - conf.consensus.min_front_rounds()));
             committer.extend_from_ahead(&self.rounds);
             EngineCtx::meter_dag_len(committer.dag_len());
         }
