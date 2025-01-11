@@ -8,98 +8,97 @@ use serde::{Deserialize, Serialize};
 use tycho_network::OverlayId;
 
 use crate::dag::align_genesis;
-use crate::models::{Link, Point, PointData, PointId, UnixTime};
+use crate::models::{Link, Point, PointData, Round, UnixTime};
 
-static CONFIG: OnceLock<MempoolConfig> = OnceLock::new();
-
-static GENESIS: OnceLock<PointId> = OnceLock::new();
-
-pub struct Genesis();
-
-impl Genesis {
-    pub fn id() -> &'static PointId {
-        GENESIS.get().expect("genesis not initialized")
+// replace with `ArcSwapOption` + copy on get() if need to change in runtime
+static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
+pub struct NodeConfig;
+impl NodeConfig {
+    pub fn get() -> &'static MempoolNodeConfig {
+        (NODE_CONFIG.get()).expect("mempool node config not initialized")
     }
 }
 
-pub struct CachedConfig;
-
-impl CachedConfig {
-    pub fn get() -> &'static MempoolConfig {
-        CONFIG.get().expect("config not initialized")
-    }
-
-    pub fn init(config: &MempoolConfig) -> (Point, OverlayId) {
-        let genesis_round = align_genesis(config.genesis_info.start_round);
-
-        // reset types to u128 as it does not match fields in `ConsensusConfig`
-        // and may be changed just to keep them handy, that must not affect hash
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&(genesis_round.0 as u128).to_be_bytes());
-        hasher.update(&(config.genesis_info.genesis_millis as u128).to_be_bytes());
-        hasher.update(&(config.consensus.clock_skew_millis as u128).to_be_bytes());
-        hasher.update(&(config.consensus.payload_batch_bytes as u128).to_be_bytes());
-        hasher.update(&(config.consensus.commit_history_rounds as u128).to_be_bytes());
-        hasher.update(&(config.consensus.deduplicate_rounds as u128).to_be_bytes());
-        hasher.update(&(config.consensus.max_consensus_lag_rounds as u128).to_be_bytes());
-
-        let overlay_id = OverlayId(hasher.finalize().into());
-
-        let genesis_keys = KeyPair::from(&SecretKey::from_bytes(overlay_id.0));
-
-        CONFIG.set(config.clone()).ok(); // may try to set the same value
-
-        let genesis = Point::new(
-            &genesis_keys,
-            genesis_round,
-            Default::default(),
-            Default::default(),
-            PointData {
-                author: genesis_keys.public_key.into(),
-                time: UnixTime::from_millis(config.genesis_info.genesis_millis),
-                includes: Default::default(),
-                witness: Default::default(),
-                anchor_trigger: Link::ToSelf,
-                anchor_proof: Link::ToSelf,
-                anchor_time: UnixTime::from_millis(config.genesis_info.genesis_millis),
-            },
-        );
-
-        GENESIS.set(genesis.id()).ok(); // may try to set the same value
-
-        assert_eq!(
-            *Genesis::id(),
-            genesis.id(),
-            "genesis is not properly initialized"
-        );
-
-        (genesis, overlay_id)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// values that can be changed in runtime via key block, private to crate
+#[derive(Clone, Debug, PartialEq)]
 pub struct MempoolConfig {
-    pub genesis_info: GenesisInfo,
     pub consensus: ConsensusConfig,
-    pub node: MempoolNodeConfig,
+    pub genesis_round: Round,
     /// Estimated hard limit on serialized point size
     pub point_max_bytes: usize,
 }
 
-#[derive(Default, Debug)]
+/// visible outside crate and used as DTO
+#[derive(Clone, Debug)]
+pub struct MempoolMergedConfig {
+    genesis_info: GenesisInfo,
+    pub(crate) conf: MempoolConfig,
+    pub(crate) overlay_id: OverlayId,
+}
+
+impl MempoolMergedConfig {
+    pub fn genesis_info(&self) -> GenesisInfo {
+        self.genesis_info
+    }
+    pub fn consensus(&self) -> &ConsensusConfig {
+        &self.conf.consensus
+    }
+    pub(crate) fn genesis(&self) -> Point {
+        let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
+        let millis = UnixTime::from_millis(self.genesis_info.genesis_millis);
+        Point::new(
+            &key_pair,
+            self.conf.genesis_round,
+            Default::default(),
+            Default::default(),
+            PointData {
+                author: key_pair.public_key.into(),
+                time: millis,
+                includes: Default::default(),
+                witness: Default::default(),
+                anchor_trigger: Link::ToSelf,
+                anchor_proof: Link::ToSelf,
+                anchor_time: millis,
+            },
+            &self.conf,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MempoolConfigBuilder {
     genesis_info: Option<GenesisInfo>,
     consensus_config: Option<ConsensusConfig>,
-    node_config: Option<MempoolNodeConfig>,
 }
 
 impl MempoolConfigBuilder {
-    pub fn set_node_config(&mut self, node_config: &MempoolNodeConfig) {
-        self.node_config = Some(node_config.clone());
+    pub fn new(node_config: &MempoolNodeConfig) -> Self {
+        if NODE_CONFIG.get_or_init(|| node_config.clone()) != node_config {
+            tracing::error!(
+                "mempool node config was not changed; using prev {:?} ignored new {:?}",
+                NodeConfig::get(),
+                node_config,
+            );
+        };
+        Self {
+            genesis_info: None,
+            consensus_config: None,
+        }
     }
 
-    pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) {
+    pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) -> Result<()> {
+        ensure!(
+            consensus_config.max_consensus_lag_rounds >= consensus_config.commit_history_rounds,
+            "max consensus lag must be greater than commit depth"
+        );
+
+        ensure!(
+            consensus_config.payload_buffer_bytes >= consensus_config.payload_batch_bytes,
+            "no need to evict cached externals if can send them in one message"
+        );
+
         self.consensus_config = Some(consensus_config.clone());
+        Ok(())
     }
 
     pub fn set_genesis(&mut self, info: GenesisInfo) {
@@ -114,42 +113,48 @@ impl MempoolConfigBuilder {
         self.genesis_info
     }
 
-    pub fn build(&self) -> Result<MempoolConfig> {
-        let genesis_data = *self
+    pub fn build(&self) -> Result<MempoolMergedConfig> {
+        let genesis_info = *self
             .genesis_info
             .as_ref()
-            .context("mempool genesis data for config is not known")?;
-        let consensus_config = self
+            .context("mempool genesis info for config is not known")?;
+
+        let consensus = self
             .consensus_config
-            .clone()
+            .as_ref()
             .context("mempool consensus config is not known")?;
-        let node_config = self
-            .node_config
-            .clone()
-            .context("mempool node config is not known")?;
 
-        let point_max_bytes = Point::max_byte_size(consensus_config.payload_batch_bytes as usize);
+        let genesis_round = align_genesis(genesis_info.start_round);
 
-        ensure!(
-            consensus_config.max_consensus_lag_rounds >= consensus_config.commit_history_rounds,
-            "max consensus lag must be greater than commit depth"
-        );
+        let mempool_config = MempoolConfig {
+            consensus: consensus.clone(),
+            genesis_round,
+            point_max_bytes: Point::max_byte_size(consensus),
+        };
 
-        ensure!(
-            consensus_config.payload_buffer_bytes >= consensus_config.payload_batch_bytes,
-            "no need to evict cached externals if can send them in one message"
-        );
+        // reset types to u128 as it does not match fields in `ConsensusConfig`
+        // and may be changed just to keep them handy, that must not affect hash
+        let mut hasher = blake3::Hasher::new();
+        // unaligned `genesis_info.start_round` is not used
+        hasher.update(&(genesis_round.0 as u128).to_be_bytes());
+        hasher.update(&(genesis_info.genesis_millis as u128).to_be_bytes());
+        hasher.update(&(consensus.clock_skew_millis as u128).to_be_bytes());
+        hasher.update(&(consensus.payload_batch_bytes as u128).to_be_bytes());
+        hasher.update(&(consensus.commit_history_rounds as u128).to_be_bytes());
+        hasher.update(&(consensus.deduplicate_rounds as u128).to_be_bytes());
+        hasher.update(&(consensus.max_consensus_lag_rounds as u128).to_be_bytes());
 
-        Ok(MempoolConfig {
-            genesis_info: genesis_data,
-            consensus: consensus_config,
-            node: node_config,
-            point_max_bytes,
+        let overlay_id = OverlayId(hasher.finalize().into());
+
+        Ok(MempoolMergedConfig {
+            genesis_info,
+            conf: mempool_config,
+            overlay_id,
         })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MempoolNodeConfig {
     /// `true` to truncate hashes, signatures and use non-standard format for large structs
     /// that may be more readable

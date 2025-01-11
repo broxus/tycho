@@ -12,7 +12,6 @@ use itertools::{Either, Itertools};
 use rayon::prelude::IntoParallelRefIterator;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::Instrument;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -24,7 +23,7 @@ use crate::effects::{
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis, MempoolConfig};
+use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{
     AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointRestoreSelect,
@@ -44,14 +43,15 @@ pub struct Engine {
 #[derive(Clone)]
 pub struct EngineHandle {
     peer_schedule: PeerSchedule,
+    genesis_round: Round,
 }
 impl EngineHandle {
     pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
         if let Some((switch_round, subset)) = subset {
             // specially for zerostate with unaligned genesis,
             // and for first (prev) vset after reboot or a new genesis
-            let round = if switch_round <= Genesis::id().round.0 {
-                Genesis::id().round.next()
+            let round = if switch_round <= self.genesis_round.0 {
+                self.genesis_round.next()
             } else {
                 Round(switch_round)
             };
@@ -75,19 +75,21 @@ impl Engine {
         input_buffer: InputBuffer,
         committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        config: &MempoolConfig,
+        merged_conf: &MempoolMergedConfig,
     ) -> Self {
-        // mostly everything depends on genesis - must init at the first line
-        // MempoolConfig::init(&global_config);
-        let (genesis, overlay_id) = CachedConfig::init(config);
+        let conf = &merged_conf.conf;
+        let genesis = merged_conf.genesis();
 
         let consensus_round = RoundWatch::default();
-        consensus_round.set_max(Genesis::id().round);
-        top_known_anchor.set_max(Genesis::id().round);
-        let engine_ctx = EngineCtx::new(consensus_round.get());
+        consensus_round.set_max(conf.genesis_round);
+        top_known_anchor.set_max(conf.genesis_round);
+
+        let engine_ctx = EngineCtx::new(consensus_round.get(), conf);
+        let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
+
         let responder = Responder::default();
 
-        let private_overlay = PrivateOverlay::builder(overlay_id)
+        let private_overlay = PrivateOverlay::builder(merged_conf.overlay_id)
             .with_peer_resolver(peer_resolver.clone())
             .named("tycho-consensus")
             .build(responder.clone());
@@ -95,10 +97,10 @@ impl Engine {
         overlay_service.add_private_overlay(&private_overlay);
 
         let dispatcher = Dispatcher::new(network, &private_overlay);
-        let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
+        let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay, &genesis);
 
         genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
+        Verifier::verify(&genesis, &peer_schedule, conf).expect("genesis failed to verify");
 
         let store = MempoolStore::new(mempool_adapter_store);
         let db_cleaner = DbCleaner::new(mempool_adapter_store);
@@ -108,20 +110,27 @@ impl Engine {
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
         let mut dag = DagFront::default();
-        let mut committer = dag.init(DagRound::new_bottom(
-            Genesis::id().round.prev(),
+        let mut committer = dag.init(
+            DagRound::new_bottom(conf.genesis_round.prev(), &peer_schedule, conf),
+            conf,
+        );
+        dag.fill_to_top(
+            conf.genesis_round,
+            Some(&mut committer),
             &peer_schedule,
-        ));
-        dag.fill_to_top(Genesis::id().round, Some(&mut committer), &peer_schedule);
+            &round_ctx,
+        );
         let committer_run = tokio::spawn(future::ready(committer));
 
         let init_task = JoinTask::new({
             let store = store.clone();
+            let overlay_id = merged_conf.overlay_id;
+            let conf = conf.clone();
             async move {
                 let init_storage_task = tokio::task::spawn_blocking({
                     move || {
                         store.init_storage(&overlay_id);
-                        store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                        store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
                     }
                 });
                 match init_storage_task.await {
@@ -163,12 +172,13 @@ impl Engine {
     pub fn get_handle(&self) -> EngineHandle {
         EngineHandle {
             peer_schedule: self.round_task.state.peer_schedule.clone(),
+            genesis_round: self.ctx.conf().genesis_round,
         }
     }
 
     #[cfg(any(test, feature = "test"))]
     pub fn set_start_peers(&self, peers: &[PeerId]) {
-        let first = Genesis::id().round.next();
+        let first = self.ctx.conf().genesis_round.next();
         (self.round_task.state.peer_schedule).set_next_subset(peers, first, peers);
     }
 
@@ -185,14 +195,14 @@ impl Engine {
         .await
         .expect("load last round from db");
 
-        self.ctx = EngineCtx::new(last_db_round);
+        self.ctx.update(last_db_round);
         tracing::info!(parent: self.ctx.span(), "rounds set since found last db round");
+        let conf = self.ctx.conf();
 
         // wait collator to load blocks and update peer schedule
 
         let top_known_anchor = {
-            let min_top_known_anchor =
-                last_db_round - CachedConfig::get().consensus.max_consensus_lag_rounds;
+            let min_top_known_anchor = last_db_round - conf.consensus.max_consensus_lag_rounds;
 
             // NOTE collator have to apply mc state update to mempool first,
             //  and pass its top known anchor only after completion
@@ -214,7 +224,7 @@ impl Engine {
 
         let dag_top_round = last_db_round
             .max(top_known_anchor)
-            .max(Genesis::id().round.next());
+            .max(conf.genesis_round.next());
         self.round_task.state.consensus_round.set_max(dag_top_round);
         let round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
         tracing::info!(parent: round_ctx.span(), "current round set to dag top");
@@ -224,10 +234,11 @@ impl Engine {
             dag_top_round,
             Some(&mut committer),
             &self.round_task.state.peer_schedule,
+            &round_ctx,
         );
         _ = committer.drop_upto(
-            (top_known_anchor - CachedConfig::get().consensus.replay_anchor_rounds())
-                .max(Genesis::id().round),
+            (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
+            conf,
         );
         let dag_bottom_round = committer.bottom_round();
 
@@ -318,6 +329,7 @@ impl Engine {
             new_top_round,
             Some(&mut committer),
             &self.round_task.state.peer_schedule,
+            &round_ctx,
         );
         self.committer_run = tokio::spawn(future::ready(committer));
 
@@ -349,9 +361,9 @@ impl Engine {
                             .multi_get_points(keys) // assume load result is sorted
                             .par_iter()
                             .map(|point| {
-                                let is_ok = point.verify_hash().is_ok()
-                                    && Verifier::verify(point, &peer_schedule).is_ok();
-                                if is_ok {
+                                if Verifier::verify(point, &peer_schedule, round_ctx.conf()).is_ok()
+                                    && point.verify_hash().is_ok()
+                                {
                                     // return back as they were, now with prev_proof filled
                                     PointRestore::Exists(point.into(), point.prev_proof())
                                 } else {
@@ -396,15 +408,16 @@ impl Engine {
     pub async fn run(mut self) {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
         let mut start_replay_bcasts = Some(self.pre_run().await);
+        let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
         let _db_clean_task = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
+            &round_ctx,
         );
 
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
-        let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
@@ -456,7 +469,7 @@ impl Engine {
                 };
 
                 if old_dag_top_round < dag_top_round.prev() {
-                    self.ctx = EngineCtx::new(dag_top_round.prev());
+                    self.ctx.update(dag_top_round.prev());
                 }
 
                 round_ctx = RoundCtx::new(&self.ctx, dag_top_round.prev());
@@ -465,6 +478,7 @@ impl Engine {
                     dag_top_round,
                     ready_committer.as_mut(),
                     &self.round_task.state.peer_schedule,
+                    &round_ctx,
                 ));
 
                 if let Some(committer) = ready_committer {
@@ -555,7 +569,7 @@ fn collator_feedback(
 ) -> Result<Round, BoxFuture<'static, ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
-    let pause_at = top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
+    let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
     // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
     //  (the next after next engine round), while vset switch round is exactly pause bound + 1
     if old_dag_top_round >= pause_at {
@@ -570,14 +584,18 @@ fn collator_feedback(
             committed_info_tx.send(MempoolOutput::Paused).ok();
         }
 
+        let timeout = Duration::from_millis(round_ctx.conf().consensus.broadcast_retry_millis as _);
+
+        let round_ctx = round_ctx.clone();
         let collator_sync = async move {
             loop {
                 let top_known_anchor = top_known_anchor_recv.next().await;
                 //  exit if ready to produce point: collator synced enough
                 let pause_at =
-                    top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
+                    top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
                 let exit = old_dag_top_round < pause_at;
                 tracing::debug!(
+                    parent: round_ctx.span(),
                     top_known_anchor = top_known_anchor.0,
                     pause_at = pause_at.0,
                     exit = exit,
@@ -588,14 +606,7 @@ fn collator_feedback(
                 }
             }
         };
-        let task = tokio::time::timeout(
-            Duration::from_millis(CachedConfig::get().consensus.broadcast_retry_millis as _),
-            collator_sync.instrument(round_ctx.span().clone()),
-        )
-        .map(|_| ())
-        .boxed();
-
-        Err(task)
+        Err((tokio::time::timeout(timeout, collator_sync).map(|_| ())).boxed())
     } else if *is_paused {
         tracing::info!(
             parent: round_ctx.span(),
@@ -643,13 +654,13 @@ fn committer_task(
         let start_dag_len = committer.dag_len();
 
         for attempt in 0.. {
-            match committer.commit() {
+            match committer.commit(round_ctx.conf()) {
                 Ok(data) => {
                     committed = Some(data);
                     break;
                 }
                 Err(round) => {
-                    let result = committer.drop_upto(round.next());
+                    let result = committer.drop_upto(round.next(), round_ctx.conf());
                     new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
                     tracing::info!(
                         ?start_bottom,

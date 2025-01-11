@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
+use everscale_types::models::ConsensusConfig;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::engine::{CachedConfig, Genesis};
+use crate::engine::MempoolConfig;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
 use crate::models::proto_utils::evidence_btree_map;
 use crate::models::{PeerCount, UnixTime};
@@ -32,7 +33,7 @@ pub struct ShortPointBody {
 }
 
 impl PointBody {
-    pub fn max_byte_size(payload_batch_bytes: usize) -> usize {
+    pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
         // 4 bytes of PointBody tag
         // 4 bytes of Round
         // payload bytes_max_size_hint
@@ -64,20 +65,20 @@ impl PointBody {
 
         4 + Round::MAX_TL_SIZE
             + tl_proto::bytes_max_size_hint(EXT_IN_BOC_MIN)
-                * (1 + payload_batch_bytes / EXT_IN_BOC_MIN)
+                * (1 + consensus_config.payload_batch_bytes as usize / EXT_IN_BOC_MIN)
             + point_data_size
             + evidence_size
     }
-    pub fn make_digest(&self) -> Digest {
-        let mut data = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
+    pub fn make_digest(&self, conf: &MempoolConfig) -> Digest {
+        let mut data = Vec::<u8>::with_capacity(conf.point_max_bytes);
         self.write_to(&mut data);
         Digest::new(data.as_ref())
     }
 
-    pub fn is_well_formed(&self) -> bool {
+    pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
         // check for being earlier than genesis takes place with other peer checks
         #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
-        let is_special_ok = if self.round == Genesis::id().round {
+        let is_special_ok = if self.round == conf.genesis_round {
             self.payload.is_empty()
                 && self.data.anchor_trigger == Link::ToSelf
                 && self.data.anchor_proof == Link::ToSelf
