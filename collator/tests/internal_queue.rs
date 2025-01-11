@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +11,9 @@ use everscale_types::models::{
     Transaction, TxInfo,
 };
 use everscale_types::num::Tokens;
-use tycho_block_util::queue::{DestAddr, QueueDiff, QueueDiffStuff, QueueKey, QueuePartition};
+use tycho_block_util::queue::{
+    QueueDiff, QueueDiffStuff, QueueKey, QueuePartition, RouterAddr, RouterDirection,
+};
 use tycho_collator::internal_queue::queue::{
     Queue, QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
 };
@@ -31,6 +33,7 @@ use tycho_storage::Storage;
 struct StoredObject {
     key: u64,
     dest: IntAddr,
+    src: IntAddr,
 }
 
 impl Ord for StoredObject {
@@ -53,7 +56,11 @@ impl InternalMessageValue for StoredObject {
         let workchain = i8::from_be_bytes(bytes[8].to_be_bytes());
         let addr = HashBytes::from_slice(&bytes[9..]);
         let dest = IntAddr::Std(StdAddr::new(workchain, addr));
-        Ok(StoredObject { key, dest })
+        Ok(StoredObject {
+            key,
+            dest,
+            src: Default::default(),
+        })
     }
 
     fn serialize(&self) -> anyhow::Result<Vec<u8>>
@@ -72,6 +79,10 @@ impl InternalMessageValue for StoredObject {
         Ok(bytes)
     }
 
+    fn source(&self) -> &IntAddr {
+        &self.src
+    }
+
     fn destination(&self) -> &IntAddr {
         &self.dest
     }
@@ -84,30 +95,33 @@ impl InternalMessageValue for StoredObject {
     }
 }
 
-fn create_stored_object(key: u64, dest_addr: DestAddr) -> anyhow::Result<Arc<StoredObject>> {
+fn create_stored_object(key: u64, dest_addr: RouterAddr) -> anyhow::Result<Arc<StoredObject>> {
     let dest = dest_addr.to_int_addr();
-    Ok(Arc::new(StoredObject { key, dest }))
+    Ok(Arc::new(StoredObject {
+        key,
+        dest,
+        src: Default::default(),
+    }))
 }
 
 fn test_statistics_check_statistics(
     queue: &QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject>,
-    dest_1_low_priority: DestAddr,
-    dest_2_low_priority: DestAddr,
-    dest_3_normal_priority: DestAddr,
+    dest_1_low_priority: RouterAddr,
+    dest_2_low_priority: RouterAddr,
+    dest_3_normal_priority: RouterAddr,
 ) -> anyhow::Result<()> {
     // check two diff statistics
-    let statistics_low_priority_partition =
-        queue.load_statistics(QueuePartition::LowPriority, vec![QueueShardRange {
-            shard_ident: ShardIdent::new_full(0),
-            from: QueueKey {
-                lt: 1,
-                hash: HashBytes::default(),
-            },
-            to: QueueKey {
-                lt: 36000,
-                hash: HashBytes::default(),
-            },
-        }])?;
+    let statistics_low_priority_partition = queue.load_statistics(1, vec![QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 1,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 36000,
+            hash: HashBytes::default(),
+        },
+    }])?;
 
     let addr_1_stat = statistics_low_priority_partition
         .statistics()
@@ -122,7 +136,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 10000);
 
     let statistics_normal_priority_partition =
-        queue.load_statistics(QueuePartition::NormalPriority, vec![QueueShardRange {
+        queue.load_statistics(QueuePartition::default(), vec![QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
                 lt: 1,
@@ -141,18 +155,17 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_3_stat, 2000);
 
     // check first diff
-    let statistics_low_priority_partition =
-        queue.load_statistics(QueuePartition::LowPriority, vec![QueueShardRange {
-            shard_ident: ShardIdent::new_full(0),
-            from: QueueKey {
-                lt: 1,
-                hash: HashBytes::default(),
-            },
-            to: QueueKey {
-                lt: 16000,
-                hash: HashBytes::default(),
-            },
-        }])?;
+    let statistics_low_priority_partition = queue.load_statistics(1, vec![QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 1,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 16000,
+            hash: HashBytes::default(),
+        },
+    }])?;
 
     let addr_1_stat = statistics_low_priority_partition
         .statistics()
@@ -167,18 +180,17 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 5000);
 
     // check second diff
-    let statistics_low_priority_partition =
-        queue.load_statistics(QueuePartition::LowPriority, vec![QueueShardRange {
-            shard_ident: ShardIdent::new_full(0),
-            from: QueueKey {
-                lt: 20000,
-                hash: HashBytes::default(),
-            },
-            to: QueueKey {
-                lt: 36000,
-                hash: HashBytes::default(),
-            },
-        }])?;
+    let statistics_low_priority_partition = queue.load_statistics(1, vec![QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 20000,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 36000,
+            hash: HashBytes::default(),
+        },
+    }])?;
 
     let addr_1_stat = statistics_low_priority_partition
         .statistics()
@@ -224,27 +236,27 @@ async fn test_queue() -> anyhow::Result<()> {
     let mut partition_router = PartitionRouter::default();
 
     let dest_1_low_priority =
-        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
     let dest_2_low_priority =
-        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
 
     // low priority
     for i in 1..=10000 {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
     }
 
     for i in 10001..=15000 {
         let stored_object = create_stored_object(i, dest_2_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
     }
 
     let dest_3_normal_priority =
-        DestAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::from([3; 32]))))?;
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::from([3; 32]))))?;
 
     // normal priority
     for i in 15001..=16000 {
@@ -254,16 +266,25 @@ async fn test_queue() -> anyhow::Result<()> {
     }
 
     assert_eq!(
-        partition_router.get_partition(&dest_1_low_priority.to_int_addr()),
-        QueuePartition::LowPriority
+        partition_router.get_partition(
+            Some(&Default::default()),
+            &dest_1_low_priority.to_int_addr()
+        ),
+        1
     );
     assert_eq!(
-        partition_router.get_partition(&dest_2_low_priority.to_int_addr()),
-        QueuePartition::LowPriority
+        partition_router.get_partition(
+            Some(&Default::default()),
+            &dest_2_low_priority.to_int_addr()
+        ),
+        1
     );
     assert_eq!(
-        partition_router.get_partition(&dest_3_normal_priority.to_int_addr()),
-        QueuePartition::NormalPriority
+        partition_router.get_partition(
+            Some(&Default::default()),
+            &dest_3_normal_priority.to_int_addr()
+        ),
+        QueuePartition::default()
     );
 
     let diff_with_messages = QueueDiffWithMessages {
@@ -278,7 +299,7 @@ async fn test_queue() -> anyhow::Result<()> {
     // check low priority statistics
     diff_statistics
         .iter()
-        .filter(|(partition, _)| partition == &&QueuePartition::LowPriority)
+        .filter(|(partition, _)| partition == &&1)
         .for_each(|(_partition, statistics)| {
             assert_eq!(statistics.iter().count(), 2);
 
@@ -292,7 +313,7 @@ async fn test_queue() -> anyhow::Result<()> {
     // check normal priority statistics
     diff_statistics
         .iter()
-        .filter(|(partition, _)| partition == &&QueuePartition::NormalPriority)
+        .filter(|(partition, _)| partition == &&QueuePartition::default())
         .for_each(|(_partition, statistics)| {
             assert_eq!(statistics.iter().count(), 1);
 
@@ -323,27 +344,27 @@ async fn test_queue() -> anyhow::Result<()> {
     let mut partition_router = PartitionRouter::default();
 
     let dest_1_low_priority =
-        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
     let dest_2_low_priority =
-        DestAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
 
     // low priority
     for i in 20001..=30000 {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
     }
 
     for i in 30001..=35000 {
         let stored_object = create_stored_object(i, dest_2_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert(stored_object.dest.clone(), QueuePartition::LowPriority)?;
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
     }
 
     let dest_3_normal_priority =
-        DestAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::from([3; 32]))))?;
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::from([3; 32]))))?;
 
     // normal priority
     for i in 35001..=36000 {
@@ -353,16 +374,25 @@ async fn test_queue() -> anyhow::Result<()> {
     }
 
     assert_eq!(
-        partition_router.get_partition(&dest_1_low_priority.to_int_addr()),
-        QueuePartition::LowPriority
+        partition_router.get_partition(
+            Some(&IntAddr::default()),
+            &dest_1_low_priority.to_int_addr()
+        ),
+        1
     );
     assert_eq!(
-        partition_router.get_partition(&dest_2_low_priority.to_int_addr()),
-        QueuePartition::LowPriority
+        partition_router.get_partition(
+            Some(&IntAddr::default()),
+            &dest_2_low_priority.to_int_addr()
+        ),
+        1
     );
     assert_eq!(
-        partition_router.get_partition(&dest_3_normal_priority.to_int_addr()),
-        QueuePartition::NormalPriority
+        partition_router.get_partition(
+            Some(&IntAddr::default()),
+            &dest_3_normal_priority.to_int_addr()
+        ),
+        QueuePartition::default()
     );
 
     let diff_with_messages = QueueDiffWithMessages {
@@ -377,7 +407,7 @@ async fn test_queue() -> anyhow::Result<()> {
     // check low priority statistics
     diff_statistics
         .iter()
-        .filter(|(partition, _)| partition == &&QueuePartition::LowPriority)
+        .filter(|(partition, _)| partition == &&1)
         .for_each(|(_partition, statistics)| {
             assert_eq!(statistics.iter().count(), 2);
 
@@ -391,7 +421,7 @@ async fn test_queue() -> anyhow::Result<()> {
     // check normal priority statistics
     diff_statistics
         .iter()
-        .filter(|(partition, _)| partition == &&QueuePartition::NormalPriority)
+        .filter(|(partition, _)| partition == &&QueuePartition::default())
         .for_each(|(_partition, statistics)| {
             assert_eq!(statistics.iter().count(), 1);
 
@@ -446,24 +476,16 @@ async fn test_queue() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let iterators = queue.iterator(
-        QueuePartition::LowPriority,
-        ranges.clone(),
-        ShardIdent::new_full(-1),
-    )?;
+    let iterators = queue.iterator(1, ranges.clone(), ShardIdent::new_full(-1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
-    while let Some(_) = iterator_manager.next()? {
+    while iterator_manager.next()?.is_some() {
         read_count += 1;
     }
     assert_eq!(read_count, 15000);
 
-    let iterators = queue.iterator(
-        QueuePartition::NormalPriority,
-        ranges,
-        ShardIdent::new_full(0),
-    )?;
+    let iterators = queue.iterator(QueuePartition::default(), ranges, ShardIdent::new_full(0))?;
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
     while iterator_manager.next()?.is_some() {
@@ -489,11 +511,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let iterators = queue.iterator(
-        QueuePartition::LowPriority,
-        ranges.clone(),
-        ShardIdent::new_full(-1),
-    )?;
+    let iterators = queue.iterator(1, ranges.clone(), ShardIdent::new_full(-1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -502,11 +520,7 @@ async fn test_queue() -> anyhow::Result<()> {
     }
     assert_eq!(read_count, 30000);
 
-    let iterators = queue.iterator(
-        QueuePartition::NormalPriority,
-        ranges,
-        ShardIdent::new_full(0),
-    )?;
+    let iterators = queue.iterator(QueuePartition::default(), ranges, ShardIdent::new_full(0))?;
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
     while iterator_manager.next()?.is_some() {
@@ -556,7 +570,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     };
     let mut diff = QueueDiffWithMessages::new();
 
-    let stored_objects = vec![create_stored_object(1, DestAddr {
+    let stored_objects = vec![create_stored_object(1, RouterAddr {
         workchain: 1,
         account: HashBytes::from([1; 32]),
     })?];
@@ -599,7 +613,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let partition = QueuePartition::NormalPriority;
+    let partition = QueuePartition::default();
     let iterators = queue.iterator(partition, ranges.clone(), ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
@@ -611,6 +625,37 @@ async fn test_queue_clear() -> anyhow::Result<()> {
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next()?.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn test_router() -> anyhow::Result<()> {
+    let mut partition_router = PartitionRouter::default();
+
+    let dest_1 = RouterAddr {
+        workchain: 0,
+        account: HashBytes::from([1; 32]),
+    };
+    let src_1 = RouterAddr {
+        workchain: 0,
+        account: HashBytes::from([2; 32]),
+    };
+
+    partition_router.insert(RouterDirection::Dest, dest_1.to_int_addr().clone(), 1)?;
+    partition_router.insert(RouterDirection::Src, src_1.to_int_addr().clone(), 2)?;
+
+    let res = partition_router.get_partition(Some(&IntAddr::default()), &dest_1.to_int_addr());
+    assert_eq!(res, 1);
+
+    let res = partition_router.get_partition(Some(&src_1.to_int_addr()), &IntAddr::default());
+    assert_eq!(res, 2);
+
+    let res = partition_router.get_partition(Some(&src_1.to_int_addr()), &dest_1.to_int_addr());
+    assert_eq!(res, 1);
+
+    let res = partition_router.get_partition(Some(&IntAddr::default()), &IntAddr::default());
+    assert_eq!(res, 0);
 
     Ok(())
 }
@@ -720,16 +765,24 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut messages = vec![message1_hash, message2_hash, message3_hash];
     messages.sort_unstable();
 
-    let mut partition_router = BTreeMap::default();
+    let mut direction_router = BTreeMap::default();
 
-    partition_router.insert(
-        QueuePartition::LowPriority,
-        BTreeSet::from_iter(vec![
-            DestAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
-            DestAddr::try_from(IntAddr::Std(StdAddr::new(1, HashBytes::ZERO)))?,
-            DestAddr::try_from(IntAddr::Std(StdAddr::new(2, HashBytes::ZERO)))?,
-        ]),
+    direction_router.insert(
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
+        1,
     );
+    direction_router.insert(
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
+        2,
+    );
+    direction_router.insert(
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
+        3,
+    );
+
+    let mut partition_router = BTreeMap::new();
+
+    partition_router.insert(RouterDirection::Dest, direction_router);
 
     let diff = QueueDiff {
         hash: HashBytes::ZERO,
@@ -826,19 +879,19 @@ async fn test_queue_tail() -> anyhow::Result<()> {
     let mut diff_mc2 = QueueDiffWithMessages::new();
 
     let stored_objects = vec![
-        create_stored_object(1, DestAddr {
+        create_stored_object(1, RouterAddr {
             workchain: -1,
             account: HashBytes::from([1; 32]),
         })?,
-        create_stored_object(2, DestAddr {
+        create_stored_object(2, RouterAddr {
             workchain: -1,
             account: HashBytes::from([2; 32]),
         })?,
-        create_stored_object(3, DestAddr {
+        create_stored_object(3, RouterAddr {
             workchain: 0,
             account: HashBytes::from([3; 32]),
         })?,
-        create_stored_object(4, DestAddr {
+        create_stored_object(4, RouterAddr {
             workchain: -1,
             account: HashBytes::from([4; 32]),
         })?,
