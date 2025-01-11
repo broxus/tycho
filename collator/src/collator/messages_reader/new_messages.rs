@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, RouterDirection};
 
 use super::internals_reader::{
     InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
@@ -58,7 +58,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         for stats in partition_all_ranges_msgs_stats {
             for account_addr in stats.statistics().keys() {
                 self.partition_router
-                    .insert(account_addr.clone(), partition_id.try_into().unwrap())
+                    .insert(RouterDirection::Dest, account_addr.clone(), partition_id)
                     .unwrap();
             }
         }
@@ -79,9 +79,11 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn add_message(&mut self, message: Arc<V>) {
         self.messages.insert(message.key(), message.clone());
         if self.current_shard.contains_address(message.destination()) {
-            let partition = self.partition_router.get_partition(message.destination());
+            let partition = self
+                .partition_router
+                .get_partition(Some(message.source()), message.destination());
             self.messages_for_current_shard
-                .entry(partition as PartitionId)
+                .entry(partition)
                 .or_default()
                 .push(Reverse(MessageExt::new(self.current_shard, message)));
         };
