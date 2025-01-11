@@ -2,15 +2,15 @@ use std::fs::File;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
-use tycho_block_util::queue::{DestAddr, QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr, RouterDirection};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, ReadOptions, WriteBatch, WriteBatchWithTransaction};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
 
 use crate::db::*;
 use crate::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
-use crate::store::QueueStateReader;
 use crate::util::{OwnedIterator, StoredValue};
+use crate::QueueStateReader;
 
 pub mod model;
 
@@ -100,7 +100,7 @@ impl InternalQueueStorage {
             partition,
             min_message: from,
             max_message: QueueKey::MIN,
-            dest: DestAddr::MIN,
+            dest: RouterAddr::MIN,
         };
 
         let from_key_bytes = {
@@ -169,7 +169,7 @@ impl InternalQueueStorage {
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
             let mut buffer = Vec::new();
-            let mut statistics: FastHashMap<QueuePartition, FastHashMap<DestAddr, u64>> =
+            let mut statistics: FastHashMap<QueuePartition, FastHashMap<RouterAddr, u64>> =
                 FastHashMap::default();
             while reader.read_next_diff()?.is_some() {
                 let current_diff_index = reader.next_queue_diff_index() - 1;
@@ -185,23 +185,32 @@ impl InternalQueueStorage {
                         anyhow::bail!("non-std destination address in msg {msg_hash}");
                     };
 
-                    let dest_addr = DestAddr {
+                    let IntAddr::Std(src) = &int_msg_info.src else {
+                        anyhow::bail!("non-std destination address in msg {msg_hash}");
+                    };
+
+                    let src_addr = RouterAddr {
+                        workchain: src.workchain,
+                        account: src.address,
+                    };
+
+                    let dest_addr = RouterAddr {
                         workchain: dest.workchain,
                         account: dest.address,
                     };
                     let current_diff = &reader.state().header.queue_diffs[current_diff_index];
+
                     let partition = current_diff
                         .partition_router
-                        .iter()
-                        .find_map(|(key, value)| {
-                            if value.contains(&dest_addr) {
-                                Some(key)
-                            } else {
-                                None
-                            }
+                        .get(&RouterDirection::Dest)
+                        .and_then(|dest_router| dest_router.get(&dest_addr).cloned())
+                        .or_else(|| {
+                            current_diff
+                                .partition_router
+                                .get(&RouterDirection::Src)
+                                .and_then(|src_router| src_router.get(&src_addr).cloned())
                         })
-                        .cloned()
-                        .unwrap_or(QueuePartition::NormalPriority);
+                        .unwrap_or_default();
 
                     let key = ShardsInternalMessagesKey {
                         partition,
@@ -290,14 +299,14 @@ impl InternalQueueStorage {
                 partition: range.partition,
                 min_message: range.from,
                 max_message: QueueKey::MIN,
-                dest: DestAddr::MIN,
+                dest: RouterAddr::MIN,
             };
             let to_stat_key = StatKey {
                 shard_ident: range.shard_ident,
                 partition: range.partition,
                 min_message: range.to,
                 max_message: QueueKey::MAX,
-                dest: DestAddr::MAX,
+                dest: RouterAddr::MAX,
             };
 
             self.commit_range(
@@ -361,7 +370,7 @@ impl InternalQueueStorage {
                 partition: range.partition,
                 min_message: range.from,
                 max_message: QueueKey::MIN,
-                dest: DestAddr::MIN,
+                dest: RouterAddr::MIN,
             }
             .to_vec();
 
@@ -370,7 +379,7 @@ impl InternalQueueStorage {
                 partition: range.partition,
                 min_message: range.to,
                 max_message: QueueKey::MAX,
-                dest: DestAddr::MAX,
+                dest: RouterAddr::MAX,
             }
             .to_vec();
 
