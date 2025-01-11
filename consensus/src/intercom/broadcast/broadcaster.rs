@@ -15,7 +15,6 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcastCtx, Ctx, RoundCtx};
-use crate::engine::CachedConfig;
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -172,7 +171,7 @@ impl Broadcaster {
         self.ctx = BroadcastCtx::new(&round_ctx, &self.point);
 
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
-            CachedConfig::get().consensus.broadcast_retry_millis as _,
+            self.ctx.conf().consensus.broadcast_retry_millis as _,
         ));
         retry_interval.reset(); // query signatures after time passes, just to resend broadcast
         retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);

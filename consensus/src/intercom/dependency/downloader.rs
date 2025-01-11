@@ -18,7 +18,7 @@ use tycho_util::FastHashMap;
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::{CachedConfig, ConsensusConfigExt};
+use crate::engine::{ConsensusConfigExt, MempoolConfig};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -42,15 +42,15 @@ struct DownloaderInner {
 }
 
 trait DownloadType: Send + 'static {
-    fn next_peers(attempt: u8, available_peers: usize) -> usize;
+    fn next_peers(attempt: u8, available_peers: usize, conf: &MempoolConfig) -> usize;
 }
 
 /// Exponential increase of peers to query
 struct ExponentialQuery;
 impl DownloadType for ExponentialQuery {
-    fn next_peers(attempt: u8, available_peers: usize) -> usize {
+    fn next_peers(attempt: u8, available_peers: usize, conf: &MempoolConfig) -> usize {
         // result increases exponentially
-        let download_peers = CachedConfig::get().consensus.download_peers as usize;
+        let download_peers = conf.consensus.download_peers as usize;
         download_peers
             .saturating_mul(download_peers.saturating_pow(attempt as u32))
             .min(available_peers)
@@ -60,8 +60,8 @@ impl DownloadType for ExponentialQuery {
 /// Linear increase of peers to query
 struct LinearQuery;
 impl DownloadType for LinearQuery {
-    fn next_peers(attempt: u8, available_peers: usize) -> usize {
-        let download_peers = CachedConfig::get().consensus.download_peers as usize;
+    fn next_peers(attempt: u8, available_peers: usize, conf: &MempoolConfig) -> usize {
+        let download_peers = conf.consensus.download_peers as usize;
         download_peers
             .saturating_add(download_peers.saturating_mul(attempt as usize))
             .min(available_peers)
@@ -108,11 +108,9 @@ impl Downloader {
         verified_broadcast: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
     ) -> Option<DownloadResult> {
-        let _guard = (self.inner.limiter)
-            .enter(point_id.round, &CachedConfig::get().consensus)
-            .await;
+        let _guard = self.inner.limiter.enter(point_id.round, ctx.conf()).await;
 
-        if point_id.round + CachedConfig::get().consensus.min_front_rounds()
+        if point_id.round + ctx.conf().consensus.min_front_rounds()
             >= self.inner.consensus_round.get()
         {
             // for validation
@@ -166,6 +164,7 @@ impl Downloader {
         let mut task = DownloadTask {
             parent: self.clone(),
             _phantom: PhantomData,
+            ctx,
             request: Dispatcher::point_by_id_request(*point_id),
             point_id: *point_id,
             peer_count,
@@ -175,16 +174,17 @@ impl Downloader {
             downloading: FuturesUnordered::new(),
             attempt: 0,
         };
+        let span = task.ctx.span().clone();
         let downloaded = task
             .run(dependers_rx, broadcast_result)
-            .instrument(ctx.span().clone())
+            .instrument(span)
             .await;
 
         DownloadCtx::meter_task::<T>(&task);
 
         if downloaded.is_none() {
             tracing::warn!(
-                parent: ctx.span(),
+                parent: task.ctx.span(),
                 "not downloaded",
             );
         }
@@ -196,6 +196,7 @@ impl Downloader {
 struct DownloadTask<T> {
     parent: Downloader,
     _phantom: PhantomData<T>,
+    ctx: DownloadCtx,
 
     request: Request,
     point_id: PointId,
@@ -221,10 +222,10 @@ impl<T: DownloadType> DownloadTask<T> {
         mut broadcast_result: oneshot::Receiver<DownloadResult>,
     ) -> Option<DownloadResult> {
         let mut interval = tokio::time::interval(Duration::from_millis(
-            CachedConfig::get().consensus.download_retry_millis as _,
+            self.ctx.conf().consensus.download_retry_millis as _,
         ));
-        // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         // no `interval.reset()`: download starts right after biased receive of all known dependers
+        // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
@@ -282,7 +283,7 @@ impl<T: DownloadType> DownloadTask<T> {
             .collect::<Vec<_>>();
         filtered.sort_unstable_by(|(_, ord_l), (_, ord_r)| ord_l.cmp(ord_r));
 
-        let count = T::next_peers(self.attempt, filtered.len());
+        let count = T::next_peers(self.attempt, filtered.len(), self.ctx.conf());
 
         for (peer_id, _) in &filtered[..count] {
             self.download_one(peer_id);
@@ -381,7 +382,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 None
             }
             Some(point) => {
-                match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
+                match Verifier::verify(&point, &self.parent.inner.peer_schedule, self.ctx.conf()) {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(error @ VerifyError::BadSig) => {
                         // reliable peer won't return unverifiable point

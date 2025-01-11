@@ -11,7 +11,7 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
-use crate::engine::Genesis;
+use crate::engine::MempoolMergedConfig;
 use crate::models::{MempoolOutput, PointId, Round};
 
 #[derive(Default)]
@@ -54,7 +54,7 @@ impl AnchorConsumer {
         }
     }
 
-    pub async fn check(mut self) {
+    pub async fn check(mut self, merged_conf: &MempoolMergedConfig) {
         let mut next_expected_history_round = None;
         loop {
             let (peer_id, commit_result) = self
@@ -78,7 +78,7 @@ impl AnchorConsumer {
 
             if next_expected_history_round.is_none() {
                 // Genesis point is excluded from commit, points only reference it
-                next_expected_history_round = Some(Genesis::id().round.next());
+                next_expected_history_round = Some(merged_conf.conf.genesis_round.next());
             }
 
             let anchor_round = anchor.round();

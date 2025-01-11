@@ -8,7 +8,6 @@ use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
 use crate::effects::{CollectCtx, Ctx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::CachedConfig;
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
 
@@ -72,7 +71,7 @@ impl CollectorTask {
     /// returns includes for our point at the next round
     async fn run(&mut self, mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>) {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
-            CachedConfig::get().consensus.broadcast_retry_millis as _,
+            self.ctx.conf().consensus.broadcast_retry_millis as _,
         ));
         // no `interval.reset()` as may receive bcaster_signal after jump immediately
         retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);

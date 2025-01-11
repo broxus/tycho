@@ -4,7 +4,7 @@ use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
 use crate::effects::AltFormat;
-use crate::engine::InputBuffer;
+use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
     Through, UnixTime,
@@ -25,6 +25,7 @@ impl Producer {
         last_own_point: Option<&LastOwnPoint>,
         input_buffer: &InputBuffer,
         head: &DagHead,
+        conf: &MempoolConfig,
     ) -> Option<Point> {
         let current_round = head.current();
         let finished_round = head.prev();
@@ -114,6 +115,7 @@ impl Producer {
                 anchor_proof,
                 anchor_time,
             },
+            conf,
         ))
     }
 
