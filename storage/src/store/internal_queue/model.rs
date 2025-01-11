@@ -1,6 +1,6 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::{DestAddr, QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr};
 
 use crate::util::{StoredValue, StoredValueBuffer};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,38 +59,6 @@ impl StoredValue for ShardsInternalMessagesKey {
     }
 }
 
-impl StoredValue for QueuePartition {
-    const SIZE_HINT: usize = 1;
-
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        let value = match self {
-            QueuePartition::NormalPriority => 0u8,
-            QueuePartition::LowPriority => 1u8,
-        };
-        buffer.write_raw_slice(&[value]);
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self
-    where
-        Self: Sized,
-    {
-        if reader.len() < Self::SIZE_HINT {
-            panic!("Insufficient data for deserialization");
-        }
-
-        let value = reader[0];
-        *reader = &reader[1..];
-
-        match value {
-            0 => QueuePartition::NormalPriority,
-            1 => QueuePartition::LowPriority,
-            _ => panic!("Unknown value for QueuePartition: {}", value),
-        }
-    }
-}
-
 impl StoredValue for QueueKey {
     const SIZE_HINT: usize = 8 + 32;
 
@@ -120,7 +88,7 @@ impl StoredValue for QueueKey {
     }
 }
 
-impl StoredValue for DestAddr {
+impl StoredValue for RouterAddr {
     const SIZE_HINT: usize = 1 + 32;
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
@@ -155,7 +123,7 @@ pub struct StatKey {
     pub partition: QueuePartition,
     pub min_message: QueueKey,
     pub max_message: QueueKey,
-    pub dest: DestAddr,
+    pub dest: RouterAddr,
 }
 
 impl StatKey {
@@ -164,7 +132,7 @@ impl StatKey {
         partition: QueuePartition,
         min_message: QueueKey,
         max_message: QueueKey,
-        dest: DestAddr,
+        dest: RouterAddr,
     ) -> Self {
         Self {
             shard_ident,
@@ -180,12 +148,12 @@ impl StoredValue for StatKey {
     const SIZE_HINT: usize = ShardIdent::SIZE_HINT
         + QueuePartition::SIZE_HINT
         + QueueKey::SIZE_HINT * 2
-        + DestAddr::SIZE_HINT;
+        + RouterAddr::SIZE_HINT;
 
     type OnStackSlice = [u8; ShardIdent::SIZE_HINT
         + QueuePartition::SIZE_HINT
         + QueueKey::SIZE_HINT * 2
-        + DestAddr::SIZE_HINT];
+        + RouterAddr::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
         self.shard_ident.serialize(buffer);
@@ -204,7 +172,7 @@ impl StoredValue for StatKey {
         let partition = QueuePartition::deserialize(reader);
         let min_message = QueueKey::deserialize(reader);
         let max_message = QueueKey::deserialize(reader);
-        let dest = DestAddr::deserialize(reader);
+        let dest = RouterAddr::deserialize(reader);
 
         Self {
             shard_ident,
@@ -221,4 +189,27 @@ pub struct QueueRange {
     pub partition: QueuePartition,
     pub from: QueueKey,
     pub to: QueueKey,
+}
+
+impl StoredValue for u8 {
+    const SIZE_HINT: usize = 1;
+
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        buffer.write_raw_slice(&(*self).to_be_bytes());
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let mut partition_bytes = [0u8; 1];
+        partition_bytes.copy_from_slice(&reader[..1]);
+        let partition = u8::from_be_bytes(partition_bytes);
+        *reader = &reader[1..];
+
+        partition
+    }
 }
