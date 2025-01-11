@@ -1,6 +1,7 @@
 mod p2;
 
 use std::collections::VecDeque;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 pub use p2::*;
@@ -145,6 +146,57 @@ impl<C: Clock> RollingP2Estimator<C> {
 impl RollingP2Estimator<RealClock> {
     pub fn new(quantile: f64) -> Result<Self, RollingP2EstimatorError> {
         Self::new_with_config(quantile, Duration::from_secs(60), 5, RealClock)
+    }
+}
+
+/// Clock that will not decrease in runtime.
+/// **WARNING** Changing server time between node runs should be avoided or handled with care.
+pub struct MonotonicClock {
+    init_instant: Instant,
+    init_system_time: std::time::SystemTime,
+}
+static MONOTONIC_CLOCK: LazyLock<MonotonicClock> = LazyLock::new(|| MonotonicClock {
+    init_instant: Instant::now(),
+    init_system_time: std::time::SystemTime::now(),
+});
+impl MonotonicClock {
+    pub fn now_millis() -> u64 {
+        // initialize lazy lock
+        let Self {
+            init_instant,
+            init_system_time,
+        } = *MONOTONIC_CLOCK;
+
+        let since_init = {
+            let now = Instant::now();
+            now.checked_duration_since(init_instant)
+                .unwrap_or_else(|| panic!("current {now:?} < initial {init_instant:?}"))
+        };
+
+        let system_time = init_system_time.checked_add(since_init).unwrap_or_else(|| {
+            panic!(
+                "overflow at init system time {} + duration {} since {init_instant:?}",
+                humantime::format_rfc3339_nanos(init_system_time),
+                humantime::format_duration(since_init),
+            )
+        });
+
+        let since_epoch = system_time
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "calculated current {system_time:?} < UNIX_EPOCH {:?} for {}",
+                    std::time::SystemTime::UNIX_EPOCH,
+                    humantime::format_duration(err.duration())
+                )
+            });
+
+        u64::try_from(since_epoch.as_millis()).unwrap_or_else(|_| {
+            panic!(
+                "current time millis exceed u64: {}",
+                since_epoch.as_millis()
+            )
+        })
     }
 }
 

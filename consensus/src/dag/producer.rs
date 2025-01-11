@@ -118,13 +118,15 @@ impl Producer {
     }
 
     fn includes(finished_dag_round: &DagRound) -> Vec<PointInfo> {
-        let includes = finished_dag_round.threshold().get();
+        let includes = finished_dag_round.threshold().get_reached();
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
             "Coding error: producing point at {:?} with not enough includes, check Collector logic: {:?}",
             finished_dag_round.round().next(),
             finished_dag_round.alt()
         );
+        metrics::counter!("tycho_mempool_collected_includes_count")
+            .increment(includes.len() as u64);
         includes
     }
 
