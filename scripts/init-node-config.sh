@@ -11,7 +11,10 @@ tycho_bin=$(/usr/bin/env bash "$script_dir/build-node.sh")
 
 $tycho_bin init config "$config_path" "$@"
 
-config=$(jq '.public_ip = "127.0.0.1"' "$config_path")
+config=$(jq '
+    .public_ip = "127.0.0.1" |
+    .blockchain_rpc_client.too_new_archive_threshold = 1
+' "$config_path")
 echo "$config" > "$config_path"
 
 if ! [ -f "$logger_path" ]; then
