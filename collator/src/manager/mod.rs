@@ -35,6 +35,7 @@ use crate::mempool::{
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
+use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedTo, ShardDescriptionExt,
@@ -141,7 +142,7 @@ where
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
         let processed_upto = state.state().processed_upto.load()?;
 
-        metrics_report_last_applied_block_and_anchor(state, &processed_upto);
+        metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state_cloned = state.clone();
 
@@ -149,7 +150,7 @@ where
             Box::pin(async move {
                 worker.detect_top_processed_to_anchor_and_notify_mempool(
                     state_cloned,
-                    processed_upto.externals.processed_to.0,
+                    processed_upto.get_min_externals_processed_to()?.0,
                 )
             })
         })
@@ -167,7 +168,7 @@ where
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
         let processed_upto = state.state().processed_upto.load()?;
 
-        metrics_report_last_applied_block_and_anchor(state, &processed_upto);
+        metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state = state.clone();
         self.enqueue_task(method_to_async_closure!(handle_block_from_bc, state))
@@ -180,12 +181,12 @@ where
 fn metrics_report_last_applied_block_and_anchor(
     state: &ShardStateStuff,
     processed_upto: &ProcessedUptoInfo,
-) {
+) -> Result<()> {
     let block_id = state.block_id();
     let labels = [("workchain", block_id.shard.workchain().to_string())];
 
     let block_ct = state.get_gen_chain_time();
-    let processed_to_anchor_id = processed_upto.externals.processed_to.0;
+    let processed_to_anchor_id = processed_upto.get_min_externals_processed_to()?.0;
 
     metrics::gauge!("tycho_last_applied_block_seqno", &labels).set(block_id.seqno);
     metrics::gauge!("tycho_last_processed_to_anchor_id", &labels).set(processed_to_anchor_id);
@@ -196,6 +197,8 @@ fn metrics_report_last_applied_block_and_anchor(
         processed_to_anchor_id = processed_to_anchor_id,
         "last applied block",
     );
+
+    Ok(())
 }
 
 #[async_trait]
@@ -1106,8 +1109,7 @@ where
                         .state()
                         .processed_upto
                         .load()?
-                        .externals
-                        .processed_to
+                        .get_min_externals_processed_to()?
                         .0,
                 )?;
 

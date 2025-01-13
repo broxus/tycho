@@ -7,7 +7,7 @@ use anyhow::Result;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use processed_upto::ProcessedUptoInfoStuff;
+use processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
@@ -127,7 +127,7 @@ impl McData {
         let shards = extra.shards.as_vec()?;
         let top_processed_to_anchor = detect_top_processed_to_anchor(
             shards.iter().map(|(_, d)| *d),
-            processed_upto.externals.processed_to.0,
+            processed_upto.get_min_externals_processed_to()?.0,
         );
 
         Ok(Arc::new(Self {
