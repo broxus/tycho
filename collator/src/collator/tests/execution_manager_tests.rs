@@ -21,6 +21,7 @@ use super::{
     GetNextMessageGroupContext, GetNextMessageGroupMode, InitIteratorMode, MessagesReader,
 };
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
+use crate::internal_queue::queue::ShortQueueDiff;
 use crate::internal_queue::types::{
     DiffStatistics, EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
     QueueRange, QueueShardRange, QueueStatistics,
@@ -140,7 +141,11 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         unimplemented!()
     }
 
-    fn get_diff_count_by_shard(&self, _shard_ident: &ShardIdent) -> usize {
+    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
+        todo!()
+    }
+
+    fn get_diffs_count_by_shard(&self, _shard_ident: &ShardIdent) -> usize {
         unimplemented!()
     }
 }
