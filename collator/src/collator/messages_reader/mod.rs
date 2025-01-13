@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{IntAddr, MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::QueuePartition;
+use everscale_types::models::{MsgsExecutionParams, ShardIdent};
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::{
     DisplayMessageGroup, FastIndexSet, MessageGroup, MessagesBufferLimits,
 };
 use super::types::AnchorsCache;
-use crate::collator::messages_buffer::FillMessageGroupResult;
+use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
     EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
@@ -46,14 +46,13 @@ pub(super) enum GetNextMessageGroupMode {
 
 #[derive(PartialEq, Eq)]
 enum MessagesReaderStage {
-    ExistingMessages,
-    NewMessages,
+    ExistingAndExternals,
+    FinishExternals,
+    ExternalsAndNew,
 }
 
 pub(super) struct MessagesReader {
     for_shard_id: ShardIdent,
-
-    msgs_exec_params: MsgsExecutionParams,
 
     metrics: MessagesReaderMetrics,
 
@@ -94,17 +93,52 @@ impl MessagesReader {
         let msgs_buffer_max_count = cx.msgs_exec_params.buffer_limit as usize;
         let group_vert_size = (cx.msgs_exec_params.group_vert_size as usize).max(1);
         let group_limit = cx.msgs_exec_params.group_limit as usize;
-        // TODO: msgs-v3: should move the fraction value to params in blockchain config
-        // internals: normal partition 0: 70% of `group_limit`, but min 1
-        let par_0_slots_count = group_limit.saturating_mul(70).saturating_div(100).max(1);
-        // internals: low-priority partition 1: + 10%, but min 1
-        let par_1_slots_count = group_limit.saturating_mul(80).saturating_div(100).max(2);
-        // externals: + 20%, but min 1
-        let ext_slots_count = group_limit.max(3);
 
-        let max_limits = MessagesBufferLimits {
+        let mut internals_buffer_limits_by_partitions =
+            BTreeMap::<PartitionId, MessagesBufferLimits>::new();
+        let mut externals_buffer_limits_by_partitions =
+            BTreeMap::<PartitionId, MessagesBufferLimits>::new();
+
+        // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
+
+        // TODO: msgs-v3: should move the fraction value to params in blockchain config
+
+        // internals: normal partition 0: 80% of `group_limit`, but min 1
+        internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
-            slots_count: ext_slots_count,
+            slots_count: group_limit.saturating_mul(80).saturating_div(100).max(1),
+            slot_vert_size: group_vert_size,
+        });
+        // externals: normal partition 0: 100%, but min 2, vert size +1
+        externals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: group_limit.saturating_mul(100).saturating_div(100).max(2),
+            slot_vert_size: group_vert_size + 1,
+        });
+
+        // internals: low-priority partition 1: 10%, but min 1
+        internals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: group_limit.saturating_mul(80).saturating_div(100).max(1),
+            slot_vert_size: group_vert_size,
+        });
+        // externals: low-priority partition 1: equal to internals, vert size +1
+        {
+            let int_buffer_limits = internals_buffer_limits_by_partitions.get(&1).unwrap();
+            externals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+                max_count: msgs_buffer_max_count,
+                slots_count: int_buffer_limits.slots_count,
+                slot_vert_size: int_buffer_limits.slot_vert_size + 1,
+            });
+        }
+
+        // TODO: msgs-v3: remove if we do not need this field
+        let _msg_group_max_limits = MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: externals_buffer_limits_by_partitions
+                .values()
+                .map(|l| l.slots_count)
+                .sum(),
             slot_vert_size: group_vert_size,
         };
 
@@ -113,19 +147,13 @@ impl MessagesReader {
             cx.for_shard_id,
             cx.block_seqno,
             cx.next_chain_time,
-            MessagesBufferLimits {
-                max_count: msgs_buffer_max_count,
-                slots_count: ext_slots_count,
-                slot_vert_size: group_vert_size + 1,
-            },
+            externals_buffer_limits_by_partitions.clone(),
             cx.anchors_cache,
             cx.reader_state.externals,
         );
 
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
-
-            msgs_exec_params: cx.msgs_exec_params,
 
             metrics: Default::default(),
 
@@ -139,18 +167,24 @@ impl MessagesReader {
 
         // create internals readers by partitions
         let mut partition_reader_states = cx.reader_state.internals.partitions;
+
         // normal partition 0
+        let target_limits = internals_buffer_limits_by_partitions.remove(&0).unwrap();
+        let max_limits = {
+            let ext_limits = externals_buffer_limits_by_partitions.remove(&0).unwrap();
+            MessagesBufferLimits {
+                max_count: msgs_buffer_max_count,
+                slots_count: ext_limits.slots_count,
+                slot_vert_size: target_limits.slot_vert_size,
+            }
+        };
         let par_reader_state = partition_reader_states.remove(&0).unwrap_or_default();
         let par_reader = InternalsParitionReader::new(
-            InternalsParitionReaderContext {
+            InternalsPartitionReaderContext {
                 partition_id: 0,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
-                target_limits: MessagesBufferLimits {
-                    max_count: msgs_buffer_max_count,
-                    slots_count: par_0_slots_count,
-                    slot_vert_size: group_vert_size,
-                },
+                target_limits,
                 max_limits,
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
@@ -161,20 +195,25 @@ impl MessagesReader {
         )?;
         res.internals_partition_readers.insert(0, par_reader);
         res.readers_stages
-            .insert(0, MessagesReaderStage::ExistingMessages);
+            .insert(0, MessagesReaderStage::ExistingAndExternals);
 
         // low-priority partition 1
+        let target_limits = internals_buffer_limits_by_partitions.remove(&1).unwrap();
+        let max_limits = {
+            let ext_limits = externals_buffer_limits_by_partitions.remove(&1).unwrap();
+            MessagesBufferLimits {
+                max_count: msgs_buffer_max_count,
+                slots_count: ext_limits.slots_count,
+                slot_vert_size: target_limits.slot_vert_size,
+            }
+        };
         let par_reader_state = partition_reader_states.remove(&1).unwrap_or_default();
         let par_reader = InternalsParitionReader::new(
-            InternalsParitionReaderContext {
+            InternalsPartitionReaderContext {
                 partition_id: 1,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
-                target_limits: MessagesBufferLimits {
-                    max_count: msgs_buffer_max_count,
-                    slots_count: par_1_slots_count,
-                    slot_vert_size: group_vert_size,
-                },
+                target_limits,
                 max_limits,
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
@@ -185,7 +224,7 @@ impl MessagesReader {
         )?;
         res.internals_partition_readers.insert(1, par_reader);
         res.readers_stages
-            .insert(1, MessagesReaderStage::ExistingMessages);
+            .insert(1, MessagesReaderStage::ExistingAndExternals);
 
         // get full statistics from partition 1 and init partition router in new messages state
         let par_1_all_ranges_msgs_stats = res
@@ -207,7 +246,7 @@ impl MessagesReader {
 
         // reset internals reader stages
         for (_, par_reader_stage) in self.readers_stages.iter_mut() {
-            *par_reader_stage = MessagesReaderStage::ExistingMessages;
+            *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
         }
     }
 
@@ -220,29 +259,29 @@ impl MessagesReader {
         Ok(false)
     }
 
-    pub fn finalize(self, current_next_lt: u64) -> Result<FinalizedMessagesReader> {
+    pub fn drop_internals_next_range_readers(&mut self) {
+        for (_, par_reader) in self.internals_partition_readers.iter_mut() {
+            par_reader.drop_next_range_reader();
+        }
+    }
+
+    pub fn finalize(mut self, current_next_lt: u64) -> Result<FinalizedMessagesReader> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
             || self.has_pending_externals_in_cache();
-
-        // collect externals reader state
-        let FinalizedExternalsReader {
-            externals_reader_state,
-            anchors_cache,
-        } = self.externals_reader.finalize();
-        let mut reader_state = ReaderState {
-            externals: externals_reader_state,
-            internals: Default::default(),
-        };
 
         // aggregated messages stats from all ranges
         // we need it to detect target ratition for new messages from queue diff
         let mut aggregated_stats = QueueStatistics::default();
 
         // collect internals partition readers states
+        let mut internals_reader_state = InternalsReaderState::default();
         for (par_id, mut par_reader) in self.internals_partition_readers {
             // collect aggregated messages stats
             for range_reader in par_reader.range_readers().values() {
+                if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
+                    continue;
+                }
                 aggregated_stats.append(&range_reader.msgs_stats);
             }
 
@@ -251,12 +290,44 @@ impl MessagesReader {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
             }
 
+            // handle last new messages range reader
+            if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
+                if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
+                    // if skip offset in new messages reader and last externals range reader are same
+                    // then we can drop processed offset both in internals and externals readers
+                    let last_ext_range_reader = self
+                        .externals_reader
+                        .get_last_range_reader()?
+                        .1
+                        .reader_state()
+                        .get_state_by_partition(&par_id)?;
+
+                    if last_int_range_reader.reader_state.skip_offset
+                        == last_ext_range_reader.skip_offset
+                    {
+                        par_reader.drop_processing_offset(true)?;
+                        self.externals_reader
+                            .drop_processing_offset(&par_id, true)?;
+                    }
+                }
+            }
+
             let par_reader_state = par_reader.finalize(current_next_lt)?;
-            reader_state
-                .internals
+            internals_reader_state
                 .partitions
                 .insert(par_id, par_reader_state);
         }
+
+        // collect externals reader state
+        let FinalizedExternalsReader {
+            externals_reader_state,
+            anchors_cache,
+        } = self.externals_reader.finalize()?;
+
+        let reader_state = ReaderState {
+            externals: externals_reader_state,
+            internals: internals_reader_state,
+        };
 
         // build queue diff
         let min_internals_processed_to = reader_state.internals.get_min_processed_to_by_shards();
@@ -301,9 +372,7 @@ impl MessagesReader {
     }
 
     pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
-        self.externals_reader
-            .reader_state
-            .last_read_to_anchor_chain_time
+        self.externals_reader.last_read_to_anchor_chain_time()
     }
 
     pub fn metrics(&self) -> &MessagesReaderMetrics {
@@ -314,24 +383,39 @@ impl MessagesReader {
         self.new_messages.add_messages(messages);
     }
 
+    pub fn count_messages_in_buffers(&self) -> usize {
+        self.count_internals_in_buffers() + self.count_externals_in_buffers()
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
         self.has_internals_in_buffers() || self.has_externals_in_buffers()
     }
 
+    pub fn count_internals_in_buffers(&self) -> usize {
+        self.internals_partition_readers
+            .values()
+            .map(|v| v.count_messages_in_buffers())
+            .sum()
+    }
+
     pub fn has_internals_in_buffers(&self) -> bool {
         self.internals_partition_readers
-            .iter()
-            .any(|(_, v)| v.has_messages_in_buffers())
+            .values()
+            .any(|v| v.has_messages_in_buffers())
     }
 
     pub fn has_not_fully_read_internals_ranges(&self) -> bool {
         self.internals_partition_readers
-            .iter()
-            .any(|(_, v)| !v.all_ranges_fully_read)
+            .values()
+            .any(|v| !v.all_ranges_fully_read)
     }
 
     pub fn has_pending_new_messages(&self) -> bool {
         self.new_messages.has_pending_messages()
+    }
+
+    pub fn count_externals_in_buffers(&self) -> usize {
+        self.externals_reader.count_messages_in_buffers()
     }
 
     pub fn has_externals_in_buffers(&self) -> bool {
@@ -341,21 +425,18 @@ impl MessagesReader {
     pub fn has_pending_externals_in_cache(&self) -> bool {
         self.externals_reader.has_pending_externals()
     }
-}
 
-impl MessagesReader {
     pub fn check_has_non_zero_processed_offset(&self) -> bool {
-        let check_externals = self.externals_reader.has_non_zero_processed_offset();
-        if check_externals {
-            return check_externals;
-        }
-
         let check_internals = self
             .internals_partition_readers
-            .iter()
-            .any(|(_, par_reader)| par_reader.has_non_zero_processed_offset());
+            .values()
+            .any(|par_reader| par_reader.has_non_zero_processed_offset());
+        if check_internals {
+            return check_internals;
+        }
 
-        check_internals
+        // NOTE: in current implementation processed_offset syncronized in internals and externals readers
+        self.externals_reader.has_non_zero_processed_offset()
     }
 
     pub fn check_need_refill(&self) -> bool {
@@ -379,11 +460,7 @@ impl MessagesReader {
                             .unwrap_or_default(),
                     )
                 })),
-            externals_processed_offset = self
-                .externals_reader
-                .get_last_range_reader()
-                .map(|(_, r)| r.reader_state.processed_offset)
-                .unwrap_or_default(),
+            externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
             "start: refill messages buffer and skip groups upto",
         );
 
@@ -416,15 +493,19 @@ impl MessagesReader {
         read_mode: GetNextMessageGroupMode,
         current_next_lt: u64,
     ) -> Result<Option<MessageGroup>> {
-        let mut msg_group = MessageGroup::default();
+        // we collect separate messages groups by partitions them merge them into one
+        let mut msg_groups = BTreeMap::<PartitionId, MessageGroup>::new();
 
-        // TODO: msgs-v3: read internals from partitions and externals in parallel
+        // TODO: msgs-v3: try to read all in parallel
 
-        // remember if all internals were collected before to reduce spam in logs further
-        let mut all_internals_collected_before = BTreeMap::new();
+        // collect separate metrics by partitions
+        let mut metrics_by_partitions = BTreeMap::<PartitionId, MessagesReaderMetrics>::new();
 
         // count how many times prev processed offset reached in readers
         let mut prev_processed_offset_reached_count = 0;
+
+        // check if we have FinishExternals stage in any partition
+        let mut has_finish_externals_stage = false;
 
         //--------------------
         // read internals
@@ -434,6 +515,11 @@ impl MessagesReader {
                 .get_mut(par_id)
                 .context("reader for partition should exist")?;
 
+            // check if we have FinishExternals stage in any partition
+            if matches!(par_reader_stage, MessagesReaderStage::FinishExternals) {
+                has_finish_externals_stage = true;
+            }
+
             // on refill read only until the last range processed offset reached
             if read_mode == GetNextMessageGroupMode::Refill
                 && par_reader.last_range_offset_reached()
@@ -442,56 +528,52 @@ impl MessagesReader {
                 continue;
             }
 
+            // collect separate metrics by partitions
+            let metrics_of_partition = metrics_by_partitions.entry(*par_id).or_default();
+
             match par_reader_stage {
-                MessagesReaderStage::ExistingMessages => {
-                    all_internals_collected_before
-                        .insert(*par_id, par_reader.all_existing_messages_collected());
-
-                    let par_metrics = par_reader.read_into_buffers()?;
-                    self.metrics.append(par_metrics);
+                MessagesReaderStage::ExistingAndExternals => {
+                    let metrics = par_reader.read_existing_messages_into_buffers()?;
+                    metrics_of_partition.append(metrics);
                 }
-                MessagesReaderStage::NewMessages => {
-                    // TODO: msgs-v3: needs to simplify to remove non obvious logic branches
-
-                    // update new messages reader "to" boundary on current next lt
-                    par_reader.update_new_messages_reader_to_boundary(current_next_lt)?;
-
-                    // check if has pending new messages
-                    let has_pending_new_messages = self
-                        .new_messages
-                        .has_pending_messages_from_partition(par_id);
-                    all_internals_collected_before.insert(
-                        *par_id,
-                        par_reader.all_new_messages_collected(has_pending_new_messages),
-                    );
-                    if !has_pending_new_messages {
-                        par_reader.set_new_messages_range_reader_fully_read()?;
-                        continue;
-                    }
-
-                    // take new messages from state
-                    if let Some(mut new_messages_for_current_shard) =
-                        self.new_messages.take_messages_for_current_shard(par_id)
-                    {
-                        // read from new messages to buffers
-                        let read_new_messages_res = par_reader.read_new_messages_into_buffer(
-                            &mut new_messages_for_current_shard,
-                            current_next_lt,
-                        )?;
-
-                        self.metrics.append(read_new_messages_res.metrics);
-
-                        // return new messages to state
-                        self.new_messages.set_messages_for_current_shard(
-                            *par_id,
-                            new_messages_for_current_shard,
-                        );
-                    }
+                MessagesReaderStage::FinishExternals => {
+                    // do not read internals when finishing to collect externals
+                }
+                MessagesReaderStage::ExternalsAndNew => {
+                    let read_new_messages_res = par_reader
+                        .read_new_messages_into_buffers(&mut self.new_messages, current_next_lt)?;
+                    metrics_of_partition.append(read_new_messages_res.metrics);
                 }
             }
         }
 
-        // collect internals after reading
+        //--------------------
+        // read externals
+        'read_externals: {
+            // do not read more externals on FinishExternals stage in any partition
+            if has_finish_externals_stage {
+                break 'read_externals;
+            }
+
+            // on refill read only until the last range processed offset reached
+            if read_mode == GetNextMessageGroupMode::Refill
+                && prev_processed_offset_reached_count == self.internals_partition_readers.len()
+            {
+                break 'read_externals;
+            }
+
+            let metrics = self
+                .externals_reader
+                .read_into_buffers(self.new_messages.partition_router());
+            self.metrics.append(metrics);
+        }
+
+        let labels = [("workchain", self.for_shard_id.workchain().to_string())];
+        metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
+            .set(self.count_messages_in_buffers() as f64);
+
+        //----------
+        // collect messages after reading
         let mut unused_buffer_accounts_by_partitions =
             FastHashMap::<(PartitionId, BlockSeqno), FastIndexSet<HashBytes>>::default();
         let mut par_readers = BTreeMap::<PartitionId, InternalsParitionReader>::default();
@@ -503,7 +585,7 @@ impl MessagesReader {
                 .remove(par_id)
                 .context("reader for partition should exist")?;
 
-            // on refill read only until the last range processed offset reached
+            // on refill collect only until the last range processed offset reached
             if read_mode == GetNextMessageGroupMode::Refill
                 && par_reader.last_range_offset_reached()
             {
@@ -511,264 +593,264 @@ impl MessagesReader {
                 continue;
             }
 
-            // update processing offset in current partition
-            par_reader.reader_state.curr_processed_offset += 1;
+            // collect separate metrics by partitions
+            let metrics_of_partition = metrics_by_partitions.entry(*par_id).or_default();
 
-            // collect internals from partition
-            let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader>::default();
-            // extract range readers from state to use previous readers buffers
-            // to check for account skip on collecting messages from current one
-            while let Some((seqno, mut reader)) = par_reader.pop_first_range_reader() {
-                // try to fill messages group
-                self.metrics.add_to_message_groups_timer.start();
-                let FillMessageGroupResult {
-                    unused_buffer_accounts,
-                    collected_queue_msgs_keys,
-                } = reader.reader_state.buffer.fill_message_group(
-                    &mut msg_group,
-                    par_reader.target_limits.slots_count,
-                    par_reader.target_limits.slot_vert_size,
-                    unused_buffer_accounts_by_partitions.remove(&(*par_id, seqno)),
-                    |account_id| {
-                        let dst_addr =
-                            IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
-                        // check by previous partitions
-                        for prev_partition in par_readers.values() {
-                            for prev_reader in prev_partition.range_readers().values() {
-                                if prev_reader
-                                    .reader_state
-                                    .buffer
-                                    .account_messages_count(account_id)
-                                    > 0
-                                {
-                                    return true;
-                                }
-                                if prev_reader
-                                    .remaning_msgs_stats
-                                    .statistics()
-                                    .contains_key(&dst_addr)
-                                {
-                                    return true;
-                                }
-                            }
-                        }
-                        // check by previous ranges in current partition
-                        for prev_reader in range_readers.values() {
-                            if prev_reader
-                                .reader_state
-                                .buffer
-                                .account_messages_count(account_id)
-                                > 0
-                            {
-                                return true;
-                            }
-                            if prev_reader
-                                .remaning_msgs_stats
-                                .statistics()
-                                .contains_key(&dst_addr)
-                            {
-                                return true;
-                            }
-                        }
-                        false
-                    },
-                );
-                self.metrics.add_to_message_groups_timer.stop();
-                unused_buffer_accounts_by_partitions
-                    .insert((*par_id, seqno), unused_buffer_accounts);
-                self.new_messages
-                    .remove_collected_messages(&collected_queue_msgs_keys);
+            // collect existing internals, externals and new internals
+            let has_pending_new_messages_for_partition = self
+                .new_messages
+                .has_pending_messages_from_partition(par_id);
+            let CollectMessageForPartitionResult {
+                metrics,
+                msg_group,
+                collected_queue_msgs_keys,
+            } = Self::collect_messages_for_partition(
+                par_reader_stage,
+                &mut par_reader,
+                &mut self.externals_reader,
+                has_pending_new_messages_for_partition,
+                &mut unused_buffer_accounts_by_partitions,
+                &par_readers,
+            )?;
+            msg_groups.insert(*par_id, msg_group);
+            metrics_of_partition.append(metrics);
 
-                let range_reader_processed_offset = reader.reader_state.processed_offset;
-
-                range_readers.insert(seqno, reader);
-
-                // collect messages from the next range
-                // only when current range processed offset is reached
-                if par_reader.reader_state.curr_processed_offset <= range_reader_processed_offset {
-                    break;
-                }
-            }
-            par_reader.set_range_readers(range_readers);
-
-            // check if should switch to next reading stage
-            match par_reader_stage {
-                MessagesReaderStage::ExistingMessages => {
-                    // check if all existing messages read and collected
-                    if par_reader.all_existing_messages_collected() {
-                        // we can update processed_to when we collected all messages from the partition
-                        par_reader.set_processed_to_current_position()?;
-
-                        // drop processing offset when all ranges read
-                        par_reader.drop_processing_offset()?;
-
-                        // drop all ranges except the last one
-                        par_reader.retain_only_last_range_reader()?;
-
-                        *par_reader_stage = MessagesReaderStage::NewMessages;
-
-                        // log only when was collected just now
-                        if !all_internals_collected_before
-                            .get(par_id)
-                            .cloned()
-                            .unwrap_or_default()
-                        {
-                            tracing::debug!(target: tracing_targets::COLLATOR,
-                                partition_id = *par_id,
-                                int_processed_to = ?par_reader.reader_state.processed_to,
-                                int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
-                                last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                                "all existing internals collected from partition",
-                            );
-                        }
-                    }
-                }
-                MessagesReaderStage::NewMessages => {
-                    // check if all new messages read and collected
-                    if par_reader.all_new_messages_collected(
-                        self.new_messages
-                            .has_pending_messages_from_partition(par_id),
-                    ) {
-                        // we can update processed_to when we collected all messages from the partition
-                        par_reader.set_processed_to_current_position()?;
-
-                        // drop processing offset when all new messages read
-                        par_reader.drop_processing_offset()?;
-
-                        // log only when was collected just now
-                        if !all_internals_collected_before
-                            .get(par_id)
-                            .cloned()
-                            .unwrap_or_default()
-                        {
-                            tracing::debug!(target: tracing_targets::COLLATOR,
-                                partition_id = *par_id,
-                                int_processed_to = ?par_reader.reader_state.processed_to,
-                                int_curr_processed_offset = par_reader.reader_state.curr_processed_offset,
-                                last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                                "all new internals collected from partition",
-                            );
-                        }
-                    }
-                }
-            }
+            // remove collected new messages
+            self.new_messages
+                .remove_collected_messages(&collected_queue_msgs_keys);
 
             par_readers.insert(*par_id, par_reader);
         }
         // return partion readers to state
         self.internals_partition_readers = par_readers;
 
-        //--------------------
-        // read externals
-        // on refill read only until the last range processed offset reached
-        if read_mode == GetNextMessageGroupMode::Refill
-            && self.externals_reader.last_range_offset_reached()
-        {
-            prev_processed_offset_reached_count += 1;
-        } else {
-            self.externals_reader.read_into_buffers();
-
-            // remember if all externals were collected before to reduce spam in logs further
-            let all_externals_collected_before = self.externals_reader.all_messages_collected();
-
-            // update processing offset
-            self.externals_reader.reader_state.curr_processed_offset += 1;
-
-            // collect externals
-            let mut range_readers = BTreeMap::<BlockSeqno, ExternalsRangeReader>::default();
-            // extract range readers from state to use previous readers buffers
-            // to check for account skip on collecting messages from current one
-            while let Some((seqno, mut reader)) = self.externals_reader.pop_first_range_reader() {
-                self.metrics.add_to_message_groups_timer.start();
-                reader.reader_state.buffer.fill_message_group(
-                    &mut msg_group,
-                    self.externals_reader.messages_buffer_limits.slots_count,
-                    self.externals_reader.messages_buffer_limits.slot_vert_size,
-                    None,
-                    |account_id| {
-                        for prev_reader in range_readers.values() {
-                            if prev_reader
-                                .reader_state
-                                .buffer
-                                .account_messages_count(account_id)
-                                > 0
-                            {
-                                return true;
-                            }
-                        }
-                        false
-                    },
-                );
-                self.metrics.add_to_message_groups_timer.stop();
-
-                let range_reader_processed_offset = reader.reader_state.processed_offset;
-
-                range_readers.insert(seqno, reader);
-
-                // collect messages from the next range
-                // only when current range processed offset is reached
-                if self.externals_reader.reader_state.curr_processed_offset
-                    <= range_reader_processed_offset
-                {
-                    break;
-                }
-            }
-            // return range readers to state
-            self.externals_reader.set_range_readers(range_readers);
-
-            // check if all externals collected
-            if self.externals_reader.all_messages_collected() {
-                // we can update processed_to when we collected all externals
-                self.externals_reader.set_processed_to_current_position()?;
-
-                // drop processing offset when all ranges read
-                self.externals_reader.drop_processing_offset()?;
-
-                // drop all ranges except the last one
-                self.externals_reader.retain_only_last_range_reader()?;
-
-                // log only when was collected just now
-                if !all_externals_collected_before {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        ext_processed_to = ?self.externals_reader.reader_state.processed_to,
-                        ext_curr_processed_offset = self.externals_reader.reader_state.curr_processed_offset,
-                        last_range_reader_state = ?self.externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(&r.reader_state))),
-                        "all externals collected",
-                    );
-                }
-            }
-        }
-
-        // if message group was not fully filled after externals
-        // then try to append remaning internals
-        if msg_group.check_is_filled(
-            self.msgs_exec_params.group_limit as _,
-            self.msgs_exec_params.group_vert_size as _,
-        ) {
-            // TODO: msgs-v3: fill messages group with internals again
-            //              skip on refill when prev processed offset reached
+        // aggregate metrics from partitions
+        for (par_id, metrics) in metrics_by_partitions {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "messages read from partition {}: existing={}, ext={}, new={}",
+                par_id,
+                metrics.read_int_msgs_from_iterator_count,
+                metrics.read_ext_msgs_count,
+                metrics.read_new_msgs_count,
+            );
+            self.metrics.append(metrics);
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "message group collected: {}",
-            DisplayMessageGroup(&msg_group),
+            "collected message groups by partitions: {:?}",
+            DebugIter(msg_groups.iter().map(|(par_id, g)| (*par_id, DisplayMessageGroup(g)))),
         );
 
+        // aggregate message group
+        self.metrics.add_to_message_groups_timer.start();
+        let msg_group = msg_groups
+            .into_iter()
+            .fold(MessageGroup::default(), |acc, (_, next)| acc.add(next));
+        self.metrics.add_to_message_groups_timer.stop();
+
         // check if prev processed offset reached
-        // in all internals partition readers and in externals reader
+        // in all internals partition readers
         let all_prev_processed_offset_reached =
-            prev_processed_offset_reached_count == self.internals_partition_readers.len() + 1;
+            prev_processed_offset_reached_count == self.internals_partition_readers.len();
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            has_pending_new_messages = self.has_pending_new_messages(),
+            has_pending_externals_in_cache = self.has_pending_externals_in_cache(),
+            has_not_fully_read_internals_ranges = self.has_not_fully_read_internals_ranges(),
+            ?read_mode,
+            all_prev_processed_offset_reached,
+            add_to_message_groups_total_elapsed_ms = self.metrics.add_to_message_groups_timer.total_elapsed.as_millis(),
+            "aggregated collected message group: {:?}",
+            DebugMessageGroup(&msg_group),
+        );
 
         if msg_group.len() == 0
-            && (!self.new_messages.has_pending_messages()
-                || (read_mode == GetNextMessageGroupMode::Refill
-                    && all_prev_processed_offset_reached))
+            && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
+                || !self.has_pending_new_messages()
+                || !self.has_messages_in_buffers())
         {
             Ok(None)
         } else {
             Ok(Some(msg_group))
         }
     }
+
+    fn collect_messages_for_partition(
+        par_reader_stage: &mut MessagesReaderStage,
+        par_reader: &mut InternalsParitionReader,
+        externals_reader: &mut ExternalsReader,
+        has_pending_new_messages_for_partition: bool,
+        unused_buffer_accounts_by_partitions: &mut FastHashMap<
+            (PartitionId, BlockSeqno),
+            FastIndexSet<HashBytes>,
+        >,
+        prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+    ) -> Result<CollectMessageForPartitionResult> {
+        let mut res = CollectMessageForPartitionResult::default();
+
+        // update processed offset anyway
+        par_reader.increment_curr_processed_offset();
+        externals_reader.increment_curr_processed_offset(&par_reader.partition_id)?;
+
+        // remember if all internals or externals were collected before to reduce spam in logs further
+        let mut all_internals_collected_before = false;
+        let all_read_externals_collected_before;
+
+        // collect existing internals
+        if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals) {
+            all_internals_collected_before = par_reader.all_existing_messages_collected();
+
+            let CollectInternalsResult { metrics, .. } = par_reader.collect_messages(
+                par_reader_stage,
+                &mut res.msg_group,
+                unused_buffer_accounts_by_partitions,
+                prev_par_readers,
+            )?;
+            res.metrics.append(metrics);
+        }
+
+        // collect externals
+        {
+            all_read_externals_collected_before = !externals_reader.has_messages_in_buffers();
+
+            let CollectExternalsResult { metrics } = externals_reader.collect_messages(
+                &par_reader.partition_id,
+                &mut res.msg_group,
+                prev_par_readers,
+            )?;
+            res.metrics.append(metrics);
+        }
+
+        // collect new internals
+        if matches!(par_reader_stage, MessagesReaderStage::ExternalsAndNew) {
+            all_internals_collected_before =
+                par_reader.all_new_messages_collected(has_pending_new_messages_for_partition);
+
+            let CollectInternalsResult {
+                metrics,
+                mut collected_queue_msgs_keys,
+            } = par_reader.collect_messages(
+                par_reader_stage,
+                &mut res.msg_group,
+                unused_buffer_accounts_by_partitions,
+                prev_par_readers,
+            )?;
+            res.metrics.append(metrics);
+            res.collected_queue_msgs_keys
+                .append(&mut collected_queue_msgs_keys);
+
+            // set skip offset to current offset
+            // because we will not save collected new messages to the queue
+            par_reader.set_skip_offset_to_current()?;
+        }
+
+        // switch to the next reader stage if required
+
+        // if all existing internals collected
+        // then we should collect all already read externals without reading more from cache
+        // and only after that we can finalize existing internals read state
+        if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals)
+            && par_reader.all_existing_messages_collected()
+        {
+            // log only first time
+            if !all_internals_collected_before {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    partition_id = par_reader.partition_id,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                    "all existing internals collected from partition",
+                );
+            }
+
+            // switch to the "collect only already read externals" stage
+            *par_reader_stage = MessagesReaderStage::FinishExternals;
+        }
+
+        // if all read externals collected
+        let all_read_externals_collected = !externals_reader.has_messages_in_buffers();
+        if all_read_externals_collected {
+            // finalize externals read state
+            {
+                // drop all ranges except the last one
+                externals_reader.retain_only_last_range_reader()?;
+                // update reader state for each partitions
+                let par_ids = externals_reader.get_partition_ids();
+                for par_id in par_ids {
+                    // mark all read messages processed
+                    externals_reader.set_processed_to_current_position(&par_id)?;
+                    // set skip offset to current offset
+                    externals_reader.set_skip_offset_to_current(&par_reader.partition_id)?;
+                }
+                // we can move "from" boundary to current position
+                // because all messages up to current position processed
+                externals_reader.set_from_to_current_position_in_last_range_reader()?;
+            }
+
+            // log only first time
+            if !all_read_externals_collected_before {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    has_pending_externals = externals_reader.has_pending_externals(),
+                    ext_reader_states = ?externals_reader.reader_state().by_partitions,
+                    last_range_reader_state = ?externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(r.reader_state()))),
+                    "all read externals collected",
+                );
+            }
+
+            // if we are in the "collecting only already read externals" stage
+            // then we can finalize existing internals read state
+            if matches!(par_reader_stage, MessagesReaderStage::FinishExternals) {
+                // finalize existing intenals read state
+                // drop all ranges except the last one
+                par_reader.retain_only_last_range_reader()?;
+                // mark all read messages processed
+                par_reader.set_processed_to_current_position()?;
+                // drop processing offset for existing internals
+                par_reader.drop_processing_offset(true)?;
+                // and drop processing offset for externals
+                externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
+
+                // switch to the "new messages processing" stage
+                *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
+            }
+        }
+
+        // if all new messages collected
+        // finalize new messages read state
+        if matches!(par_reader_stage, MessagesReaderStage::ExternalsAndNew)
+            && par_reader.all_new_messages_collected(has_pending_new_messages_for_partition)
+        {
+            // mark all read messages processed
+            par_reader.set_processed_to_current_position()?;
+
+            // if all read externals collected
+            // drop processed offset both for externals and new message
+            if all_read_externals_collected {
+                par_reader.drop_processing_offset(true)?;
+                externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
+            }
+
+            // log only first time
+            if !all_internals_collected_before {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    partition_id = par_reader.partition_id,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                    "all new internals collected from partition",
+                );
+            }
+        }
+
+        Ok(res)
+    }
+}
+
+#[derive(Default)]
+struct CollectMessageForPartitionResult {
+    metrics: MessagesReaderMetrics,
+    msg_group: MessageGroup,
+    collected_queue_msgs_keys: Vec<QueueKey>,
 }
 
 #[derive(Default)]
