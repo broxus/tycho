@@ -84,7 +84,7 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         source: ShardIdent,
         partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
-        statistics: DiffStatistics,
+        statistics: &DiffStatistics,
     ) -> Result<()>;
 
     fn load_statistics(
@@ -161,7 +161,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         source: ShardIdent,
         partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
-        statistics: DiffStatistics,
+        statistics: &DiffStatistics,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
 
@@ -231,7 +231,7 @@ impl UncommittedStateStdImpl {
     fn add_statistics(
         &self,
         batch: &mut WriteBatch,
-        diff_statistics: DiffStatistics,
+        diff_statistics: &DiffStatistics,
     ) -> Result<()> {
         let shard_ident = diff_statistics.shard_ident();
         let min_message = diff_statistics.min_message();

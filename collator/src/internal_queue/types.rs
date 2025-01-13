@@ -351,6 +351,7 @@ impl IntoIterator for QueueStatistics {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DiffStatistics {
     inner: Arc<DiffStatisticsInner>,
 }
@@ -371,8 +372,12 @@ impl DiffStatistics {
     pub fn max_message(&self) -> &QueueKey {
         &self.inner.max_message
     }
-}
 
+    pub fn partition(&self, partition: QueuePartition) -> Option<&FastHashMap<IntAddr, u64>> {
+        self.inner.statistics.get(&partition)
+    }
+}
+#[derive(Debug, Clone)]
 struct DiffStatisticsInner {
     shard_ident: ShardIdent,
     min_message: QueueKey,
