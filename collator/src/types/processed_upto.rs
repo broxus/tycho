@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
+use anyhow::Result;
 use everscale_types::models::{
-    ExternalsProcessedUpto, ExternalsRange, InternalsProcessedUpto, InternalsRange,
-    PartitionProcessedUpto, ProcessedUptoInfo, ShardIdent, ShardIdentFull, ShardRange,
+    ExternalsRange, InternalsRange, ProcessedUptoInfo, ProcessedUptoPartition, ShardIdent,
+    ShardIdentFull, ShardRange,
 };
-use tycho_block_util::queue::QueueKey;
 
 use super::ProcessedTo;
 use crate::mempool::MempoolAnchorId;
@@ -13,37 +13,33 @@ pub type PartitionId = u8;
 pub type Lt = u64;
 pub type BlockSeqno = u32;
 
-/// Processed up to info for externals and internals.
+/// Processed up to info by partitions.
 #[derive(Debug, Default, Clone)]
 pub struct ProcessedUptoInfoStuff {
-    /// Externals read range and processed to info.
-    pub externals: ExternalsProcessedUptoStuff,
-
-    /// We split internals storage by partitions.
-    /// There are at least 2: normal and low-priority.
-    /// And inside partitions we split messages by source shard.
-    pub internals: InternalsProcessedUptoStuff,
+    /// We split messages by partitions.
+    /// Main partition 0 and others.
+    pub partitions: BTreeMap<PartitionId, ProcessedUptoPartitionStuff>,
 }
 
 impl ProcessedUptoInfoStuff {
     pub fn check_has_non_zero_processed_offset(&self) -> bool {
-        let check_externals = self
-            .externals
-            .ranges
-            .iter()
-            .any(|(_, r)| r.processed_offset > 0);
+        self.partitions.values().any(|p| {
+            p.externals.ranges.values().any(|r| r.processed_offset > 0)
+                || p.internals.ranges.values().any(|r| r.processed_offset > 0)
+        })
+    }
 
-        if check_externals {
-            return check_externals;
+    pub fn get_min_internals_processed_to_by_shards(&self) -> ProcessedTo {
+        let mut shards_processed_to = ProcessedTo::default();
+        for par in self.partitions.values() {
+            for (shard_id, key) in &par.internals.processed_to {
+                shards_processed_to
+                    .entry(*shard_id)
+                    .and_modify(|min_key| *min_key = std::cmp::min(*min_key, *key))
+                    .or_insert(*key);
+            }
         }
-
-        let check_internals = self
-            .internals
-            .partitions
-            .iter()
-            .any(|(_, p)| p.ranges.iter().any(|(_, r)| r.processed_offset > 0));
-
-        check_internals
+        shards_processed_to
     }
 }
 
@@ -51,28 +47,29 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
     type Error = everscale_types::error::Error;
 
     fn try_from(value: ProcessedUptoInfo) -> std::result::Result<Self, Self::Error> {
-        let mut externals = ExternalsProcessedUptoStuff {
-            processed_to: value.externals.processed_to,
-            ranges: Default::default(),
-        };
-        for r_item in value.externals.ranges.iter() {
-            let (seqno, r) = r_item?;
-            externals.ranges.insert(seqno, r.into());
-        }
+        let mut res = ProcessedUptoInfoStuff::default();
 
-        let mut internals = InternalsProcessedUptoStuff::default();
-        for par_item in value.internals.partitions.iter() {
-            let (par_id, par) = par_item?;
-            let mut partition = PartitionProcessedUptoStuff::default();
-            for item in par.processed_to.iter() {
+        for p_item in value.partitions.iter() {
+            let (par_id, par) = p_item?;
+            let mut par_stuff = ProcessedUptoPartitionStuff::default();
+
+            par_stuff.externals.processed_to = par.externals.processed_to;
+            for r_item in par.externals.ranges.iter() {
+                let (seqno, r) = r_item?;
+                par_stuff.externals.ranges.insert(seqno, r.into());
+            }
+
+            for item in par.internals.processed_to.iter() {
                 let (shard_id_full, p_to) = item?;
-                partition
+                par_stuff
+                    .internals
                     .processed_to
                     .insert(ShardIdent::try_from(shard_id_full)?, p_to.into());
             }
-            for r_item in par.ranges.iter() {
+            for r_item in par.internals.ranges.iter() {
                 let (seqno, r) = r_item?;
                 let mut int_range = InternalsRangeStuff {
+                    skip_offset: r.skip_offset,
                     processed_offset: r.processed_offset,
                     shards: Default::default(),
                 };
@@ -82,15 +79,54 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
                         .shards
                         .insert(ShardIdent::try_from(shard_id_full.clone())?, s_r.into());
                 }
-                partition.ranges.insert(seqno, int_range);
+                par_stuff.internals.ranges.insert(seqno, int_range);
             }
-            internals.partitions.insert(par_id, partition);
+
+            res.partitions.insert(par_id, par_stuff);
         }
 
-        Ok(Self {
-            externals,
-            internals,
-        })
+        Ok(res)
+
+        // let mut externals = ExternalsProcessedUptoStuff {
+        //     processed_to: value.externals.processed_to,
+        //     ranges: Default::default(),
+        // };
+        // for r_item in value.externals.ranges.iter() {
+        //     let (seqno, r) = r_item?;
+        //     externals.ranges.insert(seqno, r.into());
+        // }
+
+        // let mut internals = InternalsProcessedUptoStuff::default();
+        // for par_item in value.internals.partitions.iter() {
+        //     let (par_id, par) = par_item?;
+        //     let mut partition = InternalsProcessedUptoStuff::default();
+        //     for item in par.processed_to.iter() {
+        //         let (shard_id_full, p_to) = item?;
+        //         partition
+        //             .processed_to
+        //             .insert(ShardIdent::try_from(shard_id_full)?, p_to.into());
+        //     }
+        //     for r_item in par.ranges.iter() {
+        //         let (seqno, r) = r_item?;
+        //         let mut int_range = InternalsRangeStuff {
+        //             processed_offset: r.processed_offset,
+        //             shards: Default::default(),
+        //         };
+        //         for s_r_item in r.shards.iter() {
+        //             let (shard_id_full, s_r) = s_r_item?;
+        //             int_range
+        //                 .shards
+        //                 .insert(ShardIdent::try_from(shard_id_full.clone())?, s_r.into());
+        //         }
+        //         partition.ranges.insert(seqno, int_range);
+        //     }
+        //     internals.partitions.insert(par_id, partition);
+        // }
+
+        // Ok(Self {
+        //     externals,
+        //     internals,
+        // })
     }
 }
 
@@ -98,24 +134,24 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
     type Error = everscale_types::error::Error;
 
     fn try_from(value: ProcessedUptoInfoStuff) -> std::result::Result<Self, Self::Error> {
-        let mut externals = ExternalsProcessedUpto {
-            processed_to: value.externals.processed_to,
-            ranges: Default::default(),
-        };
-        for (seqno, r) in value.externals.ranges {
-            externals.ranges.set(seqno, ExternalsRange::from(r))?;
-        }
+        let mut res = ProcessedUptoInfo::default();
 
-        let mut internals = InternalsProcessedUpto::default();
-        for (par_id, par) in value.internals.partitions {
-            let mut partition = PartitionProcessedUpto::default();
-            for (shard_id, p_to) in par.processed_to {
-                partition
+        for (par_id, par_stuff) in value.partitions {
+            let mut par = ProcessedUptoPartition::default();
+
+            par.externals.processed_to = par_stuff.externals.processed_to;
+            for (seqno, r) in par_stuff.externals.ranges {
+                par.externals.ranges.set(seqno, ExternalsRange::from(r))?;
+            }
+
+            for (shard_id, p_to) in par_stuff.internals.processed_to {
+                par.internals
                     .processed_to
                     .set(ShardIdentFull::from(shard_id), p_to.split())?;
             }
-            for (seqno, r) in par.ranges {
+            for (seqno, r) in par_stuff.internals.ranges {
                 let mut int_range = InternalsRange {
+                    skip_offset: r.skip_offset,
                     processed_offset: r.processed_offset,
                     shards: Default::default(),
                 };
@@ -124,16 +160,44 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
                         .shards
                         .set(ShardIdentFull::from(shard_id), ShardRange::from(s_r))?;
                 }
-                partition.ranges.set(seqno, int_range)?;
+                par.internals.ranges.set(seqno, int_range)?;
             }
-            internals.partitions.set(par_id, partition)?;
+
+            res.partitions.set(par_id, par)?;
         }
 
-        Ok(Self {
-            externals,
-            internals,
-        })
+        Ok(res)
+
+        // let mut externals = ExternalsProcessedUpto {
+        //     processed_to: value.externals.processed_to,
+        //     ranges: Default::default(),
+        // };
+        // for (seqno, r) in value.externals.ranges {
+        //     externals.ranges.set(seqno, ExternalsRange::from(r))?;
+        // }
+
+        // let mut internals = InternalsProcessedUpto::default();
+        // for (par_id, par) in value.internals.partitions {
+        //     let mut partition = PartitionProcessedUpto::default();
+
+        //     internals.partitions.set(par_id, partition)?;
+        // }
+
+        // Ok(Self {
+        //     externals,
+        //     internals,
+        // })
     }
+}
+
+/// Processed up to info for externals and internals in one partition.
+#[derive(Debug, Default, Clone)]
+pub struct ProcessedUptoPartitionStuff {
+    /// Externals read ranges and processed to info.
+    pub externals: ExternalsProcessedUptoStuff,
+
+    /// Internals read ranges and processed to info.
+    pub internals: InternalsProcessedUptoStuff,
 }
 
 #[derive(Default, Clone)]
@@ -149,6 +213,7 @@ impl std::fmt::Debug for ExternalsProcessedUptoStuff {
         struct ExternalsRangesInfo {
             seqno: String,
             processed_offset: String,
+            last_skip_offset: u32,
             chain_time: String,
             from: (MempoolAnchorId, u64),
             to: (MempoolAnchorId, u64),
@@ -159,15 +224,24 @@ impl std::fmt::Debug for ExternalsProcessedUptoStuff {
             .first_key_value()
             .map(|(seqno, r)| (*seqno, r.processed_offset, r.chain_time, r.from))
             .unwrap_or_default();
-        let (last_seqno, last_processed_offset, last_ct, last_to) = self
+        let (last_seqno, last_skip_offset, last_processed_offset, last_ct, last_to) = self
             .ranges
             .last_key_value()
-            .map(|(seqno, r)| (*seqno, r.processed_offset, r.chain_time, r.to))
+            .map(|(seqno, r)| {
+                (
+                    *seqno,
+                    r.skip_offset,
+                    r.processed_offset,
+                    r.chain_time,
+                    r.to,
+                )
+            })
             .unwrap_or_default();
 
         let ranges = ExternalsRangesInfo {
             seqno: format!("{}-{}", first_seqno, last_seqno),
             processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
+            last_skip_offset,
             chain_time: format!("{}-{}", first_ct, last_ct),
             from: first_from,
             to: last_to,
@@ -185,6 +259,7 @@ pub struct ExternalsRangeInfo {
     pub from: (MempoolAnchorId, u64),
     pub to: (MempoolAnchorId, u64),
     pub chain_time: u64,
+    pub skip_offset: u32,
     pub processed_offset: u32,
 }
 
@@ -193,7 +268,8 @@ impl From<everscale_types::models::shard::ExternalsRange> for ExternalsRangeInfo
         Self {
             from: value.from,
             to: value.to,
-            chain_time: value.ct,
+            chain_time: value.chain_time,
+            skip_offset: value.skip_offset,
             processed_offset: value.processed_offset,
         }
     }
@@ -203,45 +279,27 @@ impl From<ExternalsRangeInfo> for everscale_types::models::shard::ExternalsRange
         Self {
             from: value.from,
             to: value.to,
-            ct: value.chain_time,
+            chain_time: value.chain_time,
+            skip_offset: value.skip_offset,
             processed_offset: value.processed_offset,
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct InternalsProcessedUptoStuff {
-    pub partitions: BTreeMap<PartitionId, PartitionProcessedUptoStuff>,
-}
-
-impl InternalsProcessedUptoStuff {
-    pub fn get_min_processed_to_by_shards(&self) -> ProcessedTo {
-        let mut shards_processed_to = ProcessedTo::default();
-        for par_s in self.partitions.values() {
-            for (shard_id, key) in &par_s.processed_to {
-                shards_processed_to
-                    .entry(*shard_id)
-                    .and_modify(|min_key| *min_key = std::cmp::min(*min_key, *key))
-                    .or_insert(*key);
-            }
-        }
-        shards_processed_to
-    }
-}
-
 #[derive(Default, Clone)]
-pub struct PartitionProcessedUptoStuff {
-    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
+pub struct InternalsProcessedUptoStuff {
+    pub processed_to: ProcessedTo,
     pub ranges: BTreeMap<BlockSeqno, InternalsRangeStuff>,
 }
 
-impl std::fmt::Debug for PartitionProcessedUptoStuff {
+impl std::fmt::Debug for InternalsProcessedUptoStuff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         #[derive(Debug)]
         #[allow(dead_code)]
         struct InternalsRangesInfo {
             seqno: String,
             processed_offset: String,
+            last_skip_offset: u32,
             shards: BTreeMap<ShardIdent, ShardRangeInfo>,
         }
 
@@ -250,10 +308,10 @@ impl std::fmt::Debug for PartitionProcessedUptoStuff {
             .first_key_value()
             .map(|(seqno, r)| (*seqno, r.processed_offset, r.shards.clone()))
             .unwrap_or_default();
-        let (last_seqno, last_processed_offset, last_shards) = self
+        let (last_seqno, last_skip_offset, last_processed_offset, last_shards) = self
             .ranges
             .last_key_value()
-            .map(|(seqno, r)| (*seqno, r.processed_offset, r.shards.clone()))
+            .map(|(seqno, r)| (*seqno, r.skip_offset, r.processed_offset, r.shards.clone()))
             .unwrap_or_default();
 
         for (shard_id, last_shard_range) in last_shards {
@@ -266,6 +324,7 @@ impl std::fmt::Debug for PartitionProcessedUptoStuff {
         let ranges = InternalsRangesInfo {
             seqno: format!("{}-{}", first_seqno, last_seqno),
             processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
+            last_skip_offset,
             shards: first_shards,
         };
 
@@ -278,6 +337,7 @@ impl std::fmt::Debug for PartitionProcessedUptoStuff {
 
 #[derive(Debug, Default, Clone)]
 pub struct InternalsRangeStuff {
+    pub skip_offset: u32,
     pub processed_offset: u32,
     pub shards: BTreeMap<ShardIdent, ShardRangeInfo>,
 }
@@ -302,5 +362,41 @@ impl From<ShardRangeInfo> for everscale_types::models::shard::ShardRange {
             from: value.from,
             to: value.to,
         }
+    }
+}
+
+pub trait ProcessedUptoInfoExtension {
+    fn get_min_externals_processed_to(&self) -> Result<(MempoolAnchorId, u64)>;
+}
+
+impl ProcessedUptoInfoExtension for ProcessedUptoInfo {
+    fn get_min_externals_processed_to(&self) -> Result<(MempoolAnchorId, u64)> {
+        let mut min_opt: Option<(MempoolAnchorId, u64)> = None;
+        for item in self.partitions.iter() {
+            let (_, par) = item?;
+            match min_opt.as_mut() {
+                Some(min) => {
+                    if par.externals.processed_to < *min {
+                        *min = par.externals.processed_to;
+                    }
+                }
+                None => min_opt = Some(par.externals.processed_to),
+            };
+        }
+        Ok(min_opt.unwrap_or_default())
+    }
+}
+
+impl ProcessedUptoInfoExtension for ProcessedUptoInfoStuff {
+    fn get_min_externals_processed_to(&self) -> Result<(MempoolAnchorId, u64)> {
+        let min_opt = self
+            .partitions
+            .values()
+            .map(|par| par.externals.processed_to)
+            .min_by(|(x_id, x_offset), (y_id, y_offset)| match x_id.cmp(y_id) {
+                std::cmp::Ordering::Equal => x_offset.cmp(y_offset),
+                ord => ord,
+            });
+        Ok(min_opt.unwrap_or_default())
     }
 }

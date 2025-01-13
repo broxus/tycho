@@ -26,6 +26,7 @@ use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
+use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
     DisplayBlockIdsIntoIter, McData, TopBlockDescription,
@@ -364,7 +365,9 @@ impl CollatorStdImpl {
             &working_state.mc_data,
             &prev_block_id,
             prev_shard_data.gen_chain_time(),
-            prev_shard_data.processed_upto().externals.processed_to,
+            prev_shard_data
+                .processed_upto()
+                .get_min_externals_processed_to()?,
         );
 
         // import anchors
@@ -626,7 +629,9 @@ impl CollatorStdImpl {
                 &working_state.mc_data,
                 &prev_block_id,
                 prev_shard_data.gen_chain_time(),
-                prev_shard_data.processed_upto().externals.processed_to,
+                prev_shard_data
+                    .processed_upto()
+                    .get_min_externals_processed_to()?,
             );
 
             // import anchors
@@ -954,8 +959,10 @@ impl CollatorStdImpl {
         // try get from mc data
         let mut from_mc_info_opt = None;
         if !shard_id.is_masterchain() {
-            let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) =
-                mc_data.processed_upto.externals.processed_to;
+            let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) = mc_data
+                .processed_upto
+                .get_min_externals_processed_to()
+                .unwrap_or_default();
             if mc_processed_to_anchor_id > 0 {
                 // TODO: consider split/merge
 
@@ -1257,7 +1264,7 @@ impl CollatorStdImpl {
 
         // if all internals and externals read
         // then check if any buffer contain messages
-        if working_state.reader_state.count_messages_in_buffers() > 0 {
+        if working_state.reader_state.has_messages_in_buffers() {
             working_state.has_unprocessed_messages = Some(true);
             return Ok(true);
         }
