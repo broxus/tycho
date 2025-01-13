@@ -1,0 +1,56 @@
+name: "Initialize build environment"
+description: "Sets up common tools and configurations for Rust builds"
+
+inputs:
+  toolchain:
+    description: "Rust toolchain to use (stable/nightly)"
+    required: false
+    default: "stable"
+  components:
+    description: "Rust components to install"
+    required: false
+    default: ""
+  install-clang:
+    description: "Whether to install clang"
+    required: false
+    default: "true"
+  setup-cache:
+    description: "Whether to setup Rust cache"
+    required: false
+    default: "true"
+  fake-procfs:
+    description: "Whether to create fake procfs entries"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Clang
+      if: ${{ inputs.install-clang == 'true' }}
+      run: sudo apt-get update && sudo apt-get install -y clang
+      shell: bash
+
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    - uses: Swatinem/rust-cache@v2
+      if: ${{ inputs.setup-cache == 'true' }}
+      with:
+        cache-on-failure: true
+
+    - uses: extractions/setup-just@v2
+
+    - name: Create fake procfs values
+      if: ${{ inputs.fake-procfs == 'true' }}
+      shell: bash
+      run: |
+        sudo mkdir -p /tmp/mock_proc/sys/net/core
+        echo 212992 | sudo tee /tmp/mock_proc/sys/net/core/wmem_max
+        echo 212992 | sudo tee /tmp/mock_proc/sys/net/core/rmem_max
+        # Set environment variable to use this mock directory
+        echo "MOCK_PROC_PATH=/tmp/mock_proc" >> $GITHUB_ENV
