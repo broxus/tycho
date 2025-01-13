@@ -19,7 +19,8 @@ use crate::internal_queue::state::uncommitted_state::{
     UncommittedState, UncommittedStateFactory, UncommittedStateImplFactory, UncommittedStateStdImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueShardRange, QueueStatistics,
+    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
+    QueueStatistics,
 };
 use crate::tracing_targets;
 use crate::types::ProcessedTo;
@@ -102,6 +103,8 @@ where
         partition: QueuePartition,
         ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics>;
+
+    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
 }
 
 // IMPLEMENTATION
@@ -129,12 +132,13 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
     }
 }
 
-#[derive(Debug)]
-struct ShortQueueDiff {
+#[derive(Debug, Clone)]
+pub struct ShortQueueDiff {
     pub processed_to: ProcessedTo,
     pub max_message: QueueKey,
-    pub partitions: FastHashSet<QueuePartition>,
+    pub router: PartitionRouter,
     pub hash: HashBytes,
+    pub statistics: DiffStatistics,
 }
 
 pub struct QueueImpl<S, P, V>
@@ -225,7 +229,7 @@ where
                 block_id_short.shard,
                 &diff.partition_router,
                 &diff.messages,
-                statistics,
+                &statistics,
             )?;
         }
 
@@ -233,7 +237,8 @@ where
             processed_to: diff.processed_to,
             max_message,
             hash: *hash,
-            partitions: diff.partition_router.partitions().clone(),
+            router: diff.partition_router,
+            statistics,
         };
 
         // Insert the diff into the shard diffs
@@ -265,7 +270,7 @@ where
                             .entry(block_id_short.shard)
                             .or_insert_with(|| shard_diff.max_message);
 
-                        for partition in &shard_diff.partitions {
+                        for partition in shard_diff.router.partitions() {
                             partitions.insert(*partition);
                         }
 
@@ -385,5 +390,33 @@ where
         let statistics = QueueStatistics::with_statistics(statistics);
 
         Ok(statistics)
+    }
+
+    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
+        blocks
+            .into_iter()
+            .flat_map(|(shard_ident, seqno)| {
+                let mut diffs = vec![];
+                if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
+                    shard_diffs
+                        .value()
+                        .iter()
+                        .filter(|(block_seqno, _)| **block_seqno <= seqno)
+                        .for_each(|(_, diff)| {
+                            diffs.push((shard_ident, diff.clone()));
+                        });
+                }
+                if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
+                    shard_diffs
+                        .value()
+                        .iter()
+                        .filter(|(block_seqno, _)| **block_seqno <= seqno)
+                        .for_each(|(_, diff)| {
+                            diffs.push((shard_ident, diff.clone()));
+                        });
+                }
+                diffs
+            })
+            .collect()
     }
 }
