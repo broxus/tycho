@@ -29,7 +29,7 @@ use crate::collator::types::{
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::ProcessedUptoInfoStuff;
+use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardHashesExt};
 use crate::utils::block::detect_top_processed_to_anchor;
 
@@ -304,8 +304,7 @@ impl Phase<FinalizeState> {
                 .state
                 .prev_shard_data
                 .processed_upto()
-                .externals
-                .processed_to
+                .get_min_externals_processed_to()?
                 .0;
             let config_params =
                 processed_accounts
@@ -564,7 +563,7 @@ impl Phase<FinalizeState> {
             },
         );
 
-        let processed_to_anchor_id = processed_upto.externals.processed_to.0;
+        let processed_to_anchor_id = processed_upto.get_min_externals_processed_to()?.0;
 
         let new_mc_data = match mc_state_extra {
             None => None,

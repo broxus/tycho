@@ -3,7 +3,7 @@ use std::time::Instant;
 use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
 
-use super::{DebugMessageGroup, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
+use super::{DebugMessageGroupDetailed, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
 use crate::collator::messages_buffer::FillMessageGroupResult;
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::types::EnqueuedMessage;
@@ -254,7 +254,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n1.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("1.1: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "1.1: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append internals from the low-priority partition 1
@@ -270,7 +273,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n1.2: int_buffer_par_1: {:?}",
         DebugMessagesBuffer(&int_buffer_par_1)
     );
-    println!("1.2: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "1.2: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append externals from range 1
@@ -288,7 +294,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n1.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
     );
-    println!("1.3: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "1.3: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then try to append externals from range 2
@@ -304,7 +313,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n1.4: ext_buffer_range_2: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_2)
     );
-    println!("1.4: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "1.4: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // 2. ==========
@@ -324,7 +336,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n2.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("2.1: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "2.1: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append internals from the low-priority partition 1
@@ -340,7 +355,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n2.2: int_buffer_par_1: {:?}",
         DebugMessagesBuffer(&int_buffer_par_1)
     );
-    println!("2.2: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "2.2: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append externals from range 1
@@ -358,7 +376,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n2.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
     );
-    println!("2.3: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "2.3: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then try to append externals from range 2
@@ -374,7 +395,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n2.4: ext_buffer_range_2: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_2)
     );
-    println!("2.4: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "2.4: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // 3. ==========
@@ -395,7 +419,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n3.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("3.1: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "3.1: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append internals from the low-priority partition 1
@@ -411,7 +438,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n3.2: int_buffer_par_1: {:?}",
         DebugMessagesBuffer(&int_buffer_par_1)
     );
-    println!("3.2: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "3.2: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append externals from range 1
@@ -430,7 +460,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n3.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
     );
-    println!("3.3: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "3.3: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then try to append externals from range 2
@@ -446,7 +479,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n3.4: ext_buffer_range_2: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_2)
     );
-    println!("3.4: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "3.4: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // 4. ==========
@@ -468,7 +504,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n4.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("4.1: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "4.1: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append internals from the low-priority partition 1
@@ -484,7 +523,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n4.2: int_buffer_par_1: {:?}",
         DebugMessagesBuffer(&int_buffer_par_1)
     );
-    println!("4.2: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "4.2: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append externals from range 1
@@ -503,7 +545,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n4.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
     );
-    println!("4.3: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "4.3: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then try to append externals from range 2
@@ -521,7 +566,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n4.4: ext_buffer_range_2: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_2)
     );
-    println!("4.4: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "4.4: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // 5. ==========
@@ -542,7 +590,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n5.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("5.1: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "5.1: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append internals from the low-priority partition 1
@@ -558,7 +609,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n5.2: int_buffer_par_1: {:?}",
         DebugMessagesBuffer(&int_buffer_par_1)
     );
-    println!("5.2: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "5.2: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append externals from range 1
@@ -577,7 +631,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n5.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
     );
-    println!("5.3: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "5.3: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then try to append externals from range 2
@@ -596,7 +653,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n5.4: ext_buffer_range_2: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_2)
     );
-    println!("5.4: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "5.4: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // 6. ==========
@@ -625,7 +685,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n6.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("6.1: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "6.1: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append internals from the low-priority partition 1
@@ -641,7 +704,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n6.2: int_buffer_par_1: {:?}",
         DebugMessagesBuffer(&int_buffer_par_1)
     );
-    println!("6.2: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "6.2: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then append externals from range 1
@@ -657,7 +723,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n6.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
     );
-    println!("6.3: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "6.3: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // then try to append externals from range 2
@@ -673,7 +742,10 @@ fn test_message_group_filling_from_buffers() {
         "\r\n6.4: ext_buffer_range_2: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_2)
     );
-    println!("6.4: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "6.4: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 
     // so we have unfilled slots in message group and unused accounts in buffer of partition 0
@@ -689,6 +761,9 @@ fn test_message_group_filling_from_buffers() {
         "\r\n6.5: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
     );
-    println!("6.5: message_group: {:?}", DebugMessageGroup(&msg_group));
+    println!(
+        "6.5: message_group: {:?}",
+        DebugMessageGroupDetailed(&msg_group)
+    );
     timer.print_elapsed_and_restart();
 }

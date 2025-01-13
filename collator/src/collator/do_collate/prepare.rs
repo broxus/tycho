@@ -45,11 +45,9 @@ impl Phase<PrepareState> {
 
     pub fn run(self) -> Result<Phase<ExecuteState>> {
         // log initial processed upto
-        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
-            self.state.prev_shard_data.processed_upto().externals
-        );
-        tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.internals = {:?}",
-            self.state.prev_shard_data.processed_upto().internals
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "initial processed_upto = {:?}",
+            self.state.prev_shard_data.processed_upto(),
         );
 
         // init executor

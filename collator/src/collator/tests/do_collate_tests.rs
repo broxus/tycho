@@ -8,7 +8,7 @@ use tycho_util::FastHashMap;
 
 use super::super::types::{AnchorsCache, BlockCollationData, BlockCollationDataBuilder};
 use super::CollatorStdImpl;
-use crate::collator::do_collate::calculate_min_processed_to;
+use crate::collator::do_collate::calculate_min_internals_processed_to;
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
 use crate::types::{supported_capabilities, ShardDescriptionShort};
@@ -329,7 +329,7 @@ fn test_calculate_min_processed_to_masterchain() {
     // check updated
     mc_data_shards_processed_to.insert(updated_shard, processed_to);
 
-    let result = calculate_min_processed_to(
+    let result = calculate_min_internals_processed_to(
         &shard_id,
         current_processed_to,
         mc_processed_to,
@@ -347,7 +347,7 @@ fn test_calculate_min_processed_to_masterchain() {
     // check updated
     mc_data_shards_processed_to.insert(not_updated_shard, processed_to);
 
-    let result = calculate_min_processed_to(
+    let result = calculate_min_internals_processed_to(
         &shard_id,
         current_processed_to,
         mc_processed_to,
@@ -388,7 +388,7 @@ fn test_calculate_min_processed_to_shard() {
     // Check updated shard
     mc_data_shards_processed_to.insert(updated_shard, processed_to);
 
-    let result = calculate_min_processed_to(
+    let result = calculate_min_internals_processed_to(
         &shard_id,
         current_processed_to,
         mc_processed_to,
@@ -407,7 +407,7 @@ fn test_calculate_min_processed_to_shard() {
     // Check not updated shard
     mc_data_shards_processed_to.insert(not_updated_shard, processed_to);
 
-    let result = calculate_min_processed_to(
+    let result = calculate_min_internals_processed_to(
         &shard_id,
         current_processed_to,
         mc_processed_to,
@@ -423,7 +423,7 @@ fn test_calculate_min_processed_to_shard() {
 
     let mc_processed_to = Some(QueueKey::max_for_lt(9));
 
-    let result = calculate_min_processed_to(
+    let result = calculate_min_internals_processed_to(
         &shard_id,
         current_processed_to,
         mc_processed_to,

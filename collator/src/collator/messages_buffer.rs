@@ -7,6 +7,7 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
+use crate::types::DisplayIter;
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -435,11 +436,13 @@ impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub enum BufferFillStateByCount {
     IsFull,
     NotFull,
 }
 
+#[derive(PartialEq, Eq)]
 pub enum BufferFillStateBySlots {
     CanFill,
     CanNotFill,
@@ -537,6 +540,36 @@ impl MessageGroup {
 
         true
     }
+
+    pub fn add(mut self, other: Self) -> Self {
+        let last_slot_id = self.slots_info.slots.keys().last();
+        let mut next_slot_id = match last_slot_id {
+            Some(slot_id) => *slot_id + 1,
+            None => 0,
+        };
+        for (_, new_slot) in other.slots_info.slots {
+            let slots_ids = self
+                .slots_info
+                .index_by_msgs_count
+                .entry(new_slot.msgs_count())
+                .or_default();
+            slots_ids.insert(next_slot_id);
+
+            self.slots_info.slots.insert(next_slot_id, new_slot);
+
+            next_slot_id += 1;
+        }
+        self.slots_info.int_count += other.slots_info.int_count;
+        self.slots_info.ext_count += other.slots_info.ext_count;
+
+        for (account_id, msgs) in other.msgs {
+            if self.msgs.insert(account_id, msgs).is_some() {
+                panic!("other message group should not contain account that already exists")
+            }
+        }
+
+        self
+    }
 }
 
 impl IntoParallelIterator for MessageGroup {
@@ -558,16 +591,36 @@ impl std::fmt::Display for DisplayMessageGroup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "int={}, ext={}, slots={:?}",
-            self.0.slots_info.int_count, self.0.slots_info.ext_count, self.0.slots_info.slots,
+            "int={}, ext={}, accounts={}, slots={}",
+            self.0.slots_info.int_count,
+            self.0.slots_info.ext_count,
+            self.0.msgs.len(),
+            self.0.slots_info.slots.len(),
+        )
+    }
+}
+
+pub(super) struct DebugMessageGroup<'a>(pub &'a MessageGroup);
+impl std::fmt::Debug for DebugMessageGroup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for DebugMessageGroup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {}",
+            DisplayMessageGroup(self.0),
+            DisplayIter(self.0.slots_info.slots.values().map(|s| s.msgs_count())),
         )
     }
 }
 
 #[cfg(test)]
-pub(super) struct DebugMessageGroup<'a>(pub &'a MessageGroup);
+pub(super) struct DebugMessageGroupDetailed<'a>(pub &'a MessageGroup);
 #[cfg(test)]
-impl std::fmt::Debug for DebugMessageGroup<'_> {
+impl std::fmt::Debug for DebugMessageGroupDetailed<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageGroup")
             .field("msgs", &DebugMessageGroupHashMap(&self.0.msgs))
