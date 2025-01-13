@@ -1,4 +1,4 @@
-name: CI # Continuous Integration
+name: CI
 
 on:
   push:
@@ -13,8 +13,9 @@ on:
       - "Cargo.lock"
       - "**.rs"
       - ".github**"
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }} # cancels previous runs on the same PR / commit group
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -27,11 +28,13 @@ jobs:
     name: Rustfmt
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
         with:
+          toolchain: nightly
           components: rustfmt
-      - uses: extractions/setup-just@v2
+          install-clang: false
+          setup-cache: false
       - name: Check formatting
         run: just check_format
 
@@ -40,33 +43,22 @@ jobs:
     needs: rustfmt
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
         with:
           components: "clippy,rustfmt"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: extractions/setup-just@v2
       - name: Clippy check
         run: just lint
+
   just_install:
     name: just install works
     needs: rustfmt
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang lld
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
         with:
           components: "clippy,rustfmt"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: extractions/setup-just@v2
       - name: Clippy check
         run: just install
 
@@ -75,18 +67,13 @@ jobs:
     runs-on: [self-hosted, linux]
     needs: rustfmt
     steps:
-      - uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
         with:
           components: llvm-tools-preview
+          fake-procfs: true
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: extractions/setup-just@v2
       - name: Run tests
         env:
           RUSTC_WRAPPER: scripts/coverage.py
@@ -105,14 +92,10 @@ jobs:
     runs-on: [self-hosted, linux]
     needs: rustfmt
     steps:
-      - uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
         with:
-          cache-on-failure: true
-      - uses: extractions/setup-just@v2
+          fake-procfs: true
       - name: Run integration tests
         env:
           RUST_LOG: warn
@@ -122,25 +105,25 @@ jobs:
     name: Metrics
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: extractions/setup-just@v2
       - name: Check dashboard
         run: just check_dashboard
+
   msrv:
     name: Check minimum supported Rust version
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
+        with:
+          install-clang: false
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-msrv
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
       - name: Check semver
         run: cargo msrv verify --manifest-path cli/Cargo.toml
 
@@ -151,26 +134,14 @@ jobs:
       (github.event_name == 'push' && contains(join(github.event.commits.*.added, github.event.commits.*.modified), '.proto'))
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
+        with:
+          install-clang: false
+          setup-cache: false
       - name: Install protobuf
         run: sudo apt update && sudo apt-get -y install protobuf-compiler
-      - uses: extractions/setup-just@v2
       - name: Update RPC proto
         run: just update_rpc_proto
       - name: Check for uncommitted changes
         run: git diff --exit-code
-
-  # docs:
-  #   name: Docs
-  #   needs: clippy
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - name: Install Clang
-  #       run: sudo apt-get update && sudo apt-get install -y clang
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: extractions/setup-just@v2
-  #     - name: Check documentation
-  #       run: just docs
