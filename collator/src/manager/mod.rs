@@ -1288,6 +1288,7 @@ where
 
                     let queue_diff_with_messages =
                         QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs)?;
+
                     prev_queue_diffs.push((
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),

@@ -69,6 +69,35 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
+        let diffs = if self.state.collation_data.block_id_short.is_masterchain() {
+            let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
+                Some(
+                    self.state
+                        .collation_data
+                        .top_shard_blocks
+                        .iter()
+                        .map(|b| (b.block_id.shard, b.block_id.seqno))
+                        .collect(),
+                )
+            } else {
+                None
+            };
+
+            // load diffs by top shard blocks
+            mq_adapter.get_diffs(top_shard_blocks.clone().unwrap_or_default())
+        } else {
+            let blocks = self
+                .state
+                .mc_data
+                .shards
+                .iter()
+                .filter(|(_, d)| d.top_sc_block_updated)
+                .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
+                .collect();
+
+            mq_adapter.get_diffs(blocks)
+        };
+
         // get queue diff and check for pending internals
         let create_queue_diff_elapsed;
         let FinalizedMessagesReader {
@@ -82,7 +111,7 @@ impl Phase<FinalizeState> {
                 &labels,
             );
             let finalize_message_reader_res =
-                messages_reader.finalize(self.extra.executor.min_next_lt())?;
+                messages_reader.finalize(self.extra.executor.min_next_lt(), diffs)?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };
