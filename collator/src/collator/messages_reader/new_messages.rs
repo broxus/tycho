@@ -46,9 +46,13 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         }
     }
 
+    pub fn partition_router(&self) -> &PartitionRouter {
+        &self.partition_router
+    }
+
     pub fn init_partition_router<'a>(
         &mut self,
-        partition_id: u8,
+        partition_id: PartitionId,
         partition_all_ranges_msgs_stats: impl Iterator<Item = &'a QueueStatistics>,
     ) {
         for stats in partition_all_ranges_msgs_stats {
@@ -60,7 +64,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         }
     }
 
-    pub fn has_pending_messages_from_partition(&self, partition_id: &u8) -> bool {
+    pub fn has_pending_messages_from_partition(&self, partition_id: &PartitionId) -> bool {
         self.messages_for_current_shard
             .get(partition_id)
             .is_some_and(|heap| !heap.is_empty())
@@ -77,7 +81,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         if self.current_shard.contains_address(message.destination()) {
             let partition = self.partition_router.get_partition(message.destination());
             self.messages_for_current_shard
-                .entry(partition as u8)
+                .entry(partition as PartitionId)
                 .or_default()
                 .push(Reverse(MessageExt::new(self.current_shard, message)));
         };
@@ -91,18 +95,20 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
 
     pub fn take_messages_for_current_shard(
         &mut self,
-        partition_id: &u8,
+        partition_id: &PartitionId,
     ) -> Option<BinaryHeap<Reverse<MessageExt<V>>>> {
         self.messages_for_current_shard.remove(partition_id)
     }
 
     pub fn set_messages_for_current_shard(
         &mut self,
-        partition_id: u8,
+        partition_id: PartitionId,
         messages: BinaryHeap<Reverse<MessageExt<V>>>,
     ) {
-        self.messages_for_current_shard
-            .insert(partition_id, messages);
+        if !messages.is_empty() {
+            self.messages_for_current_shard
+                .insert(partition_id, messages);
+        }
     }
 
     pub fn remove_collected_messages(&mut self, collected_messages: &[QueueKey]) {
@@ -134,7 +140,7 @@ impl InternalsParitionReader {
         match last_range_reader.kind {
             InternalsRangeReaderKind::NewMessages => self.get_last_range_reader_mut(),
             InternalsRangeReaderKind::Existing | InternalsRangeReaderKind::Next => {
-                let mut new_shard_reader_states = BTreeMap::default();
+                let mut new_shard_reader_states = BTreeMap::new();
                 for (shard_id, prev_shard_reader_state) in &last_range_reader.reader_state.shards {
                     let shard_range_to = if shard_id == &self.for_shard_id {
                         current_next_lt
@@ -153,9 +159,11 @@ impl InternalsParitionReader {
                     for_shard_id: last_range_reader.for_shard_id,
                     seqno: last_range_reader.seqno,
                     kind: InternalsRangeReaderKind::NewMessages,
+                    buffer_limits: self.target_limits,
                     reader_state: InternalsRangeReaderState {
                         buffer: Default::default(),
                         shards: new_shard_reader_states,
+                        skip_offset: 0,
                         processed_offset: 0,
                     },
                     fully_read: false,
@@ -188,13 +196,15 @@ impl InternalsParitionReader {
         }
     }
 
-    pub fn update_new_messages_reader_to_boundary(&mut self, current_next_lt: u64) -> Result<()> {
+    pub(super) fn update_new_messages_reader_to_boundary(
+        &mut self,
+        current_next_lt: u64,
+    ) -> Result<()> {
         let for_shard_id = self.for_shard_id;
-        let last_range_reader = self.get_last_range_reader_mut()?;
-        if matches!(
-            last_range_reader.kind,
-            InternalsRangeReaderKind::NewMessages
-        ) {
+        let Ok(last_range_reader) = self.get_last_range_reader_mut() else {
+            return Ok(());
+        };
+        if last_range_reader.kind == InternalsRangeReaderKind::NewMessages {
             let current_shard_reader_state = last_range_reader
                 .reader_state
                 .shards
@@ -203,20 +213,16 @@ impl InternalsParitionReader {
             if current_shard_reader_state.to < current_next_lt {
                 current_shard_reader_state.to = current_next_lt;
                 last_range_reader.fully_read = false;
+                self.all_ranges_fully_read = false;
             }
         }
         Ok(())
     }
 
-    pub fn set_new_messages_range_reader_fully_read(&mut self) -> Result<()> {
+    fn set_new_messages_range_reader_fully_read(&mut self) -> Result<()> {
         let for_shard_id = self.for_shard_id;
         let last_range_reader = self.get_last_range_reader_mut()?;
-        if matches!(
-            last_range_reader.kind,
-            InternalsRangeReaderKind::NewMessages
-        ) {
-            last_range_reader.fully_read = true;
-
+        if last_range_reader.kind == InternalsRangeReaderKind::NewMessages {
             // set current position to the end of the range
             let current_shard_reader_state = last_range_reader
                 .reader_state
@@ -225,11 +231,50 @@ impl InternalsParitionReader {
                 .context("new messages range reader should have current shard reader state")?;
             current_shard_reader_state.current_position =
                 QueueKey::max_for_lt(current_shard_reader_state.to);
+
+            last_range_reader.fully_read = true;
+            self.all_ranges_fully_read = true;
         }
         Ok(())
     }
 
-    pub fn read_new_messages_into_buffer(
+    pub fn read_new_messages_into_buffers(
+        &mut self,
+        new_messages: &mut NewMessagesState<EnqueuedMessage>,
+        current_next_lt: u64,
+    ) -> Result<ReadNewMessagesResult> {
+        // update new messages reader "to" boundary on current next lt
+        self.update_new_messages_reader_to_boundary(current_next_lt)?;
+
+        // if no new messages for current partition then return earlier
+        if !new_messages.has_pending_messages_from_partition(&self.partition_id) {
+            self.set_new_messages_range_reader_fully_read()?;
+            return Ok(ReadNewMessagesResult {
+                taken_messages: vec![],
+                has_pending_new_messages: false,
+                metrics: MessagesReaderMetrics::default(),
+            });
+        }
+
+        // take new messages from state
+        let mut new_messages_for_current_shard = new_messages
+            .take_messages_for_current_shard(&self.partition_id)
+            .unwrap_or_default();
+
+        // read new messages to buffer
+        let res = self.read_new_messages_into_buffer_impl(
+            &mut new_messages_for_current_shard,
+            current_next_lt,
+        )?;
+
+        // return new messages to state
+        new_messages
+            .set_messages_for_current_shard(self.partition_id, new_messages_for_current_shard);
+
+        Ok(res)
+    }
+
+    fn read_new_messages_into_buffer_impl(
         &mut self,
         new_messages: &mut BinaryHeap<Reverse<MessageExt<EnqueuedMessage>>>,
         current_next_lt: u64,
@@ -319,6 +364,8 @@ impl InternalsParitionReader {
             }
         }
 
+        res.has_pending_new_messages = !new_messages.is_empty();
+
         res.metrics.read_new_messages_timer.stop();
         res.metrics.read_new_messages_timer.total_elapsed -=
             res.metrics.add_to_message_groups_timer.total_elapsed;
@@ -330,5 +377,6 @@ impl InternalsParitionReader {
 #[derive(Default)]
 pub(super) struct ReadNewMessagesResult {
     pub taken_messages: Vec<QueueKey>,
+    pub has_pending_new_messages: bool,
     pub metrics: MessagesReaderMetrics,
 }

@@ -967,6 +967,7 @@ pub struct ExecuteResult {
     pub read_ext_messages_elapsed: Duration,
     pub read_new_messages_elapsed: Duration,
     pub add_to_message_groups_elapsed: Duration,
+    // TODO: msgs-v3: take from ReaderState instead
     pub last_read_to_anchor_chain_time: Option<u64>,
 }
 

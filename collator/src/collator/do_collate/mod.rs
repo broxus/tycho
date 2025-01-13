@@ -309,31 +309,24 @@ impl CollatorStdImpl {
         let processed_upto = reader_state.get_updated_processed_upto();
 
         // log updated processed upto
-        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-            processed_upto.externals
-        );
-        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.internals = {:?}",
-            processed_upto.internals
-        );
+        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
 
-        // get min processed to for current shard and master
-        let current_processed_to = processed_upto
-            .internals
-            .get_min_processed_to_by_shards()
+        // get min processed to for current shard from shard and mc_data
+        let current_min_processed_to = processed_upto
+            .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
             .cloned();
-        let mc_processed_to = mc_data
+        let min_processed_to_from_mc_data = mc_data
             .processed_upto
-            .internals
-            .get_min_processed_to_by_shards()
+            .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
             .cloned();
 
-        // calculate minimal processed_to for this shrad across all partitions
-        let min_processed_to = calculate_min_processed_to(
+        // calculate minimal internals processed_to for this shard
+        let min_processed_to = calculate_min_internals_processed_to(
             &shard_id,
-            current_processed_to,
-            mc_processed_to,
+            current_min_processed_to,
+            min_processed_to_from_mc_data,
             &mc_data.shards,
             &mc_data.shards_processed_to,
         );
@@ -1046,16 +1039,16 @@ impl CollatorStdImpl {
     }
 }
 
-fn calculate_min_processed_to(
+fn calculate_min_internals_processed_to(
     shard_id: &ShardIdent,
-    current_processed_to: Option<QueueKey>,
-    mc_processed_to: Option<QueueKey>,
+    current_min_processed_to: Option<QueueKey>,
+    min_processed_to_from_mc_data: Option<QueueKey>,
     mc_data_shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
     mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
 ) -> Option<QueueKey> {
     fn find_min_processed_to(
         shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
-        shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+        mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
         shard_id: &ShardIdent,
         min_processed_to: &mut Option<QueueKey>,
         skip_condition: impl Fn(&ShardIdent) -> bool,
@@ -1067,7 +1060,7 @@ fn calculate_min_processed_to(
             }
 
             if descr.top_sc_block_updated {
-                if let Some(value) = shards_processed_to.get(shard) {
+                if let Some(value) = mc_data_shards_processed_to.get(shard) {
                     if let Some(v) = value.get(shard_id) {
                         *min_processed_to = match *min_processed_to {
                             Some(current_min) => Some(current_min.min(*v)),
@@ -1091,7 +1084,7 @@ fn calculate_min_processed_to(
         );
 
         // Combine with current and masterchain values
-        min_processed_to = [current_processed_to, min_processed_to]
+        min_processed_to = [current_min_processed_to, min_processed_to]
             .into_iter()
             .flatten()
             .min();
@@ -1105,10 +1098,14 @@ fn calculate_min_processed_to(
         );
 
         // Combine with current and masterchain values and shard values
-        min_processed_to = [current_processed_to, min_processed_to, mc_processed_to]
-            .into_iter()
-            .flatten()
-            .min();
+        min_processed_to = [
+            current_min_processed_to,
+            min_processed_to,
+            min_processed_to_from_mc_data,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
     }
 
     min_processed_to
