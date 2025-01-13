@@ -32,6 +32,8 @@ use new_messages::*;
 pub(super) use reader_state::*;
 use tycho_block_util::queue::RouterDirection;
 
+use crate::internal_queue::queue::ShortQueueDiff;
+
 pub(super) struct FinalizedMessagesReader {
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
@@ -266,7 +268,11 @@ impl MessagesReader {
         }
     }
 
-    pub fn finalize(mut self, current_next_lt: u64) -> Result<FinalizedMessagesReader> {
+    pub fn finalize(
+        mut self,
+        current_next_lt: u64,
+        diffs: Vec<(ShardIdent, ShortQueueDiff)>,
+    ) -> Result<FinalizedMessagesReader> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
             || self.has_pending_externals_in_cache();
@@ -342,9 +348,11 @@ impl MessagesReader {
 
         // reset queue diff partition router
         // according to actual aggregated stats
-        Self::reset_partition_rounter_by_stats(
+        Self::reset_partition_router_by_stats(
             &mut queue_diff_with_msgs.partition_router,
             aggregated_stats,
+            self.for_shard_id,
+            diffs,
         );
 
         Ok(FinalizedMessagesReader {
@@ -355,19 +363,65 @@ impl MessagesReader {
         })
     }
 
-    pub fn reset_partition_rounter_by_stats(
+    pub fn reset_partition_router_by_stats(
         partition_router: &mut PartitionRouter,
-        stats: QueueStatistics,
+        aggregated_stats: QueueStatistics,
+        for_shard_id: ShardIdent,
+        top_block_diffs: Vec<(ShardIdent, ShortQueueDiff)>,
     ) {
         // TODO: msgs-v3: store limit in msgs_exec_params
         const MAX_PAR_0_MSGS_COUNT_LIMIT: u64 = 100_000;
 
-        partition_router.clear();
-        for (account_addr, msgs_count) in stats {
-            if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
-                partition_router
-                    .insert(RouterDirection::Dest, account_addr, 1)
-                    .unwrap();
+        for (int_address, msgs_count) in aggregated_stats {
+            let int_address_bytes = int_address.as_std().unwrap().address;
+            let acc_for_current_shard = for_shard_id.contains_account(&int_address_bytes);
+
+            let existing_partition = partition_router.get_partition(None, &int_address);
+            if existing_partition != 0 {
+                continue;
+            }
+
+            if acc_for_current_shard {
+                if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                    partition_router
+                        .insert(RouterDirection::Dest, int_address, 1)
+                        .unwrap();
+                }
+            } else {
+                // if we have account for another shard then take info from that shard
+                let acc_shard_diff_info = top_block_diffs
+                    .iter()
+                    .find(|(shard_id, _)| shard_id.contains_account(&int_address_bytes))
+                    .map(|(_, diff)| diff);
+
+                if let Some(diff) = acc_shard_diff_info {
+                    // if we found low priority partition in remote diff then copy it
+                    let remote_shard_partition = diff.router.get_partition(None, &int_address);
+                    if remote_shard_partition != 0 {
+                        partition_router
+                            .insert(RouterDirection::Dest, int_address, remote_shard_partition)
+                            .unwrap();
+                        continue;
+                    }
+
+                    // if remote partition == 0 then we need to check statistics
+                    let remote_msgs_count = match diff.statistics.partition(0) {
+                        None => 0,
+                        Some(partition) => partition.get(&int_address).copied().unwrap_or(0),
+                    };
+
+                    let total = msgs_count + remote_msgs_count;
+
+                    if total > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                        partition_router
+                            .insert(RouterDirection::Dest, int_address, 1)
+                            .unwrap();
+                    }
+                } else if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                    partition_router
+                        .insert(RouterDirection::Dest, int_address, 1)
+                        .unwrap();
+                }
             }
         }
     }
