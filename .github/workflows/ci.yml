@@ -8,11 +8,6 @@ on:
   pull_request:
     branches:
       - "**"
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "**.rs"
-      - ".github**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -24,8 +19,29 @@ env:
   CXX: /usr/bin/clang++
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      shell: ${{ steps.filter.outputs.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '**.rs'
+            shell:
+              - '**.sh'
   rustfmt:
     name: Rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +56,8 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: rustfmt
+    needs: [rustfmt, changes]
+    if: ${{ needs.changes.outputs.rust == 'true' }} # we duplicate it so gh actions will skip the job and mark it as success
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +70,7 @@ jobs:
   just_install:
     name: just install works
     needs: rustfmt
+    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.shell == 'true'}}
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +83,8 @@ jobs:
   test:
     name: Test with codecov
     runs-on: [self-hosted, linux]
-    needs: rustfmt
+    needs: [rustfmt, changes]
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/init
@@ -90,7 +109,8 @@ jobs:
   integration-test:
     name: Integration Test Suite
     runs-on: [self-hosted, linux]
-    needs: rustfmt
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    needs: [rustfmt, changes]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/init
@@ -115,7 +135,9 @@ jobs:
 
   msrv:
     name: Check minimum supported Rust version
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: self-hosted
+    needs: [changes]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/init
