@@ -93,17 +93,17 @@ where
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
     /// remove all data in uncommitted state storage
     fn clear_uncommitted_state(&self) -> Result<()>;
-    /// returns the number of diffs in cache for the given shard
+    /// Returns the number of diffs in cache for the given shard
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
-    /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
+    /// Removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
-    /// load statistics for the given range by accounts
+    /// Load statistics for the given range by accounts
     fn load_statistics(
         &self,
         partition: QueuePartition,
         ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics>;
-
+    /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
 }
 
@@ -134,6 +134,51 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
 
 #[derive(Debug, Clone)]
 pub struct ShortQueueDiff {
+    inner: Arc<ShortQueueDiffInner>,
+}
+
+impl ShortQueueDiff {
+    pub fn new(
+        processed_to: ProcessedTo,
+        max_message: QueueKey,
+        router: PartitionRouter,
+        hash: HashBytes,
+        statistics: DiffStatistics,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ShortQueueDiffInner {
+                processed_to,
+                max_message,
+                router,
+                hash,
+                statistics,
+            }),
+        }
+    }
+
+    pub fn processed_to(&self) -> &ProcessedTo {
+        &self.inner.processed_to
+    }
+
+    pub fn max_message(&self) -> &QueueKey {
+        &self.inner.max_message
+    }
+
+    pub fn router(&self) -> &PartitionRouter {
+        &self.inner.router
+    }
+
+    pub fn hash(&self) -> &HashBytes {
+        &self.inner.hash
+    }
+
+    pub fn statistics(&self) -> &DiffStatistics {
+        &self.inner.statistics
+    }
+}
+
+#[derive(Debug)]
+pub struct ShortQueueDiffInner {
     pub processed_to: ProcessedTo,
     pub max_message: QueueKey,
     pub router: PartitionRouter,
@@ -196,11 +241,15 @@ where
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = shard_diffs.get(&block_id_short.seqno);
+
+        // Check if the diff is already applied
+        // return if hash is the same
         if let Some(shard_diff) = shard_diff {
-            if &shard_diff.hash != hash {
+            // Check if the diff is already applied with different hash
+            if shard_diff.hash() != hash {
                 bail!(
                     "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
-                    block_id_short, shard_diff.hash,  hash,
+                    block_id_short, shard_diff.hash(),  hash,
                 )
             }
             return Ok(());
@@ -223,6 +272,7 @@ where
                 );
             }
         }
+
         // Add messages to uncommitted_state if there are any
         if !diff.messages.is_empty() {
             self.uncommitted_state.add_messages_with_statistics(
@@ -233,13 +283,13 @@ where
             )?;
         }
 
-        let short_diff = ShortQueueDiff {
-            processed_to: diff.processed_to,
+        let short_diff = ShortQueueDiff::new(
+            diff.processed_to,
             max_message,
-            hash: *hash,
-            router: diff.partition_router,
+            diff.partition_router,
+            *hash,
             statistics,
-        };
+        );
 
         // Insert the diff into the shard diffs
         shard_diffs.insert(block_id_short.seqno, short_diff);
@@ -249,8 +299,7 @@ where
 
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
         let mut partitions = FastHashSet::default();
-        // insert default because we doesn't store it in router
-
+        // insert default partition  because we doesn't store it in router
         partitions.insert(QueuePartition::default());
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();
@@ -258,9 +307,12 @@ where
         for (block_id_short, top_shard_block_changed) in mc_top_blocks {
             let mut diffs_to_commit = vec![];
 
+            // find all uncommited diffs for the given shard top block
             let prev_shard_uncommitted_diffs =
                 self.uncommitted_diffs.get_mut(&block_id_short.shard);
+
             if let Some(mut shard_uncommitted_diffs) = prev_shard_uncommitted_diffs {
+                // iterate over all uncommitted diffs for the given shard until the top block seqno
                 shard_uncommitted_diffs
                     .range(..=block_id_short.seqno)
                     .for_each(|(block_seqno, shard_diff)| {
@@ -268,19 +320,23 @@ where
 
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
-                            .or_insert_with(|| shard_diff.max_message);
+                            .or_insert_with(|| *shard_diff.max_message());
 
-                        for partition in shard_diff.router.partitions() {
+                        // Add all partitions from the router to the partitions set
+                        // use it in commit and gc
+                        for partition in shard_diff.router().partitions() {
                             partitions.insert(*partition);
                         }
 
-                        if shard_diff.max_message > *current_last_key {
-                            *current_last_key = shard_diff.max_message;
+                        // find max message for each shard for commit
+                        if shard_diff.max_message() > current_last_key {
+                            *current_last_key = *shard_diff.max_message();
                         }
 
                         // find min processed_to for each shard for GC
                         if *block_seqno == block_id_short.seqno && *top_shard_block_changed {
-                            for (shard_ident, processed_to_key) in shard_diff.processed_to.iter() {
+                            for (shard_ident, processed_to_key) in shard_diff.processed_to().iter()
+                            {
                                 let last_key = gc_ranges
                                     .entry(*shard_ident)
                                     .or_insert_with(|| *processed_to_key);
@@ -292,6 +348,7 @@ where
                         }
                     });
 
+                // remove all diffs from uncommitted state that are going to be committed
                 for seqno in diffs_to_commit {
                     if let Some(diff) = shard_uncommitted_diffs.remove(&seqno) {
                         // Move the diff to committed_diffs
@@ -314,8 +371,9 @@ where
             })
             .collect();
 
+        // move all uncommitted diffs messages to committed state
         self.uncommitted_state
-            .commit(partitions.clone(), commit_ranges.as_slice())?;
+            .commit(partitions.clone(), &commit_ranges)?;
 
         let uncommitted_diffs_count: usize =
             self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
@@ -323,6 +381,7 @@ where
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
 
+        // run GC for each found partition in routers
         for partition in partitions {
             for (shard, end_key) in &gc_ranges {
                 self.gc.update_delete_until(partition, *shard, *end_key);
@@ -364,12 +423,12 @@ where
         if let Some(mut shard_diffs) = self.uncommitted_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
-                .retain(|_, diff| &diff.max_message > inclusive_until);
+                .retain(|_, diff| diff.max_message() > inclusive_until);
         }
         if let Some(mut shard_diffs) = self.committed_diffs.get_mut(source_shard) {
             shard_diffs
                 .value_mut()
-                .retain(|_, diff| &diff.max_message > inclusive_until);
+                .retain(|_, diff| diff.max_message() > inclusive_until);
         }
         Ok(())
     }
@@ -382,8 +441,11 @@ where
         let snapshot = self.committed_state.snapshot();
         let mut statistics = FastHashMap::default();
 
+        // load from committed state
         self.committed_state
             .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
+
+        // load from uncommitted state and add to the statistics
         self.uncommitted_state
             .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
 
@@ -393,30 +455,26 @@ where
     }
 
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
-        blocks
-            .into_iter()
-            .flat_map(|(shard_ident, seqno)| {
-                let mut diffs = vec![];
-                if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
-                    shard_diffs
-                        .value()
-                        .iter()
-                        .filter(|(block_seqno, _)| **block_seqno <= seqno)
-                        .for_each(|(_, diff)| {
-                            diffs.push((shard_ident, diff.clone()));
-                        });
+        let mut result = Vec::new();
+
+        for (shard_ident, seqno) in blocks {
+            if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
+                for (block_seqno, diff) in shard_diffs.value() {
+                    if *block_seqno <= seqno {
+                        result.push((shard_ident, diff.clone()));
+                    }
                 }
-                if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
-                    shard_diffs
-                        .value()
-                        .iter()
-                        .filter(|(block_seqno, _)| **block_seqno <= seqno)
-                        .for_each(|(_, diff)| {
-                            diffs.push((shard_ident, diff.clone()));
-                        });
+            }
+
+            if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
+                for (block_seqno, diff) in shard_diffs.value() {
+                    if *block_seqno <= seqno {
+                        result.push((shard_ident, diff.clone()));
+                    }
                 }
-                diffs
-            })
-            .collect()
+            }
+        }
+
+        result
     }
 }
