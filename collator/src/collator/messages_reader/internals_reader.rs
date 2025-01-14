@@ -129,8 +129,8 @@ impl InternalsParitionReader {
 
     pub fn has_non_zero_processed_offset(&self) -> bool {
         self.range_readers
-            .iter()
-            .any(|(_, r)| r.reader_state.processed_offset > 0)
+            .values()
+            .any(|r| r.reader_state.processed_offset > 0)
     }
 
     pub fn last_range_offset_reached(&self) -> bool {
@@ -141,10 +141,17 @@ impl InternalsParitionReader {
             .unwrap_or(true)
     }
 
+    pub fn count_messages_in_buffers(&self) -> usize {
+        self.range_readers
+            .values()
+            .map(|v| v.reader_state.buffer.msgs_count())
+            .sum()
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
         self.range_readers
-            .iter()
-            .any(|(_, r)| r.reader_state.buffer.msgs_count() > 0)
+            .values()
+            .any(|r| r.reader_state.buffer.msgs_count() > 0)
     }
 
     pub fn all_existing_messages_collected(&self) -> bool {

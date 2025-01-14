@@ -129,7 +129,7 @@ impl ExternalsReader {
     }
 
     pub fn has_non_zero_processed_offset(&self) -> bool {
-        self.range_readers.iter().any(|(_, r)| {
+        self.range_readers.values().any(|r| {
             r.reader_state
                 .by_partitions
                 .values()
@@ -149,8 +149,21 @@ impl ExternalsReader {
             .unwrap_or_default()
     }
 
+    pub fn count_messages_in_buffers(&self) -> usize {
+        self.range_readers
+            .values()
+            .map(|v| {
+                v.reader_state
+                    .by_partitions
+                    .values()
+                    .map(|par| par.buffer.msgs_count())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
-        self.range_readers.iter().any(|(_, v)| {
+        self.range_readers.values().any(|v| {
             v.reader_state
                 .by_partitions
                 .values()

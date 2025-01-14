@@ -355,24 +355,39 @@ impl MessagesReader {
         self.new_messages.add_messages(messages);
     }
 
+    pub fn count_messages_in_buffers(&self) -> usize {
+        self.count_internals_in_buffers() + self.count_externals_in_buffers()
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
         self.has_internals_in_buffers() || self.has_externals_in_buffers()
     }
 
+    pub fn count_internals_in_buffers(&self) -> usize {
+        self.internals_partition_readers
+            .values()
+            .map(|v| v.count_messages_in_buffers())
+            .sum()
+    }
+
     pub fn has_internals_in_buffers(&self) -> bool {
         self.internals_partition_readers
-            .iter()
-            .any(|(_, v)| v.has_messages_in_buffers())
+            .values()
+            .any(|v| v.has_messages_in_buffers())
     }
 
     pub fn has_not_fully_read_internals_ranges(&self) -> bool {
         self.internals_partition_readers
-            .iter()
-            .any(|(_, v)| !v.all_ranges_fully_read)
+            .values()
+            .any(|v| !v.all_ranges_fully_read)
     }
 
     pub fn has_pending_new_messages(&self) -> bool {
         self.new_messages.has_pending_messages()
+    }
+
+    pub fn count_externals_in_buffers(&self) -> usize {
+        self.externals_reader.count_messages_in_buffers()
     }
 
     pub fn has_externals_in_buffers(&self) -> bool {
@@ -386,8 +401,8 @@ impl MessagesReader {
     pub fn check_has_non_zero_processed_offset(&self) -> bool {
         let check_internals = self
             .internals_partition_readers
-            .iter()
-            .any(|(_, par_reader)| par_reader.has_non_zero_processed_offset());
+            .values()
+            .any(|par_reader| par_reader.has_non_zero_processed_offset());
         if check_internals {
             return check_internals;
         }
@@ -525,6 +540,10 @@ impl MessagesReader {
             self.metrics.append(metrics);
         }
 
+        let labels = [("workchain", self.for_shard_id.workchain().to_string())];
+        metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
+            .set(self.count_messages_in_buffers() as f64);
+
         //----------
         // collect messages after reading
         let mut unused_buffer_accounts_by_partitions =
@@ -566,7 +585,7 @@ impl MessagesReader {
                 &par_readers,
             )?;
             msg_groups.insert(*par_id, msg_group);
-            metrics_of_partition.append(metrics);
+            // metrics_of_partition.append(metrics);
 
             // remove collected new messages
             self.new_messages
