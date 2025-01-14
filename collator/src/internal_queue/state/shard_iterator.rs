@@ -68,6 +68,7 @@ impl ShardIterator {
         if let Some(key) = self.iterator.key() {
             let key = ShardsInternalMessagesKey::from(key);
 
+            // skip first key if it is equal to `from`
             if key == self.range.from {
                 return Ok(Some(IterResult::Skip(None)));
             }
