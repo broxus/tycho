@@ -69,34 +69,35 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
-        let diffs = if self.state.collation_data.block_id_short.is_masterchain() {
-            let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
-                Some(
-                    self.state
-                        .collation_data
-                        .top_shard_blocks
-                        .iter()
-                        .map(|b| (b.block_id.shard, b.block_id.seqno))
-                        .collect(),
-                )
-            } else {
-                None
-            };
-
-            // load diffs by top shard blocks
-            mq_adapter.get_diffs(top_shard_blocks.clone().unwrap_or_default())
+        // getting top shard blocks
+        let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
+            self.state
+                .collation_data
+                .top_shard_blocks
+                .iter()
+                .map(|b| (b.block_id.shard, b.block_id.seqno))
+                .collect()
         } else {
-            let blocks = self
+            let mut top_blocks: FastHashMap<ShardIdent, u32> = self
                 .state
                 .mc_data
                 .shards
                 .iter()
-                .filter(|(_, d)| d.top_sc_block_updated)
+                .filter(|(shard, descr)| {
+                    descr.top_sc_block_updated && shard != &self.state.shard_id
+                })
                 .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
                 .collect();
 
-            mq_adapter.get_diffs(blocks)
+            top_blocks.insert(
+                self.state.mc_data.block_id.shard,
+                self.state.mc_data.block_id.seqno,
+            );
+
+            top_blocks
         };
+
+        let diffs = mq_adapter.get_diffs(top_shard_blocks);
 
         // get queue diff and check for pending internals
         let create_queue_diff_elapsed;

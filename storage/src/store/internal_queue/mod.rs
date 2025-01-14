@@ -443,14 +443,26 @@ impl InternalQueueStorage {
             snapshot,
         )
     }
-    pub fn clear_uncommitted_queue(&self) -> Result<()> {
+    pub fn clear_uncommitted_state(&self) -> Result<()> {
         let cf = self.db.shards_internal_messages_uncommitted.cf();
-        self.clear_queue(&cf)
+        self.clear(&cf)?;
+
+        let cf = self.db.internal_messages_statistics_uncommitted.cf();
+        let start_key = [0x00; StatKey::SIZE_HINT];
+        let end_key = [0xFF; StatKey::SIZE_HINT];
+        self.db
+            .rocksdb()
+            .delete_range_cf(&cf, &start_key, &end_key)?;
+        self.db
+            .rocksdb()
+            .compact_range_cf(&cf, Some(start_key), Some(end_key));
+
+        Ok(())
     }
 
     pub fn clear_committed_queue(&self) -> Result<()> {
         let cf = self.db.shards_internal_messages.cf();
-        self.clear_queue(&cf)
+        self.clear(&cf)
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
@@ -473,7 +485,7 @@ impl InternalQueueStorage {
         Self::insert_message(batch, cf, key, dest.workchain() as i8, dest.prefix(), value)
     }
 
-    fn clear_queue(&self, cf: &BoundedCfHandle<'_>) -> Result<()> {
+    fn clear(&self, cf: &BoundedCfHandle<'_>) -> Result<()> {
         let start_key = [0x00; ShardsInternalMessagesKey::SIZE_HINT];
         let end_key = [0xFF; ShardsInternalMessagesKey::SIZE_HINT];
         self.db

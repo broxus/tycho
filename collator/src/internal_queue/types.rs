@@ -28,6 +28,8 @@ impl PartitionRouter {
         }
     }
 
+    /// Returns the partition for the given source and destination addresses.
+    /// If the partition is not found, returns the default partition.
     pub fn get_partition(&self, src_addr: Option<&IntAddr>, dest_addr: &IntAddr) -> QueuePartition {
         self.router
             .get(&RouterDirection::Dest)
@@ -42,6 +44,7 @@ impl PartitionRouter {
             .unwrap_or_default()
     }
 
+    /// Inserts the address into the router.
     pub fn insert(
         &mut self,
         direction: RouterDirection,
