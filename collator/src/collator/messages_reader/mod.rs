@@ -353,7 +353,7 @@ impl MessagesReader {
             aggregated_stats,
             self.for_shard_id,
             diffs,
-        );
+        )?;
 
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
@@ -368,62 +368,66 @@ impl MessagesReader {
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
         top_block_diffs: Vec<(ShardIdent, ShortQueueDiff)>,
-    ) {
+    ) -> Result<()> {
         // TODO: msgs-v3: store limit in msgs_exec_params
         const MAX_PAR_0_MSGS_COUNT_LIMIT: u64 = 100_000;
 
-        for (int_address, msgs_count) in aggregated_stats {
-            let int_address_bytes = int_address.as_std().unwrap().address;
-            let acc_for_current_shard = for_shard_id.contains_account(&int_address_bytes);
-
-            let existing_partition = partition_router.get_partition(None, &int_address);
+        for (dest_int_address, msgs_count) in aggregated_stats {
+            let existing_partition = partition_router.get_partition(None, &dest_int_address);
             if existing_partition != 0 {
                 continue;
             }
 
-            if acc_for_current_shard {
+            if for_shard_id.contains_address(&dest_int_address) {
+                // if we have account for current shard then check if we need to move it to partition 1
+                // if we have less than MAX_PAR_0_MSGS_COUNT_LIMIT messages then keep it in partition 0
                 if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
-                    partition_router
-                        .insert(RouterDirection::Dest, int_address, 1)
-                        .unwrap();
+                    partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
                 }
             } else {
                 // if we have account for another shard then take info from that shard
                 let acc_shard_diff_info = top_block_diffs
                     .iter()
-                    .find(|(shard_id, _)| shard_id.contains_account(&int_address_bytes))
+                    .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
                     .map(|(_, diff)| diff);
 
-                if let Some(diff) = acc_shard_diff_info {
-                    // if we found low priority partition in remote diff then copy it
-                    let remote_shard_partition = diff.router.get_partition(None, &int_address);
-                    if remote_shard_partition != 0 {
-                        partition_router
-                            .insert(RouterDirection::Dest, int_address, remote_shard_partition)
-                            .unwrap();
-                        continue;
+                // try to get remote partition from diff
+                let total_msgs = match acc_shard_diff_info {
+                    // if we do not have diff then use aggregated stats
+                    None => msgs_count,
+                    Some(diff) => {
+                        // getting remote shard partition from diff
+                        let remote_shard_partition = diff
+                            .router()
+                            .get_partition(Default::default(), &dest_int_address);
+
+                        if remote_shard_partition != 0 {
+                            partition_router.insert(
+                                RouterDirection::Dest,
+                                dest_int_address,
+                                remote_shard_partition,
+                            )?;
+                            continue;
+                        }
+
+                        // if remote partition == 0 then we need to check statistics
+                        let remote_msgs_count = match diff.statistics().partition(0) {
+                            None => 0,
+                            Some(partition) => {
+                                partition.get(&dest_int_address).copied().unwrap_or(0)
+                            }
+                        };
+
+                        msgs_count + remote_msgs_count
                     }
-
-                    // if remote partition == 0 then we need to check statistics
-                    let remote_msgs_count = match diff.statistics.partition(0) {
-                        None => 0,
-                        Some(partition) => partition.get(&int_address).copied().unwrap_or(0),
-                    };
-
-                    let total = msgs_count + remote_msgs_count;
-
-                    if total > MAX_PAR_0_MSGS_COUNT_LIMIT {
-                        partition_router
-                            .insert(RouterDirection::Dest, int_address, 1)
-                            .unwrap();
-                    }
-                } else if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
-                    partition_router
-                        .insert(RouterDirection::Dest, int_address, 1)
-                        .unwrap();
+                };
+                if total_msgs > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                    partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
