@@ -113,6 +113,10 @@ fn gc_task<V: InternalMessageValue>(
             }
         }
     }
+
+    // the total number of entries in the GC state
+    let total_entries = gc_state.values().map(|map| map.len()).sum::<usize>();
+    metrics::gauge!("tycho_internal_queue_gc_state_size").set(total_entries as f64);
 }
 
 type GcRange = FastHashMap<QueuePartition, FastHashMap<ShardIdent, QueueKey>>;
