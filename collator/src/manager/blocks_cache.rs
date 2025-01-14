@@ -174,21 +174,16 @@ impl BlocksCache {
                 continue;
             }
 
-            let mut processed_to = BTreeMap::default();
+            let mut processed_to_opt = None;
 
             // try to find in cache
             if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    sc_block_entry
-                        .int_processed_to()
-                        .iter()
-                        .for_each(|(shard, queue_key)| {
-                            processed_to.insert(*shard, *queue_key);
-                        });
+                    processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
                 }
             }
 
-            all_processed_to.insert(top_sc_block_id, Some(processed_to));
+            all_processed_to.insert(top_sc_block_id, processed_to_opt);
         }
 
         Ok(all_processed_to)
