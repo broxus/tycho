@@ -118,63 +118,109 @@ impl Drop for LimiterGuard<'_> {
 
 #[cfg(all(test, feature = "test"))]
 mod tests {
-    use std::collections::VecDeque;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::Result;
     use futures_util::stream::FuturesUnordered;
-    use futures_util::{future, StreamExt};
+    use futures_util::{future, TryStreamExt};
     use itertools::Itertools;
     use rand::RngCore;
-    use tokio::time::Instant;
+    use tokio::sync::{mpsc, Barrier};
+    use tokio_stream::StreamExt;
 
     use super::*;
     use crate::test_utils::{default_test_config, test_logger};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn order() -> Result<()> {
+    async fn order_many() -> Result<()> {
         test_logger::spans("order", "info");
         test_logger::set_print_panic_hook(true);
 
+        let instant = Instant::now();
+
+        let futures = FuturesUnordered::new();
+
+        const RUNS: u32 = 1;
+        for _ in 0..RUNS {
+            futures.push(order());
+        }
+
+        let result = futures.collect::<Result<Vec<()>>>().await;
+
+        tracing::info!(
+            "{RUNS} run(s) took {}",
+            humantime::format_duration(instant.elapsed())
+        );
+
+        result?;
+        Ok(())
+    }
+
+    async fn order() -> Result<()> {
         let mut config = default_test_config().consensus;
 
         config.download_tasks = 0; // Note feature of this test: sequential execution
 
         let limiter = Arc::new(Limiter::default());
 
-        let mut futures = FuturesUnordered::new();
+        const ITEMS: usize = 200;
 
-        let values = (0..200)
-            .sorted_by_cached_key(|_| rand::thread_rng().next_u32())
-            .collect::<Vec<_>>();
+        let values: Vec<u32> = (0..ITEMS)
+            .map(|i| i as u32)
+            .sorted_by_cached_key(|_| rand::thread_rng().next_u64())
+            .collect();
+
+        let spawned = FuturesUnordered::new();
+
+        let mut results: Vec<u32> = Vec::with_capacity(ITEMS);
+
+        // without barrier the 1st spawned future may resolve earlier than 2nd is spawned,
+        // so 2nd will be out of order too
+        let all_spawned = Arc::new(Barrier::new(ITEMS));
+
+        let (sender, mut receiver) = mpsc::channel(ITEMS);
 
         for i in values {
+            let all_spawned = all_spawned.clone();
             let limiter = limiter.clone();
             let config = config.clone();
-            futures.push(tokio::spawn(async move {
+            let sender = sender.clone();
+            spawned.push(tokio::spawn(async move {
+                all_spawned.wait().await;
                 let _guard = limiter.enter(Round(i), &config).await;
-                tracing::trace!("{i} guard entered");
+                tracing::debug!("{i} guard entered");
+                // no ctx switch here
+                sender.try_send(i)?;
+                // immediately freed guard will make limiter queue empty at random moments;
+                // tokio on CI will reorder tasks when overloaded so will need to sleep more
                 tokio::time::sleep(Duration::from_millis(5)).await;
-                tracing::debug!("{i} awaken");
-                i
+                Ok(())
             }));
         }
 
-        let mut results = VecDeque::new();
-        while let Some(i) = futures.next().await {
-            results.push_back(i?);
-        }
+        spawned
+            .try_collect::<Vec<Result<()>>>()
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<()>>>()?;
 
-        // first resolved may be in order of either rounds or spawns
-        results.pop_front();
-
-        anyhow::ensure!(
-            results.iter().tuple_windows().all(|(a, b)| a > b),
-            "all (except first) resolved must be is in order of rounds: {:?}",
-            results
-        );
+        receiver.recv_many(&mut results, ITEMS).await;
 
         ensure_roundtrip(limiter)?;
+
+        let bad_order = results
+            .iter()
+            .tuple_windows()
+            .skip(1)
+            .filter(|(a, b)| a < b)
+            .collect::<Vec<_>>();
+
+        // first resolved may be in order of either rounds or spawns
+        anyhow::ensure!(
+            bad_order.is_empty(),
+            "all (except first) resolved must be in DESC order: \
+             also found {bad_order:?} in all {results:?}",
+        );
 
         Ok(())
     }
@@ -227,9 +273,9 @@ mod tests {
             humantime::format_duration(expected_duration),
         );
 
-        anyhow::ensure!(elapsed < expected_duration);
-
         ensure_roundtrip(limiter)?;
+
+        anyhow::ensure!(elapsed < expected_duration);
 
         Ok(())
     }
