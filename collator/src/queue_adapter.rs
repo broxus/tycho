@@ -69,11 +69,12 @@ where
     ) -> Result<()>;
 
     fn clear_uncommitted_state(&self) -> Result<()>;
-    /// removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
+    /// Removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
+    /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
 
-    /// returns the number of diffs in cache for the given shard
+    /// Returns the number of diffs in cache for the given shard
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
 }
 

@@ -1259,6 +1259,9 @@ def collator_queue_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
+        create_gauge_panel(
+            "tycho_internal_queue_gc_state_size", "Total GC state size",
+        ),
     ]
     return create_row("collator: Queue Metrics", metrics)
 

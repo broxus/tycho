@@ -55,8 +55,9 @@ pub trait CommittedStateFactory<V: InternalMessageValue> {
 // TRAIT
 
 pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
+    /// Create snapshot
     fn snapshot(&self) -> OwnedSnapshot;
-
+    /// Create iterator for given partition and ranges
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
@@ -65,7 +66,10 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
+    /// Delete messages in given partition and ranges
     fn delete(&self, partition: QueuePartition, ranges: &[QueueShardRange]) -> Result<()>;
+
+    /// Load statistics for given partition and ranges
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,

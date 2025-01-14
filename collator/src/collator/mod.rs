@@ -1307,7 +1307,10 @@ impl CollatorStdImpl {
         // return reader state to working state
         let FinalizedMessagesReader {
             mut reader_state, ..
-        } = messages_reader.finalize(0, vec![])?;
+        } = messages_reader.finalize(
+            0, // can pass 0 because new messages reader was not initialized in this case
+            vec![],
+        )?;
         std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
         working_state.has_unprocessed_messages = Some(has_pending_internals);

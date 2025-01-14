@@ -139,13 +139,16 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
                         break;
                     }
                     Some(IterResult::Skip(Some((shard_partition, queue_key)))) => {
+                        // skip if we are not receiver for this message
                         self.current_position.insert(shard_partition, queue_key);
                         iter.shift();
                     }
                     Some(IterResult::Skip(None)) => {
+                        // skip if it's a first key in range
                         iter.shift();
                     }
                     None => {
+                        // remove iterator if it's empty
                         self.iters_to_remove.push(*shard_ident);
                         break;
                     }
@@ -163,12 +166,15 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
 
 impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
     fn next(&mut self) -> Result<Option<MessageExt<V>>> {
+        // refill queue for each shard in range
         self.refill_queue()?;
 
+        // take ordered by lt+hash message from filled queue
         if let Some(Reverse(message)) = self.message_queue.pop() {
             let message_key = message.message.key();
             self.current_position.insert(message.source, message_key);
 
+            // set shard as not in queue for refilling next time
             self.in_queue.remove(&message.source);
             return Ok(Some(message));
         }

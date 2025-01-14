@@ -549,6 +549,208 @@ async fn test_queue() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
+
+    let queue_factory = QueueFactoryStdImpl {
+        uncommitted_state_factory: UncommittedStateImplFactory {
+            storage: storage.clone(),
+        },
+        committed_state_factory: CommittedStateImplFactory {
+            storage: storage.clone(),
+        },
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+    };
+
+    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
+        queue_factory.create();
+
+    // create first block with queue diff
+    let block1 = BlockIdShort {
+        shard: ShardIdent::new_full(0),
+        seqno: 0,
+    };
+    let mut diff = QueueDiffWithMessages::new();
+
+    let mut partition_router = PartitionRouter::default();
+
+    let dest_1_low_priority =
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
+    let dest_2_low_normal_priority =
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
+
+    // low priority
+    for i in 1..=10000 {
+        let stored_object = create_stored_object(i, dest_1_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
+    }
+
+    for i in 20001..=30000 {
+        let stored_object = create_stored_object(i, dest_1_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
+    }
+
+    for i in 100000..=150000 {
+        let stored_object = create_stored_object(i, dest_2_low_normal_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+    }
+
+    let diff_with_messages = QueueDiffWithMessages {
+        messages: diff.messages,
+        processed_to: diff.processed_to,
+        partition_router,
+    };
+
+    let diff_statistics: DiffStatistics = (&diff_with_messages, block1.shard).into();
+
+    let max_message = *diff_with_messages.messages.keys().last().unwrap();
+
+    queue.apply_diff(
+        diff_with_messages,
+        block1,
+        &HashBytes::from([1; 32]),
+        diff_statistics,
+        max_message,
+    )?;
+    // end block 1 diff
+
+    // create second block with queue diff
+    let block2 = BlockIdShort {
+        shard: ShardIdent::new_full(-1),
+        seqno: 0,
+    };
+    let mut diff = QueueDiffWithMessages::new();
+
+    let mut partition_router = PartitionRouter::default();
+
+    let dest_1_low_priority =
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([1; 32]))))?;
+    let dest_2_low_normal_priority =
+        RouterAddr::try_from(IntAddr::Std(StdAddr::new(-1, HashBytes::from([2; 32]))))?;
+
+    // low priority
+    for i in 10001..=20000 {
+        let stored_object = create_stored_object(i, dest_1_low_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+        partition_router.insert(RouterDirection::Dest, stored_object.dest.clone(), 1)?;
+    }
+
+    for i in 200000..=250000 {
+        let stored_object = create_stored_object(i, dest_2_low_normal_priority)?;
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+    }
+
+    let diff_with_messages = QueueDiffWithMessages {
+        messages: diff.messages,
+        processed_to: diff.processed_to,
+        partition_router,
+    };
+
+    let diff_statistics: DiffStatistics = (&diff_with_messages, block2.shard).into();
+
+    let max_message = *diff_with_messages.messages.keys().last().unwrap();
+
+    queue.apply_diff(
+        diff_with_messages,
+        block2,
+        &HashBytes::from([1; 32]),
+        diff_statistics,
+        max_message,
+    )?;
+    // end block 2 diff
+
+    // test iterator
+    let mut ranges = Vec::new();
+
+    let queue_range1 = QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 0,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 30000,
+            hash: HashBytes::default(),
+        },
+    };
+
+    let queue_range2 = QueueShardRange {
+        shard_ident: ShardIdent::new_full(-1),
+        from: QueueKey {
+            lt: 10000,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 20000,
+            hash: HashBytes::default(),
+        },
+    };
+
+    ranges.push(queue_range1);
+    ranges.push(queue_range2);
+
+    let stat_range1 = QueueShardRange {
+        shard_ident: ShardIdent::new_full(0),
+        from: QueueKey {
+            lt: 1,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 150000,
+            hash: HashBytes::default(),
+        },
+    };
+
+    let stat_range2 = QueueShardRange {
+        shard_ident: ShardIdent::new_full(-1),
+        from: QueueKey {
+            lt: 1,
+            hash: HashBytes::default(),
+        },
+        to: QueueKey {
+            lt: 250000,
+            hash: HashBytes::default(),
+        },
+    };
+
+    let statistics = queue.load_statistics(1, vec![stat_range1, stat_range2])?;
+
+    let stat = statistics
+        .statistics()
+        .get(&dest_1_low_priority.to_int_addr())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(stat, 30000);
+
+    let iterators = queue.iterator(1, ranges.clone(), ShardIdent::new_full(-1))?;
+
+    let mut iterator_manager = StatesIteratorsManager::new(iterators);
+    let mut read_count = 0;
+    while let Some(message) = iterator_manager.next()? {
+        if message.message.key <= 10000 || message.message.key >= 20001 {
+            assert_eq!(message.source, block1.shard);
+        } else {
+            assert_eq!(message.source, block2.shard);
+        }
+        read_count += 1;
+        // check sequence
+        assert_eq!(message.message.key, read_count);
+    }
+    assert_eq!(read_count, 30000);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_clear() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
