@@ -249,7 +249,12 @@ impl BlockStorage {
         );
 
         for archive_id in archives_to_commit {
-            tracing::info!(archive_id, "found partially committed archive");
+            tracing::info!(archive_id, "clear partially committed archive");
+            // Solves the problem of non-deterministic compression when commit archive
+            // was interrupted and should be rewritten
+            self.clear_archive(archive_id)?;
+
+            tracing::info!(archive_id, "rewrite partially committed archive");
             let mut task = self.spawn_commit_archive(archive_id);
             task.finish().await?;
         }
@@ -1027,6 +1032,25 @@ impl BlockStorage {
         debug_assert!(mc_seqno - archive_id.id <= ARCHIVE_PACKAGE_SIZE);
 
         archive_id
+    }
+
+    fn clear_archive(&self, archive_id: u32) -> Result<()> {
+        let archives_cf = self.db.archives.cf();
+        let write_options = self.db.archives.write_config();
+
+        let mut start_key = [0u8; tables::Archives::KEY_LEN];
+        start_key[..4].copy_from_slice(&archive_id.to_be_bytes());
+        start_key[4..].fill(0x00);
+
+        let mut end_key = [0u8; tables::Archives::KEY_LEN];
+        end_key[..4].copy_from_slice(&archive_id.to_be_bytes());
+        end_key[4..].fill(0xFF);
+
+        self.db
+            .rocksdb()
+            .delete_range_cf_opt(&archives_cf, start_key, end_key, write_options)?;
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]

@@ -463,7 +463,7 @@ async fn heavy_archives() -> Result<()> {
                 if let Some(block) = result {
                     assert!(data_entry.block.is_some());
                     if let Some(data) = data_entry.block.as_ref() {
-                        let archive_block = BlockStuff::deserialize_checked(block_id, data)?;
+                        let archive_block = BlockStuff::deserialize_checked(block_id, data)?;ve non-deterministic compression problem when rewrite partially committed archive)
                         assert_eq!(block?.block(), archive_block.block());
                     }
                 }
