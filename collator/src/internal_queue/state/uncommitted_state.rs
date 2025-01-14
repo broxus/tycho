@@ -64,6 +64,7 @@ pub trait UncommittedStateFactory<V: InternalMessageValue> {
 
 #[trait_variant::make(UncommittedState: Send)]
 pub trait LocalUncommittedState<V: InternalMessageValue> {
+    /// Create iterator for given partition and ranges
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
@@ -72,11 +73,14 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
+    /// Move messages and statistics from uncommitted to committed state with given partitions and ranges
     fn commit(
         &self,
         partitions: FastHashSet<QueuePartition>,
         ranges: &[QueueShardRange],
     ) -> Result<()>;
+
+    /// Delete all uncommitted messages and statistics
     fn truncate(&self) -> Result<()>;
 
     fn add_messages_with_statistics(
@@ -87,6 +91,7 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         statistics: &DiffStatistics,
     ) -> Result<()>;
 
+    /// Load statistics for given partition and ranges
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
@@ -153,7 +158,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
     fn truncate(&self) -> Result<()> {
         self.storage
             .internal_queue_storage()
-            .clear_uncommitted_queue()
+            .clear_uncommitted_state()
     }
 
     fn add_messages_with_statistics(
