@@ -1202,11 +1202,7 @@ where
             for (shard_id, to_key) in min_processed_upto.clone() {
                 min_processed_to_by_shards
                     .entry(shard_id)
-                    .and_modify(|min| {
-                        if &to_key < min {
-                            *min = to_key;
-                        }
-                    })
+                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
                     .or_insert(to_key);
             }
         }
