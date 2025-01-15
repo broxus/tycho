@@ -203,11 +203,10 @@ impl InternalsParitionReader {
         current_next_lt: u64,
     ) -> Result<()> {
         let for_shard_id = self.for_shard_id;
-        let last_range_reader = self.get_last_range_reader_mut()?;
-        if matches!(
-            last_range_reader.kind,
-            InternalsRangeReaderKind::NewMessages
-        ) {
+        let Ok(last_range_reader) = self.get_last_range_reader_mut() else {
+            return Ok(());
+        };
+        if last_range_reader.kind == InternalsRangeReaderKind::NewMessages {
             let current_shard_reader_state = last_range_reader
                 .reader_state
                 .shards
@@ -225,10 +224,7 @@ impl InternalsParitionReader {
     fn set_new_messages_range_reader_fully_read(&mut self) -> Result<()> {
         let for_shard_id = self.for_shard_id;
         let last_range_reader = self.get_last_range_reader_mut()?;
-        if matches!(
-            last_range_reader.kind,
-            InternalsRangeReaderKind::NewMessages
-        ) {
+        if last_range_reader.kind == InternalsRangeReaderKind::NewMessages {
             // set current position to the end of the range
             let current_shard_reader_state = last_range_reader
                 .reader_state

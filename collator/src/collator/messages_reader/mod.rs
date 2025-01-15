@@ -260,26 +260,23 @@ impl MessagesReader {
         Ok(false)
     }
 
-    pub fn finalize(self, current_next_lt: u64) -> Result<FinalizedMessagesReader> {
+    pub fn drop_internals_next_range_readers(&mut self) {
+        for (_, par_reader) in self.internals_partition_readers.iter_mut() {
+            par_reader.drop_next_range_reader();
+        }
+    }
+
+    pub fn finalize(mut self, current_next_lt: u64) -> Result<FinalizedMessagesReader> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
             || self.has_pending_externals_in_cache();
-
-        // collect externals reader state
-        let FinalizedExternalsReader {
-            externals_reader_state,
-            anchors_cache,
-        } = self.externals_reader.finalize()?;
-        let mut reader_state = ReaderState {
-            externals: externals_reader_state,
-            internals: Default::default(),
-        };
 
         // aggregated messages stats from all ranges
         // we need it to detect target ratition for new messages from queue diff
         let mut aggregated_stats = QueueStatistics::default();
 
         // collect internals partition readers states
+        let mut internals_reader_state = InternalsReaderState::default();
         for (par_id, mut par_reader) in self.internals_partition_readers {
             // collect aggregated messages stats
             for range_reader in par_reader.range_readers().values() {
@@ -294,12 +291,44 @@ impl MessagesReader {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
             }
 
+            // handle last new messages range reader
+            if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
+                if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
+                    // if skip offset in new messages reader and last externals range reader are same
+                    // then we can drop processed offset both in internals and externals readers
+                    let last_ext_range_reader = self
+                        .externals_reader
+                        .get_last_range_reader()?
+                        .1
+                        .reader_state()
+                        .get_state_by_partition(&par_id)?;
+
+                    if last_int_range_reader.reader_state.skip_offset
+                        == last_ext_range_reader.skip_offset
+                    {
+                        par_reader.drop_processing_offset(true)?;
+                        self.externals_reader
+                            .drop_processing_offset(&par_id, true)?;
+                    }
+                }
+            }
+
             let par_reader_state = par_reader.finalize(current_next_lt)?;
-            reader_state
-                .internals
+            internals_reader_state
                 .partitions
                 .insert(par_id, par_reader_state);
         }
+
+        // collect externals reader state
+        let FinalizedExternalsReader {
+            externals_reader_state,
+            anchors_cache,
+        } = self.externals_reader.finalize()?;
+
+        let reader_state = ReaderState {
+            externals: externals_reader_state,
+            internals: internals_reader_state,
+        };
 
         // build queue diff
         let min_internals_processed_to = reader_state.internals.get_min_processed_to_by_shards();
@@ -637,9 +666,9 @@ impl MessagesReader {
         );
 
         if msg_group.len() == 0
-            && (!self.new_messages.has_pending_messages()
-                || (read_mode == GetNextMessageGroupMode::Refill
-                    && all_prev_processed_offset_reached))
+            && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
+                || !self.has_pending_new_messages()
+                || !self.has_messages_in_buffers())
         {
             Ok(None)
         } else {
