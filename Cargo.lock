@@ -1487,16 +1487,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "json_to_table"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a974bc5b8f9a651a655f8ab292e5f5d4487c55bf79a41027eb8818505c6428"
-dependencies = [
- "serde_json",
- "tabled",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3503,7 +3493,6 @@ dependencies = [
  "futures-util",
  "hex",
  "humantime",
- "json_to_table",
  "metrics",
  "parking_lot",
  "rand",
@@ -3514,6 +3503,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "tabled",
  "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",

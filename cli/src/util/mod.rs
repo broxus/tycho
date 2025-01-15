@@ -9,7 +9,6 @@ use everscale_types::abi::{AbiType, AbiValue, FromAbi, IntoAbi, WithAbiType};
 use everscale_types::models::{Account, StorageUsed};
 use everscale_types::num::{Tokens, VarUint56};
 use everscale_types::prelude::*;
-use json_to_table::{json_to_table, Orientation};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "jemalloc")]
@@ -31,15 +30,6 @@ pub fn print_json<T: Serialize>(output: T) -> Result<()> {
     }?;
 
     println!("{output}");
-    Ok(())
-}
-
-pub fn print_table<T: Serialize>(output: T) -> Result<()> {
-    let value = serde_json::to_value(output)?;
-    let table = json_to_table(&value)
-        .object_orientation(Orientation::Row)
-        .to_string();
-    println!("{table}");
     Ok(())
 }
 
