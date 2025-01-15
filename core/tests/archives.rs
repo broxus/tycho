@@ -1,29 +1,33 @@
 use anyhow::Result;
+use bytes::BytesMut;
 use bytesize::ByteSize;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use everscale_types::prelude::*;
 use futures_util::future;
 use futures_util::future::BoxFuture;
-use tycho_block_util::archive::Archive;
+use tycho_block_util::archive::{Archive, ArchiveVerifier};
 use tycho_block_util::block::{BlockIdExt, BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
-    BlockStrider, CheckProof, OptionalBlockStuff, PersistentBlockStriderState, ProofChecker,
-    ShardStateApplier, StateSubscriber, StateSubscriberContext,
+    ArchiveBlockProvider, ArchiveBlockProviderConfig, ArchiveHandler, ArchiveSubscriber,
+    ArchiveSubscriberContext, BlockProvider, BlockProviderExt, BlockStrider, CheckProof,
+    OptionalBlockStuff, PersistentBlockStriderState, ProofChecker, ShardStateApplier,
+    StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::PeerId;
 use tycho_storage::{ArchiveId, ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
-use tycho_util::compression::zstd_decompress;
+use tycho_util::compression::{zstd_decompress, ZstdDecompressStream};
 use tycho_util::project_root;
 
 use crate::network::TestNode;
 
 mod network;
 mod utils;
+
+const BLOCK_DATA_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
 #[derive(Default, Debug, Clone, Copy)]
 struct DummySubscriber;
@@ -89,6 +93,55 @@ impl BlockProvider for ArchiveProvider {
 
     fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
         future::ready(Ok(()))
+    }
+}
+
+pub struct ArchiveHandlerSubscriber {}
+
+impl ArchiveSubscriber for ArchiveHandlerSubscriber {
+    type HandleArchiveFut<'a> = future::Ready<Result<()>>;
+
+    fn handle_archive<'a>(
+        &'a self,
+        cx: &'a ArchiveSubscriberContext<'_>,
+    ) -> Self::HandleArchiveFut<'a> {
+        futures_util::future::ready(ArchiveHandlerInner::handle(cx))
+    }
+}
+
+struct ArchiveHandlerInner {}
+
+impl ArchiveHandlerInner {
+    fn handle(cx: &ArchiveSubscriberContext<'_>) -> Result<()> {
+        let iterator = cx.archive_iterator();
+
+        let mut zstd_decoder = ZstdDecompressStream::new(BLOCK_DATA_CHUNK_SIZE)?;
+
+        // Reuse buffer for decompressed data
+        let mut decompressed_chunk = Vec::new();
+
+        let mut verifier = ArchiveVerifier::default();
+
+        let mut archive_bytes = BytesMut::new();
+
+        for (key, chunk) in iterator {
+            let id = u32::from_be_bytes(key[..4].try_into()?);
+            assert_eq!(id, cx.archive_id);
+
+            decompressed_chunk.clear();
+            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
+
+            verifier.write_verify(decompressed_chunk.as_ref())?;
+
+            archive_bytes.extend_from_slice(decompressed_chunk.as_ref());
+        }
+
+        verifier.final_check()?;
+
+        // Build archive
+        Archive::new(archive_bytes)?;
+
+        Ok(())
     }
 }
 
@@ -289,6 +342,7 @@ async fn heavy_archives() -> Result<()> {
     let state_subscriber = DummySubscriber;
 
     let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
+    let archive_handler = ArchiveHandler::new(storage.clone(), ArchiveHandlerSubscriber {})?;
 
     // Archive provider
     let archive_path = integration_test_path.join("archive_1.bin");
@@ -331,7 +385,7 @@ async fn heavy_archives() -> Result<()> {
                 .chain(last_archive_provider),
         )
         .with_state(strider_state)
-        .with_block_subscriber(state_applier)
+        .with_block_subscriber((state_applier, archive_handler))
         .build();
 
     block_strider.run().await?;

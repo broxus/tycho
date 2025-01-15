@@ -46,6 +46,7 @@ pub struct BlockStorage {
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
+    archive_notifier: ArchiveNotifier,
 }
 
 impl BlockStorage {
@@ -71,11 +72,17 @@ impl BlockStorage {
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
+        let archive_notifier = {
+            let archive_id = Arc::new(tokio::sync::Mutex::new(None));
+            ArchiveNotifier { archive_id }
+        };
+
         Self {
             db,
             blocks_cache,
             block_handle_storage,
             block_connection_storage,
+            archive_notifier,
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
@@ -273,6 +280,10 @@ impl BlockStorage {
             tracing::info!(archive_id, "rewrite partially committed archive");
             let mut task = self.spawn_commit_archive(archive_id);
             task.finish().await?;
+
+            // New archive committed
+            let mut new_id = self.archive_notifier.archive_id.lock().await;
+            *new_id = Some(task.archive_id);
         }
 
         Ok(())
@@ -721,7 +732,13 @@ impl BlockStorage {
 
             // NOTE: Wait on reference to make sure that the task is cancel safe
             if let Some(task) = &mut *prev_archive_commit {
+                // Wait commit archive
                 task.finish().await?;
+
+                // NOTE: We must wait until all handlers of the previous archive are completed
+                // and after that when the mutex is released we write a new archive
+                let mut new_id = self.archive_notifier.archive_id.lock().await;
+                *new_id = Some(task.archive_id);
             }
             *prev_archive_commit = Some(self.spawn_commit_archive(to_commit));
         }
@@ -827,6 +844,33 @@ impl BlockStorage {
             // SAFETY: A value was received from the same RocksDB instance.
             unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }
         }))
+    }
+
+    pub fn archive_listener(&self) -> Arc<tokio::sync::Mutex<Option<u32>>> {
+        self.archive_notifier.archive_id.clone()
+    }
+
+    pub fn archive_chunks_iterator(
+        &self,
+        archive_id: u32,
+    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+        let mut from = [0u8; tables::Archives::KEY_LEN];
+        from[..4].copy_from_slice(&archive_id.to_be_bytes());
+
+        let mut to = [0u8; tables::Archives::KEY_LEN];
+        to[..4].copy_from_slice(&archive_id.to_be_bytes());
+        to[4..].copy_from_slice(&(ARCHIVE_STARTED_MAGIC - 1).to_be_bytes());
+
+        let mut read_opts = self.db.archives.new_read_config();
+        read_opts.set_iterate_upper_bound(to.as_slice());
+
+        let rocksdb = self.db.rocksdb();
+        let archives_cf = self.db.archives.cf();
+
+        let mut raw_iterator = rocksdb.raw_iterator_cf_opt(&archives_cf, read_opts);
+        raw_iterator.seek(from);
+
+        ArchiveIterator { raw_iterator }
     }
 
     // === GC stuff ===
@@ -1644,6 +1688,27 @@ struct PreparedArchiveId {
     is_new: bool,
     override_next_id: Option<u32>,
     to_commit: Option<u32>,
+}
+
+struct ArchiveNotifier {
+    archive_id: Arc<tokio::sync::Mutex<Option<u32>>>,
+}
+
+struct ArchiveIterator<'a> {
+    raw_iterator: rocksdb::DBRawIterator<'a>,
+}
+
+impl Iterator for ArchiveIterator<'_> {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self
+            .raw_iterator
+            .item()
+            .map(|(k, v)| (k.to_vec(), v.to_vec()));
+        self.raw_iterator.next();
+        result
+    }
 }
 
 type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
