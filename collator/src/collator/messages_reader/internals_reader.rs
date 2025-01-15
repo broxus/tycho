@@ -87,6 +87,11 @@ impl InternalsParitionReader {
         Ok(reader)
     }
 
+    pub(super) fn drop_next_range_reader(&mut self) {
+        self.range_readers
+            .retain(|_, r| r.kind != InternalsRangeReaderKind::Next);
+    }
+
     pub fn finalize(mut self, current_next_lt: u64) -> Result<InternalsPartitionReaderState> {
         // update new messages "to" boundary on current block next lt
         self.update_new_messages_reader_to_boundary(current_next_lt)?;
@@ -564,7 +569,7 @@ impl InternalsParitionReader {
     pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
         for (_, range_reader) in self.range_readers.iter_mut() {
             // skip new messages range readers
-            if matches!(range_reader.kind, InternalsRangeReaderKind::NewMessages) {
+            if range_reader.kind == InternalsRangeReaderKind::NewMessages {
                 continue;
             }
 
@@ -678,7 +683,7 @@ pub(super) struct CollectInternalsResult {
     pub collected_queue_msgs_keys: Vec<QueueKey>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum InternalsRangeReaderKind {
     Existing,
     Next,

@@ -1298,6 +1298,12 @@ impl CollatorStdImpl {
         // check if has pending internals
         let has_pending_internals = messages_reader.check_has_pending_internals_in_iterators()?;
 
+        // drop created next internals range readers for master
+        // because shard end_lt does not include updated top shard block info
+        if working_state.next_block_id_short.is_masterchain() {
+            messages_reader.drop_internals_next_range_readers();
+        }
+
         // return reader state to working state
         let FinalizedMessagesReader {
             mut reader_state, ..

@@ -421,6 +421,7 @@ pub struct DebugInternalsRangeReaderState<'a>(pub &'a InternalsRangeReaderState)
 impl std::fmt::Debug for DebugInternalsRangeReaderState<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("")
+            .field("skip_offset", &self.0.skip_offset)
             .field("processed_offset", &self.0.processed_offset)
             .field(
                 "shards",
