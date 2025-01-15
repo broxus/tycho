@@ -614,7 +614,7 @@ impl MessagesReader {
                 &par_readers,
             )?;
             msg_groups.insert(*par_id, msg_group);
-            // metrics_of_partition.append(metrics);
+            metrics_of_partition.append(metrics);
 
             // remove collected new messages
             self.new_messages
