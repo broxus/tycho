@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
-use crate::util::{print_json, print_table};
+use crate::util::print_json;
 use crate::BaseArgs;
 
 #[derive(Subcommand)]
@@ -166,16 +167,57 @@ impl CmdGetAccount {
 }
 
 #[derive(Parser)]
+#[clap(disable_help_flag = true)]
 pub struct CmdGetNeighbours {
     #[clap(flatten)]
     args: ControlArgs,
+
+    #[clap(short, long)]
+    human_readable: bool,
+
+    #[clap(long, action = clap::ArgAction::HelpLong)]
+    help: Option<bool>,
 }
 
 impl CmdGetNeighbours {
     pub fn run(self, args: BaseArgs) -> Result<()> {
-        self.args.rt(args, |client| async move {
-            let neighbours = client.get_neighbours_info().await?;
-            print_table(neighbours)
+        struct TableRow(tycho_control::proto::NeighbourInfo);
+
+        impl tabled::Tabled for TableRow {
+            const LENGTH: usize = 5;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                vec![
+                    Cow::from(self.0.id.to_string()),
+                    Cow::from(self.0.score.to_string()),
+                    Cow::from(self.0.failed_requests.to_string()),
+                    Cow::from(self.0.total_requests.to_string()),
+                    Cow::from(self.0.roundtrip_ms.to_string()),
+                ]
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("peer_id"),
+                    Cow::from("score"),
+                    Cow::from("failed_requests"),
+                    Cow::from("total_requests"),
+                    Cow::from("roundtrip_ms"),
+                ]
+            }
+        }
+
+        self.args.rt(args, move |client| async move {
+            let res = client.get_neighbours_info().await?;
+
+            if self.human_readable {
+                let mut table = tabled::Table::new(res.neighbours.into_iter().map(TableRow));
+                table.with(tabled::settings::Style::psql());
+                println!("{table}");
+                Ok(())
+            } else {
+                print_json(res)
+            }
         })
     }
 }
@@ -341,12 +383,16 @@ impl CmdFindArchive {
 
 /// Fetch the list of all stored archive ids.
 #[derive(Parser)]
+#[clap(disable_help_flag = true)]
 pub struct CmdListArchives {
     #[clap(flatten)]
     args: ControlArgs,
 
-    #[clap(long)]
+    #[clap(short, long)]
     human_readable: bool,
+
+    #[clap(long, action = clap::ArgAction::HelpLong)]
+    help: Option<bool>,
 }
 
 impl CmdListArchives {
@@ -453,12 +499,16 @@ impl CmdDumpArchive {
 
 /// Fetch the list of all stored block ids.
 #[derive(Parser)]
+#[clap(disable_help_flag = true)]
 pub struct CmdListBlocks {
     #[clap(flatten)]
     args: ControlArgs,
 
-    #[clap(long)]
+    #[clap(short, long)]
     human_readable: bool,
+
+    #[clap(long, action = clap::ArgAction::HelpLong)]
+    help: Option<bool>,
 }
 
 impl CmdListBlocks {
