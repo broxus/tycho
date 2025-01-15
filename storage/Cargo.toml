@@ -55,7 +55,6 @@ rand = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 tycho-block-util = { workspace = true, features = ["test"] }
-tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]

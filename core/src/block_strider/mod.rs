@@ -14,6 +14,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
+pub use self::archive_handler::{ArchiveHandler, ArchiveHandlerPrepared};
 pub use self::provider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
@@ -25,11 +26,13 @@ pub use self::state_applier::ShardStateApplier;
 #[cfg(any(test, feature = "test"))]
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
-    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber,
-    ManualGcTrigger, MetricsSubscriber, NoopSubscriber, PsSubscriber, StateSubscriber,
-    StateSubscriberContext, StateSubscriberExt,
+    ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
+    BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber, ManualGcTrigger,
+    MetricsSubscriber, NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext,
+    StateSubscriberExt,
 };
 
+mod archive_handler;
 mod provider;
 mod starter;
 mod state;

@@ -191,6 +191,76 @@ impl<B: StateSubscriber> StateSubscriberExt for B {
     }
 }
 
+// === trait ArchiveSubscriber ===
+
+pub struct ArchiveSubscriberContext<'a> {
+    pub archive_id: u32,
+    pub storage: &'a tycho_storage::Storage,
+}
+
+impl ArchiveSubscriberContext<'_> {
+    pub fn archive_iterator(&self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+        self.storage
+            .block_storage()
+            .archive_chunks_iterator(self.archive_id)
+    }
+}
+
+pub trait ArchiveSubscriber: Send + Sync + 'static {
+    type HandleArchiveFut<'a>: Future<Output = Result<()>> + Send + 'a;
+
+    fn handle_archive<'a>(
+        &'a self,
+        cx: &'a ArchiveSubscriberContext<'_>,
+    ) -> Self::HandleArchiveFut<'a>;
+}
+
+impl<T: ArchiveSubscriber> ArchiveSubscriber for Option<T> {
+    type HandleArchiveFut<'a> = OptionHandleFut<T::HandleArchiveFut<'a>>;
+
+    fn handle_archive<'a>(
+        &'a self,
+        cx: &'a ArchiveSubscriberContext<'_>,
+    ) -> Self::HandleArchiveFut<'a> {
+        OptionHandleFut::<_>::from(self.as_ref().map(|s| s.handle_archive(cx)))
+    }
+}
+
+impl<T: ArchiveSubscriber> ArchiveSubscriber for Box<T> {
+    type HandleArchiveFut<'a> = T::HandleArchiveFut<'a>;
+
+    fn handle_archive<'a>(
+        &'a self,
+        cx: &'a ArchiveSubscriberContext<'_>,
+    ) -> Self::HandleArchiveFut<'a> {
+        <T as ArchiveSubscriber>::handle_archive(self, cx)
+    }
+}
+
+impl<T: ArchiveSubscriber> ArchiveSubscriber for Arc<T> {
+    type HandleArchiveFut<'a> = T::HandleArchiveFut<'a>;
+
+    fn handle_archive<'a>(
+        &'a self,
+        cx: &'a ArchiveSubscriberContext<'_>,
+    ) -> Self::HandleArchiveFut<'a> {
+        <T as ArchiveSubscriber>::handle_archive(self, cx)
+    }
+}
+
+pub trait ArchiveSubscriberExt: Sized {
+    fn chain<T: ArchiveSubscriber>(self, other: T) -> ChainSubscriber<Self, T>;
+}
+
+impl<B: ArchiveSubscriber> ArchiveSubscriberExt for B {
+    fn chain<T: ArchiveSubscriber>(self, other: T) -> ChainSubscriber<Self, T> {
+        ChainSubscriber {
+            left: self,
+            right: other,
+        }
+    }
+}
+
 // === NoopSubscriber ===
 
 #[derive(Default, Debug, Clone, Copy)]

@@ -3814,7 +3814,6 @@ dependencies = [
  "tracing",
  "triomphe",
  "tycho-block-util",
- "tycho-storage",
  "tycho-util",
  "weedb",
 ]

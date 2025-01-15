@@ -740,8 +740,20 @@ def core_block_strider() -> RowPanel:
             "Time to handle block by ShardStateApplier",
         ),
         create_heatmap_panel(
+            "tycho_core_archive_handler_prepare_block_time",
+            "Time to prepare block by ArchiveHandler",
+        ),
+        create_heatmap_panel(
+            "tycho_core_archive_handler_handle_block_time",
+            "Time to handle block by ArchiveHandler",
+        ),
+        create_heatmap_panel(
             "tycho_core_subscriber_handle_state_time",
             "Total time to handle state by all subscribers",
+        ),
+        create_heatmap_panel(
+            "tycho_core_subscriber_handle_archive_time",
+            "Total time to handle archive by all subscribers",
         ),
         create_heatmap_panel(
             "tycho_core_apply_block_time",
