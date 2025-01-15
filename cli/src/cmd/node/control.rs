@@ -12,7 +12,7 @@ use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
-use crate::util::print_json;
+use crate::util::{print_json, print_table};
 use crate::BaseArgs;
 
 #[derive(Subcommand)]
@@ -175,7 +175,7 @@ impl CmdGetNeighbours {
     pub fn run(self, args: BaseArgs) -> Result<()> {
         self.args.rt(args, |client| async move {
             let neighbours = client.get_neighbours_info().await?;
-            print_json(neighbours)
+            print_table(neighbours)
         })
     }
 }
