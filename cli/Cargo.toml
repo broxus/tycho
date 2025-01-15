@@ -28,6 +28,7 @@ everscale-types = { workspace = true, features = ["abi"] }
 futures-util = { workspace = true }
 hex = { workspace = true }
 humantime = { workspace = true }
+json_to_table = { workspace = true }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
