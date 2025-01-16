@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{IntAddr, MsgInfo, ShardIdent};
+use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
 
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
@@ -28,6 +29,7 @@ pub(super) struct ExternalsReader {
     for_shard_id: ShardIdent,
     block_seqno: BlockSeqno,
     next_chain_time: u64,
+    msgs_exec_params: Arc<MsgsExecutionParams>,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<PartitionId, MessagesBufferLimits>,
     anchors_cache: AnchorsCache,
@@ -42,6 +44,7 @@ impl ExternalsReader {
         for_shard_id: ShardIdent,
         block_seqno: BlockSeqno,
         next_chain_time: u64,
+        msgs_exec_params: Arc<MsgsExecutionParams>,
         buffer_limits_by_partitions: BTreeMap<PartitionId, MessagesBufferLimits>,
         anchors_cache: AnchorsCache,
         mut reader_state: ExternalsReaderState,
@@ -55,6 +58,7 @@ impl ExternalsReader {
             for_shard_id,
             block_seqno,
             next_chain_time,
+            msgs_exec_params,
             buffer_limits_by_partitions,
             anchors_cache,
             reader_state,
@@ -289,6 +293,7 @@ impl ExternalsReader {
         let reader = ExternalsRangeReader {
             for_shard_id: self.for_shard_id,
             seqno,
+            msgs_exec_params: self.msgs_exec_params.clone(),
             buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
             fully_read: range_reader_state.range.current_position == range_reader_state.range.to,
             reader_state: range_reader_state,
@@ -355,6 +360,7 @@ impl ExternalsReader {
         let reader = ExternalsRangeReader {
             for_shard_id: self.for_shard_id,
             seqno: self.block_seqno,
+            msgs_exec_params: self.msgs_exec_params.clone(),
             fully_read: false,
             buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
             reader_state: ExternalsRangeReaderState {
@@ -591,6 +597,7 @@ pub(super) struct CollectExternalsResult {
 pub(super) struct ExternalsRangeReader {
     for_shard_id: ShardIdent,
     seqno: BlockSeqno,
+    msgs_exec_params: Arc<MsgsExecutionParams>,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<PartitionId, MessagesBufferLimits>,
     reader_state: ExternalsRangeReaderState,
@@ -748,10 +755,10 @@ impl ExternalsRangeReader {
                     && msgs_read_offset_in_last_anchor == prev_to.msgs_offset);
 
             // skip expired anchor
-            // TODO: msgs-v3: should move this param to blockchain config
-            const EXTERNALS_EXPIRE_TIMEOUT: u64 = 60_000; // 1 minute
+            let externals_expire_timeout_ms =
+                self.msgs_exec_params.externals_expire_timeout as u64 * 1000;
 
-            if next_chain_time.saturating_sub(anchor.chain_time) > EXTERNALS_EXPIRE_TIMEOUT {
+            if next_chain_time.saturating_sub(anchor.chain_time) > externals_expire_timeout_ms {
                 let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
                 let mut expired_msgs_count = 0;
                 for ext_msg in iter {
@@ -759,7 +766,7 @@ impl ExternalsRangeReader {
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             anchor_id,
                             "ext_msg hash: {}, dst: {} is expired by timeout {} ms",
-                            ext_msg.hash(), ext_msg.info.dst, EXTERNALS_EXPIRE_TIMEOUT,
+                            ext_msg.hash(), ext_msg.info.dst, externals_expire_timeout_ms,
                         );
                         expired_msgs_count += 1;
                     }

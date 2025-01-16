@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use everscale_types::models::{
-    ExternalsRange, InternalsRange, ProcessedUptoInfo, ProcessedUptoPartition, ShardIdent,
-    ShardIdentFull, ShardRange,
+    ExternalsRange, InternalsRange, Lazy, MsgsExecutionParams, ProcessedUptoInfo,
+    ProcessedUptoPartition, ShardIdent, ShardIdentFull, ShardRange,
 };
 
 use super::ProcessedTo;
@@ -19,6 +19,12 @@ pub struct ProcessedUptoInfoStuff {
     /// We split messages by partitions.
     /// Main partition 0 and others.
     pub partitions: BTreeMap<PartitionId, ProcessedUptoPartitionStuff>,
+
+    /// Actual messages execution params used for collated block.
+    /// They help to refill messages buffers on sync/restart and
+    /// process remaning messages in queues with previous params
+    /// before switching to a new params version.
+    pub msgs_exec_params: Option<MsgsExecutionParams>,
 }
 
 impl ProcessedUptoInfoStuff {
@@ -83,6 +89,10 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
             }
 
             res.partitions.insert(par_id, par_stuff);
+        }
+
+        if let Some(msgs_exec_params) = value.msgs_exec_params {
+            res.msgs_exec_params = Some(msgs_exec_params.load()?);
         }
 
         Ok(res)
@@ -164,6 +174,10 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
             }
 
             res.partitions.set(par_id, par)?;
+        }
+
+        if let Some(msgs_exec_params) = value.msgs_exec_params {
+            res.msgs_exec_params = Some(Lazy::new(&msgs_exec_params)?);
         }
 
         Ok(res)

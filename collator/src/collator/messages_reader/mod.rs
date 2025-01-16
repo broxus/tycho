@@ -11,7 +11,7 @@ use tycho_util::FastHashMap;
 use super::messages_buffer::{
     DisplayMessageGroup, FastIndexSet, MessageGroup, MessagesBufferLimits,
 };
-use super::types::AnchorsCache;
+use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
     EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
@@ -57,6 +57,8 @@ enum MessagesReaderStage {
 pub(super) struct MessagesReader {
     for_shard_id: ShardIdent,
 
+    msgs_exec_params: Arc<MsgsExecutionParams>,
+
     metrics: MessagesReaderMetrics,
 
     new_messages: NewMessagesState<EnqueuedMessage>,
@@ -72,7 +74,7 @@ pub(super) struct MessagesReaderContext {
     pub for_shard_id: ShardIdent,
     pub block_seqno: BlockSeqno,
     pub next_chain_time: u64,
-    pub msgs_exec_params: MsgsExecutionParams,
+    pub msgs_exec_params: Arc<MsgsExecutionParams>,
     pub mc_state_gen_lt: Lt,
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
@@ -104,12 +106,16 @@ impl MessagesReader {
 
         // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
 
-        // TODO: msgs-v3: should move the fraction value to params in blockchain config
+        let slots_fractions = cx.msgs_exec_params.group_slots_fractions()?;
 
         // internals: normal partition 0: 80% of `group_limit`, but min 1
+        let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
         internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
-            slots_count: group_limit.saturating_mul(80).saturating_div(100).max(1),
+            slots_count: group_limit
+                .saturating_mul(par_0_slots_fraction)
+                .saturating_div(100)
+                .max(1),
             slot_vert_size: group_vert_size,
         });
         // externals: normal partition 0: 100%, but min 2, vert size +1
@@ -120,9 +126,13 @@ impl MessagesReader {
         });
 
         // internals: low-priority partition 1: 10%, but min 1
+        let par_1_slots_fraction = slots_fractions.get(&1).cloned().unwrap() as usize;
         internals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
-            slots_count: group_limit.saturating_mul(80).saturating_div(100).max(1),
+            slots_count: group_limit
+                .saturating_mul(par_1_slots_fraction)
+                .saturating_div(100)
+                .max(1),
             slot_vert_size: group_vert_size,
         });
         // externals: low-priority partition 1: equal to internals, vert size +1
@@ -150,6 +160,7 @@ impl MessagesReader {
             cx.for_shard_id,
             cx.block_seqno,
             cx.next_chain_time,
+            cx.msgs_exec_params.clone(),
             externals_buffer_limits_by_partitions.clone(),
             cx.anchors_cache,
             cx.reader_state.externals,
@@ -157,6 +168,8 @@ impl MessagesReader {
 
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
+
+            msgs_exec_params: cx.msgs_exec_params,
 
             metrics: Default::default(),
 
@@ -349,6 +362,7 @@ impl MessagesReader {
         // reset queue diff partition router
         // according to actual aggregated stats
         Self::reset_partition_router_by_stats(
+            &self.msgs_exec_params,
             &mut queue_diff_with_msgs.partition_router,
             aggregated_stats,
             self.for_shard_id,
@@ -364,13 +378,13 @@ impl MessagesReader {
     }
 
     pub fn reset_partition_router_by_stats(
+        msgs_exec_params: &MsgsExecutionParams,
         partition_router: &mut PartitionRouter,
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
         top_block_diffs: Vec<(ShardIdent, ShortQueueDiff)>,
     ) -> Result<()> {
-        // TODO: msgs-v3: store limit in msgs_exec_params
-        const MAX_PAR_0_MSGS_COUNT_LIMIT: u64 = 100_000;
+        let par_0_msgs_count_limit = msgs_exec_params.par_0_msgs_count_limit as u64;
 
         for (dest_int_address, msgs_count) in aggregated_stats {
             let existing_partition = partition_router.get_partition(None, &dest_int_address);
@@ -380,8 +394,8 @@ impl MessagesReader {
 
             if for_shard_id.contains_address(&dest_int_address) {
                 // if we have account for current shard then check if we need to move it to partition 1
-                // if we have less than MAX_PAR_0_MSGS_COUNT_LIMIT messages then keep it in partition 0
-                if msgs_count > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                // if we have less than limit then keep it in partition 0
+                if msgs_count > par_0_msgs_count_limit {
                     partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
                 }
             } else {
@@ -421,7 +435,7 @@ impl MessagesReader {
                         msgs_count + remote_msgs_count
                     }
                 };
-                if total_msgs > MAX_PAR_0_MSGS_COUNT_LIMIT {
+                if total_msgs > par_0_msgs_count_limit {
                     partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
                 }
             }
