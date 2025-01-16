@@ -2200,7 +2200,7 @@ where
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Equeued next attempt to collate block for shard {}",
+            "Enqueued next attempt to collate block for shard {}",
             shard_id,
         );
 
