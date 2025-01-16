@@ -409,22 +409,26 @@ impl MaxBufferSize {
         let proc_path = std::env::var("MOCK_PROC_PATH").unwrap_or_else(|_| "/proc".to_string());
         #[cfg(not(any(feature = "test", test)))]
         let proc_path = "/proc";
-        let proc_path = Path::new(&proc_path);
-        let proc_path = proc_path.join(Path::new("sys/net/core"));
+        let proc_path = Path::new(&proc_path).join("sys/net/core");
 
-        let read_and_parse = |path: &str| -> Result<usize> {
-            let path = proc_path.join(path);
-            std::fs::read_to_string(&path)
+        let read_and_parse = |file_name: &str| -> Result<Option<usize>> {
+            let path = proc_path.join(file_name);
+            if !path.exists() {
+                tracing::warn!("{} not found", path.display());
+                return Ok(None);
+            }
+            let res = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?
                 .trim()
                 .parse()
-                .with_context(|| format!("Failed to parse {}", path.display()))
+                .with_context(|| format!("Failed to parse {}", path.display()))?;
+            Ok(Some(res))
         };
 
-        Ok(Some(Self {
-            send: read_and_parse(WMEM)?,
-            recv: read_and_parse(RMEM)?,
-        }))
+        let rmem = read_and_parse(RMEM)?;
+        let wmem = read_and_parse(WMEM)?;
+
+        Ok(rmem.zip(wmem).map(|(recv, send)| Self { send, recv }))
     }
 
     #[cfg(not(target_os = "linux"))]
