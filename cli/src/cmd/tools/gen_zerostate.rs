@@ -635,6 +635,10 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     })?;
 
     // Param 28
+    let mut group_slots_fractions = Dict::<u8, u8>::new();
+    group_slots_fractions.set(0, 80)?;
+    group_slots_fractions.set(1, 10)?;
+
     params.set_collation_config(&CollationConfig {
         shuffle_mc_validators: true,
 
@@ -644,9 +648,13 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
         max_uncommitted_chain_length: 31,
 
         msgs_exec_params: MsgsExecutionParams {
-            buffer_limit: 20_000,
+            buffer_limit: 10_000,
             group_limit: 100,
             group_vert_size: 10,
+            externals_expire_timeout: 60,
+            open_ranges_limit: 1_000,
+            par_0_msgs_count_limit: 100_000,
+            group_slots_fractions,
         },
 
         wu_used_to_import_next_anchor: 1_200_000_000,
