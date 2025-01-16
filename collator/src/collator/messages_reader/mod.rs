@@ -393,12 +393,25 @@ impl MessagesReader {
             }
 
             if for_shard_id.contains_address(&dest_int_address) {
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    "check address {} for partition 0 because it is in current shard",
+                    dest_int_address,
+                );
+
                 // if we have account for current shard then check if we need to move it to partition 1
                 // if we have less than limit then keep it in partition 0
                 if msgs_count > par_0_msgs_count_limit {
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        "move address {} to partition 1 because it has {} messages",
+                        dest_int_address, msgs_count,
+                    );
                     partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
                 }
             } else {
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    "reset partition router for address {} because it is not in current shard",
+                    dest_int_address,
+                );
                 // if we have account for another shard then take info from that shard
                 let acc_shard_diff_info = top_block_diffs
                     .iter()
@@ -408,14 +421,33 @@ impl MessagesReader {
                 // try to get remote partition from diff
                 let total_msgs = match acc_shard_diff_info {
                     // if we do not have diff then use aggregated stats
-                    None => msgs_count,
+                    None => {
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            "use aggregated stats for address {} because we do not have diff",
+                            dest_int_address,
+                        );
+                        msgs_count
+                    }
                     Some(diff) => {
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            "use diff for address {} because we have diff",
+                            dest_int_address,
+                        );
                         // getting remote shard partition from diff
                         let remote_shard_partition = diff
                             .router()
                             .get_partition(Default::default(), &dest_int_address);
 
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            "remote shard partition for address {} is {}",
+                            dest_int_address, remote_shard_partition,
+                        );
+
                         if remote_shard_partition != 0 {
+                            tracing::trace!(target: tracing_targets::COLLATOR,
+                                "move address {} to partition {} because it has partition {} in diff",
+                                dest_int_address, remote_shard_partition, remote_shard_partition,
+                            );
                             partition_router.insert(
                                 RouterDirection::Dest,
                                 dest_int_address,
@@ -426,8 +458,18 @@ impl MessagesReader {
 
                         // if remote partition == 0 then we need to check statistics
                         let remote_msgs_count = match diff.statistics().partition(0) {
-                            None => 0,
+                            None => {
+                                tracing::trace!(target: tracing_targets::COLLATOR,
+                                    "use aggregated stats for address {} because we do not have partition 0 stats in diff",
+                                    dest_int_address,
+                                );
+                                0
+                            }
                             Some(partition) => {
+                                tracing::trace!(target: tracing_targets::COLLATOR,
+                                    "use partition 0 stats for address {} because we have partition 0 stats in diff",
+                                    dest_int_address,
+                                );
                                 partition.get(&dest_int_address).copied().unwrap_or(0)
                             }
                         };
@@ -435,7 +477,16 @@ impl MessagesReader {
                         msgs_count + remote_msgs_count
                     }
                 };
+
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    "total messages for address {} is {}",
+                    dest_int_address, total_msgs,
+                );
                 if total_msgs > par_0_msgs_count_limit {
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        "move address {} to partition 1 because it has {} messages",
+                        dest_int_address, total_msgs,
+                    );
                     partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
                 }
             }
@@ -615,6 +666,7 @@ impl MessagesReader {
                 MessagesReaderStage::ExternalsAndNew => {
                     let read_new_messages_res = par_reader
                         .read_new_messages_into_buffers(&mut self.new_messages, current_next_lt)?;
+
                     metrics_of_partition.append(read_new_messages_res.metrics);
                 }
             }
@@ -647,9 +699,9 @@ impl MessagesReader {
 
         //----------
         // collect messages after reading
-        let mut unused_buffer_accounts_by_partitions =
-            FastHashMap::<(PartitionId, BlockSeqno), FastIndexSet<HashBytes>>::default();
-        let mut par_readers = BTreeMap::<PartitionId, InternalsParitionReader>::default();
+        let mut unused_buffer_accounts_by_partitions = FastHashMap::default();
+        let mut partitions_readers = BTreeMap::default();
+
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             // extract partition reader from state to use partition 0 buffer
             // to check for account skip on collecting messages from partition 1
@@ -662,7 +714,7 @@ impl MessagesReader {
             if read_mode == GetNextMessageGroupMode::Refill
                 && par_reader.last_range_offset_reached()
             {
-                par_readers.insert(*par_id, par_reader);
+                partitions_readers.insert(*par_id, par_reader);
                 continue;
             }
 
@@ -683,8 +735,10 @@ impl MessagesReader {
                 &mut self.externals_reader,
                 has_pending_new_messages_for_partition,
                 &mut unused_buffer_accounts_by_partitions,
-                &par_readers,
+                &partitions_readers,
+                &msg_groups,
             )?;
+
             msg_groups.insert(*par_id, msg_group);
             metrics_of_partition.append(metrics);
 
@@ -692,10 +746,10 @@ impl MessagesReader {
             self.new_messages
                 .remove_collected_messages(&collected_queue_msgs_keys);
 
-            par_readers.insert(*par_id, par_reader);
+            partitions_readers.insert(*par_id, par_reader);
         }
-        // return partion readers to state
-        self.internals_partition_readers = par_readers;
+        // return partition readers to state
+        self.internals_partition_readers = partitions_readers;
 
         // aggregate metrics from partitions
         for (par_id, metrics) in metrics_by_partitions {
@@ -757,7 +811,8 @@ impl MessagesReader {
             (PartitionId, BlockSeqno),
             FastIndexSet<HashBytes>,
         >,
-        prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+        prev_partitions_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();
 
@@ -777,8 +832,10 @@ impl MessagesReader {
                 par_reader_stage,
                 &mut res.msg_group,
                 unused_buffer_accounts_by_partitions,
-                prev_par_readers,
+                prev_partitions_readers,
+                prev_msg_groups,
             )?;
+
             res.metrics.append(metrics);
         }
 
@@ -789,7 +846,8 @@ impl MessagesReader {
             let CollectExternalsResult { metrics } = externals_reader.collect_messages(
                 &par_reader.partition_id,
                 &mut res.msg_group,
-                prev_par_readers,
+                prev_partitions_readers,
+                prev_msg_groups,
             )?;
             res.metrics.append(metrics);
         }
@@ -806,7 +864,8 @@ impl MessagesReader {
                 par_reader_stage,
                 &mut res.msg_group,
                 unused_buffer_accounts_by_partitions,
-                prev_par_readers,
+                prev_partitions_readers,
+                prev_msg_groups,
             )?;
             res.metrics.append(metrics);
             res.collected_queue_msgs_keys

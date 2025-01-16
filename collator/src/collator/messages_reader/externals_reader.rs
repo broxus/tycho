@@ -502,7 +502,8 @@ impl ExternalsReader {
         &mut self,
         par_id: &PartitionId,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+        prev_partitions_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> Result<CollectExternalsResult> {
         let mut res = CollectExternalsResult::default();
 
@@ -532,9 +533,15 @@ impl ExternalsReader {
                         let dst_addr =
                             IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
+                        for msg_group in prev_msg_groups.values() {
+                            if msg_group.contains_account(account_id) {
+                                return true;
+                            }
+                        }
+
                         // check by previous partitions
-                        for prev_par_reader in prev_par_readers.values() {
-                            for prev_reader in prev_par_reader.range_readers().values() {
+                        for prev_partitions_reader in prev_partitions_readers.values() {
+                            for prev_reader in prev_partitions_reader.range_readers().values() {
                                 if prev_reader
                                     .reader_state
                                     .buffer
@@ -611,14 +618,14 @@ impl ExternalsRangeReader {
 
     fn get_buffer_limits_by_partition(
         &self,
-        par_id: &PartitionId,
+        partitions_id: &PartitionId,
     ) -> Result<&MessagesBufferLimits> {
         self.buffer_limits_by_partitions
-            .get(par_id)
+            .get(partitions_id)
 
             .with_context(|| format!(
                 "externals range reader does not contain buffer limits for partition {} (for_shard_id: {}, seqno: {})",
-                par_id, self.for_shard_id, self.seqno,
+                partitions_id, self.for_shard_id, self.seqno,
             ))
     }
 
