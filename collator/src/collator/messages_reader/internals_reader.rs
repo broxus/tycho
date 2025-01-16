@@ -622,6 +622,7 @@ impl InternalsParitionReader {
             FastIndexSet<HashBytes>,
         >,
         prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> Result<CollectInternalsResult> {
         let mut res = CollectInternalsResult::default();
 
@@ -655,6 +656,7 @@ impl InternalsParitionReader {
                     unused_buffer_accounts_by_partitions,
                     prev_par_readers,
                     &range_readers,
+                    prev_msg_groups,
                 );
                 res.metrics.add_to_message_groups_timer.stop();
                 res.collected_queue_msgs_keys
@@ -754,6 +756,7 @@ impl InternalsRangeReader {
         >,
         prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
         prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader>,
+        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> CollectMessagesFromRangeReaderResult {
         let FillMessageGroupResult {
             unused_buffer_accounts,
@@ -765,6 +768,12 @@ impl InternalsRangeReader {
             unused_buffer_accounts_by_partitions.remove(&(self.partition_id, self.seqno)),
             |account_id| {
                 let dst_addr = IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
+
+                for msg_group in prev_msg_groups.values() {
+                    if msg_group.contains_account(account_id) {
+                        return true;
+                    }
+                }
 
                 // check by previous partitions
                 for prev_par_reader in prev_par_readers.values() {
@@ -805,6 +814,7 @@ impl InternalsRangeReader {
                         return true;
                     }
                 }
+
                 false
             },
         );
