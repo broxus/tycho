@@ -7,7 +7,7 @@ use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent}
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
     ExternalsRangeReaderStateByPartition, ExternalsReaderRange, ExternalsReaderState,
-    InternalsParitionReader, MessagesReaderMetrics,
+    GetNextMessageGroupMode, InternalsParitionReader, MessagesReaderMetrics,
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessageGroup, MessagesBufferLimits,
@@ -387,6 +387,7 @@ impl ExternalsReader {
 
     pub fn read_into_buffers(
         &mut self,
+        read_mode: GetNextMessageGroupMode,
         partition_router: &PartitionRouter,
     ) -> MessagesReaderMetrics {
         let mut metrics = MessagesReaderMetrics::default();
@@ -411,7 +412,7 @@ impl ExternalsReader {
             .unwrap_or_default();
 
         'main_loop: loop {
-            let mut last_ext_read_res = ReadExternalsRangeResult::default();
+            let mut last_ext_read_res_opt = None;
             let mut all_ranges_fully_read = true;
             while let Some(range_reader) = self.range_readers.get_mut(&seqno) {
                 // remember last existing range
@@ -423,13 +424,21 @@ impl ExternalsReader {
                     continue;
                 }
 
-                // read externals
-                let read_mode = if seqno == self.block_seqno {
-                    ReadNextExternalsMode::ToTheEnd
-                } else {
-                    ReadNextExternalsMode::ToPreviuosReadTo
-                };
-                last_ext_read_res = range_reader.read_externals_into_buffers(
+                // on refill skip last range reader created in this block
+                if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
+                    all_ranges_fully_read = false;
+                    seqno += 1;
+                    continue;
+                }
+
+                // read externals, on refill only up to previous read_to
+                let read_mode =
+                    if seqno == self.block_seqno && read_mode != GetNextMessageGroupMode::Refill {
+                        ReadNextExternalsMode::ToTheEnd
+                    } else {
+                        ReadNextExternalsMode::ToPreviuosReadTo
+                    };
+                let mut read_res = range_reader.read_externals_into_buffers(
                     self.next_chain_time,
                     &mut self.anchors_cache,
                     read_mode,
@@ -437,7 +446,7 @@ impl ExternalsReader {
                     &processed_to_by_partitions,
                 );
 
-                metrics.append(last_ext_read_res.metrics);
+                metrics.append(std::mem::take(&mut read_res.metrics));
 
                 // if range was not fully read then buffer is full
                 // and we should continue to read current range
@@ -460,11 +469,13 @@ impl ExternalsReader {
                 // do not try to read from the next range
                 // if we already can fill all slots in messages group
                 if matches!(
-                    last_ext_read_res.min_fill_state_by_slots,
+                    read_res.min_fill_state_by_slots,
                     BufferFillStateBySlots::CanFill
                 ) {
                     break 'main_loop;
                 }
+
+                last_ext_read_res_opt = Some(read_res);
 
                 // try to get next range
                 seqno += 1;
@@ -472,10 +483,12 @@ impl ExternalsReader {
 
             // update the pending externals flag from the last range
             if last_seqno == self.block_seqno {
-                self.anchors_cache
-                    .set_has_pending_externals(last_ext_read_res.has_pending_externals);
-                if let Some(ct) = last_ext_read_res.last_read_to_anchor_chain_time {
-                    self.reader_state.last_read_to_anchor_chain_time = Some(ct);
+                if let Some(read_res) = last_ext_read_res_opt {
+                    self.anchors_cache
+                        .set_has_pending_externals(read_res.has_pending_externals);
+                    if let Some(ct) = read_res.last_read_to_anchor_chain_time {
+                        self.reader_state.last_read_to_anchor_chain_time = Some(ct);
+                    }
                 }
             }
 
