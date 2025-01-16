@@ -1156,6 +1156,16 @@ def collator_execution_metrics() -> RowPanel:
             "MAX exec time in group",
             labels=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_do_collate_processed_upto_ext_ranges",
+            "Externals ProcessedUpto ranges count",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_processed_upto_int_ranges",
+            "Internals ProcessedUpto ranges count",
+            labels=['workchain=~"$workchain"'],
+        ),
     ]
     return create_row("collator: Execution Metrics", metrics)
 
