@@ -1033,8 +1033,8 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
     fn group_slots_fractions(&self) -> Result<BTreeMap<PartitionId, u8>> {
         let mut res = BTreeMap::new();
         for item in self.group_slots_fractions.iter() {
-            let (par_id, fraction) = item?;
-            res.insert(par_id, fraction);
+            let (partition_id, fraction) = item?;
+            res.insert(partition_id, fraction);
         }
         Ok(res)
     }
