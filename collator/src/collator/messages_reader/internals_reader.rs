@@ -97,14 +97,14 @@ impl InternalsParitionReader {
         self.update_new_messages_reader_to_boundary(current_next_lt)?;
 
         // collect range reader states
-        // ignore next range reader if it was not initialized
-        // and we did not read any messages from it
+        // ignore next range reader if it was not fully read
+        // and was not initialized (we did not read any messages from it)
         // to reduce stored range reader states in processed upto info
         let mut range_readers = self
             .range_readers
             .into_iter()
             .filter_map(|(seqno, r)| match r.kind {
-                InternalsRangeReaderKind::Next if !r.initialized => None,
+                InternalsRangeReaderKind::Next if !r.fully_read && !r.initialized => None,
                 _ => Some((seqno, r)),
             })
             .peekable();
