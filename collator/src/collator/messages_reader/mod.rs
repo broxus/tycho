@@ -296,7 +296,7 @@ impl MessagesReader {
 
         // collect internals partition readers states
         let mut internals_reader_state = InternalsReaderState::default();
-        for (partition_id, mut par_reader) in self.internals_partition_readers {
+        for (par_id, mut par_reader) in self.internals_partition_readers {
             // collect aggregated messages stats
             for range_reader in par_reader.range_readers().values() {
                 if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
@@ -320,14 +320,14 @@ impl MessagesReader {
                         .get_last_range_reader()?
                         .1
                         .reader_state()
-                        .get_state_by_partition(&partition_id)?;
+                        .get_state_by_partition(&par_id)?;
 
                     if last_int_range_reader.reader_state.skip_offset
                         == last_ext_range_reader.skip_offset
                     {
                         par_reader.drop_processing_offset(true)?;
                         self.externals_reader
-                            .drop_processing_offset(&partition_id, true)?;
+                            .drop_processing_offset(&par_id, true)?;
                     }
                 }
             }
@@ -335,7 +335,7 @@ impl MessagesReader {
             let par_reader_state = par_reader.finalize(current_next_lt)?;
             internals_reader_state
                 .partitions
-                .insert(partition_id, par_reader_state);
+                .insert(par_id, par_reader_state);
         }
 
         // collect externals reader state
@@ -576,9 +576,9 @@ impl MessagesReader {
         tracing::debug!(target: tracing_targets::COLLATOR,
             internals_processed_offsets = ?DebugIter(self.internals_partition_readers
                 .iter()
-                .map(|(partition_id, par_r)| {
+                .map(|(par_id, par_r)| {
                     (
-                        partition_id,
+                        par_id,
                         par_r.get_last_range_reader()
                             .map(|(_, r)| r.reader_state.processed_offset)
                             .unwrap_or_default(),
@@ -633,10 +633,10 @@ impl MessagesReader {
 
         //--------------------
         // read internals
-        for (partition_id, par_reader_stage) in self.readers_stages.iter_mut() {
+        for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             let par_reader = self
                 .internals_partition_readers
-                .get_mut(partition_id)
+                .get_mut(par_id)
                 .context("reader for partition should exist")?;
 
             // check if we have FinishExternals stage in any partition
@@ -653,7 +653,7 @@ impl MessagesReader {
             }
 
             // collect separate metrics by partitions
-            let metrics_of_partition = metrics_by_partitions.entry(*partition_id).or_default();
+            let metrics_of_partition = metrics_by_partitions.entry(*par_id).or_default();
 
             match par_reader_stage {
                 MessagesReaderStage::ExistingAndExternals => {
@@ -702,29 +702,29 @@ impl MessagesReader {
         let mut unused_buffer_accounts_by_partitions = FastHashMap::default();
         let mut partitions_readers = BTreeMap::default();
 
-        for (partition_id, partition_reader_stage) in self.readers_stages.iter_mut() {
+        for (par_id, partition_reader_stage) in self.readers_stages.iter_mut() {
             // extract partition reader from state to use partition 0 buffer
             // to check for account skip on collecting messages from partition 1
             let mut partition_reader = self
                 .internals_partition_readers
-                .remove(partition_id)
+                .remove(par_id)
                 .context("reader for partition should exist")?;
 
             // on refill collect only until the last range processed offset reached
             if read_mode == GetNextMessageGroupMode::Refill
                 && partition_reader.last_range_offset_reached()
             {
-                partitions_readers.insert(*partition_id, partition_reader);
+                partitions_readers.insert(*par_id, partition_reader);
                 continue;
             }
 
             // collect separate metrics by partitions
-            let metrics_of_partition = metrics_by_partitions.entry(*partition_id).or_default();
+            let metrics_of_partition = metrics_by_partitions.entry(*par_id).or_default();
 
             // collect existing internals, externals and new internals
             let has_pending_new_messages_for_partition = self
                 .new_messages
-                .has_pending_messages_from_partition(partition_id);
+                .has_pending_messages_from_partition(par_id);
             let CollectMessageForPartitionResult {
                 metrics,
                 msg_group,
@@ -739,23 +739,23 @@ impl MessagesReader {
                 &msg_groups,
             )?;
 
-            msg_groups.insert(*partition_id, msg_group);
+            msg_groups.insert(*par_id, msg_group);
             metrics_of_partition.append(metrics);
 
             // remove collected new messages
             self.new_messages
                 .remove_collected_messages(&collected_queue_msgs_keys);
 
-            partitions_readers.insert(*partition_id, partition_reader);
+            partitions_readers.insert(*par_id, partition_reader);
         }
         // return partition readers to state
         self.internals_partition_readers = partitions_readers;
 
         // aggregate metrics from partitions
-        for (partition_id, metrics) in metrics_by_partitions {
+        for (par_id, metrics) in metrics_by_partitions {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "messages read from partition {}: existing={}, ext={}, new={}",
-                partition_id,
+                par_id,
                 metrics.read_int_msgs_from_iterator_count,
                 metrics.read_ext_msgs_count,
                 metrics.read_new_msgs_count,
@@ -765,7 +765,7 @@ impl MessagesReader {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             "collected message groups by partitions: {:?}",
-            DebugIter(msg_groups.iter().map(|(partition_id, g)| (*partition_id, DisplayMessageGroup(g)))),
+            DebugIter(msg_groups.iter().map(|(par_id, g)| (*par_id, DisplayMessageGroup(g)))),
         );
 
         // aggregate message group
@@ -912,10 +912,10 @@ impl MessagesReader {
                 // drop all ranges except the last one
                 externals_reader.retain_only_last_range_reader()?;
                 // update reader state for each partitions
-                let partition_ids = externals_reader.get_partition_ids();
-                for partition_id in partition_ids {
+                let par_ids = externals_reader.get_partition_ids();
+                for par_id in par_ids {
                     // mark all read messages processed
-                    externals_reader.set_processed_to_current_position(&partition_id)?;
+                    externals_reader.set_processed_to_current_position(&par_id)?;
                     // set skip offset to current offset
                     externals_reader.set_skip_offset_to_current(&partition_reader.partition_id)?;
                 }
