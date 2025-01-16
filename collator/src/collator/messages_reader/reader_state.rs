@@ -29,10 +29,10 @@ pub struct ReaderState {
 impl ReaderState {
     pub fn new(processed_upto: &ProcessedUptoInfoStuff) -> Self {
         let mut ext_reader_state = ExternalsReaderState::default();
-        for (par_id, par) in &processed_upto.partitions {
+        for (partition_id, par) in &processed_upto.partitions {
             ext_reader_state
                 .by_partitions
-                .insert(*par_id, ExternalsReaderStateByPartition {
+                .insert(*partition_id, ExternalsReaderStateByPartition {
                     processed_to: par.externals.processed_to.into(),
                     curr_processed_offset: 0,
                 });
@@ -41,11 +41,11 @@ impl ReaderState {
                     .ranges
                     .entry(*seqno)
                     .and_modify(|r| {
-                        r.by_partitions.insert(*par_id, range_info.into());
+                        r.by_partitions.insert(*partition_id, range_info.into());
                     })
                     .or_insert(ExternalsRangeReaderState {
                         range: range_info.into(),
-                        by_partitions: [(*par_id, range_info.into())].into(),
+                        by_partitions: [(*partition_id, range_info.into())].into(),
                     });
             }
         }
@@ -63,12 +63,12 @@ impl ReaderState {
 
     pub fn get_updated_processed_upto(&self) -> ProcessedUptoInfoStuff {
         let mut processed_upto = ProcessedUptoInfoStuff::default();
-        for (par_id, par) in &self.internals.partitions {
+        for (partition_id, par) in &self.internals.partitions {
             let ext_reader_state_by_partition =
-                self.externals.get_state_by_partition(par_id).unwrap();
+                self.externals.get_state_by_partition(partition_id).unwrap();
             processed_upto
                 .partitions
-                .insert(*par_id, ProcessedUptoPartitionStuff {
+                .insert(*partition_id, ProcessedUptoPartitionStuff {
                     externals: ExternalsProcessedUptoStuff {
                         processed_to: ext_reader_state_by_partition.processed_to.into(),
                         ranges: self
@@ -77,7 +77,7 @@ impl ReaderState {
                             .iter()
                             .map(|(k, v)| {
                                 let ext_range_reader_state_by_partition =
-                                    v.get_state_by_partition(par_id).unwrap();
+                                    v.get_state_by_partition(partition_id).unwrap();
                                 (*k, (&v.range, ext_range_reader_state_by_partition).into())
                             })
                             .collect(),
@@ -146,20 +146,26 @@ pub struct ExternalsReaderState {
 impl ExternalsReaderState {
     pub fn get_state_by_partition_mut(
         &mut self,
-        par_id: &PartitionId,
+        partition_id: &PartitionId,
     ) -> Result<&mut ExternalsReaderStateByPartition> {
-        self.by_partitions
-            .get_mut(par_id)
-            .with_context(|| format!("externals reader state not exists for partition {}", par_id))
+        self.by_partitions.get_mut(partition_id).with_context(|| {
+            format!(
+                "externals reader state not exists for partition {}",
+                partition_id
+            )
+        })
     }
 
     pub fn get_state_by_partition(
         &self,
-        par_id: &PartitionId,
+        partition_id: &PartitionId,
     ) -> Result<&ExternalsReaderStateByPartition> {
-        self.by_partitions
-            .get(par_id)
-            .with_context(|| format!("externals reader state not exists for partition {}", par_id))
+        self.by_partitions.get(partition_id).with_context(|| {
+            format!(
+                "externals reader state not exists for partition {}",
+                partition_id
+            )
+        })
     }
 }
 
@@ -183,24 +189,24 @@ pub struct ExternalsRangeReaderState {
 impl ExternalsRangeReaderState {
     pub fn get_state_by_partition_mut(
         &mut self,
-        par_id: &PartitionId,
+        partition_id: &PartitionId,
     ) -> Result<&mut ExternalsRangeReaderStateByPartition> {
-        self.by_partitions.get_mut(par_id).with_context(|| {
+        self.by_partitions.get_mut(partition_id).with_context(|| {
             format!(
                 "externals range reader state not exists for partition {}",
-                par_id
+                partition_id
             )
         })
     }
 
     pub fn get_state_by_partition(
         &self,
-        par_id: &PartitionId,
+        partition_id: &PartitionId,
     ) -> Result<&ExternalsRangeReaderStateByPartition> {
-        self.by_partitions.get(par_id).with_context(|| {
+        self.by_partitions.get(partition_id).with_context(|| {
             format!(
                 "externals range reader state not exists for partition {}",
-                par_id
+                partition_id
             )
         })
     }
@@ -282,12 +288,9 @@ impl std::fmt::Debug for DebugExternalsRangeReaderState<'_> {
             .field("range", &self.0.range)
             .field(
                 "by_partitions",
-                &DebugIter(
-                    self.0
-                        .by_partitions
-                        .iter()
-                        .map(|(par_id, par)| (par_id, DisplayRangeReaderStateByPartition(par))),
-                ),
+                &DebugIter(self.0.by_partitions.iter().map(|(partition_id, par)| {
+                    (partition_id, DisplayRangeReaderStateByPartition(par))
+                })),
             )
             .finish()
     }
