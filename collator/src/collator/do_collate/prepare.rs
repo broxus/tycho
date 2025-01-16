@@ -100,7 +100,7 @@ impl Phase<PrepareState> {
                 for_shard_id: self.state.shard_id,
                 block_seqno: self.state.collation_data.block_id_short.seqno,
                 next_chain_time: self.state.collation_data.get_gen_chain_time(),
-                msgs_exec_params: self.state.collation_config.msgs_exec_params.clone(),
+                msgs_exec_params: Arc::new(self.state.collation_config.msgs_exec_params.clone()),
                 mc_state_gen_lt: self.state.mc_data.gen_lt,
                 prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
                 mc_top_shards_end_lts,

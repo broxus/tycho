@@ -8,9 +8,9 @@ use everscale_types::dict::Dict;
 use everscale_types::models::{
     AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits, BlockRef,
     CollationConfig, CurrencyCollection, GlobalVersion, HashUpdate, ImportFees, InMsg, Lazy,
-    LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts,
-    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit,
-    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tl_proto::TlWrite;
 use ton_executor::{AccountMeta, ExecutedTransaction};
@@ -22,7 +22,7 @@ use tycho_util::FastHashMap;
 
 use super::messages_reader::ReaderState;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
+use crate::types::processed_upto::{BlockSeqno, PartitionId, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, ProofFunds, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
@@ -1023,4 +1023,19 @@ pub struct RandSeed {
     pub shard: ShardIdent,
     pub seqno: u32,
     pub next_chain_time: u64,
+}
+
+pub trait MsgsExecutionParamsExtension {
+    fn group_slots_fractions(&self) -> Result<BTreeMap<PartitionId, u8>>;
+}
+
+impl MsgsExecutionParamsExtension for MsgsExecutionParams {
+    fn group_slots_fractions(&self) -> Result<BTreeMap<PartitionId, u8>> {
+        let mut res = BTreeMap::new();
+        for item in self.group_slots_fractions.iter() {
+            let (par_id, fraction) = item?;
+            res.insert(par_id, fraction);
+        }
+        Ok(res)
+    }
 }
