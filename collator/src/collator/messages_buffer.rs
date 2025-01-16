@@ -570,6 +570,10 @@ impl MessageGroup {
 
         self
     }
+
+    pub fn contains_account(&self, account_id: &HashBytes) -> bool {
+        self.msgs.contains_key(account_id)
+    }
 }
 
 impl IntoParallelIterator for MessageGroup {
