@@ -414,23 +414,20 @@ impl Phase<FinalizeState> {
                 wu_params_finalize,
             );
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "finalize_wu_total: {}, accounts_count: {}, in_msgs: {}, out_msgs: {} ",
-                finalize_wu_total,
-                accounts_count,
-                in_msgs_len,
-                out_msgs_len,
-            );
-
             // compute total wu used from last anchor
-            let wu_used_from_last_anchor = wu_used_from_last_anchor
+            let new_wu_used_from_last_anchor = wu_used_from_last_anchor
                 .saturating_add(self.extra.execute_result.prepare_groups_wu_total)
                 .saturating_add(self.extra.execute_result.execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_from_last_anchor: {:?}",
-                wu_used_from_last_anchor
+                "wu_used_from_last_anchor: old={}, new={}, \
+                prepare_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
+                wu_used_from_last_anchor,
+                new_wu_used_from_last_anchor,
+                self.extra.execute_result.prepare_groups_wu_total,
+                self.extra.execute_result.execute_groups_wu_total,
+                finalize_wu_total,
             );
 
             // build new state
@@ -446,7 +443,7 @@ impl Phase<FinalizeState> {
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
-                overload_history: wu_used_from_last_anchor,
+                overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: self.state.prev_shard_data.total_validator_fees().clone(),
