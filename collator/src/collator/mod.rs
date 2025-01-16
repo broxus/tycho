@@ -1277,7 +1277,7 @@ impl CollatorStdImpl {
                 for_shard_id: working_state.next_block_id_short.shard,
                 block_seqno: working_state.next_block_id_short.seqno,
                 next_chain_time: 0,
-                msgs_exec_params: working_state.collation_config.msgs_exec_params.clone(),
+                msgs_exec_params: Arc::new(working_state.collation_config.msgs_exec_params.clone()),
                 mc_state_gen_lt: working_state.mc_data.gen_lt,
                 prev_state_gen_lt: working_state.prev_shard_data_ref().gen_lt(),
                 mc_top_shards_end_lts: working_state
