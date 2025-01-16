@@ -8,8 +8,8 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use super::{
-    DebugInternalsRangeReaderState, InternalsPartitionReaderState, InternalsRangeReaderState,
-    MessagesReaderMetrics, MessagesReaderStage, ShardReaderState,
+    DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
+    InternalsRangeReaderState, MessagesReaderMetrics, MessagesReaderStage, ShardReaderState,
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FastIndexSet, FillMessageGroupResult,
@@ -439,7 +439,10 @@ impl InternalsParitionReader {
         Ok(reader)
     }
 
-    pub fn read_existing_messages_into_buffers(&mut self) -> Result<MessagesReaderMetrics> {
+    pub fn read_existing_messages_into_buffers(
+        &mut self,
+        read_mode: GetNextMessageGroupMode,
+    ) -> Result<MessagesReaderMetrics> {
         let mut metrics = MessagesReaderMetrics::default();
 
         // skip if all ranges fully read
@@ -454,6 +457,12 @@ impl InternalsParitionReader {
         'iter_ranges: for (seqno, range_reader) in self.range_readers.iter_mut() {
             // skip fully read ranges
             if range_reader.fully_read {
+                continue;
+            }
+
+            // on refill skip last range reader created in this block
+            if read_mode == GetNextMessageGroupMode::Refill && seqno == &self.block_seqno {
+                all_ranges_fully_read = false;
                 continue;
             }
 

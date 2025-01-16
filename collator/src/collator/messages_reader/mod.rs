@@ -41,7 +41,7 @@ pub(super) struct FinalizedMessagesReader {
     pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GetNextMessageGroupMode {
     Continue,
     Refill,
@@ -657,7 +657,7 @@ impl MessagesReader {
 
             match par_reader_stage {
                 MessagesReaderStage::ExistingAndExternals => {
-                    let metrics = par_reader.read_existing_messages_into_buffers()?;
+                    let metrics = par_reader.read_existing_messages_into_buffers(read_mode)?;
                     metrics_of_partition.append(metrics);
                 }
                 MessagesReaderStage::FinishExternals => {
@@ -689,7 +689,7 @@ impl MessagesReader {
 
             let metrics = self
                 .externals_reader
-                .read_into_buffers(self.new_messages.partition_router());
+                .read_into_buffers(read_mode, self.new_messages.partition_router());
             self.metrics.append(metrics);
         }
 
