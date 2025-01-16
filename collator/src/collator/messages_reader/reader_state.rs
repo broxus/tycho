@@ -30,10 +30,11 @@ impl ReaderState {
     pub fn new(processed_upto: &ProcessedUptoInfoStuff) -> Self {
         let mut ext_reader_state = ExternalsReaderState::default();
         for (par_id, par) in &processed_upto.partitions {
+            let processed_to = par.externals.processed_to.into();
             ext_reader_state
                 .by_partitions
                 .insert(*par_id, ExternalsReaderStateByPartition {
-                    processed_to: par.externals.processed_to.into(),
+                    processed_to,
                     curr_processed_offset: 0,
                 });
             for (seqno, range_info) in &par.externals.ranges {
@@ -44,7 +45,7 @@ impl ReaderState {
                         r.by_partitions.insert(*par_id, range_info.into());
                     })
                     .or_insert(ExternalsRangeReaderState {
-                        range: range_info.into(),
+                        range: ExternalsReaderRange::from_range_info(range_info, processed_to),
                         by_partitions: [(*par_id, range_info.into())].into(),
                     });
             }
@@ -217,14 +218,22 @@ pub struct ExternalsReaderRange {
     pub chain_time: u64,
 }
 
-impl From<&ExternalsRangeInfo> for ExternalsReaderRange {
-    fn from(value: &ExternalsRangeInfo) -> Self {
+impl ExternalsReaderRange {
+    pub fn from_range_info(range_info: &ExternalsRangeInfo, processed_to: ExternalKey) -> Self {
+        let from = range_info.from.into();
+        let to = range_info.to.into();
+        let current_position = if processed_to < from {
+            from
+        } else if processed_to < to {
+            processed_to
+        } else {
+            to
+        };
         Self {
-            from: value.from.into(),
-            to: value.to.into(),
-            // on init current position is on the from
-            current_position: value.from.into(),
-            chain_time: value.chain_time,
+            from,
+            to,
+            current_position,
+            chain_time: range_info.chain_time,
         }
     }
 }
@@ -367,10 +376,20 @@ impl From<&InternalsProcessedUptoStuff> for InternalsPartitionReaderState {
         Self {
             curr_processed_offset: 0,
             processed_to: value.processed_to.clone(),
-            ranges: value.ranges.iter().map(|(k, v)| (*k, v.into())).collect(),
+            ranges: value
+                .ranges
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        *k,
+                        InternalsRangeReaderState::from_range_info(v, &value.processed_to),
+                    )
+                })
+                .collect(),
         }
     }
 }
+
 impl From<&InternalsPartitionReaderState> for InternalsProcessedUptoStuff {
     fn from(value: &InternalsPartitionReaderState) -> Self {
         Self {
@@ -397,16 +416,26 @@ pub struct InternalsRangeReaderState {
     pub processed_offset: u32,
 }
 
-impl From<&InternalsRangeStuff> for InternalsRangeReaderState {
-    fn from(value: &InternalsRangeStuff) -> Self {
-        Self {
+impl InternalsRangeReaderState {
+    pub fn from_range_info(range_info: &InternalsRangeStuff, processed_to: &ProcessedTo) -> Self {
+        let mut res = Self {
             buffer: Default::default(),
-            skip_offset: value.skip_offset,
-            processed_offset: value.processed_offset,
-            shards: value.shards.iter().map(|(k, v)| (*k, v.into())).collect(),
+            skip_offset: range_info.skip_offset,
+            processed_offset: range_info.processed_offset,
+            shards: Default::default(),
+        };
+
+        for (shard_id, shard_range_info) in &range_info.shards {
+            let shard_processed_to = processed_to.get(shard_id).copied().unwrap_or_default();
+            let reader_state =
+                ShardReaderState::from_range_info(shard_range_info, shard_processed_to);
+            res.shards.insert(*shard_id, reader_state);
         }
+
+        res
     }
 }
+
 impl From<&InternalsRangeReaderState> for InternalsRangeStuff {
     fn from(value: &InternalsRangeReaderState) -> Self {
         Self {
@@ -443,16 +472,23 @@ pub struct ShardReaderState {
     pub current_position: QueueKey,
 }
 
-impl From<&ShardRangeInfo> for ShardReaderState {
-    fn from(value: &ShardRangeInfo) -> Self {
+impl ShardReaderState {
+    pub fn from_range_info(range_info: &ShardRangeInfo, processed_to: QueueKey) -> Self {
+        let current_position = if processed_to.lt < range_info.from {
+            QueueKey::max_for_lt(range_info.from)
+        } else if processed_to.lt < range_info.to {
+            processed_to
+        } else {
+            QueueKey::max_for_lt(range_info.to)
+        };
         Self {
-            from: value.from,
-            to: value.to,
-            // on init current position is on the from
-            current_position: QueueKey::max_for_lt(value.from),
+            from: range_info.from,
+            to: range_info.to,
+            current_position,
         }
     }
 }
+
 impl From<&ShardReaderState> for ShardRangeInfo {
     fn from(value: &ShardReaderState) -> Self {
         Self {
