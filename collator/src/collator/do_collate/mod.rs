@@ -235,7 +235,7 @@ impl CollatorStdImpl {
         usage_tree: UsageTree,
     ) -> Result<CollationResult> {
         let shard_id = state.shard_id;
-        let labels: [(&str, String); 1] = [("workchain", shard_id.workchain().to_string())];
+        let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
 
         // prepare execution
@@ -318,6 +318,18 @@ impl CollatorStdImpl {
 
         // log updated processed upto
         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
+
+        // report actual ranges count to metrics
+        for (partition_id, partition) in &processed_upto.partitions {
+            let labels = [
+                ("workchain", shard_id.workchain().to_string()),
+                ("partition", partition_id.to_string()),
+            ];
+            metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
+                .set(partition.externals.ranges.len() as f64);
+            metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
+                .set(partition.internals.ranges.len() as f64);
+        }
 
         // get min processed to for current shard from shard and mc_data
         let current_min_processed_to = processed_upto
