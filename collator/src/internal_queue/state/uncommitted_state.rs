@@ -212,7 +212,6 @@ impl UncommittedStateStdImpl {
     ) -> Result<()> {
         for (internal_message_key, message) in messages {
             let destination = message.destination();
-
             let partition = partition_router.get_partition(Some(message.source()), destination);
 
             self.storage
