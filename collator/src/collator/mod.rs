@@ -1302,6 +1302,12 @@ impl CollatorStdImpl {
         // because shard end_lt does not include updated top shard block info
         if working_state.next_block_id_short.is_masterchain() {
             messages_reader.drop_internals_next_range_readers();
+        } else if !has_pending_internals {
+            // drop created next internals range readers for shard
+            // when we do not have pending internals
+            // because master can be changed on the next check and
+            // range to boudary should be updated
+            messages_reader.drop_internals_next_range_readers();
         }
 
         // return reader state to working state
