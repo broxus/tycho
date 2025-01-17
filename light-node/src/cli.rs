@@ -8,9 +8,9 @@ use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProviderExt, BlockStrider,
-    BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState,
-    PsSubscriber, ShardStateApplier, Starter, StarterConfig, StateSubscriber, StorageBlockProvider,
+    BlockSubscriber, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
+    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState, Starter,
+    StarterConfig, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -63,9 +63,8 @@ pub struct CmdRun {
 }
 
 impl CmdRun {
-    pub async fn run<S, C>(self, node_config: NodeConfig<C>, subscriber: S) -> Result<Node<C>>
+    pub async fn create<C>(self, node_config: NodeConfig<C>) -> Result<Node<C>>
     where
-        S: StateSubscriber,
         C: Clone,
     {
         if let Some(metrics) = &node_config.metrics {
@@ -81,7 +80,7 @@ impl CmdRun {
             keys
         };
 
-        let mut node = {
+        let node = {
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
                 .context("failed to load global config")?;
 
@@ -90,17 +89,6 @@ impl CmdRun {
 
             Node::new(socket_addr, keys, node_config, global_config).await?
         };
-
-        node.wait_for_neighbours().await;
-
-        let init_block_id = node
-            .boot(self.import_zerostate)
-            .await
-            .context("failed to init node")?;
-
-        tracing::info!(%init_block_id, "node initialized");
-
-        node.run(&init_block_id, subscriber).await?;
 
         Ok(node)
     }
@@ -251,6 +239,19 @@ impl<C> Node<C> {
         })
     }
 
+    pub async fn init(&self, import_zerostate: Option<Vec<PathBuf>>) -> Result<BlockId> {
+        self.wait_for_neighbours().await;
+
+        let init_block_id = self
+            .boot(import_zerostate)
+            .await
+            .context("failed to init node")?;
+
+        tracing::info!(%init_block_id, "node initialized");
+
+        Ok(init_block_id)
+    }
+
     async fn wait_for_neighbours(&self) {
         // Ensure that there are some neighbours
         tracing::info!("waiting for initial neighbours");
@@ -288,10 +289,53 @@ impl<C> Node<C> {
         Ok(last_mc_block_id)
     }
 
-    async fn run<S>(&mut self, last_block_id: &BlockId, subscriber: S) -> Result<()>
+    pub async fn run<S>(&mut self, subscriber: S) -> Result<()>
     where
-        S: StateSubscriber,
+        S: BlockSubscriber,
     {
+        // Create block strider
+        let archive_block_provider = ArchiveBlockProvider::new(
+            self.blockchain_rpc_client.clone(),
+            self.storage.clone(),
+            self.archive_block_provider_config.clone(),
+        );
+
+        let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
+
+        let strider_state =
+            PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
+
+        let blockchain_block_provider = BlockchainBlockProvider::new(
+            self.blockchain_rpc_client.clone(),
+            self.storage.clone(),
+            self.blockchain_block_provider_config.clone(),
+        )
+        .with_fallback(archive_block_provider.clone());
+
+        let gc_subscriber = GcSubscriber::new(self.storage.clone());
+
+        let block_strider = BlockStrider::builder()
+            .with_provider(
+                archive_block_provider.chain((blockchain_block_provider, storage_block_provider)),
+            )
+            .with_state(strider_state)
+            .with_block_subscriber((subscriber, MetricsSubscriber).chain(gc_subscriber))
+            .build();
+
+        // Run block strider
+        let handle = tokio::spawn(async move {
+            tracing::info!("block strider started");
+            if let Err(e) = block_strider.run().await {
+                tracing::error!(%e, "block strider failed");
+            }
+            tracing::info!("block strider finished");
+        });
+        self.run_handle = Some(handle);
+
+        Ok(())
+    }
+
+    pub async fn update_validator_set(&self, last_block_id: &BlockId) -> Result<()> {
         // notify subscriber with an initial validators list
         let mc_state = self
             .storage
@@ -311,7 +355,9 @@ impl<C> Node<C> {
             validator_subscriber.update_validator_set(&current_validator_set);
         }
 
-        // Create RPC
+        Ok(())
+    }
+    pub async fn create_rpc(&self, last_block_id: &BlockId) -> Result<Option<RpcState>> {
         let rpc_state = if let Some(config) = &self.rpc_config {
             let rpc_state = RpcState::builder()
                 .with_config(config.clone())
@@ -334,62 +380,12 @@ impl<C> Node<C> {
                 tracing::info!("RPC server stopped");
             });
 
-            Some(rpc_state.split())
+            Some(rpc_state)
         } else {
             None
-        }
-        .unzip();
+        };
 
-        // Create block strider
-        let archive_block_provider = ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.archive_block_provider_config.clone(),
-        );
-
-        let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
-
-        let strider_state =
-            PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
-
-        let blockchain_block_provider = BlockchainBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.blockchain_block_provider_config.clone(),
-        )
-        .with_fallback(archive_block_provider.clone());
-
-        let gc_subscriber = GcSubscriber::new(self.storage.clone());
-        let ps_subscriber = PsSubscriber::new(self.storage.clone());
-
-        let block_strider = BlockStrider::builder()
-            .with_provider(
-                archive_block_provider.chain((blockchain_block_provider, storage_block_provider)),
-            )
-            .with_state(strider_state)
-            .with_block_subscriber(
-                (
-                    ShardStateApplier::new(
-                        self.storage.clone(),
-                        (rpc_state.1, subscriber, ps_subscriber),
-                    ),
-                    (MetricsSubscriber, rpc_state.0),
-                )
-                    .chain(gc_subscriber),
-            )
-            .build();
-
-        // Run block strider
-        let handle = tokio::spawn(async move {
-            tracing::info!("block strider started");
-            if let Err(e) = block_strider.run().await {
-                tracing::error!(%e, "block strider failed");
-            }
-            tracing::info!("block strider finished");
-        });
-        self.run_handle = Some(handle);
-
-        Ok(())
+        Ok(rpc_state)
     }
 
     pub fn dht_client(&self) -> &DhtClient {
