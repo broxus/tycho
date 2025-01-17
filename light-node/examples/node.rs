@@ -25,10 +25,15 @@ async fn main() -> anyhow::Result<()> {
 
     let args = TestArgs::parse();
 
+    let import_zerostate = args.node.import_zerostate.clone();
+
     let config: Config =
         tycho_light_node::NodeConfig::from_file(args.node.config.as_ref().context("no config")?)?;
 
-    args.node.run(config, PrintSubscriber).await?;
+    let mut node = args.node.create(config).await?;
+    let init_block_id = node.init(import_zerostate).await?;
+    node.update_validator_set(&init_block_id).await?;
+    node.run(PrintSubscriber).await?;
 
     Ok(tokio::signal::ctrl_c().await?)
 }
