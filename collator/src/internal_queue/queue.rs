@@ -8,6 +8,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
 use crate::internal_queue::gc::GcManager;
@@ -214,13 +215,20 @@ where
     ) -> Result<Vec<Box<dyn StateIterator<V>>>> {
         let snapshot = self.committed_state.snapshot();
 
-        let committed_state_iterator =
+        let committed_state_iterator = {
+            let _histogram =
+                HistogramGuard::begin("tycho_internal_queue_commited_state_iterator_create_time");
             self.committed_state
-                .iterator(&snapshot, for_shard_id, partition, ranges.clone())?;
+                .iterator(&snapshot, for_shard_id, partition, ranges.clone())?
+        };
 
-        let uncommitted_state_iterator =
+        let uncommitted_state_iterator = {
+            let _histogram =
+                HistogramGuard::begin("tycho_internal_queue_uncommited_state_iterator_create_time");
+
             self.uncommitted_state
-                .iterator(&snapshot, for_shard_id, partition, ranges)?;
+                .iterator(&snapshot, for_shard_id, partition, ranges)?
+        };
 
         Ok(vec![committed_state_iterator, uncommitted_state_iterator])
     }
