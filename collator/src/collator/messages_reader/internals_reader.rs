@@ -2,18 +2,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use everscale_types::cell::HashBytes;
 use everscale_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueueKey;
-use tycho_util::FastHashMap;
 
 use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
     InternalsRangeReaderState, MessagesReaderMetrics, MessagesReaderStage, ShardReaderState,
 };
 use crate::collator::messages_buffer::{
-    BufferFillStateByCount, BufferFillStateBySlots, FastIndexSet, FillMessageGroupResult,
-    MessageGroup, MessagesBufferLimits,
+    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
+    MessagesBufferLimits,
 };
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::iterator::QueueIterator;
@@ -320,7 +318,12 @@ impl InternalsParitionReader {
         }
 
         // get statistics for the range
-        let stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        // get statistics for the range
+        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        let remaning_msgs_stats = match fully_read {
+            true => QueueStatistics::default(),
+            false => msgs_stats.clone(),
+        };
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
@@ -334,8 +337,8 @@ impl InternalsParitionReader {
             iterator_opt: None,
             initialized: false,
 
-            msgs_stats: stats.clone(),
-            remaning_msgs_stats: stats,
+            msgs_stats,
+            remaning_msgs_stats,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -400,7 +403,11 @@ impl InternalsParitionReader {
         }
 
         // get statistics for the range
-        let stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        let remaning_msgs_stats = match fully_read {
+            true => QueueStatistics::default(),
+            false => msgs_stats.clone(),
+        };
 
         let processed_offset = last_range_reader_shards_and_offset_opt
             .map(|(_, processed_offset)| processed_offset)
@@ -423,8 +430,8 @@ impl InternalsParitionReader {
             iterator_opt: None,
             initialized: false,
 
-            msgs_stats: stats.clone(),
-            remaning_msgs_stats: stats,
+            msgs_stats,
+            remaning_msgs_stats,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -626,10 +633,6 @@ impl InternalsParitionReader {
         &mut self,
         par_reader_stage: &MessagesReaderStage,
         msg_group: &mut MessageGroup,
-        unused_buffer_accounts_by_partitions: &mut FastHashMap<
-            (PartitionId, BlockSeqno),
-            FastIndexSet<HashBytes>,
-        >,
         prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
         prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> Result<CollectInternalsResult> {
@@ -662,7 +665,6 @@ impl InternalsParitionReader {
                     mut collected_queue_msgs_keys,
                 } = range_reader.collect_messages(
                     msg_group,
-                    unused_buffer_accounts_by_partitions,
                     prev_par_readers,
                     &range_readers,
                     prev_msg_groups,
@@ -759,27 +761,22 @@ impl InternalsRangeReader {
     fn collect_messages(
         &mut self,
         msg_group: &mut MessageGroup,
-        unused_buffer_accounts_by_partitions: &mut FastHashMap<
-            (PartitionId, BlockSeqno),
-            FastIndexSet<HashBytes>,
-        >,
         prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
         prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader>,
         prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> CollectMessagesFromRangeReaderResult {
         let FillMessageGroupResult {
-            unused_buffer_accounts,
+            // unused_buffer_accounts,
             collected_queue_msgs_keys,
         } = self.reader_state.buffer.fill_message_group(
             msg_group,
             self.buffer_limits.slots_count,
             self.buffer_limits.slot_vert_size,
-            unused_buffer_accounts_by_partitions.remove(&(self.partition_id, self.seqno)),
             |account_id| {
                 let dst_addr = IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
                 for msg_group in prev_msg_groups.values() {
-                    if msg_group.contains_account(account_id) {
+                    if msg_group.messages_count() > 0 && msg_group.contains_account(account_id) {
                         return true;
                     }
                 }
@@ -787,18 +784,20 @@ impl InternalsRangeReader {
                 // check by previous partitions
                 for prev_par_reader in prev_par_readers.values() {
                     for prev_reader in prev_par_reader.range_readers().values() {
-                        if prev_reader
-                            .reader_state
-                            .buffer
-                            .account_messages_count(account_id)
-                            > 0
+                        if prev_reader.reader_state.buffer.msgs_count() > 0
+                            && prev_reader
+                                .reader_state
+                                .buffer
+                                .account_messages_count(account_id)
+                                > 0
                         {
                             return true;
                         }
-                        if prev_reader
-                            .remaning_msgs_stats
-                            .statistics()
-                            .contains_key(&dst_addr)
+                        if !prev_reader.fully_read
+                            && prev_reader
+                                .remaning_msgs_stats
+                                .statistics()
+                                .contains_key(&dst_addr)
                         {
                             return true;
                         }
@@ -807,18 +806,20 @@ impl InternalsRangeReader {
 
                 // check by previous ranges in current partition
                 for prev_reader in prev_range_readers.values() {
-                    if prev_reader
-                        .reader_state
-                        .buffer
-                        .account_messages_count(account_id)
-                        > 0
+                    if prev_reader.reader_state.buffer.msgs_count() > 0
+                        && prev_reader
+                            .reader_state
+                            .buffer
+                            .account_messages_count(account_id)
+                            > 0
                     {
                         return true;
                     }
-                    if prev_reader
-                        .remaning_msgs_stats
-                        .statistics()
-                        .contains_key(&dst_addr)
+                    if !prev_reader.fully_read
+                        && prev_reader
+                            .remaning_msgs_stats
+                            .statistics()
+                            .contains_key(&dst_addr)
                     {
                         return true;
                     }
@@ -827,8 +828,6 @@ impl InternalsRangeReader {
                 false
             },
         );
-        unused_buffer_accounts_by_partitions
-            .insert((self.partition_id, self.seqno), unused_buffer_accounts);
 
         CollectMessagesFromRangeReaderResult {
             collected_queue_msgs_keys,

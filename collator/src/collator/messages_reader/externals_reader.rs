@@ -541,13 +541,14 @@ impl ExternalsReader {
                     msg_group,
                     buffer_limits.slots_count,
                     buffer_limits.slot_vert_size,
-                    None,
                     |account_id| {
                         let dst_addr =
                             IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
                         for msg_group in prev_msg_groups.values() {
-                            if msg_group.contains_account(account_id) {
+                            if msg_group.messages_count() > 0
+                                && msg_group.contains_account(account_id)
+                            {
                                 return true;
                             }
                         }
@@ -555,18 +556,20 @@ impl ExternalsReader {
                         // check by previous partitions
                         for prev_partitions_reader in prev_partitions_readers.values() {
                             for prev_reader in prev_partitions_reader.range_readers().values() {
-                                if prev_reader
-                                    .reader_state
-                                    .buffer
-                                    .account_messages_count(account_id)
-                                    > 0
+                                if prev_reader.reader_state.buffer.msgs_count() > 0
+                                    && prev_reader
+                                        .reader_state
+                                        .buffer
+                                        .account_messages_count(account_id)
+                                        > 0
                                 {
                                     return true;
                                 }
-                                if prev_reader
-                                    .remaning_msgs_stats
-                                    .statistics()
-                                    .contains_key(&dst_addr)
+                                if !prev_reader.fully_read
+                                    && prev_reader
+                                        .remaning_msgs_stats
+                                        .statistics()
+                                        .contains_key(&dst_addr)
                                 {
                                     return true;
                                 }
@@ -575,13 +578,13 @@ impl ExternalsReader {
 
                         // check by previous ranges
                         for prev_reader in range_readers.values() {
-                            if prev_reader
+                            let buffer = &prev_reader
                                 .reader_state
                                 .get_state_by_partition(par_id)
                                 .unwrap()
-                                .buffer
-                                .account_messages_count(account_id)
-                                > 0
+                                .buffer;
+                            if buffer.msgs_count() > 0
+                                && buffer.account_messages_count(account_id) > 0
                             {
                                 return true;
                             }
