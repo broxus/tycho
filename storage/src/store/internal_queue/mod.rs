@@ -2,6 +2,7 @@ use std::fs::File;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
+use smallvec::SmallVec;
 use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr, RouterDirection};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, ReadOptions, WriteBatch, WriteBatchWithTransaction};
@@ -364,50 +365,81 @@ impl InternalQueueStorage {
     pub fn delete(&self, ranges: Vec<QueueRange>) -> Result<()> {
         let mut batch = WriteBatch::default();
 
+        let mut compact_intervals = Vec::new();
+
         for range in &ranges {
-            let start_stat_key = StatKey {
-                shard_ident: range.shard_ident,
-                partition: range.partition,
-                min_message: range.from,
-                max_message: QueueKey::MIN,
-                dest: RouterAddr::MIN,
-            }
-            .to_vec();
-
-            let end_stat_key = StatKey {
-                shard_ident: range.shard_ident,
-                partition: range.partition,
-                min_message: range.to,
-                max_message: QueueKey::MAX,
-                dest: RouterAddr::MAX,
-            }
-            .to_vec();
-
-            let start_message_key =
-                ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.from)
-                    .to_vec();
-            let end_message_key =
-                ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.to)
-                    .to_vec();
+            let (start_stat_key, end_stat_key, start_msg_key, end_msg_key) =
+                Self::build_range_keys(range);
 
             self.delete_range(
                 &mut batch,
                 &self.db.internal_messages_statistics_committed.cf(),
                 &start_stat_key,
                 &end_stat_key,
-            )?;
+            );
 
             self.delete_range(
                 &mut batch,
                 &self.db.shards_internal_messages.cf(),
-                &start_message_key,
-                &end_message_key,
-            )?;
+                &start_msg_key,
+                &end_msg_key,
+            );
+
+            compact_intervals.push((
+                self.db.internal_messages_statistics_committed.cf(),
+                start_stat_key.clone(),
+                end_stat_key.clone(),
+            ));
+            compact_intervals.push((
+                self.db.shards_internal_messages.cf(),
+                start_msg_key.clone(),
+                end_msg_key.clone(),
+            ));
         }
 
         self.db.rocksdb().write(batch)?;
 
+        for (cf, start_key, end_key) in compact_intervals {
+            self.db
+                .rocksdb()
+                .compact_range_cf(&cf, Some(&start_key), Some(&end_key));
+        }
+
         Ok(())
+    }
+
+    fn build_range_keys(range: &QueueRange) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let start_stat_key = StatKey {
+            shard_ident: range.shard_ident,
+            partition: range.partition,
+            min_message: range.from,
+            max_message: QueueKey::MIN,
+            dest: RouterAddr::MIN,
+        }
+        .to_vec()
+        .to_vec();
+
+        let end_stat_key = StatKey {
+            shard_ident: range.shard_ident,
+            partition: range.partition,
+            min_message: range.to,
+            max_message: QueueKey::MAX,
+            dest: RouterAddr::MAX,
+        }
+        .to_vec()
+        .to_vec();
+
+        let start_msg_key =
+            ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.from)
+                .to_vec()
+                .to_vec();
+
+        let end_msg_key =
+            ShardsInternalMessagesKey::new(range.partition, range.shard_ident, range.to)
+                .to_vec()
+                .to_vec();
+
+        (start_stat_key, end_stat_key, start_msg_key, end_msg_key)
     }
 
     fn delete_range(
@@ -416,10 +448,9 @@ impl InternalQueueStorage {
         cf: &BoundedCfHandle<'_>,
         start_key: &[u8],
         end_key: &[u8],
-    ) -> Result<()> {
+    ) {
         batch.delete_range_cf(cf, start_key, end_key);
         batch.delete_cf(cf, end_key);
-        Ok(())
     }
 
     pub fn snapshot(&self) -> OwnedSnapshot {

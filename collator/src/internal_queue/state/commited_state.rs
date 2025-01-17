@@ -2,6 +2,7 @@ use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueuePartition;
 use tycho_storage::Storage;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 use weedb::OwnedSnapshot;
 
@@ -93,6 +94,7 @@ impl CommittedStateStdImpl {
 
 impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
     fn snapshot(&self) -> OwnedSnapshot {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_snapshot_time");
         self.storage.internal_queue_storage().snapshot()
     }
 
