@@ -7,7 +7,7 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
-use crate::types::DisplayIter;
+use crate::types::{DebugIter, DisplayIter};
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -97,19 +97,12 @@ impl MessagesBuffer {
         }
     }
 
-    /// Returns the set of unused accounts from buffer that we can use
-    /// to fill group from the same buffer but with grater limits.
     /// Returns queue keys of collected internal queue messages.
-    ///
-    /// E.g. we filled 5 slots from buffer 1, then tried to fill up to 8 slots
-    /// from buffer 2, but filled only 6 slots. So we can try to fill the rest slots
-    /// up to 8 from buffer 1 again.
     pub fn fill_message_group<F>(
         &mut self,
         msg_group: &mut MessageGroup,
         slots_count: usize,
         slot_vert_size: usize,
-        unused_buffer_accounts: Option<FastIndexSet<HashBytes>>,
         check_skip_account: F,
     ) -> FillMessageGroupResult
     where
@@ -119,25 +112,20 @@ impl MessagesBuffer {
         let mut slots_info = std::mem::take(&mut msg_group.slots_info);
 
         // we will collect updates for slots index and apply them at the end
-        let mut slots_index_updates = BTreeMap::<SlotId, SlotIndexUpdate>::default();
+        let mut slots_index_updates = BTreeMap::new();
 
         // track collected queue messages
         let mut collected_queue_msgs_keys = vec![];
 
         // track accounts whose messages were not used to fill group
-        let mut unused_buffer_accounts =
-            unused_buffer_accounts.unwrap_or_else(|| self.msgs.keys().copied().collect());
+        let mut buffer_accounts: VecDeque<HashBytes> = self.msgs.keys().copied().collect();
 
         // 1. try to fill remaning slots with messages of accounts which are not included in any slot
         let mut new_used_slots = FastHashSet::<SlotId>::default();
         let mut remaning_slots_count = slots_count.saturating_sub(slots_info.slots.len());
         if remaning_slots_count > 0 {
             // define next empty slot
-            let last_slot_id = slots_info
-                .slots
-                .last_key_value()
-                .map(|(k, _)| *k)
-                .unwrap_or_default();
+            let last_slot_id = slots_info.last_slot_id.unwrap_or_default();
             let mut slot_id = last_slot_id + 1;
             remaning_slots_count -= 1;
 
@@ -154,23 +142,20 @@ impl MessagesBuffer {
                 };
 
                 // try to get messages of other accounts which are not included in any slot
-                let mut used_buffer_accounts = vec![];
-                for account_id in &unused_buffer_accounts {
-                    if msg_group.msgs.contains_key(account_id) {
+                while let Some(account_id) = buffer_accounts.pop_front() {
+                    if msg_group.msgs.contains_key(&account_id) {
                         continue;
                     }
 
                     // skip accounts that do not pass the provided check
-                    if check_skip_account(account_id) {
-                        used_buffer_accounts.push(*account_id);
+                    if check_skip_account(&account_id) {
                         continue;
                     }
 
                     self.move_account_messages_to_slot(
-                        *account_id,
+                        account_id,
                         msg_group,
                         &mut slot_cx,
-                        &mut used_buffer_accounts,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
@@ -182,9 +167,6 @@ impl MessagesBuffer {
 
                         break;
                     }
-                }
-                for account_id in used_buffer_accounts {
-                    unused_buffer_accounts.shift_remove(&account_id);
                 }
 
                 // if slot still is empty then we unable to fill next slots
@@ -238,11 +220,9 @@ impl MessagesBuffer {
                 };
 
                 // try to get messages of accounts which are already included in slot
-                let mut used_buffer_accounts = vec![];
                 for account_id in slot_cx.slot.accounts.clone() {
                     // skip accounts that do not pass the provided check
                     if check_skip_account(&account_id) {
-                        used_buffer_accounts.push(account_id);
                         continue;
                     }
 
@@ -250,7 +230,6 @@ impl MessagesBuffer {
                         account_id,
                         msg_group,
                         &mut slot_cx,
-                        &mut used_buffer_accounts,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
@@ -258,9 +237,6 @@ impl MessagesBuffer {
                     if slot_cx.remaning_capacity == 0 {
                         break;
                     }
-                }
-                for account_id in used_buffer_accounts {
-                    unused_buffer_accounts.shift_remove(&account_id);
                 }
 
                 // go to next slot if current is full
@@ -269,23 +245,21 @@ impl MessagesBuffer {
                 }
 
                 // then try to get messages of other accounts which are not included in any slot
-                let mut used_buffer_accounts = vec![];
-                for account_id in &unused_buffer_accounts {
-                    if msg_group.msgs.contains_key(account_id) {
+
+                while let Some(account_id) = buffer_accounts.pop_front() {
+                    if msg_group.msgs.contains_key(&account_id) {
                         continue;
                     }
 
                     // skip accounts that do not pass the provided check
-                    if check_skip_account(account_id) {
-                        used_buffer_accounts.push(*account_id);
+                    if check_skip_account(&account_id) {
                         continue;
                     }
 
                     self.move_account_messages_to_slot(
-                        *account_id,
+                        account_id,
                         msg_group,
                         &mut slot_cx,
-                        &mut used_buffer_accounts,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
@@ -294,23 +268,23 @@ impl MessagesBuffer {
                         break;
                     }
                 }
-                for account_id in used_buffer_accounts {
-                    unused_buffer_accounts.shift_remove(&account_id);
-                }
             }
         }
 
-        // NOTE: `unused_buffer_accounts` will not contain accounts which we already used in previous step
+        // remove empty accounts from buffer
+        self.msgs.retain(|_, account_msgs| !account_msgs.is_empty());
 
         // 3. update slots index
+        let mut remove_slot_ids = BTreeMap::<usize, FastHashSet<u16>>::new();
         for (slot_id, index_update) in slots_index_updates {
             // remove slot from old count basket
             if index_update.old_count() != 0 {
-                let slots_ids = slots_info
-                    .index_by_msgs_count
+                remove_slot_ids
                     .entry(index_update.old_count())
+                    .and_modify(|to_remove| {
+                        to_remove.insert(slot_id);
+                    })
                     .or_default();
-                slots_ids.shift_remove(&slot_id);
                 slots_info.int_count -= index_update.old_int_count;
                 slots_info.ext_count -= index_update.old_ext_count;
             }
@@ -324,12 +298,15 @@ impl MessagesBuffer {
             slots_info.int_count += index_update.new_int_count;
             slots_info.ext_count += index_update.new_ext_count;
         }
+        for (old_count, to_remove) in remove_slot_ids {
+            let slots_ids = slots_info.index_by_msgs_count.entry(old_count).or_default();
+            slots_ids.retain(|id| !to_remove.contains(id));
+        }
 
         // put slots info into group
         std::mem::swap(&mut slots_info, &mut msg_group.slots_info);
 
         FillMessageGroupResult {
-            unused_buffer_accounts,
             collected_queue_msgs_keys,
         }
     }
@@ -339,51 +316,38 @@ impl MessagesBuffer {
         account_id: HashBytes,
         msg_group: &mut MessageGroup,
         slot_cx: &mut SlotContext<'_>,
-        used_buffer_accounts: &mut Vec<HashBytes>,
         collected_queue_msgs_keys: &mut Vec<QueueKey>,
         slots_index_updates: &mut BTreeMap<SlotId, SlotIndexUpdate>,
     ) {
         let mut amount = 0;
         let mut int_count = 0;
         let mut ext_count = 0;
-        if let indexmap::map::Entry::Occupied(mut occupied) = self.msgs.entry(account_id) {
-            let remaning_account_msgs_count = {
-                let account_msgs = occupied.get_mut();
 
-                amount = account_msgs.len().min(slot_cx.remaning_capacity);
-                if amount == 0 {
-                    return;
-                }
+        if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
+            amount = account_msgs.len().min(slot_cx.remaning_capacity);
+            if amount == 0 {
+                return;
+            }
 
-                used_buffer_accounts.push(account_id);
+            let slot_account_msgs = msg_group.msgs.entry(account_id).or_default();
+            if slot_account_msgs.is_empty() {
+                slot_cx.slot.accounts.push(account_id);
+            }
 
-                let slot_account_msgs = msg_group.msgs.entry(account_id).or_default();
-                if slot_account_msgs.is_empty() {
-                    slot_cx.slot.accounts.insert(account_id);
-                }
-
-                for msg in account_msgs.drain(..amount) {
-                    match (&msg.info, &msg.special_origin) {
-                        (MsgInfo::Int(int_msg_info), None) => {
-                            let queue_key = QueueKey {
-                                lt: int_msg_info.created_lt,
-                                hash: *msg.cell.repr_hash(),
-                            };
-                            collected_queue_msgs_keys.push(queue_key);
-                            int_count += 1;
-                        }
-                        (MsgInfo::ExtIn(_), None) => ext_count += 1,
-                        _ => unreachable!("must contain only Int and ExtIn messages"),
+            for msg in account_msgs.drain(..amount) {
+                match (&msg.info, &msg.special_origin) {
+                    (MsgInfo::Int(int_msg_info), None) => {
+                        let queue_key = QueueKey {
+                            lt: int_msg_info.created_lt,
+                            hash: *msg.cell.repr_hash(),
+                        };
+                        collected_queue_msgs_keys.push(queue_key);
+                        int_count += 1;
                     }
-                    slot_account_msgs.push(msg);
+                    (MsgInfo::ExtIn(_), None) => ext_count += 1,
+                    _ => unreachable!("must contain only Int and ExtIn messages"),
                 }
-
-                account_msgs.len()
-            };
-
-            // remove account from buffer if msgs queue was drained
-            if remaning_account_msgs_count == 0 {
-                occupied.shift_remove();
+                slot_account_msgs.push(msg);
             }
         }
 
@@ -419,7 +383,6 @@ impl MessagesBuffer {
 }
 
 pub struct FillMessageGroupResult {
-    pub unused_buffer_accounts: FastIndexSet<HashBytes>,
     pub collected_queue_msgs_keys: Vec<QueueKey>,
 }
 
@@ -542,7 +505,7 @@ impl MessageGroup {
     }
 
     pub fn add(mut self, other: Self) -> Self {
-        let last_slot_id = self.slots_info.slots.keys().last();
+        let last_slot_id = self.slots_info.last_slot_id.as_ref();
         let mut next_slot_id = match last_slot_id {
             Some(slot_id) => *slot_id + 1,
             None => 0,
@@ -556,6 +519,7 @@ impl MessageGroup {
             slots_ids.insert(next_slot_id);
 
             self.slots_info.slots.insert(next_slot_id, new_slot);
+            self.slots_info.last_slot_id = Some(next_slot_id);
 
             next_slot_id += 1;
         }
@@ -651,7 +615,8 @@ impl std::fmt::Debug for DebugMessageGroupHashMap<'_> {
 
 #[derive(Debug, Default)]
 pub(super) struct SlotsInfo {
-    slots: BTreeMap<SlotId, SlotInfo>,
+    slots: FastHashMap<SlotId, SlotInfo>,
+    last_slot_id: Option<SlotId>,
     index_by_msgs_count: BTreeMap<usize, FastIndexSet<SlotId>>,
     int_count: usize,
     ext_count: usize,
@@ -679,7 +644,7 @@ impl std::fmt::Debug for DebugSlotsInfo<'_> {
 
 #[derive(Default)]
 pub(super) struct SlotInfo {
-    accounts: FastIndexSet<HashBytes>,
+    accounts: Vec<HashBytes>,
     int_count: usize,
     ext_count: usize,
 }
@@ -695,16 +660,10 @@ impl std::fmt::Debug for SlotInfo {
         f.debug_struct("")
             .field("int_count", &self.int_count)
             .field("ext_count", &self.ext_count)
-            .field("accounts", &DebugIndexSetOfHashBytesShort(&self.accounts))
-            .finish()
-    }
-}
-
-struct DebugIndexSetOfHashBytesShort<'a>(pub &'a FastIndexSet<HashBytes>);
-impl std::fmt::Debug for DebugIndexSetOfHashBytesShort<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_set()
-            .entries(self.0.iter().map(DebugHashBytesShort))
+            .field(
+                "accounts",
+                &DebugIter(self.accounts.iter().map(DebugHashBytesShort)),
+            )
             .finish()
     }
 }
