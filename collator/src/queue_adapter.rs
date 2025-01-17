@@ -3,6 +3,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
@@ -92,6 +93,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         partition: QueuePartition,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
+
+        metrics::counter!("tycho_collator_queue_adapter_iterators_count").increment(1);
+
         let time_start = std::time::Instant::now();
 
         let states_iterators = self.queue.iterator(partition, ranges, for_shard_id)?;
