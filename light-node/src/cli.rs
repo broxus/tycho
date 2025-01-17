@@ -82,7 +82,6 @@ impl CmdRun {
 
         let global_config = GlobalConfig::from_file(self.global_config.unwrap())
             .context("failed to load global config")?;
-
         let public_ip = resolve_public_ip(node_config.public_ip).await?;
         let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
