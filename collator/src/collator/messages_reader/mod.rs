@@ -3,14 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use everscale_types::cell::HashBytes;
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::QueueKey;
-use tycho_util::FastHashMap;
 
-use super::messages_buffer::{
-    DisplayMessageGroup, FastIndexSet, MessageGroup, MessagesBufferLimits,
-};
+use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
@@ -699,8 +695,7 @@ impl MessagesReader {
 
         //----------
         // collect messages after reading
-        let mut unused_buffer_accounts_by_partitions = FastHashMap::default();
-        let mut partitions_readers = BTreeMap::default();
+        let mut partitions_readers = BTreeMap::new();
 
         for (par_id, partition_reader_stage) in self.readers_stages.iter_mut() {
             // extract partition reader from state to use partition 0 buffer
@@ -734,7 +729,6 @@ impl MessagesReader {
                 &mut partition_reader,
                 &mut self.externals_reader,
                 has_pending_new_messages_for_partition,
-                &mut unused_buffer_accounts_by_partitions,
                 &partitions_readers,
                 &msg_groups,
             )?;
@@ -807,10 +801,6 @@ impl MessagesReader {
         partition_reader: &mut InternalsParitionReader,
         externals_reader: &mut ExternalsReader,
         has_pending_new_messages_for_partition: bool,
-        unused_buffer_accounts_by_partitions: &mut FastHashMap<
-            (PartitionId, BlockSeqno),
-            FastIndexSet<HashBytes>,
-        >,
         prev_partitions_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
         prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> Result<CollectMessageForPartitionResult> {
@@ -834,7 +824,6 @@ impl MessagesReader {
             let CollectInternalsResult { metrics, .. } = partition_reader.collect_messages(
                 partition_reader_stage,
                 &mut res.msg_group,
-                unused_buffer_accounts_by_partitions,
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;
@@ -866,7 +855,6 @@ impl MessagesReader {
             } = partition_reader.collect_messages(
                 partition_reader_stage,
                 &mut res.msg_group,
-                unused_buffer_accounts_by_partitions,
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;
