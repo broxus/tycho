@@ -1272,6 +1272,21 @@ def collator_queue_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_internal_queue_gc_state_size", "Total GC state size",
         ),
+        create_heatmap_panel(
+            "tycho_internal_queue_commited_state_iterator_create_time", "Commited iterator init time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_uncommited_state_iterator_create_time", "Uncommitted iterator init time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_snapshot_time", "Snapshot time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_create_iterator_time", "Create iterator time"
+        ),
+        create_counter_panel(
+            "tycho_collator_queue_adapter_iterators_count", "Iterators count"
+        ),
     ]
     return create_row("collator: Queue Metrics", metrics)
 
