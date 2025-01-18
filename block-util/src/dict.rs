@@ -61,7 +61,7 @@ where
                 }),
                 K::BITS,
                 A::comp_add,
-                &mut Cell::empty_context(),
+                Cell::empty_context(),
             )?,
             _marker: std::marker::PhantomData,
         })
@@ -78,7 +78,7 @@ where
                 iter,
                 K::BITS,
                 A::comp_add,
-                &mut Cell::empty_context(),
+                Cell::empty_context(),
             )?,
             _marker: std::marker::PhantomData,
         })
@@ -89,7 +89,7 @@ where
     }
 
     pub fn set_any(&mut self, key: &K, extra: &A, value: &dyn Store) -> Result<bool, Error> {
-        let cx = &mut Cell::empty_context();
+        let cx = Cell::empty_context();
 
         let mut key_builder = CellBuilder::new();
         key.store_into(&mut key_builder, cx)?;
@@ -109,7 +109,7 @@ where
     }
 
     pub fn remove(&mut self, key: &K) -> Result<bool, Error> {
-        let cx = &mut Cell::empty_context();
+        let cx = Cell::empty_context();
 
         let mut key_builder = CellBuilder::new();
         key.store_into(&mut key_builder, cx)?;

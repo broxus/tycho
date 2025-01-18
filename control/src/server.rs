@@ -459,7 +459,7 @@ impl proto::ControlServer for ControlServer {
             .map(|x| {
                 let stats = x.get_stats();
                 proto::NeighbourInfo {
-                    id: *x.peer_id(),
+                    id: HashBytes(x.peer_id().to_bytes()),
                     expires_at: x.expires_at_secs(),
                     score: stats.score,
                     failed_requests: stats.failed_requests,

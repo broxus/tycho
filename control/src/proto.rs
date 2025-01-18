@@ -7,7 +7,6 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
-use tycho_network::PeerId;
 use tycho_util::serde_helpers;
 
 use crate::error::ServerResult;
@@ -274,7 +273,7 @@ pub struct NeighboursInfoResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NeighbourInfo {
-    pub id: PeerId,
+    pub id: HashBytes,
     pub expires_at: u32,
     pub score: u8,
     pub failed_requests: u64,

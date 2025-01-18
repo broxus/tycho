@@ -52,7 +52,7 @@ pub struct StateTimings {
 }
 
 pub fn serialize_account(account: &Account) -> Result<Cell, everscale_types::error::Error> {
-    let cx = &mut Cell::empty_context();
+    let cx = Cell::empty_context();
     let mut builder = CellBuilder::new();
     account.address.store_into(&mut builder, cx)?;
     account.storage_stat.store_into(&mut builder, cx)?;

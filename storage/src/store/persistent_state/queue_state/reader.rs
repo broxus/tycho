@@ -136,7 +136,7 @@ impl<'a> QueueDiffReader<'a> {
             })?;
 
             let mut roots = boc.roots().to_vec();
-            let cells = boc.finalize(&mut Cell::empty_context())?;
+            let cells = boc.finalize(Cell::empty_context())?;
 
             // NOTE: Reverse root indices here to allow the `ParsedBoc` iterator to just pop them.
             roots.reverse();

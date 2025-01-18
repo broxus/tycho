@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=c3d7cea1f320b37500bf72c2507bb7f7fbda4b51#c3d7cea1f320b37500bf72c2507bb7f7fbda4b51"
+source = "git+https://github.com/broxus/everscale-types.git?rev=416fc7512a656d1fa51e15fc91747a211105cb13#416fc7512a656d1fa51e15fc91747a211105cb13"
 dependencies = [
  "ahash",
  "anyhow",
@@ -976,7 +976,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=c3d7cea1f320b37500bf72c2507bb7f7fbda4b51#c3d7cea1f320b37500bf72c2507bb7f7fbda4b51"
+source = "git+https://github.com/broxus/everscale-types.git?rev=416fc7512a656d1fa51e15fc91747a211105cb13#416fc7512a656d1fa51e15fc91747a211105cb13"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1568,7 +1568,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -3253,7 +3253,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?rev=5c3d76ad2d5fb620d369553278dc7d2bc533176c#5c3d76ad2d5fb620d369553278dc7d2bc533176c"
+source = "git+https://github.com/broxus/ton-labs-executor.git?rev=498be5e04cf89c6b85fddec2ef226286d96c4f8d#498be5e04cf89c6b85fddec2ef226286d96c4f8d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3856,14 +3856,12 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#7f2537ba94ee0505c387554b3e26e94f81f217ce"
+source = "git+https://github.com/broxus/tycho-vm.git#52440419053996c859e8d447ea1ba7a3035e245a"
 dependencies = [
  "ahash",
  "anyhow",
  "bitflags",
  "blake2",
- "bumpalo",
- "castaway",
  "dyn-clone",
  "everscale-crypto",
  "everscale-types",
@@ -3878,7 +3876,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#7f2537ba94ee0505c387554b3e26e94f81f217ce"
+source = "git+https://github.com/broxus/tycho-vm.git#52440419053996c859e8d447ea1ba7a3035e245a"
 dependencies = [
  "darling",
  "proc-macro2",
