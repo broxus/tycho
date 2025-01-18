@@ -61,15 +61,15 @@ impl Threshold {
     }
 
     pub fn add(&self, valid: &ValidPoint) {
-        assert_eq!(valid.info.round(), self.round, "point round mismatch");
+        assert_eq!(valid.info().round(), self.round, "point round mismatch");
         // count no matter if threshold is already reached;
         // increase counter before send to reduce it upon receive;
         ThresholdCount::add_one_in_channel(&self.count);
-        match self.sender.try_send(valid.info.clone()) {
+        match self.sender.try_send(valid.info().clone()) {
             Ok(()) => {}
             Err(e) => {
                 // consider impossible
-                panic!("cannot add {:?} to threshold: {e}", valid.info.id().alt())
+                panic!("cannot add {:?} to threshold: {e}", valid.info().id().alt())
             }
         };
     }
@@ -285,7 +285,9 @@ mod test {
     use super::*;
     use crate::dag::threshold::Threshold;
     use crate::engine::CachedConfig;
-    use crate::models::{DagPoint, Link, PeerCount, Point, PointData, PointStatusValid, UnixTime};
+    use crate::models::{
+        DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
+    };
     use crate::test_utils::default_test_config;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -388,7 +390,8 @@ mod test {
     }
 
     fn new_valid_point(round: Round, now: UnixTime) -> DagPoint {
-        let status = PointStatusValid::default();
+        let mut status = PointStatusValidated::default();
+        status.is_valid = true;
         let keypair = KeyPair::generate(&mut thread_rng());
 
         let delay = UnixTime::from_millis(thread_rng().gen_range(1000..8000));
@@ -409,6 +412,6 @@ mod test {
             },
         ));
 
-        DagPoint::new_valid(info, &status)
+        DagPoint::new_validated(info, &status)
     }
 }

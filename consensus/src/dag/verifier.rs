@@ -16,8 +16,8 @@ use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
 use crate::engine::{CachedConfig, Genesis};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PointStatusInvalid,
-    PointStatusValid, PrevPointProof, Round, UnixTime,
+    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof, Round,
+    UnixTime,
 };
 
 // Note on equivocation.
@@ -80,8 +80,8 @@ pub enum IllFormedReason {
 
 #[derive(Debug)]
 pub enum ValidateResult {
-    Valid(PointStatusValid), // TODO fill anchor flags
-    Invalid(PointStatusInvalid),
+    Valid { is_certified: bool },
+    Invalid { is_certified: bool },
     IllFormed(IllFormedReason),
 }
 
@@ -126,17 +126,18 @@ impl Verifier {
                 // for genesis point it's sufficient to be well-formed and pass integrity check,
                 // it cannot be validated against AnchorStage (as it knows nothing about genesis)
                 // and cannot contain dependencies
-                return ctx.validated(ValidateResult::Valid(PointStatusValid::default()));
+                return ctx.validated(ValidateResult::Valid {
+                    is_certified: false,
+                });
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
         let Some(r_0_pre) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
-                is_first_resolved: false,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: certified_rx.try_recv() != Err(TryRecvError::Empty),
-            }));
+            });
         };
         assert_eq!(
             r_0_pre.round(),
@@ -187,27 +188,24 @@ impl Verifier {
 
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
-                is_first_resolved: false,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: proven_by_cert.unwrap_or_default(),
-            }));
+            });
         };
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot validate point's 'includes', no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
-                is_first_resolved: false,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: proven_by_cert.unwrap_or_default(),
-            }));
+            });
         };
 
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.data().witness.is_empty() {
             tracing::debug!("cannot validate point's 'witness', no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid(PointStatusInvalid {
-                is_first_resolved: false,
+            return ctx.validated(ValidateResult::Invalid {
                 is_certified: proven_by_cert.unwrap_or_default(),
-            }));
+            });
         }
 
         let direct_deps = Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
@@ -265,14 +263,9 @@ impl Verifier {
         };
 
         let status = if valid {
-            let mut status = PointStatusValid::default();
-            status.is_certified = is_certified;
-            ValidateResult::Valid(status)
+            ctx.validated(ValidateResult::Valid { is_certified })
         } else {
-            ValidateResult::Invalid(PointStatusInvalid {
-                is_first_resolved: false,
-                is_certified,
-            })
+            ctx.validated(ValidateResult::Invalid { is_certified })
         };
 
         ctx.validated(status)
@@ -448,7 +441,7 @@ impl Verifier {
                                 // None: author must have skipped current point's round
                                 return false;
                             }
-                            DagPoint::NotFound(cert) if cert.is_certified => {
+                            DagPoint::NotFound(not_found) if not_found.is_certified() => {
                                 return false; // same as for valid
                             }
                             DagPoint::NotFound(_) => {
@@ -755,18 +748,18 @@ impl ValidateCtx {
                     "validated",
                 );
             }
-            ValidateResult::Invalid(invalid) => {
+            ValidateResult::Invalid { is_certified } => {
                 tracing::warn!(
                     parent: self.span(),
-                    is_certified = invalid.is_certified,
+                    %is_certified,
                     result = "invalid",
                     "validated",
                 );
             }
-            ValidateResult::Valid(valid) => {
+            ValidateResult::Valid { is_certified } => {
                 tracing::debug!(
                     parent: self.span(),
-                    is_certified = valid.is_certified,
+                    %is_certified,
                     result = "valid",
                     "validated",
                 );

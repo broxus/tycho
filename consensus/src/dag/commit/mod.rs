@@ -226,8 +226,8 @@ impl Committer {
             let committed = uncommitted
                 .into_iter()
                 .map(|valid| {
-                    valid.is_committed.store(true, Ordering::Relaxed);
-                    valid.info
+                    valid.is_committed().store(true, Ordering::Relaxed);
+                    valid.info().clone()
                 })
                 .collect::<Vec<_>>();
             ordered.push(AnchorData {

@@ -160,7 +160,7 @@ impl Producer {
                     loc.state
                         .get_or_reject()
                         .ok()
-                        .map(|signed| signed.first_resolved.info.clone())
+                        .map(|signed| signed.first_resolved.info().clone())
                 }
             })
             .collect::<Vec<_>>()
