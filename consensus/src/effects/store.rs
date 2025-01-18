@@ -18,8 +18,8 @@ use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::models::{
-    Digest, Point, PointInfo, PointRestore, PointStatus, PointStatusStored, PointStatusStoredRef,
-    PointStatusValid, Round,
+    Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus, PointStatusStored,
+    PointStatusStoredRef, PointStatusValidated, Round,
 };
 
 #[derive(Clone)]
@@ -57,7 +57,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn last_round(&self) -> Result<Round>;
 
-    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestore>>;
+    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>>;
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
@@ -174,7 +174,7 @@ impl MempoolStore {
         self.0.last_round().expect("DB load last round")
     }
 
-    pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestore> {
+    pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestoreSelect> {
         self.0
             .load_restore(range)
             .with_context(|| format!("range [{}..={}]", range.start().0, range.end().0))
@@ -358,7 +358,7 @@ impl MempoolStoreImpl for MempoolStorage {
         let status_cf = self.db.points_status.cf();
         let mut batch = WriteBatch::default();
 
-        let mut status = PointStatusValid::default();
+        let mut status = PointStatusValidated::default();
         status.committed_at_round = Some(anchor.round().0);
         let status_encoded = status.encode();
 
@@ -549,7 +549,7 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(Round(round))
     }
 
-    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestore>> {
+    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
             let mut buf = [0; MempoolStorage::KEY_LEN];
@@ -608,51 +608,32 @@ impl MempoolStoreImpl for MempoolStorage {
             );
             let status = PointStatusStored::decode(&status_bytes)?;
 
+            round_buf.copy_from_slice(&key[..4]);
+            digest_buf.copy_from_slice(&key[4..]);
+            let round = Round(u32::from_be_bytes(round_buf));
+            let digest = Digest::wrap(digest_buf);
+
             match status {
+                PointStatusStored::Exists => {
+                    result.push(PointRestoreSelect::NeedsVerify(round, digest));
+                }
                 PointStatusStored::NotFound(status) => {
-                    round_buf.copy_from_slice(&key[..4]);
-                    digest_buf.copy_from_slice(&key[4..]);
-                    let round = Round(u32::from_be_bytes(round_buf));
-                    let digest = Digest::wrap(digest_buf);
-                    result.push(PointRestore::NotFound(round, digest, status));
+                    let ready = PointRestore::NotFound(round, digest, status);
+                    result.push(PointRestoreSelect::Ready(ready));
                 }
-                PointStatusStored::Valid(status) => {
+                PointStatusStored::Validated(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
-                        format!(
-                            "table point info, status {status}, key {}",
-                            MempoolStorage::format_key(&key)
-                        )
+                        format!("table point info, status {status} {round:?} {digest:?}")
                     })?;
-                    result.push(PointRestore::Valid(info, status));
-                }
-                PointStatusStored::Invalid(status) => {
-                    let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
-                        format!(
-                            "table point info, status {status}, key {}",
-                            MempoolStorage::format_key(&key)
-                        )
-                    })?;
-                    result.push(PointRestore::Invalid(info, status));
+                    let ready = PointRestore::Validated(info, status);
+                    result.push(PointRestoreSelect::Ready(ready));
                 }
                 PointStatusStored::IllFormed(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
-                        format!(
-                            "table point info, status {status}, key {}",
-                            MempoolStorage::format_key(&key)
-                        )
+                        format!("table point info, status {status} {round:?} {digest:?}")
                     })?;
-                    result.push(PointRestore::IllFormed(info.id(), status));
-                }
-                status @ PointStatusStored::Exists => {
-                    // Note: now point table is not read for prev_proof because it will be filled
-                    //       for mandatory verify() and validate() from the very beginning
-                    let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
-                        format!(
-                            "table point info, status {status}, key {}",
-                            MempoolStorage::format_key(&key)
-                        )
-                    })?;
-                    result.push(PointRestore::Exists(info, None));
+                    let ready = PointRestore::IllFormed(info.id(), status);
+                    result.push(PointRestoreSelect::Ready(ready));
                 }
             }
         }
@@ -718,7 +699,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn load_restore(&self, _: &RangeInclusive<Round>) -> Result<Vec<PointRestore>> {
+    fn load_restore(&self, _: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
         anyhow::bail!("should not be used in tests")
     }
 

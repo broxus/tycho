@@ -4,7 +4,7 @@ use tycho_network::PeerId;
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
 use crate::intercom::dto::PointByIdResponse;
-use crate::models::{PointId, PointStatusInvalid, PointStatusStored};
+use crate::models::{PointId, PointStatusStored};
 
 pub struct Uploader;
 
@@ -21,15 +21,14 @@ impl Uploader {
         } else {
             let status_opt = store.get_status(point_id.round, &point_id.digest);
             let result = match &status_opt {
-                Some(
-                    PointStatusStored::Valid(_)
-                    | PointStatusStored::Invalid(PointStatusInvalid {
-                        is_certified: true, ..
-                    }),
-                ) => match store.get_point_raw(point_id.round, &point_id.digest) {
-                    None => PointByIdResponse::DefinedNone,
-                    Some(slice) => PointByIdResponse::Defined(slice),
-                },
+                Some(PointStatusStored::Validated(usable))
+                    if usable.is_valid | usable.is_certified =>
+                {
+                    match store.get_point_raw(point_id.round, &point_id.digest) {
+                        None => PointByIdResponse::DefinedNone,
+                        Some(slice) => PointByIdResponse::Defined(slice),
+                    }
+                }
                 Some(PointStatusStored::Exists) | None => {
                     if head.last_back_bottom() <= point_id.round {
                         // may be downloading, unknown or resolving - dag may be incomplete
@@ -42,7 +41,7 @@ impl Uploader {
                 Some(
                     PointStatusStored::IllFormed(_)
                     | PointStatusStored::NotFound(_)
-                    | PointStatusStored::Invalid(_),
+                    | PointStatusStored::Validated(_),
                 ) => PointByIdResponse::DefinedNone,
             };
             (status_opt, result)
