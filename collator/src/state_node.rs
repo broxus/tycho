@@ -636,7 +636,7 @@ fn process_signatures(
                 })
             }),
         16,
-        &mut Cell::empty_context(),
+        Cell::empty_context(),
     )?);
 
     Ok(everscale_types::models::block::BlockSignatures {

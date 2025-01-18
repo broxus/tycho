@@ -36,7 +36,7 @@ pub fn print_json<T: Serialize>(output: T) -> Result<()> {
 // TODO: move into types
 pub fn compute_storage_used(account: &Account) -> Result<StorageUsed> {
     let cell = {
-        let cx = &mut Cell::empty_context();
+        let cx = Cell::empty_context();
         let mut storage = CellBuilder::new();
         storage.store_u64(account.last_trans_lt)?;
         account.balance.store_into(&mut storage, cx)?;

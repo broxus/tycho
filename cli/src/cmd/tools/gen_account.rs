@@ -297,7 +297,7 @@ impl MultisigBuilder {
                 data.store_u256(owner_key)?; // m_ownerKey
                 data.store_u256(&HashBytes::ZERO)?; // m_requestsMask
                 data.store_bit_zero()?; // empty m_transactions
-                custodians.store_into(&mut data, &mut Cell::empty_context())?; // m_custodians
+                custodians.store_into(&mut data, Cell::empty_context())?; // m_custodians
                 data.store_u8(custodian_count)?; // m_custodianCount
                 data.store_bit_zero()?; // empty m_updateRequests
                 data.store_u32(0)?; // m_updateRequestsMask
@@ -318,7 +318,7 @@ impl MultisigBuilder {
 
                 data.store_u8(default_required_confirmations)?; // m_defaultRequiredConfirmations
                 data.store_bit_zero()?; // empty m_transactions
-                custodians.store_into(&mut data, &mut Cell::empty_context())?; // m_custodians
+                custodians.store_into(&mut data, Cell::empty_context())?; // m_custodians
             }
         };
 
