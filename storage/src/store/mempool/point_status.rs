@@ -28,8 +28,7 @@ bitflags::bitflags! {
 }
 
 impl StatusFlags {
-    pub const VALID_BYTES: usize = 1 + 1 + 4;
-    pub const INVALID_BYTES: usize = 1;
+    pub const VALIDATED_BYTES: usize = 1 + 1 + 4;
     pub const ILL_FORMED_BYTES: usize = 1;
     pub const NOT_FOUND_BYTES: usize = 1 + 32;
 
@@ -43,10 +42,8 @@ impl StatusFlags {
             len == Self::NOT_FOUND_BYTES
         } else if !flags.contains(Self::WellFormed) {
             len == Self::ILL_FORMED_BYTES
-        } else if !flags.contains(Self::Valid) {
-            len == Self::INVALID_BYTES
         } else {
-            len == Self::VALID_BYTES
+            len == Self::VALIDATED_BYTES
         };
         if is_ok {
             Ok(Some(flags))
@@ -133,14 +130,6 @@ pub(crate) fn merge(
                 a_flags.contains(StatusFlags::WellFormed),
                 b_flags.contains(StatusFlags::WellFormed),
             ) {
-                (_, false) => return a, // only already merged flags byte is stored for ill-formed
-                (false, true) => return b,
-                (true, true) => {} // continue
-            }
-            match (
-                a_flags.contains(StatusFlags::Valid),
-                b_flags.contains(StatusFlags::Valid),
-            ) {
                 (_, false) => a, // only already merged flags byte is stored for invalid
                 (false, true) => b,
                 (true, true) => {
@@ -158,8 +147,8 @@ pub(crate) fn merge(
             Some(flags) => {
                 let mut result = c.to_vec();
                 result[0] |= flags.bits();
-                let valid_combo = StatusFlags::Found | StatusFlags::WellFormed | StatusFlags::Valid;
-                if flags.contains(valid_combo) {
+                let validated_combo = StatusFlags::Found | StatusFlags::WellFormed;
+                if flags.contains(validated_combo) {
                     result[1] |= anchor_flags;
                 }
                 result

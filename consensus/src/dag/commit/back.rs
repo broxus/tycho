@@ -13,9 +13,7 @@ use crate::dag::commit::SyncError;
 use crate::dag::{DagRound, EnqueuedAnchor};
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{CachedConfig, Genesis};
-use crate::models::{
-    AnchorStageRole, DagPoint, Digest, Link, PointId, PointInfo, Round, ValidPoint,
-};
+use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -141,7 +139,7 @@ impl DagBack {
             match Self::any_ready_valid_trigger(dag_round, &stage.leader) {
                 Ok(trigger) => {
                     // iter is from newest to oldest, restore historical order
-                    triggers.push_front(trigger.info);
+                    triggers.push_front(trigger.info().clone());
                 }
                 Err(SyncError::TryLater) => {} // skip
                 Err(SyncError::Impossible(round)) => return Err(round),
@@ -206,7 +204,8 @@ impl DagBack {
                 &last_proof.digest,
                 "anchor proof",
             )?
-            .info;
+            .info()
+            .clone();
 
             let Some(anchor_id) = proof.prev_id() else {
                 last_proof = proof.anchor_id(AnchorStageRole::Proof);
@@ -233,7 +232,8 @@ impl DagBack {
                 &anchor_id.digest,
                 "anchor candidate",
             )?
-            .info;
+            .info()
+            .clone();
 
             last_proof = anchor.anchor_id(AnchorStageRole::Proof);
 
@@ -325,7 +325,8 @@ impl DagBack {
                 &lookup_proof_id.digest,
                 "anchor proof",
             )?
-            .info;
+            .info()
+            .clone();
 
             let Some(anchor_id) = proof.prev_id() else {
                 lookup_proof_id = proof.anchor_id(AnchorStageRole::Proof);
@@ -354,7 +355,8 @@ impl DagBack {
                 &anchor_id.digest,
                 "anchor candidate",
             )?
-            .info;
+            .info()
+            .clone();
 
             let mut direct_trigger = None;
             if proof.round() == trigger.round().prev()
@@ -443,9 +445,9 @@ impl DagBack {
                 let global = // point @ r+0; break and return `None` if not ready yet
                     Self::ready_valid_point(point_round, node, digest, "point")?;
                 // select only uncommitted ones
-                if !global.is_committed.load(atomic::Ordering::Relaxed) {
-                    extend(&mut r[1], &global.info.data().includes); // points @ r-1
-                    extend(&mut r[2], &global.info.data().witness); // points @ r-2
+                if !global.is_committed().load(atomic::Ordering::Relaxed) {
+                    extend(&mut r[1], &global.info().data().includes); // points @ r-1
+                    extend(&mut r[2], &global.info().data().witness); // points @ r-2
                     uncommitted.push_front(global);
                 }
             }
@@ -479,17 +481,17 @@ impl DagBack {
                     // take any suitable
                     .filter_map(move |dag_point| match dag_point {
                         DagPoint::Valid(valid) => {
-                            if valid.info.data().anchor_trigger == Link::ToSelf {
+                            if valid.info().data().anchor_trigger == Link::ToSelf {
                                 Some(Ok(valid))
                             } else {
                                 None
                             }
                         }
-                        DagPoint::Invalid(cert) if cert.is_certified => {
-                            Some(Err(SyncError::Impossible(cert.inner.round())))
+                        DagPoint::Invalid(invalid) if invalid.is_certified() => {
+                            Some(Err(SyncError::Impossible(invalid.info().round())))
                         }
-                        DagPoint::NotFound(cert) if cert.is_certified => {
-                            Some(Err(SyncError::Impossible(cert.inner.round)))
+                        DagPoint::NotFound(not_found) if not_found.is_certified() => {
+                            Some(Err(SyncError::Impossible(not_found.id().round)))
                         }
                         DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
                             None
@@ -518,19 +520,14 @@ impl DagBack {
         }; // not yet resolved;
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
-            DagPoint::Invalid(cert) if cert.is_certified => {
-                Err(SyncError::Impossible(cert.inner.round()))
+            DagPoint::Invalid(invalid) if invalid.is_certified() => {
+                Err(SyncError::Impossible(invalid.info().round()))
             }
-            DagPoint::NotFound(cert) if cert.is_certified => {
-                Err(SyncError::Impossible(cert.inner.round))
+            DagPoint::NotFound(not_found) if not_found.is_certified() => {
+                Err(SyncError::Impossible(not_found.id().round))
             }
             dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
-                let point_id = PointId {
-                    author: *author,
-                    round: dag_round.round(),
-                    digest: *digest,
-                };
-                panic!("{point_kind} {}: {:?}", dp.alt(), point_id.alt())
+                panic!("{point_kind} {}: {:?}", dp.alt(), dp.id().alt())
             }
         }
     }
