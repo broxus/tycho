@@ -6,12 +6,16 @@ use tycho_storage::point_status::{AnchorFlags, StatusFlags};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Digest, PointId, PointInfo, PrevPointProof, Round};
 
+pub enum PointRestoreSelect {
+    /// Note: currently all points with `Exists` statuses must repeat `verify()`,
+    ///       as this status also represents an error during merge of DB statuses
+    NeedsVerify(Round, Digest),
+    Ready(PointRestore),
+}
 pub enum PointRestore {
-    /// non-terminal status can be found in DB if point task was aborted before validation;
-    /// Note: must repeat `verify()`, as this also represents an error during merge of DB statuses
+    /// non-terminal status can be found in DB if point task was aborted before validation
     Exists(PointInfo, Option<PrevPointProof>),
-    Valid(PointInfo, PointStatusValid),
-    Invalid(PointInfo, PointStatusInvalid),
+    Validated(PointInfo, PointStatusValidated),
     IllFormed(PointId, PointStatusIllFormed),
     NotFound(Round, Digest, PointStatusNotFound),
 }
@@ -27,8 +31,7 @@ impl PointRestore {
         }
         let desc = match self {
             PointRestore::Exists(_, _) => 0,
-            PointRestore::Valid(_, status) => order_desc(status),
-            PointRestore::Invalid(_, status) => order_desc(status),
+            PointRestore::Validated(_, status) => order_desc(status),
             PointRestore::IllFormed(_, status) => order_desc(status),
             PointRestore::NotFound(_, _, status) => order_desc(status),
         };
@@ -36,23 +39,21 @@ impl PointRestore {
     }
     pub fn round(&self) -> Round {
         match self {
-            Self::Exists(info, _) | Self::Valid(info, _) | Self::Invalid(info, _) => info.round(),
+            Self::Exists(info, _) | Self::Validated(info, _) => info.round(),
             Self::IllFormed(id, _) => id.round,
             Self::NotFound(round, _, _) => *round,
         }
     }
     pub fn author(&self) -> &PeerId {
         match self {
-            Self::Exists(info, _) | Self::Valid(info, _) | Self::Invalid(info, _) => {
-                &info.data().author
-            }
+            Self::Exists(info, _) | Self::Validated(info, _) => &info.data().author,
             Self::IllFormed(id, _) => &id.author,
             Self::NotFound(_, _, status) => &status.author,
         }
     }
     pub fn digest(&self) -> &Digest {
         match self {
-            Self::Exists(info, _) | Self::Valid(info, _) | Self::Invalid(info, _) => info.digest(),
+            Self::Exists(info, _) | Self::Validated(info, _) => info.digest(),
             Self::IllFormed(id, _) => &id.digest,
             Self::NotFound(_, digest, _) => digest,
         }
@@ -78,10 +79,7 @@ impl Debug for AltFmt<'_, PointRestore> {
             PointRestore::Exists(_, None) => {
                 f.write_str("Exists prev # None")?;
             }
-            PointRestore::Valid(_, status) => {
-                write!(f, "{status}")?;
-            }
-            PointRestore::Invalid(_, status) => {
+            PointRestore::Validated(_, status) => {
                 write!(f, "{status}")?;
             }
             PointRestore::IllFormed(_, status) => {
@@ -106,8 +104,7 @@ impl Debug for AltFmt<'_, PointRestore> {
 #[derive(Debug)]
 pub enum PointStatusStored {
     Exists,
-    Valid(PointStatusValid),
-    Invalid(PointStatusInvalid),
+    Validated(PointStatusValidated),
     IllFormed(PointStatusIllFormed),
     NotFound(PointStatusNotFound),
 }
@@ -118,8 +115,7 @@ impl Display for PointStatusStored {
 }
 pub enum PointStatusStoredRef<'a> {
     Exists,
-    Valid(&'a PointStatusValid),
-    Invalid(&'a PointStatusInvalid),
+    Validated(&'a PointStatusValidated),
     IllFormed(&'a PointStatusIllFormed),
     NotFound(&'a PointStatusNotFound),
 }
@@ -127,8 +123,7 @@ impl Display for PointStatusStoredRef<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Exists => f.write_str("Exists"),
-            Self::Valid(resolved) => Display::fmt(resolved, f),
-            Self::Invalid(resolved) => Display::fmt(resolved, f),
+            Self::Validated(resolved) => Display::fmt(resolved, f),
             Self::IllFormed(resolved) => Display::fmt(resolved, f),
             Self::NotFound(resolved) => Display::fmt(resolved, f),
         }
@@ -136,7 +131,7 @@ impl Display for PointStatusStoredRef<'_> {
 }
 
 pub trait PointStatus: Display {
-    fn is_valid() -> bool {
+    fn is_valid(&self) -> bool {
         false
     }
     fn set_first_valid(&mut self) {}
@@ -156,16 +151,21 @@ pub trait PointStatus: Display {
 }
 
 #[derive(Debug, Default)]
-pub struct PointStatusValid {
+pub struct PointStatusValidated {
+    pub is_valid: bool,
     pub is_first_valid: bool,
     pub is_first_resolved: bool,
     pub is_certified: bool,
     anchor_flags: AnchorFlags, // TODO make public and fill, only zeros now
     pub committed_at_round: Option<u32>, // not committed are stored with impossible zero round
 }
-impl Display for PointStatusValid {
+impl Display for PointStatusValidated {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut tuple = f.debug_tuple("Valid");
+        let mut tuple = if self.is_valid {
+            f.debug_tuple("Valid")
+        } else {
+            f.debug_tuple("Invalid")
+        };
         if self.is_first_valid {
             tuple.field(&"first valid");
         }
@@ -178,9 +178,9 @@ impl Display for PointStatusValid {
         tuple.finish_non_exhaustive()
     }
 }
-impl PointStatus for PointStatusValid {
-    fn is_valid() -> bool {
-        true
+impl PointStatus for PointStatusValidated {
+    fn is_valid(&self) -> bool {
+        self.is_valid
     }
     fn set_first_valid(&mut self) {
         self.is_first_valid = true;
@@ -195,13 +195,13 @@ impl PointStatus for PointStatusValid {
         self.is_first_resolved
     }
     fn size_hint() -> usize {
-        StatusFlags::VALID_BYTES
+        StatusFlags::VALIDATED_BYTES
     }
     fn write_to(&self, buffer: &mut Vec<u8>) {
         let mut flags = StatusFlags::empty();
         flags.insert(StatusFlags::Found);
         flags.insert(StatusFlags::WellFormed);
-        flags.insert(StatusFlags::Valid);
+        flags.set(StatusFlags::Valid, self.is_valid);
         flags.set(StatusFlags::FirstValid, self.is_first_valid);
         flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
         flags.set(StatusFlags::Certified, self.is_certified);
@@ -210,44 +210,6 @@ impl PointStatus for PointStatusValid {
         buffer.push(self.anchor_flags.bits());
         let at = self.committed_at_round.unwrap_or_default();
         buffer.extend_from_slice(&at.to_be_bytes());
-    }
-}
-
-#[derive(Debug)]
-pub struct PointStatusInvalid {
-    pub is_first_resolved: bool,
-    pub is_certified: bool,
-}
-impl Display for PointStatusInvalid {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut tuple = f.debug_tuple("Invalid");
-        if self.is_first_resolved {
-            tuple.field(&"first resolved");
-        }
-        if self.is_certified {
-            tuple.field(&"certified");
-        }
-        tuple.finish()
-    }
-}
-impl PointStatus for PointStatusInvalid {
-    fn set_first_resolved(&mut self) {
-        self.is_first_resolved = true;
-    }
-    fn is_first_resolved(&self) -> bool {
-        self.is_first_resolved
-    }
-    fn size_hint() -> usize {
-        StatusFlags::INVALID_BYTES
-    }
-    fn write_to(&self, buffer: &mut Vec<u8>) {
-        let mut flags = StatusFlags::empty();
-        flags.insert(StatusFlags::Found);
-        flags.insert(StatusFlags::WellFormed);
-        flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
-        flags.set(StatusFlags::Certified, self.is_certified);
-
-        buffer.push(flags.bits());
     }
 }
 
@@ -327,8 +289,7 @@ impl PointStatusStoredRef<'_> {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Self::Exists => Vec::new(), // no data
-            Self::Valid(resolved) => resolved.encode(),
-            Self::Invalid(resolved) => resolved.encode(),
+            Self::Validated(resolved) => resolved.encode(),
             Self::IllFormed(resolved) => resolved.encode(),
             Self::NotFound(resolved) => resolved.encode(),
         }
@@ -337,8 +298,7 @@ impl PointStatusStoredRef<'_> {
     pub fn write_to(&self, buffer: &mut Vec<u8>) {
         match self {
             Self::Exists => {} // no data
-            Self::Valid(resolved) => resolved.write_to(buffer),
-            Self::Invalid(resolved) => resolved.write_to(buffer),
+            Self::Validated(resolved) => resolved.write_to(buffer),
             Self::IllFormed(resolved) => resolved.write_to(buffer),
             Self::NotFound(resolved) => resolved.write_to(buffer),
         }
@@ -349,8 +309,7 @@ impl PointStatusStored {
     pub fn as_ref(&self) -> PointStatusStoredRef<'_> {
         match self {
             Self::Exists => PointStatusStoredRef::Exists,
-            Self::Valid(resolved) => PointStatusStoredRef::Valid(resolved),
-            Self::Invalid(resolved) => PointStatusStoredRef::Invalid(resolved),
+            Self::Validated(resolved) => PointStatusStoredRef::Validated(resolved),
             Self::IllFormed(resolved) => PointStatusStoredRef::IllFormed(resolved),
             Self::NotFound(resolved) => PointStatusStoredRef::NotFound(resolved),
         }
@@ -361,28 +320,22 @@ impl PointStatusStored {
         };
         let resolved = if flags.contains(StatusFlags::Found) {
             if flags.contains(StatusFlags::WellFormed) {
-                if flags.contains(StatusFlags::Valid) {
-                    let mut committed_at = [0_u8; 4];
-                    committed_at.copy_from_slice(&stored[2..]);
-                    let committed_at = u32::from_be_bytes(committed_at);
-                    let committed_at_round = if committed_at == 0 {
-                        None
-                    } else {
-                        Some(committed_at)
-                    };
-                    Self::Valid(PointStatusValid {
-                        is_first_valid: flags.contains(StatusFlags::FirstValid),
-                        is_first_resolved: flags.contains(StatusFlags::FirstResolved),
-                        is_certified: flags.contains(StatusFlags::Certified),
-                        anchor_flags: AnchorFlags::from_bits_retain(stored[1]),
-                        committed_at_round,
-                    })
+                let mut committed_at = [0_u8; 4];
+                committed_at.copy_from_slice(&stored[2..]);
+                let committed_at = u32::from_be_bytes(committed_at);
+                let committed_at_round = if committed_at == 0 {
+                    None
                 } else {
-                    Self::Invalid(PointStatusInvalid {
-                        is_first_resolved: flags.contains(StatusFlags::FirstResolved),
-                        is_certified: flags.contains(StatusFlags::Certified),
-                    })
-                }
+                    Some(committed_at)
+                };
+                Self::Validated(PointStatusValidated {
+                    is_valid: flags.contains(StatusFlags::Valid),
+                    is_first_valid: flags.contains(StatusFlags::FirstValid),
+                    is_first_resolved: flags.contains(StatusFlags::FirstResolved),
+                    is_certified: flags.contains(StatusFlags::Certified),
+                    anchor_flags: AnchorFlags::from_bits_retain(stored[1]),
+                    committed_at_round,
+                })
             } else {
                 Self::IllFormed(PointStatusIllFormed {
                     is_first_resolved: flags.contains(StatusFlags::FirstResolved),
