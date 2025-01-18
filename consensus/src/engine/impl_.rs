@@ -27,8 +27,8 @@ use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{
-    AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointStatusStoredRef,
-    Round,
+    AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointRestoreSelect,
+    PointStatusStoredRef, Round,
 };
 
 pub struct Engine {
@@ -329,10 +329,10 @@ impl Engine {
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
-                        PointRestore::Exists(info, _) => {
-                            Either::Left((info.round(), *info.digest()))
+                        PointRestoreSelect::NeedsVerify(round, digest) => {
+                            Either::Left((round, digest))
                         }
-                        other => Either::Right(other),
+                        PointRestoreSelect::Ready(ready) => Either::Right(ready),
                     });
                 let verified = need_verify
                     .chunks(1000) // seems enough for any case

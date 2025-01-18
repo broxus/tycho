@@ -28,8 +28,7 @@ bitflags::bitflags! {
 }
 
 impl StatusFlags {
-    pub const VALID_BYTES: usize = 1 + 1 + 4;
-    pub const INVALID_BYTES: usize = 1;
+    pub const VALIDATED_BYTES: usize = 1 + 1 + 4;
     pub const ILL_FORMED_BYTES: usize = 1;
     pub const NOT_FOUND_BYTES: usize = 1 + 32;
 
@@ -43,10 +42,8 @@ impl StatusFlags {
             len == Self::NOT_FOUND_BYTES
         } else if !flags.contains(Self::WellFormed) {
             len == Self::ILL_FORMED_BYTES
-        } else if !flags.contains(Self::Valid) {
-            len == Self::INVALID_BYTES
         } else {
-            len == Self::VALID_BYTES
+            len == Self::VALIDATED_BYTES
         };
         if is_ok {
             Ok(Some(flags))
@@ -73,8 +70,9 @@ pub(crate) fn merge(
         })
     }
 
-    let mut status_flags = StatusFlags::empty();
-    let mut anchor_flags = 0_u8;
+    let mut valted_status = 0_u8;
+    let mut valted_anchor = 0_u8;
+    let mut committed_round = 0_u32;
     stored
         .into_iter()
         .chain(new_status_queue)
@@ -104,8 +102,6 @@ pub(crate) fn merge(
                     MempoolStorage::format_key(key)
                 );
             }
-            // try our best even if errors above occurred, favouring flags set to 'true'
-            status_flags |= a_flags | b_flags;
             match (
                 a_flags.contains(StatusFlags::Found),
                 b_flags.contains(StatusFlags::Found),
@@ -130,37 +126,29 @@ pub(crate) fn merge(
                 a_flags.contains(StatusFlags::WellFormed),
                 b_flags.contains(StatusFlags::WellFormed),
             ) {
-                (_, false) => return a, // only already merged flags byte is stored for ill-formed
-                (false, true) => return b,
-                (true, true) => {} // continue
-            }
-            match (
-                a_flags.contains(StatusFlags::Valid),
-                b_flags.contains(StatusFlags::Valid),
-            ) {
                 (_, false) => a, // only already merged flags byte is stored for invalid
                 (false, true) => b,
                 (true, true) => {
-                    anchor_flags |= a[1] | b[1];
-                    // take the greatest commit round, because not committed stores all zeros
-                    if a[2..] >= b[2..] {
-                        a
-                    } else {
-                        b
-                    }
+                    valted_status = valted_status.max(a[0]).max(b[0]);
+                    valted_anchor = valted_anchor.max(a[1]).max(b[1]);
+
+                    let mut temp = [0_u8; 4];
+                    temp.copy_from_slice(&a[2..]);
+                    let a_com = u32::from_be_bytes(temp);
+                    temp.copy_from_slice(&b[2..]);
+                    let b_com = u32::from_be_bytes(temp);
+                    committed_round = committed_round.max(a_com).max(b_com);
+
+                    &[]
                 }
             }
         })
-        .map(|c| match none_if_err_or_empty(key, c) {
-            Some(flags) => {
-                let mut result = c.to_vec();
-                result[0] |= flags.bits();
-                let valid_combo = StatusFlags::Found | StatusFlags::WellFormed | StatusFlags::Valid;
-                if flags.contains(valid_combo) {
-                    result[1] |= anchor_flags;
-                }
-                result
+        .map(|c| {
+            if valted_status > 0 {
+                let cr = committed_round.to_be_bytes();
+                [valted_status, valted_anchor, cr[0], cr[1], cr[2], cr[3]].to_vec()
+            } else {
+                c.to_vec()
             }
-            None => Vec::new(), // keep empty
         })
 }

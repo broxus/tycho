@@ -70,8 +70,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
-                .map(|p| p.valid().cloned().expect("must be valid"))
-                .map(|p| p.info)
+                .map(|p| p.valid().expect("must be valid").info().clone())
                 .next()
         })
         .collect::<Vec<_>>();
@@ -140,7 +139,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         )
         .await;
         assert!(
-            matches!(validated, ValidateResult::Valid(_)),
+            matches!(validated, ValidateResult::Valid { .. }),
             "expected valid point, got {validated:?}"
         );
     }
