@@ -20,7 +20,7 @@ use crate::effects::{AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, Valida
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
     DagPoint, Digest, Point, PointId, PointInfo, PointRestore, PointStatusIllFormed,
-    PointStatusNotFound, PointStatusStored, PointStatusStoredRef, PointStatusValid,
+    PointStatusNotFound, PointStatusStored, PointStatusStoredRef, PointStatusValidated,
 };
 
 #[derive(Clone)]
@@ -80,7 +80,8 @@ impl DagPointFuture {
             tokio::task::spawn_blocking(move || {
                 let _span = round_ctx.span().enter();
 
-                let mut status = PointStatusValid::default();
+                let mut status = PointStatusValidated::default();
+                status.is_valid = true;
                 state.acquire(&point.id(), &mut status); // only after persisted
 
                 assert!(
@@ -88,15 +89,16 @@ impl DagPointFuture {
                     "local point must be first valid, got {status}"
                 );
 
-                let dag_point = DagPoint::new_valid(PointInfo::from(&point), &status);
+                let dag_point = DagPoint::new_validated(PointInfo::from(&point), &status);
 
-                store.insert_point(&point, PointStatusStoredRef::Valid(&status));
+                store.insert_point(&point, PointStatusStoredRef::Validated(&status));
                 state.resolve(&dag_point);
 
                 let signed = state.sign(point.round(), key_pair.as_deref());
                 assert!(
                     signed.as_ref().is_some_and(|sig| sig.is_ok()),
-                    "Coding or configuration error: local point cannot be signed; got {signed:?}"
+                    "Coding or configuration error: local point cannot be signed; got {:?}",
+                    signed.as_ref().map(|r| r.as_ref().map(|s| s.alt()))
                 );
                 dag_point
             })
@@ -350,13 +352,8 @@ impl DagPointFuture {
         // keep this section sync so that call site may not wait for each result to resolve
         let validate_or_restore = match point_restore {
             PointRestore::Exists(info, prev_proof) => Either::Left((info, prev_proof)),
-            PointRestore::Valid(info, status) => {
-                let dag_point = DagPoint::new_valid(info, &status);
-                state.acquire_restore(&dag_point.id(), &status);
-                Either::Right(dag_point)
-            }
-            PointRestore::Invalid(info, status) => {
-                let dag_point = DagPoint::new_invalid(info, &status);
+            PointRestore::Validated(info, status) => {
+                let dag_point = DagPoint::new_validated(info, &status);
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
@@ -425,19 +422,17 @@ impl DagPointFuture {
         validated: ValidateResult,
     ) -> (DagPoint, PointStatusStored) {
         let id = info.id();
+        let is_valid = matches!(validated, ValidateResult::Valid { .. });
+        // TODO fill anchor flags in status
         match validated {
-            ValidateResult::Valid(mut status) => {
+            ValidateResult::Valid { is_certified } | ValidateResult::Invalid { is_certified } => {
+                let mut status = PointStatusValidated::default();
+                status.is_valid = is_valid;
+                status.is_certified = is_certified;
                 state.acquire(&id, &mut status);
                 (
-                    DagPoint::new_valid(info, &status),
-                    PointStatusStored::Valid(status),
-                )
-            }
-            ValidateResult::Invalid(mut status) => {
-                state.acquire(&id, &mut status);
-                (
-                    DagPoint::new_invalid(info, &status),
-                    PointStatusStored::Invalid(status),
+                    DagPoint::new_validated(info, &status),
+                    PointStatusStored::Validated(status),
                 )
             }
             ValidateResult::IllFormed(reason) => {
