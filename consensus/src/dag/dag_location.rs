@@ -78,7 +78,6 @@ enum FirstResolved {
 
 struct FirstValid(OnceLock<Digest>);
 
-#[derive(Debug)]
 struct Signable {
     valid: ValidPoint,
     signature: OnceLock<Result<Signature, ()>>,
@@ -109,7 +108,7 @@ impl InclusionState {
         //  * if the first resolved is not valid, then some next valid will be the first valid
         let resolved = self.0.resolved.get_or_init(|| {
             status.set_first_resolved();
-            if T::is_valid() {
+            if status.is_valid() {
                 // the only place with nested lock - to resolve race during general work
                 let valid = self.0.valid.0.get_or_init(|| {
                     status.set_first_valid();
@@ -126,7 +125,7 @@ impl InclusionState {
                 FirstResolved::NotValid(id.digest)
             }
         });
-        if !status.is_first_resolved() && T::is_valid() {
+        if !status.is_first_resolved() && status.is_valid() {
             self.0.valid.0.get_or_init(|| {
                 status.set_first_valid();
                 id.digest
@@ -153,7 +152,7 @@ impl InclusionState {
     pub fn acquire_restore<T: PointStatus>(&self, id: &PointId, status: &T) {
         if status.is_first_resolved() {
             let resolved = self.0.resolved.get_or_init(|| {
-                if T::is_valid() {
+                if status.is_valid() {
                     FirstResolved::Valid(id.digest, Default::default())
                 } else {
                     FirstResolved::NotValid(id.digest)
@@ -171,7 +170,7 @@ impl InclusionState {
         }
         if status.is_first_valid() {
             assert!(
-                T::is_valid(),
+                status.is_valid(),
                 "{:?} {status} is not valid but has first_valid flag",
                 id.alt()
             );
@@ -257,7 +256,7 @@ impl InclusionState {
 
         // first valid
 
-        if let Some(valid) = dag_point.valid().filter(|v| v.is_first_valid) {
+        if let Some(valid) = dag_point.valid().filter(|v| v.is_first_valid()) {
             let Some(first_valid) = self.0.valid.0.get() else {
                 panic!(
                     "{:?} {} has first_valid flag, but its state was not acquired",
@@ -265,7 +264,7 @@ impl InclusionState {
                     dag_point.alt(),
                 )
             };
-            if valid.info.digest() == first_valid {
+            if valid.info().digest() == first_valid {
                 if let Some(dag_round) = self.0.parent.upgrade() {
                     dag_round.threshold().add(valid);
                 }
@@ -329,7 +328,6 @@ impl InclusionState {
     }
 }
 
-#[derive(Debug)]
 pub struct Signed<'a> {
     pub first_resolved: &'a ValidPoint,
     pub signature: &'a Signature,
@@ -353,11 +351,11 @@ impl Signable {
                 const REJECTED: &str = "tycho_mempool_signing_rejected";
 
                 if let Some(key_pair) = key_pair {
-                    if self.valid.info.round() > at {
+                    if self.valid.info().round() > at {
                         metrics::counter!(POSTPONED, "kind" => "round").increment(1);
                         return None; // retry later
                     }
-                    if self.valid.info.data().time - UnixTime::now()
+                    if self.valid.info().data().time - UnixTime::now()
                         >= UnixTime::from_millis(
                             CachedConfig::get().consensus.clock_skew_millis as _,
                         )
@@ -366,21 +364,21 @@ impl Signable {
                         return None; // retry later
                     }
                     self.signature.get_or_init(|| {
-                        if self.valid.info.round() >= at.prev() {
-                            if self.valid.info.round() == at {
+                        if self.valid.info().round() >= at.prev() {
+                            if self.valid.info().round() == at {
                                 metrics::counter!("tycho_mempool_signing_current_round_count")
                                     .increment(1);
                             } else {
                                 metrics::counter!("tycho_mempool_signing_prev_round_count")
                                     .increment(1);
                             }
-                            Ok(Signature::new(key_pair, self.valid.info.digest()))
+                            Ok(Signature::new(key_pair, self.valid.info().digest()))
                         } else {
                             metrics::counter!(REJECTED, "kind" => "round").increment(1);
                             Err(()) // too old round
                         }
                     })
-                } else if self.valid.info.round() >= at {
+                } else if self.valid.info().round() >= at {
                     // metrics::counter!(POSTPONED, "kind" => "round").increment(1);
                     return None; // wait for retry at next round, maybe keys will be defined
                 } else {
@@ -406,14 +404,14 @@ impl Debug for AltFmt<'_, FirstResolved> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match AltFormat::unpack(self) {
             FirstResolved::Valid(digest, signable) => match signable.get() {
-                None => write!(f, "Valid({}, Signable(NotResolved))", digest.alt()),
+                None => write!(f, "Valid(# {}, Signable(NotResolved))", digest.alt()),
                 Some(result) => {
                     let signable_alt = result.as_ref().map(|signable| signable.alt());
-                    write!(f, "Valid({}, {signable_alt:?})", digest.alt())
+                    write!(f, "Valid(# {}, {signable_alt:?})", digest.alt())
                 }
             },
             FirstResolved::NotValid(digest) => {
-                write!(f, "NotValid({})", digest.alt())
+                write!(f, "NotValid(# {})", digest.alt())
             }
             FirstResolved::Closed => f.write_str("Closed"),
         }
@@ -434,12 +432,25 @@ impl AltFormat for Signable {}
 impl Debug for AltFmt<'_, Signable> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
-        let digest = inner.valid.info.digest().alt();
+        let digest = inner.valid.info().digest().alt();
         match inner.signature.get() {
-            None => write!(f, "Signable({digest})"),
-            Some(Ok(_sig)) => write!(f, "Signed({digest})"),
-            Some(Err(())) => write!(f, "Rejected({digest})"),
+            None => write!(f, "Signable(# {digest})"),
+            Some(Ok(_sig)) => write!(f, "Signed(# {digest})"),
+            Some(Err(())) => write!(f, "Rejected(# {digest})"),
         }
+    }
+}
+
+impl AltFormat for Signed<'_> {}
+impl Debug for AltFmt<'_, Signed<'_>> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        write!(
+            f,
+            "Signed {{ {:?} {} }}",
+            &inner.first_resolved.info().id().alt(),
+            &inner.first_resolved.alt()
+        )
     }
 }
 
