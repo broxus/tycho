@@ -18,7 +18,7 @@ use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, To
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
 use crate::models::{
     Digest, Point, PointInfo, PointRestore, PointStatus, PointStatusStored, PointStatusStoredRef,
-    PointStatusValid, Round,
+    PointStatusValidated, Round,
 };
 
 #[derive(Clone)]
@@ -351,7 +351,7 @@ impl MempoolStoreImpl for MempoolStorage {
         let status_cf = self.db.points_status.cf();
         let mut batch = WriteBatch::default();
 
-        let mut status = PointStatusValid::default();
+        let mut status = PointStatusValidated::default();
         status.committed_at_round = Some(anchor.round().0);
         let status_encoded = status.encode();
 
@@ -584,23 +584,14 @@ impl MempoolStoreImpl for MempoolStorage {
                     let digest = Digest::wrap(digest_buf);
                     result.push(PointRestore::NotFound(round, digest, status));
                 }
-                PointStatusStored::Valid(status) => {
+                PointStatusStored::Validated(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
                         format!(
                             "table point info, status {status}, key {}",
                             MempoolStorage::format_key(&key)
                         )
                     })?;
-                    result.push(PointRestore::Valid(info, status));
-                }
-                PointStatusStored::Invalid(status) => {
-                    let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
-                        format!(
-                            "table point info, status {status}, key {}",
-                            MempoolStorage::format_key(&key)
-                        )
-                    })?;
-                    result.push(PointRestore::Invalid(info, status));
+                    result.push(PointRestore::Validated(info, status));
                 }
                 PointStatusStored::IllFormed(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key).with_context(|| {
