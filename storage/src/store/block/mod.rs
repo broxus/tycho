@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::Buf;
+use bytesize::ByteSize;
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
@@ -47,6 +48,7 @@ pub struct BlockStorage {
     store_block_data: tokio::sync::RwLock<()>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
     archive_notifier: ArchiveNotifier,
+    archive_chunk_size: NonZeroU32,
 }
 
 impl BlockStorage {
@@ -57,6 +59,7 @@ impl BlockStorage {
         config: BlocksCacheConfig,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
+        archive_chunk_size: ByteSize,
     ) -> Self {
         fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
             const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
@@ -77,12 +80,16 @@ impl BlockStorage {
             ArchiveNotifier { archive_id }
         };
 
+        let archive_chunk_size =
+            NonZeroU32::new(archive_chunk_size.as_u64().clamp(1, u32::MAX as _) as _).unwrap();
+
         Self {
             db,
             blocks_cache,
             block_handle_storage,
             block_connection_storage,
             archive_notifier,
+            archive_chunk_size,
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
@@ -93,7 +100,7 @@ impl BlockStorage {
     // NOTE: This is intentionally a method, not a constant because
     // it might be useful to allow configure it during the first run.
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
-        NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
+        self.archive_chunk_size
     }
 
     pub fn block_data_chunk_size(&self) -> NonZeroU32 {
@@ -1664,8 +1671,6 @@ fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
 }
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
-
 // Reserved key in which the archive size is stored
 const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
 // Reserved key in which we store the fact that the archive must be committed

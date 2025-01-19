@@ -28,6 +28,11 @@ pub struct StorageConfig {
     /// Default: calculated based on the available memory.
     pub cells_cache_size: ByteSize,
 
+    /// Archive chunk size.
+    ///
+    /// Default: 1 MB.
+    pub archive_chunk_size: ByteSize,
+
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -54,6 +59,7 @@ impl StorageConfig {
             root_dir: path.to_owned(),
             rocksdb_lru_capacity: ByteSize::kb(1024),
             cells_cache_size: ByteSize::kb(1024),
+            archive_chunk_size: ByteSize::kb(1024),
             rocksdb_enable_metrics: false,
             archives_gc: None,
             states_gc: None,
@@ -107,6 +113,7 @@ impl Default for StorageConfig {
             cells_cache_size,
             rocksdb_lru_capacity,
             rocksdb_enable_metrics: true,
+            archive_chunk_size: ByteSize::kb(1024),
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),

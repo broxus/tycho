@@ -1,5 +1,4 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
 use std::sync::{Arc, Weak};
 
 #[cfg(target_os = "linux")]
