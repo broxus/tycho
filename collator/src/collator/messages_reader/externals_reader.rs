@@ -196,6 +196,16 @@ impl ExternalsReader {
         !self.all_ranges_fully_read
     }
 
+    pub fn all_ranges_read_and_collected(&self) -> bool {
+        self.range_readers.values().all(|v| {
+            v.fully_read
+                && v.reader_state
+                    .by_partitions
+                    .values()
+                    .all(|par| par.buffer.msgs_count() == 0)
+        })
+    }
+
     pub fn has_pending_externals(&self) -> bool {
         self.anchors_cache.has_pending_externals()
     }

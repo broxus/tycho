@@ -745,7 +745,11 @@ impl InternalsParitionReader {
         let mut res = CollectInternalsResult::default();
 
         // do not collect internals on FinishExternals stage
-        if matches!(par_reader_stage, MessagesReaderStage::FinishExternals) {
+        if matches!(
+            par_reader_stage,
+            MessagesReaderStage::FinishPreviousExternals
+                | MessagesReaderStage::FinishCurrentExternals
+        ) {
             return Ok(res);
         }
 

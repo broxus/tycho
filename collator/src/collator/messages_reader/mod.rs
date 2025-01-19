@@ -40,10 +40,11 @@ pub(super) enum GetNextMessageGroupMode {
     Refill,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessagesReaderStage {
+    FinishPreviousExternals,
     ExistingAndExternals,
-    FinishExternals,
+    FinishCurrentExternals,
     ExternalsAndNew,
 }
 
@@ -174,6 +175,13 @@ impl MessagesReader {
             readers_stages: Default::default(),
         };
 
+        // define the initial reader stage
+        let all_read_externals_collected = res.externals_reader.all_ranges_read_and_collected();
+        let initial_reader_stage = match all_read_externals_collected {
+            true => MessagesReaderStage::ExistingAndExternals,
+            false => MessagesReaderStage::FinishPreviousExternals,
+        };
+
         // create internals readers by partitions
         let mut partition_reader_states = cx.reader_state.internals.partitions;
 
@@ -204,8 +212,7 @@ impl MessagesReader {
             mq_adapter.clone(),
         )?;
         res.internals_partition_readers.insert(0, par_reader);
-        res.readers_stages
-            .insert(0, MessagesReaderStage::ExistingAndExternals);
+        res.readers_stages.insert(0, initial_reader_stage);
 
         // low-priority partition 1
         let target_limits = internals_buffer_limits_by_partitions.remove(&1).unwrap();
@@ -234,8 +241,7 @@ impl MessagesReader {
             mq_adapter,
         )?;
         res.internals_partition_readers.insert(1, par_reader);
-        res.readers_stages
-            .insert(1, MessagesReaderStage::ExistingAndExternals);
+        res.readers_stages.insert(1, initial_reader_stage);
 
         // get full statistics from partition 1 and init partition router in new messages state
         let par_1_all_ranges_msgs_stats = res
@@ -255,9 +261,16 @@ impl MessagesReader {
         // reset metrics
         self.metrics = Default::default();
 
+        // define the initial reader stage
+        let all_read_externals_collected = self.externals_reader.all_ranges_read_and_collected();
+        let initial_reader_stage = match all_read_externals_collected {
+            true => MessagesReaderStage::ExistingAndExternals,
+            false => MessagesReaderStage::FinishPreviousExternals,
+        };
+
         // reset internals reader stages
         for (_, par_reader_stage) in self.readers_stages.iter_mut() {
-            *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
+            *par_reader_stage = initial_reader_stage;
         }
     }
 
@@ -636,7 +649,11 @@ impl MessagesReader {
                 .context("reader for partition should exist")?;
 
             // check if we have FinishExternals stage in any partition
-            if matches!(par_reader_stage, MessagesReaderStage::FinishExternals) {
+            if matches!(
+                par_reader_stage,
+                MessagesReaderStage::FinishPreviousExternals
+                    | MessagesReaderStage::FinishCurrentExternals
+            ) {
                 has_finish_externals_stage = true;
             }
 
@@ -656,7 +673,8 @@ impl MessagesReader {
                     let metrics = par_reader.read_existing_messages_into_buffers(read_mode)?;
                     metrics_of_partition.append(metrics);
                 }
-                MessagesReaderStage::FinishExternals => {
+                MessagesReaderStage::FinishPreviousExternals
+                | MessagesReaderStage::FinishCurrentExternals => {
                     // do not read internals when finishing to collect externals
                 }
                 MessagesReaderStage::ExternalsAndNew => {
@@ -815,7 +833,7 @@ impl MessagesReader {
         let all_read_externals_collected_before;
 
         // collect existing internals
-        if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals) {
+        if *par_reader_stage == MessagesReaderStage::ExistingAndExternals {
             all_internals_collected_before = par_reader.all_read_existing_messages_collected();
 
             let CollectInternalsResult { metrics, .. } = par_reader.collect_messages(
@@ -842,7 +860,7 @@ impl MessagesReader {
         }
 
         // collect new internals
-        if matches!(par_reader_stage, MessagesReaderStage::ExternalsAndNew) {
+        if *par_reader_stage == MessagesReaderStage::ExternalsAndNew {
             all_internals_collected_before =
                 par_reader.all_new_messages_collected(has_pending_new_messages_for_partition);
 
@@ -865,27 +883,6 @@ impl MessagesReader {
         }
 
         // switch to the next reader stage if required
-
-        // if all existing internals collected
-        // then we should collect all already read externals without reading more from cache
-        // and only after that we can finalize existing internals read state
-        if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals)
-            && par_reader.all_read_existing_messages_collected()
-        {
-            // log only first time
-            if !all_internals_collected_before {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = par_reader.partition_id,
-                    int_processed_to = ?par_reader.reader_state().processed_to,
-                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
-                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                    "all read existing internals collected from partition",
-                );
-            }
-
-            // switch to the "collect only already read externals" stage
-            *par_reader_stage = MessagesReaderStage::FinishExternals;
-        }
 
         // if all read externals collected
         let all_read_externals_collected = !externals_reader.has_messages_in_buffers();
@@ -920,35 +917,68 @@ impl MessagesReader {
                     "all read externals collected",
                 );
             }
+        }
 
-            // if we are in the "collecting only already read externals" stage
-            // then we can finalize existing internals read state
-            if matches!(par_reader_stage, MessagesReaderStage::FinishExternals) {
-                // finalize existing intenals read state
-                // drop all ranges except the last one
-                par_reader.retain_only_last_range_reader()?;
-                // mark all read messages processed
-                par_reader.set_processed_to_current_position()?;
-                // drop processing offset for existing internals
-                par_reader.drop_processing_offset(true)?;
-                // and drop processing offset for externals
-                externals_reader.drop_processing_offset(par_reader.partition_id, true)?;
+        // if all read externals collected from the previous block collation
+        // then we can switch to the "read existing internals stage"
+        if all_read_externals_collected
+            && *par_reader_stage == MessagesReaderStage::FinishPreviousExternals
+        {
+            // switch to the "read existing internals stage" stage
+            *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
+        }
 
-                // switch to the "new messages processing" stage
-                // if all existing messages read (last range reader was created in current block)
-                let (last_seqno, _) = par_reader.get_last_range_reader()?;
-                if last_seqno == &par_reader.block_seqno {
-                    *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
-                } else {
-                    // otherwise return to the reading of existing messages
-                    *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
-                }
+        // if all existing internals collected
+        // then we should collect all already read externals without reading more from cache
+        // and only after that we can finalize existing internals read state
+        if *par_reader_stage == MessagesReaderStage::ExistingAndExternals
+            && par_reader.all_read_existing_messages_collected()
+        {
+            // log only first time
+            if !all_internals_collected_before {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    partition_id = par_reader.partition_id,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                    "all read existing internals collected from partition",
+                );
+            }
+
+            // switch to the "collect only already read externals" stage
+            *par_reader_stage = MessagesReaderStage::FinishCurrentExternals;
+        }
+
+        // if all read externals collected from current block collation
+        // then we can finalize existing internals read state
+        // and switch to the "new messages processing" stage
+        if all_read_externals_collected
+            && *par_reader_stage == MessagesReaderStage::FinishCurrentExternals
+        {
+            // finalize existing intenals read state
+            // drop all ranges except the last one
+            par_reader.retain_only_last_range_reader()?;
+            // mark all read messages processed
+            par_reader.set_processed_to_current_position()?;
+            // drop processing offset for existing internals
+            par_reader.drop_processing_offset(true)?;
+            // and drop processing offset for externals
+            externals_reader.drop_processing_offset(par_reader.partition_id, true)?;
+
+            // switch to the "new messages processing" stage
+            // if all existing messages read (last range reader was created in current block)
+            let (last_seqno, _) = par_reader.get_last_range_reader()?;
+            if last_seqno == &par_reader.block_seqno {
+                *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
+            } else {
+                // otherwise return to the reading of existing messages
+                *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
             }
         }
 
         // if all new messages collected
         // finalize new messages read state
-        if matches!(par_reader_stage, MessagesReaderStage::ExternalsAndNew)
+        if *par_reader_stage == MessagesReaderStage::ExternalsAndNew
             && par_reader.all_new_messages_collected(has_pending_new_messages_for_partition)
         {
             // mark all read messages processed
