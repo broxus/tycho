@@ -113,7 +113,7 @@ tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 trait-variant = "0.1.2"
 triomphe = "0.1.11"
-weedb = "0.3.8"
+weedb = "0.4"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
@@ -133,7 +133,6 @@ tycho-storage = { path = "./storage", version = "0.1.5" }
 tycho-util = { path = "./util", version = "0.1.5" }
 
 [patch.crates-io]
-weedb = { version = "0.3.8", git = "https://github.com/broxus/weedb.git", rev = "59728ea0c8703dd28a4c37dee05c1321cd81b966" }
 everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "e2d7ff86c211f8cf49b82d0db6de08883b454712" }
 
 [workspace.lints.rust]
