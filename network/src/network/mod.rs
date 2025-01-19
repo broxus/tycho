@@ -1,8 +1,9 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
+use anyhow::Result;
 use everscale_crypto::ed25519;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -409,7 +410,7 @@ impl MaxBufferSize {
         let proc_path = std::env::var("MOCK_PROC_PATH").unwrap_or_else(|_| "/proc".to_string());
         #[cfg(not(any(feature = "test", test)))]
         let proc_path = "/proc";
-        let proc_path = Path::new(&proc_path).join("sys/net/core");
+        let proc_path = std::path::Path::new(&proc_path).join("sys/net/core");
 
         let read_and_parse = |file_name: &str| -> Result<Option<usize>> {
             let path = proc_path.join(file_name);
@@ -658,7 +659,7 @@ mod tests {
 
     #[test]
     fn socket_size_works() {
-        if Path::new("/proc").exists() {
+        if std::path::Path::new("/proc").exists() {
             let socket_size = MaxBufferSize::read()
                 .unwrap()
                 .expect("socket size not found");

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 use anyhow::bail;
@@ -33,7 +33,7 @@ pub struct QueueDiff {
     /// List of message hashes (sorted ASC).
     pub messages: Vec<HashBytes>,
     /// Partition router
-    pub partition_router: BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>,
+    pub partition_router: BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
 }
 
 impl QueueDiff {
@@ -389,37 +389,46 @@ mod partition_router_list {
     use super::*;
 
     const MAX_DIRECTIONS: usize = 2;
-    const MAX_ENTRIES_PER_DIRECTION: usize = 1_000_000;
+    const MAX_PARTITIONS_PER_DIRECTION: QueuePartition = 255;
+    const MAX_ADDRS_PER_PARTITION: usize = 1_000_000;
 
     pub fn size_hint(
-        items: &BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>,
+        items: &BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
     ) -> usize {
         let mut size = 4;
-        for (direction, map) in items {
+        for (direction, partitions) in items {
             size += direction.max_size_hint();
-            size += 4;
-            size += map.len() * (RouterAddr::SIZE_HINT + 1);
+            size += 4; // partitions count
+            for addrs in partitions.values() {
+                size += 1; // partition u8
+                size += 4; // addresses count
+                size += addrs.len() * RouterAddr::SIZE_HINT;
+            }
         }
         size
     }
+
     pub fn write<P: TlPacket>(
-        items: &BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>,
+        items: &BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
         packet: &mut P,
     ) {
         packet.write_u32(items.len() as u32);
-        for (direction, map) in items {
+        for (direction, partitions) in items {
             direction.write_to(packet);
-            packet.write_u32(map.len() as u32);
-            for (addr, partition) in map {
-                addr.write_to(packet);
-                packet.write_raw_slice(&partition.to_le_bytes());
+            packet.write_u32(partitions.len() as u32);
+            for (partition, addrs) in partitions {
+                packet.write_raw_slice(&[*partition]);
+                packet.write_u32(addrs.len() as u32);
+                for addr in addrs {
+                    addr.write_to(packet);
+                }
             }
         }
     }
 
     pub fn read(
         data: &mut &[u8],
-    ) -> TlResult<BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>> {
+    ) -> TlResult<BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>> {
         let len = u32::read_from(data)? as usize;
         if len > MAX_DIRECTIONS {
             return Err(tl_proto::TlError::InvalidData);
@@ -430,21 +439,31 @@ mod partition_router_list {
         for _ in 0..len {
             let direction = RouterDirection::read_from(data)?;
 
-            let inner_len = u32::read_from(data)? as usize;
-            if inner_len > MAX_ENTRIES_PER_DIRECTION {
+            let partitions_len = u32::read_from(data)? as usize;
+            if partitions_len > MAX_PARTITIONS_PER_DIRECTION as usize {
                 return Err(tl_proto::TlError::InvalidData);
             }
 
-            let mut map = BTreeMap::new();
-            for _ in 0..inner_len {
-                let addr = RouterAddr::read_from(data)?;
-                let partition_byte = data[0];
+            let mut partitions = BTreeMap::new();
+            for _ in 0..partitions_len {
+                let partition = data[0];
                 *data = &data[1..];
 
-                map.insert(addr, partition_byte);
+                let addrs_len = u32::read_from(data)? as usize;
+                if addrs_len > MAX_ADDRS_PER_PARTITION {
+                    return Err(tl_proto::TlError::InvalidData);
+                }
+
+                let mut addrs = BTreeSet::new();
+                for _ in 0..addrs_len {
+                    let addr = RouterAddr::read_from(data)?;
+                    addrs.insert(addr);
+                }
+
+                partitions.insert(partition, addrs);
             }
 
-            result.insert(direction, map);
+            result.insert(direction, partitions);
         }
 
         Ok(result)
@@ -622,9 +641,15 @@ mod tests {
             account: HashBytes::from([0x01; 32]),
         };
 
-        partition_router.insert(addr1, 1);
+        let addr2 = RouterAddr {
+            workchain: 1,
+            account: HashBytes::from([0x02; 32]),
+        };
 
-        let partition_router = BTreeMap::from([(RouterDirection::Dest, partition_router)]);
+        let mut partition_map = BTreeMap::new();
+        partition_map.insert(1, BTreeSet::from([addr1, addr2]));
+
+        partition_router.insert(RouterDirection::Dest, partition_map);
 
         let mut diff = QueueDiff {
             hash: HashBytes::ZERO, // NOTE: Uninitialized
@@ -671,18 +696,23 @@ mod tests {
     fn queue_state_binary_repr() {
         let mut queue_diffs = Vec::<QueueDiff>::new();
         for seqno in 1..=10 {
-            let prev_hash = queue_diffs.last().map(|diff| diff.hash).unwrap_or_default();
-
             let mut partition_router = BTreeMap::new();
 
             let addr1 = RouterAddr {
+                workchain: 0,
+                account: HashBytes::from([0x01; 32]),
+            };
+
+            let addr2 = RouterAddr {
                 workchain: 1,
                 account: HashBytes::from([0x02; 32]),
             };
 
-            partition_router.insert(addr1, 1);
+            let mut partition_map = BTreeMap::new();
+            partition_map.insert(1, BTreeSet::from([addr1, addr2]));
 
-            let partition_router = BTreeMap::from([(RouterDirection::Dest, partition_router)]);
+            partition_router.insert(RouterDirection::Dest, partition_map);
+            let prev_hash = queue_diffs.last().map(|diff| diff.hash).unwrap_or_default();
 
             let mut diff = QueueDiff {
                 hash: HashBytes::ZERO, // NOTE: Uninitialized

@@ -1,8 +1,8 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
-use smallvec::SmallVec;
 use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr, RouterDirection};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, ReadOptions, WriteBatch, WriteBatchWithTransaction};
@@ -162,6 +162,25 @@ impl InternalQueueStorage {
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
+            let get_partition = |router: &BTreeMap<
+                RouterDirection,
+                BTreeMap<QueuePartition, BTreeSet<RouterAddr>>,
+            >,
+                                 router_direction: &RouterDirection,
+                                 router_addr: &RouterAddr| {
+                let mut partition = None;
+                if let Some(partitions) = router.get(router_direction) {
+                    for (p, addresses) in partitions {
+                        if addresses.contains(router_addr) {
+                            partition = Some(p);
+                            break;
+                        }
+                    }
+                }
+
+                partition.cloned()
+            };
+
             let mapped = MappedFile::from_existing_file(file)?;
 
             let mut reader = QueueStateReader::begin_from_mapped(mapped.as_slice(), &top_update)?;
@@ -201,17 +220,19 @@ impl InternalQueueStorage {
                     };
                     let current_diff = &reader.state().header.queue_diffs[current_diff_index];
 
-                    let partition = current_diff
-                        .partition_router
-                        .get(&RouterDirection::Dest)
-                        .and_then(|dest_router| dest_router.get(&dest_addr).cloned())
-                        .or_else(|| {
-                            current_diff
-                                .partition_router
-                                .get(&RouterDirection::Src)
-                                .and_then(|src_router| src_router.get(&src_addr).cloned())
-                        })
-                        .unwrap_or_default();
+                    let mut partition = get_partition(
+                        &current_diff.partition_router,
+                        &RouterDirection::Dest,
+                        &dest_addr,
+                    );
+                    if partition.is_none() {
+                        partition = get_partition(
+                            &current_diff.partition_router,
+                            &RouterDirection::Src,
+                            &src_addr,
+                        );
+                    }
+                    let partition = partition.unwrap_or_default();
 
                     let key = ShardsInternalMessagesKey {
                         partition,
