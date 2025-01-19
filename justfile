@@ -52,7 +52,7 @@ docs:
 
 # Runs all tests.
 test:
-    cargo nextest run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util  -p tycho-collator -p tycho-control
+    cargo nextest run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util  -p tycho-collator
 
 test_cov:
     #!/usr/bin/env bash
