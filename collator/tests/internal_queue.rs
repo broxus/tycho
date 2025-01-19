@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -967,25 +967,19 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut messages = vec![message1_hash, message2_hash, message3_hash];
     messages.sort_unstable();
 
-    let mut direction_router = BTreeMap::default();
+    let addr1 = RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?;
+    let addr2 = RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?;
+    let addr3 = RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?;
 
-    direction_router.insert(
-        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
-        1,
-    );
-    direction_router.insert(
-        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
-        2,
-    );
-    direction_router.insert(
-        RouterAddr::try_from(IntAddr::Std(StdAddr::new(0, HashBytes::ZERO)))?,
-        3,
-    );
+    let mut direction_router = BTreeMap::new();
+    direction_router.insert(1, BTreeSet::from([addr1]));
+    direction_router.insert(2, BTreeSet::from([addr2]));
+    direction_router.insert(3, BTreeSet::from([addr3]));
 
     let mut partition_router = BTreeMap::new();
-
     partition_router.insert(RouterDirection::Dest, direction_router);
 
+    // И теперь можно создать QueueDiff:
     let diff = QueueDiff {
         hash: HashBytes::ZERO,
         prev_hash: HashBytes::from([0x33; 32]),
@@ -1012,6 +1006,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
         messages,
         partition_router,
     };
+
     let data = tl_proto::serialize(&diff);
 
     let block_id = BlockId {
