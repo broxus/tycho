@@ -1,8 +1,7 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use everscale_crypto::ed25519;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
