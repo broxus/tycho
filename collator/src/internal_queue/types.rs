@@ -1,5 +1,5 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::{hash_map, BTreeMap, BinaryHeap};
+use std::collections::{hash_map, BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -74,21 +74,31 @@ impl PartitionRouter {
     }
 }
 
-impl From<BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>> for PartitionRouter {
-    fn from(value: BTreeMap<RouterDirection, BTreeMap<RouterAddr, QueuePartition>>) -> Self {
+impl From<BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>>
+    for PartitionRouter
+{
+    fn from(
+        value: BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
+    ) -> Self {
         let mut router = FastHashMap::default();
-        let mut partitions = FastHashSet::default();
+
+        let mut full_partitions = FastHashSet::default();
 
         for (direction, direction_router) in value {
-            partitions.extend(direction_router.values().cloned());
-            let r = direction_router
-                .into_iter()
-                .map(|(addr, partition)| (addr.to_int_addr(), partition))
-                .collect();
-            router.insert(direction, r);
+            let mut partitions = FastHashMap::default();
+            for (partition, addresses) in direction_router {
+                for address in &addresses {
+                    partitions.insert(address.to_int_addr(), partition);
+                    full_partitions.insert(partition);
+                }
+            }
+            router.insert(direction, partitions);
         }
 
-        Self { router, partitions }
+        Self {
+            router,
+            partitions: full_partitions,
+        }
     }
 }
 
@@ -417,6 +427,66 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
                 max_message,
                 statistics,
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::*;
+
+    #[test]
+    fn test_partition_router_from_btreemap() {
+        let addr1 = RouterAddr {
+            workchain: 0,
+            account: HashBytes([0x01; 32]),
+        };
+        let addr2 = RouterAddr {
+            workchain: 0,
+            account: HashBytes([0x02; 32]),
+        };
+        let addr3 = RouterAddr {
+            workchain: 1,
+            account: HashBytes([0x03; 32]),
+        };
+        let addr4 = RouterAddr {
+            workchain: 1,
+            account: HashBytes([0x04; 32]),
+        };
+
+        let mut dest_map = BTreeMap::new();
+        dest_map.insert(1, BTreeSet::from([addr1, addr2]));
+        dest_map.insert(2, BTreeSet::from([addr3]));
+
+        let mut src_map = BTreeMap::new();
+        src_map.insert(10, BTreeSet::from([addr4]));
+
+        let mut router_data = BTreeMap::new();
+        router_data.insert(RouterDirection::Dest, dest_map);
+        router_data.insert(RouterDirection::Src, src_map);
+
+        let partition_router = PartitionRouter::from(router_data);
+
+        {
+            let expected_partitions = [1, 2, 10].into_iter().collect::<FastHashSet<_>>();
+            assert_eq!(partition_router.partitions(), &expected_partitions);
+        }
+
+        {
+            // Dest
+            let dest_router = partition_router.router.get(&RouterDirection::Dest).unwrap();
+            // addr1 и addr2 -> partition 1
+            assert_eq!(*dest_router.get(&addr1.to_int_addr()).unwrap(), 1);
+            assert_eq!(*dest_router.get(&addr2.to_int_addr()).unwrap(), 1);
+            // addr3 -> partition 2
+            assert_eq!(*dest_router.get(&addr3.to_int_addr()).unwrap(), 2);
+
+            // Src
+            let src_router = partition_router.router.get(&RouterDirection::Src).unwrap();
+            // addr4 -> partition 10
+            assert_eq!(*src_router.get(&addr4.to_int_addr()).unwrap(), 10);
         }
     }
 }

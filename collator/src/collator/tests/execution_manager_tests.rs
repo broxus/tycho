@@ -113,7 +113,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         unimplemented!()
     }
 
-    fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
+    fn commit_diff(&self, _mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
         unimplemented!()
     }
 
@@ -141,7 +141,10 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         unimplemented!()
     }
 
-    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
+    fn get_diffs(
+        &self,
+        _blocks: FastHashMap<ShardIdent, u32>,
+    ) -> Vec<(ShardIdent, ShortQueueDiff)> {
         todo!()
     }
 
