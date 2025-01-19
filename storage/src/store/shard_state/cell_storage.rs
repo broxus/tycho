@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
+use bytesize::ByteSize;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
@@ -26,9 +27,9 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
-    pub fn new(db: BaseDb, cache_size_bytes: u64) -> Arc<Self> {
+    pub fn new(db: BaseDb, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
-        let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes));
+        let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
         spawn_metrics_loop(
             &raw_cells_cache.clone(),

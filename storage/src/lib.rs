@@ -128,13 +128,14 @@ impl StorageBuilder {
             blocks_cache_config,
             block_handle_storage.clone(),
             block_connection_storage.clone(),
+            self.config.archive_chunk_size,
         ));
         let shard_state_storage = ShardStateStorage::new(
             base_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             temp_file_storage.clone(),
-            self.config.cells_cache_size.as_u64(),
+            self.config.cells_cache_size,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
             base_db.clone(),

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use bytesize::ByteSize;
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
@@ -41,7 +42,7 @@ impl ShardStateStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,
-        cache_size_bytes: u64,
+        cache_size_bytes: ByteSize,
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 
