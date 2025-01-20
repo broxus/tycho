@@ -32,7 +32,7 @@ impl InternalQueueStorage {
         count: u64,
     ) -> Result<()> {
         let cf = self.db.internal_messages_statistics_uncommitted.cf();
-        self.insert_statistics(batch, &cf, key, count)
+        Self::insert_statistics(batch, &cf, key, count)
     }
 
     pub fn insert_statistics_committed(
@@ -42,7 +42,7 @@ impl InternalQueueStorage {
         count: u64,
     ) -> Result<()> {
         let cf = self.db.internal_messages_statistics_committed.cf();
-        self.insert_statistics(batch, &cf, key, count)
+        Self::insert_statistics(batch, &cf, key, count)
     }
 
     pub fn collect_committed_stats_in_range(
@@ -63,7 +63,7 @@ impl InternalQueueStorage {
 
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
-        self.collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
+        Self::collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
     }
 
     pub fn collect_uncommitted_stats_in_range(
@@ -84,11 +84,10 @@ impl InternalQueueStorage {
 
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
-        self.collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
+        Self::collect_dest_counts_in_range(&mut iter, shard_ident, partition, from, to, result)
     }
 
     fn collect_dest_counts_in_range(
-        &self,
         iter: &mut DBRawIterator<'_>,
         shard_ident: ShardIdent,
         partition: QueuePartition,
@@ -392,14 +391,14 @@ impl InternalQueueStorage {
             let (start_stat_key, end_stat_key, start_msg_key, end_msg_key) =
                 Self::build_range_keys(range);
 
-            self.delete_range(
+            Self::delete_range(
                 &mut batch,
                 &self.db.internal_messages_statistics_committed.cf(),
                 &start_stat_key,
                 &end_stat_key,
             );
 
-            self.delete_range(
+            Self::delete_range(
                 &mut batch,
                 &self.db.shards_internal_messages.cf(),
                 &start_msg_key,
@@ -464,7 +463,6 @@ impl InternalQueueStorage {
     }
 
     fn delete_range(
-        &self,
         batch: &mut WriteBatch,
         cf: &BoundedCfHandle<'_>,
         start_key: &[u8],
@@ -580,7 +578,6 @@ impl InternalQueueStorage {
     }
 
     fn insert_statistics(
-        &self,
         batch: &mut WriteBatchWithTransaction<false>,
         cf: &BoundedCfHandle<'_>,
         key: &StatKey,

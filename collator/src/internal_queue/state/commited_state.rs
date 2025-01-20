@@ -140,6 +140,8 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         partition: QueuePartition,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
+        let _histogram =
+            HistogramGuard::begin("tycho_internal_queue_committed_statistics_load_time");
         for range in ranges {
             self.storage
                 .internal_queue_storage()
