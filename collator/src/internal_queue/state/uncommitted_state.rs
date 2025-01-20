@@ -6,6 +6,7 @@ use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr};
 use tycho_storage::model::{QueueRange, StatKey};
 use tycho_storage::Storage;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::OwnedSnapshot;
@@ -184,6 +185,8 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         partition: QueuePartition,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
+        let _histogram =
+            HistogramGuard::begin("tycho_internal_queue_uncommitted_statistics_load_time");
         for range in ranges {
             self.storage
                 .internal_queue_storage()
