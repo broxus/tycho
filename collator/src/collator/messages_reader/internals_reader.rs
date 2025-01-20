@@ -11,7 +11,7 @@ use super::{
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
-    MessagesBufferLimits,
+    MessagesBufferLimits, SaturatingAddAssign,
 };
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::iterator::QueueIterator;
@@ -543,6 +543,9 @@ impl InternalsParitionReader {
 
                         metrics.add_to_message_groups_timer.start();
                         range_reader.reader_state.buffer.add_message(msg);
+                        metrics
+                            .add_to_msgs_groups_ops_count
+                            .saturating_add_assign(1);
                         metrics.add_to_message_groups_timer.stop();
 
                         metrics.read_int_msgs_from_iterator_count += 1;
@@ -663,12 +666,16 @@ impl InternalsParitionReader {
                 res.metrics.add_to_message_groups_timer.start();
                 let CollectMessagesFromRangeReaderResult {
                     mut collected_queue_msgs_keys,
+                    ops_count,
                 } = range_reader.collect_messages(
                     msg_group,
                     prev_par_readers,
                     &range_readers,
                     prev_msg_groups,
                 );
+                res.metrics
+                    .add_to_msgs_groups_ops_count
+                    .saturating_add_assign(ops_count);
                 res.metrics.add_to_message_groups_timer.stop();
                 res.collected_queue_msgs_keys
                     .append(&mut collected_queue_msgs_keys);
@@ -766,75 +773,90 @@ impl InternalsRangeReader {
         prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
     ) -> CollectMessagesFromRangeReaderResult {
         let FillMessageGroupResult {
-            // unused_buffer_accounts,
             collected_queue_msgs_keys,
+            ops_count,
         } = self.reader_state.buffer.fill_message_group(
             msg_group,
             self.buffer_limits.slots_count,
             self.buffer_limits.slot_vert_size,
             |account_id| {
+                let mut check_ops_count = 0;
+
                 let dst_addr = IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
                 for msg_group in prev_msg_groups.values() {
-                    if msg_group.messages_count() > 0 && msg_group.contains_account(account_id) {
-                        return true;
+                    if msg_group.messages_count() > 0 {
+                        check_ops_count.saturating_add_assign(1);
+                        if msg_group.contains_account(account_id) {
+                            return (true, check_ops_count);
+                        }
                     }
                 }
 
                 // check by previous partitions
                 for prev_par_reader in prev_par_readers.values() {
                     for prev_reader in prev_par_reader.range_readers().values() {
-                        if prev_reader.reader_state.buffer.msgs_count() > 0
-                            && prev_reader
+                        if prev_reader.reader_state.buffer.msgs_count() > 0 {
+                            check_ops_count.saturating_add_assign(1);
+                            if prev_reader
                                 .reader_state
                                 .buffer
                                 .account_messages_count(account_id)
                                 > 0
-                        {
-                            return true;
+                            {
+                                return (true, check_ops_count);
+                            }
                         }
-                        if !prev_reader.fully_read
-                            && prev_reader
+                        if !prev_reader.fully_read {
+                            check_ops_count.saturating_add_assign(1);
+                            if prev_reader
                                 .remaning_msgs_stats
                                 .statistics()
                                 .contains_key(&dst_addr)
-                        {
-                            return true;
+                            {
+                                return (true, check_ops_count);
+                            }
                         }
                     }
                 }
 
                 // check by previous ranges in current partition
                 for prev_reader in prev_range_readers.values() {
-                    if prev_reader.reader_state.buffer.msgs_count() > 0
-                        && prev_reader
+                    if prev_reader.reader_state.buffer.msgs_count() > 0 {
+                        check_ops_count.saturating_add_assign(1);
+                        if prev_reader
                             .reader_state
                             .buffer
                             .account_messages_count(account_id)
                             > 0
-                    {
-                        return true;
+                        {
+                            return (true, check_ops_count);
+                        }
                     }
-                    if !prev_reader.fully_read
-                        && prev_reader
+                    if !prev_reader.fully_read {
+                        check_ops_count.saturating_add_assign(1);
+                        if prev_reader
                             .remaning_msgs_stats
                             .statistics()
                             .contains_key(&dst_addr)
-                    {
-                        return true;
+                        {
+                            return (true, check_ops_count);
+                        }
                     }
                 }
 
-                false
+                (false, check_ops_count)
             },
         );
 
         CollectMessagesFromRangeReaderResult {
             collected_queue_msgs_keys,
+            ops_count,
         }
     }
 }
 
 struct CollectMessagesFromRangeReaderResult {
     collected_queue_msgs_keys: Vec<QueueKey>,
+    ops_count: u64,
 }

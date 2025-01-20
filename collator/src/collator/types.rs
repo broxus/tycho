@@ -20,6 +20,7 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::ReaderState;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::processed_upto::{BlockSeqno, PartitionId, ProcessedUptoInfoStuff};
@@ -958,8 +959,7 @@ pub struct ExecuteResult {
     pub execute_groups_wu_vm_only: u64,
     pub process_txs_wu: u64,
     pub execute_groups_wu_total: u64,
-    pub prepare_groups_wu_total: u64,
-    pub fill_msgs_total_elapsed: Duration,
+    pub prepare_msg_groups_wu: PrepareMsgGroupsWu,
     pub execute_msgs_total_elapsed: Duration,
     pub process_txs_total_elapsed: Duration,
     pub init_iterator_elapsed: Duration,
