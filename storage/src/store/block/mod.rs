@@ -1087,36 +1087,39 @@ impl BlockStorage {
                 // Write archive prefix
                 writer.write(&ARCHIVE_PREFIX)?;
 
-                // Write all entries
+                // Write all entries. We group them by type to achieve better compression.
                 let mut unique_ids = FastHashSet::default();
-                for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
-                    anyhow::ensure!(!cancelled.check(), "task aborted");
+                for ty in [
+                    ArchiveEntryType::Block,
+                    ArchiveEntryType::Proof,
+                    ArchiveEntryType::QueueDiff,
+                ] {
+                    for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
+                        anyhow::ensure!(!cancelled.check(), "task aborted");
 
-                    let block_id = BlockId::from_slice(raw_block_id);
-                    if !unique_ids.insert(block_id) {
-                        tracing::warn!(%block_id, "skipped duplicate block id");
-                        continue;
-                    }
+                        let block_id = BlockId::from_slice(raw_block_id);
+                        if !unique_ids.insert(block_id) {
+                            tracing::warn!(%block_id, "skipped duplicate block id");
+                            continue;
+                        }
 
-                    let handle = block_handle_storage
-                        .load_handle(&block_id)
-                        .ok_or(BlockStorageError::BlockHandleNotFound)?;
+                        // Check handle flags (only for the first type).
+                        if ty == ArchiveEntryType::Block {
+                            let handle = block_handle_storage
+                                .load_handle(&block_id)
+                                .ok_or(BlockStorageError::BlockHandleNotFound)?;
 
-                    let flags = handle.meta().flags();
-                    anyhow::ensure!(
-                        flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
-                        "block does not have all parts: {block_id}, \
-                        has_data={}, has_proof={}, queue_diff={}",
-                        flags.contains(BlockFlags::HAS_DATA),
-                        flags.contains(BlockFlags::HAS_PROOF),
-                        flags.contains(BlockFlags::HAS_QUEUE_DIFF)
-                    );
+                            let flags = handle.meta().flags();
+                            anyhow::ensure!(
+                                flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
+                                "block does not have all parts: {block_id}, \
+                                has_data={}, has_proof={}, queue_diff={}",
+                                flags.contains(BlockFlags::HAS_DATA),
+                                flags.contains(BlockFlags::HAS_PROOF),
+                                flags.contains(BlockFlags::HAS_QUEUE_DIFF)
+                            );
+                        }
 
-                    for ty in [
-                        ArchiveEntryType::Block,
-                        ArchiveEntryType::Proof,
-                        ArchiveEntryType::QueueDiff,
-                    ] {
                         let key = PackageEntryKey::from((block_id, ty));
                         let Some(data) = db.package_entries.get(key.to_vec()).unwrap() else {
                             return Err(BlockStorageError::BlockDataNotFound.into());
@@ -1135,6 +1138,8 @@ impl BlockStorage {
                         writer.write(&header_buffer)?;
                         writer.write(data.as_ref())?;
                     }
+
+                    unique_ids.clear();
                 }
 
                 // Drop ids entry just in case (before removing it)
