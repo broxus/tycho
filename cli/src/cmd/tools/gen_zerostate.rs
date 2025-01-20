@@ -7,7 +7,7 @@ use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::util::{compute_storage_used, print_json};
 
@@ -304,9 +304,24 @@ impl ZerostateConfig {
 
         {
             let mut accounts = ShardAccounts::new();
+            let mut libraries = FastHashMap::<HashBytes, (Cell, FastHashSet<HashBytes>)>::default();
             for (account, mut account_state) in self.accounts {
                 let balance = match account_state.as_mut() {
                     Some(state) => {
+                        if let AccountState::Active(state) = &state.state {
+                            for entry in state.libraries.iter() {
+                                let (hash, lib) = entry?;
+                                let (prev_root, publishers) = libraries
+                                    .entry(hash)
+                                    .or_insert_with(|| (lib.root.clone(), Default::default()));
+                                publishers.insert(account);
+                                anyhow::ensure!(
+                                    prev_root == &lib.root,
+                                    "Multiple library roots is forbidden for the same lib hash"
+                                );
+                            }
+                        }
+
                         // Always ensure that the account storage stat is up-to-date
                         state.address = StdAddr::new(-1, account).into();
                         state.storage_stat.used = compute_storage_used(state)?;
@@ -341,6 +356,22 @@ impl ZerostateConfig {
 
             assert_eq!(state.total_balance, accounts.root_extra().balance);
             state.accounts = Lazy::new(&accounts)?;
+
+            // Build lib dict
+            let mut libs = Dict::new();
+            for (hash, (lib, publishers)) in libraries {
+                let mut publishers = publishers
+                    .into_iter()
+                    .map(|hash| (hash, ()))
+                    .collect::<Vec<_>>();
+                publishers.sort_unstable();
+                libs.set(hash, LibDescr {
+                    lib,
+                    publishers: Dict::try_from_sorted_slice(&publishers)?,
+                })?;
+            }
+
+            state.libraries = libs;
         }
 
         let workchains = self.params.get::<ConfigParam12>()?.unwrap();

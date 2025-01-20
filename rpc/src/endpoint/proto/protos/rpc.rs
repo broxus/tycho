@@ -46,6 +46,11 @@ pub mod request {
         #[prost(bytes = "bytes", tag = "1")]
         pub message: ::prost::bytes::Bytes,
     }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct GetLibraryCell {
+        #[prost(bytes = "bytes", tag = "1")]
+        pub hash: ::prost::bytes::Bytes,
+    }
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Call {
         #[prost(message, tag = "1")]
@@ -70,6 +75,8 @@ pub mod request {
         GetAccountsByCodeHash(GetAccountsByCodeHash),
         #[prost(message, tag = "11")]
         SendMessage(SendMessage),
+        #[prost(message, tag = "12")]
+        GetLibraryCell(GetLibraryCell),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -128,6 +135,12 @@ pub mod response {
     pub struct GetAccountsByCodeHash {
         #[prost(bytes = "bytes", repeated, tag = "1")]
         pub account: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    }
+
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct GetLibraryCell {
+        #[prost(bytes = "bytes", optional, tag = "1")]
+        pub cell: ::core::option::Option<::prost::bytes::Bytes>,
     }
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct GetContractState {
@@ -221,6 +234,8 @@ pub mod response {
         GetContractState(GetContractState),
         #[prost(message, tag = "10")]
         SendMessage(()),
+        #[prost(message, tag = "11")]
+        GetLibraryCell(GetLibraryCell),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

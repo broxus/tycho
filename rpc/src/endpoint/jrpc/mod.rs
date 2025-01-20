@@ -33,6 +33,7 @@ declare_jrpc_method! {
         GetTimings(EmptyParams),
         SendMessage(SendMessageRequest),
         GetContractState(GetContractStateRequest),
+        GetLibraryCell(GetLibraryCellRequest),
         GetAccountsByCodeHash(GetAccountsByCodeHashRequest),
         GetTransactionsList(GetTransactionsListRequest),
         GetTransaction(GetTransactionRequest),
@@ -75,6 +76,20 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             };
             state.broadcast_external_message(&data).await;
             ok_to_response(req.id, ())
+        }
+        MethodParams::GetLibraryCell(p) => {
+            let library_boc = match state.jrpc_cache().get_library_cell_boc(&p.hash) {
+                Some(value) => Some(value),
+                None => match state.get_raw_library(&p.hash) {
+                    Ok(Some(cell)) => {
+                        let boc = state.jrpc_cache().insert_library_cell(p.hash, cell);
+                        Some(boc)
+                    }
+                    Ok(None) => None,
+                    Err(e) => return error_to_response(req.id, RpcStateError::Internal(e)),
+                },
+            };
+            ok_to_response(req.id, GetLibraryCellResponse { cell: library_boc })
         }
         MethodParams::GetContractState(p) => {
             let item = match state.get_account_state(&p.address) {
@@ -197,6 +212,12 @@ pub struct GetContractStateRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetLibraryCellRequest {
+    pub hash: HashBytes,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetAccountsByCodeHashRequest {
     pub code_hash: HashBytes,
     #[serde(default)]
@@ -257,6 +278,12 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
 #[derive(Serialize)]
 pub struct GetStatusResponse {
     ready: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GetLibraryCellResponse {
+    pub cell: Option<String>,
 }
 
 #[derive(Serialize)]

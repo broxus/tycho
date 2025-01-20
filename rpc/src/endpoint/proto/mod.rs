@@ -16,6 +16,7 @@ use super::INVALID_PARAMS_CODE;
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
+use crate::endpoint::proto::protos::rpc::response::GetLibraryCell;
 use crate::endpoint::{
     INTERNAL_ERROR_CODE, INVALID_BOC_CODE, METHOD_NOT_FOUND_CODE, NOT_READY_CODE,
     NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
@@ -74,6 +75,31 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             };
             state.broadcast_external_message(&p.message).await;
             ok_to_response(response::Result::SendMessage(()))
+        }
+
+        Some(request::Call::GetLibraryCell(p)) => {
+            let Some(hash) = hash_from_bytes(p.hash) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid hash".into(),
+                }
+                .into_response();
+            };
+
+            let cell_opt = match state.proto_cache().get_library_cell_proto(&hash) {
+                Some(value) => Some(value),
+                None => match state.get_raw_library(&hash) {
+                    Ok(Some(cell)) => {
+                        let boc = state.proto_cache().insert_library_cell(hash, cell);
+                        Some(boc)
+                    }
+                    Ok(None) => None,
+                    Err(e) => return error_to_response(RpcStateError::Internal(e)),
+                },
+            };
+            ok_to_response(response::Result::GetLibraryCell(GetLibraryCell {
+                cell: cell_opt,
+            }))
         }
         Some(request::Call::GetContractState(p)) => {
             let Some(address) = addr_from_bytes(p.address) else {
