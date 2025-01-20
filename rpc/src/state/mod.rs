@@ -159,6 +159,14 @@ impl RpcState {
             .await;
     }
 
+    pub fn get_raw_library(&self, hash: &HashBytes) -> Result<Option<Cell>> {
+        let guard = self.inner.mc_accounts.read();
+        match guard.as_ref() {
+            Some(cache) => Ok(cache.libraries.get(hash)?.map(|x| x.lib)),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_account_state(
         &self,
         address: &StdAddr,
@@ -320,6 +328,7 @@ impl Inner {
                 let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
                     let state_info = state.as_ref();
                     Ok(CachedAccounts {
+                        libraries: Default::default(),
                         accounts: state_info.load_accounts()?.dict().clone(),
                         mc_ref_hanlde: state.ref_mc_state_handle().clone(),
                         gen_utime: state_info.gen_utime,
@@ -472,8 +481,10 @@ impl Inner {
         let block_info = block.load_info()?;
 
         let accounts = state.state().load_accounts()?.dict().clone();
+        let libraries = state.state().libraries.clone();
 
         let cached = CachedAccounts {
+            libraries,
             accounts,
             mc_ref_hanlde: state.ref_mc_state_handle().clone(),
             gen_utime: block_info.gen_utime,
@@ -551,6 +562,7 @@ pub enum LoadedAccountState {
 }
 
 struct CachedAccounts {
+    libraries: Dict<HashBytes, LibDescr>,
     accounts: ShardAccountsDict,
     mc_ref_hanlde: RefMcStateHandle,
     gen_utime: u32,

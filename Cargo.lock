@@ -3745,6 +3745,7 @@ dependencies = [
  "everscale-types",
  "futures-util",
  "metrics",
+ "moka",
  "parking_lot",
  "prost",
  "serde",

@@ -1,18 +1,42 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use everscale_types::boc::BocRepr;
+use everscale_types::boc::{Boc, BocRepr};
+use everscale_types::cell::HashBytes;
 use everscale_types::models::{Block, BlockchainConfig};
+use everscale_types::prelude::Cell;
 use serde::Serialize;
 use serde_json::value::RawValue;
+use tycho_util::FastHasherState;
 
-#[derive(Default)]
 pub struct JrpcEndpointCache {
+    libraries: moka::sync::Cache<HashBytes, String, FastHasherState>,
     latest_key_block: ArcSwapOption<Box<RawValue>>,
     blockchain_config: ArcSwapOption<Box<RawValue>>,
 }
 
+impl Default for JrpcEndpointCache {
+    fn default() -> Self {
+        Self {
+            libraries: moka::sync::Cache::builder()
+                .max_capacity(100)
+                .build_with_hasher(Default::default()),
+            latest_key_block: Default::default(),
+            blockchain_config: Default::default(),
+        }
+    }
+}
+
 impl JrpcEndpointCache {
+    pub fn get_library_cell_boc(&self, hash: &HashBytes) -> Option<String> {
+        self.libraries.get(hash)
+    }
+
+    pub fn insert_library_cell(&self, hash_bytes: HashBytes, cell: Cell) -> String {
+        let boc = Boc::encode_base64(cell);
+        self.libraries.insert(hash_bytes, boc.clone());
+        boc
+    }
     pub fn load_latest_key_block(&self) -> arc_swap::Guard<Option<CachedJson>> {
         self.latest_key_block.load()
     }

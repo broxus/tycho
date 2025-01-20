@@ -18,6 +18,7 @@ bytes = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
 metrics = { workspace = true }
+moka = { workspace = true }
 parking_lot = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }

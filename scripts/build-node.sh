@@ -14,8 +14,8 @@ else
     profile="${TYCHO_BUILD_PROFILE}"
 fi
 
-if [[ ${profile} != "debug" ]]; then
-    set_clang_env 19
+if set_clang_env 19; then
+    : # dont exit
 fi
 
 cargo build --bin tycho $profile_arg
