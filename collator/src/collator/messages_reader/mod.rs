@@ -380,7 +380,7 @@ impl MessagesReader {
         for_shard_id: ShardIdent,
         top_block_diffs: Vec<(ShardIdent, ShortQueueDiff)>,
     ) -> Result<()> {
-        let par_0_msgs_count_limit = msgs_exec_params.par_0_msgs_count_limit as u64;
+        let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
 
         for (dest_int_address, msgs_count) in aggregated_stats {
             let existing_partition = partition_router.get_partition(None, &dest_int_address);
