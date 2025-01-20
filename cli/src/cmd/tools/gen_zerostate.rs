@@ -652,8 +652,9 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
             group_limit: 100,
             group_vert_size: 10,
             externals_expire_timeout: 60,
-            open_ranges_limit: 1_000,
-            par_0_msgs_count_limit: 100_000,
+            open_ranges_limit: 100,
+            par_0_int_msgs_count_limit: 50_000,
+            par_0_ext_msgs_count_limit: 5_000,
             group_slots_fractions,
         },
 
