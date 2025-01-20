@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::{TickTock, WorkUnitsParamsExecute, WorkUnitsParamsPrepare};
+use everscale_types::models::{TickTock, WorkUnitsParamsExecute};
 
 use super::execution_wrapper::ExecutorWrapper;
 use super::finalize::FinalizeState;
 use super::phase::{Phase, PhaseState};
+use super::work_units::PrepareMsgGroupsWu;
 use crate::collator::messages_reader::{GetNextMessageGroupMode, MessagesReader};
 use crate::collator::types::{BlockCollationData, BlockLimitsLevel, ExecuteResult};
 use crate::tracing_targets;
@@ -203,17 +204,17 @@ impl Phase<ExecuteState> {
         );
         let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
 
-        let prepare_groups_wu_total = calc_prepare_groups_wu_total(
-            &self.state.collation_data,
+        let prepare_msg_groups_wu = PrepareMsgGroupsWu::calculate(
             &self.state.collation_config.work_units_params.prepare,
+            self.extra.messages_reader.metrics(),
+            fill_msgs_total_elapsed,
         );
 
         self.extra.execute_result = Some(ExecuteResult {
             execute_groups_wu_vm_only,
             process_txs_wu,
             execute_groups_wu_total,
-            prepare_groups_wu_total,
-            fill_msgs_total_elapsed,
+            prepare_msg_groups_wu,
             execute_msgs_total_elapsed,
             process_txs_total_elapsed,
             init_iterator_elapsed,
@@ -249,7 +250,7 @@ fn calc_process_txs_wu(
     let &WorkUnitsParamsExecute {
         serialize_enqueue,
         serialize_dequeue,
-        insert_new_msgs_to_iterator,
+        insert_new_msgs,
         ..
     } = wu_params_execute;
 
@@ -257,36 +258,6 @@ fn calc_process_txs_wu(
         .saturating_mul(serialize_enqueue as u64)
         .saturating_add((collation_data.int_dequeue_count).saturating_mul(serialize_dequeue as u64))
         .saturating_add(
-            (collation_data.inserted_new_msgs_count)
-                .saturating_mul(insert_new_msgs_to_iterator as u64),
-        )
-}
-
-fn calc_prepare_groups_wu_total(
-    collation_data: &BlockCollationData,
-    wu_params_prepare: &WorkUnitsParamsPrepare,
-) -> u64 {
-    let &WorkUnitsParamsPrepare {
-        fixed_part,
-        read_ext_msgs,
-        read_int_msgs,
-        read_new_msgs,
-    } = wu_params_prepare;
-
-    (fixed_part as u64)
-        .saturating_add(
-            collation_data
-                .read_ext_msgs_count
-                .saturating_mul(read_ext_msgs as u64),
-        )
-        .saturating_add(
-            collation_data
-                .read_int_msgs_from_iterator_count
-                .saturating_mul(read_int_msgs as u64),
-        )
-        .saturating_add(
-            collation_data
-                .read_new_msgs_count
-                .saturating_mul(read_new_msgs as u64),
+            (collation_data.inserted_new_msgs_count).saturating_mul(insert_new_msgs as u64),
         )
 }

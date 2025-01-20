@@ -13,7 +13,9 @@ use super::{
     DebugInternalsRangeReaderState, InternalsRangeReaderState, MessagesReaderMetrics,
     ShardReaderState,
 };
-use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
+use crate::collator::messages_buffer::{
+    BufferFillStateByCount, BufferFillStateBySlots, SaturatingAddAssign,
+};
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::{
@@ -327,6 +329,9 @@ impl InternalsParitionReader {
                             block_seqno: Some(block_seqno),
                             from_same_shard: Some(msg.source == for_shard_id),
                         }));
+                    res.metrics
+                        .add_to_msgs_groups_ops_count
+                        .saturating_add_assign(1);
                     res.metrics.add_to_message_groups_timer.stop();
 
                     res.metrics.read_new_msgs_count += 1;

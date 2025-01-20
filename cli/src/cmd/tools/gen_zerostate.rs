@@ -662,19 +662,20 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
         work_units_params: WorkUnitsParams {
             prepare: WorkUnitsParamsPrepare {
-                fixed_part: 5_000_000, // 5 ms
-                read_ext_msgs: 4_000,  // 4 mcs
-                read_int_msgs: 5_000,  // 5 mcs
-                read_new_msgs: 75_000, // 75 mcs
+                fixed_part: 500_000,    // 500 ns
+                read_ext_msgs: 200,     // 200 ns
+                read_int_msgs: 5_000,   // 5 mcs
+                read_new_msgs: 500,     // 500 ns
+                add_to_msg_groups: 150, // 150 ns
             },
             execute: WorkUnitsParamsExecute {
-                prepare: 114_000,                   // 114 mcs
-                execute_err: 6_000,                 // 6 mcs
-                execute: 25_000,                    // 25 mcs
-                execute_delimiter: 10_000,          //
-                serialize_enqueue: 3_000,           // 3 mcs
-                serialize_dequeue: 3_000,           // 3 mcs
-                insert_new_msgs_to_iterator: 3_000, // 3 mcs
+                prepare: 114_000,          // 114 mcs
+                execute_err: 6_000,        // 6 mcs
+                execute: 25_000,           // 25 mcs
+                execute_delimiter: 10_000, //
+                serialize_enqueue: 3_000,  // 3 mcs
+                serialize_dequeue: 3_000,  // 3 mcs
+                insert_new_msgs: 3_000,    // 3 mcs
                 subgroup_size: 16,
             },
             finalize: WorkUnitsParamsFinalize {
