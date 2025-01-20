@@ -1279,6 +1279,12 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_uncommited_state_iterator_create_time", "Uncommitted iterator init time"
         ),
         create_heatmap_panel(
+            "tycho_internal_queue_uncommitted_statistics_load_time", "Uncommited statistics load time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_committed_statistics_load_time", "Committed statistics load time"
+        ),
+        create_heatmap_panel(
             "tycho_internal_queue_snapshot_time", "Snapshot time"
         ),
         create_heatmap_panel(
