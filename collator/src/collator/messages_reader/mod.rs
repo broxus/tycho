@@ -1024,6 +1024,8 @@ pub(super) struct MessagesReaderMetrics {
     pub read_ext_msgs_count: u64,
     /// num of new internal messages read
     pub read_new_msgs_count: u64,
+
+    pub add_to_msgs_groups_ops_count: u64,
 }
 
 impl MessagesReaderMetrics {
@@ -1040,5 +1042,9 @@ impl MessagesReaderMetrics {
         self.read_int_msgs_from_iterator_count += other.read_int_msgs_from_iterator_count;
         self.read_ext_msgs_count += other.read_ext_msgs_count;
         self.read_new_msgs_count += other.read_new_msgs_count;
+
+        self.add_to_msgs_groups_ops_count = self
+            .add_to_msgs_groups_ops_count
+            .saturating_add(other.add_to_msgs_groups_ops_count);
     }
 }

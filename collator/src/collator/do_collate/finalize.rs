@@ -424,16 +424,16 @@ impl Phase<FinalizeState> {
 
             // compute total wu used from last anchor
             let new_wu_used_from_last_anchor = wu_used_from_last_anchor
-                .saturating_add(self.extra.execute_result.prepare_groups_wu_total)
+                .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
                 .saturating_add(self.extra.execute_result.execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "wu_used_from_last_anchor: old={}, new={}, \
-                prepare_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
+                prepare_msg_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
                 wu_used_from_last_anchor,
                 new_wu_used_from_last_anchor,
-                self.extra.execute_result.prepare_groups_wu_total,
+                self.extra.execute_result.prepare_msg_groups_wu.total_wu,
                 self.extra.execute_result.execute_groups_wu_total,
                 finalize_wu_total,
             );

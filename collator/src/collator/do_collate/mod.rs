@@ -44,6 +44,7 @@ mod execution_wrapper;
 mod finalize;
 mod phase;
 mod prepare;
+pub mod work_units;
 
 impl CollatorStdImpl {
     /// [`force_next_mc_block`] - should force next master block collation after this block
@@ -928,21 +929,73 @@ impl CollatorStdImpl {
         total_elapsed: Duration,
     ) {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        // prepare
         metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
-            .set(execute_result.prepare_groups_wu_total as f64);
+            .set(execute_result.prepare_msg_groups_wu.total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
+            .set(execute_result.prepare_msg_groups_wu.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_ext_msgs", &labels)
+            .set(execute_result.prepare_msg_groups_wu.read_ext_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_ext_msgs_wu_price(),
+        );
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_existing_int_msgs_wu as f64,
+        );
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_existing_int_msgs_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_new_int_msgs", &labels)
+            .set(execute_result.prepare_msg_groups_wu.read_new_int_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_new_int_msgs_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_add_msgs_to_groups", &labels)
+            .set(execute_result.prepare_msg_groups_wu.add_msgs_to_groups_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .add_msgs_to_groups_wu_price(),
+        );
+
         metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
             .set(execute_result.execute_groups_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
             execute_result.execute_groups_wu_total as f64
                 + finalize_wu_total as f64
-                + execute_result.prepare_groups_wu_total as f64,
+                + execute_result.prepare_msg_groups_wu.total_wu as f64,
         );
 
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels).set(
-            execute_result.fill_msgs_total_elapsed.as_nanos() as f64
-                / execute_result.prepare_groups_wu_total as f64,
-        );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
             (execute_result.execute_msgs_total_elapsed.as_nanos() as f64
                 + execute_result.process_txs_total_elapsed.as_nanos() as f64)
@@ -963,7 +1016,7 @@ impl CollatorStdImpl {
             total_elapsed.as_nanos() as f64
                 / (execute_result.execute_groups_wu_total
                     + finalize_wu_total
-                    + execute_result.prepare_groups_wu_total) as f64,
+                    + execute_result.prepare_msg_groups_wu.total_wu) as f64,
         );
     }
 
@@ -1007,7 +1060,7 @@ impl CollatorStdImpl {
             execute_tock = %format_duration(final_result.execute_tock_elapsed),
             execute_total = %format_duration(final_result.execute_elapsed),
 
-            fill_msgs_total = %format_duration(execute_result.fill_msgs_total_elapsed),
+            fill_msgs_total = %format_duration(execute_result.prepare_msg_groups_wu.total_elapsed),
             init_iterator = %format_duration(execute_result.init_iterator_elapsed),
             read_existing = %format_duration(execute_result.read_existing_messages_elapsed),
             read_ext = %format_duration(execute_result.read_ext_messages_elapsed),

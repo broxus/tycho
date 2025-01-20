@@ -10,7 +10,8 @@ use super::{
     GetNextMessageGroupMode, InternalsParitionReader, MessagesReaderMetrics,
 };
 use crate::collator::messages_buffer::{
-    BufferFillStateByCount, BufferFillStateBySlots, MessageGroup, MessagesBufferLimits,
+    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
+    MessagesBufferLimits, SaturatingAddAssign,
 };
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::types::PartitionRouter;
@@ -537,61 +538,74 @@ impl ExternalsReader {
             // skip up to skip offset
             if curr_processed_offset > range_reader_state_by_partition.skip_offset {
                 res.metrics.add_to_message_groups_timer.start();
-                range_reader_state_by_partition.buffer.fill_message_group(
-                    msg_group,
-                    buffer_limits.slots_count,
-                    buffer_limits.slot_vert_size,
-                    |account_id| {
-                        let dst_addr =
-                            IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
+                let FillMessageGroupResult { ops_count, .. } =
+                    range_reader_state_by_partition.buffer.fill_message_group(
+                        msg_group,
+                        buffer_limits.slots_count,
+                        buffer_limits.slot_vert_size,
+                        |account_id| {
+                            let mut check_ops_count = 0;
 
-                        for msg_group in prev_msg_groups.values() {
-                            if msg_group.messages_count() > 0
-                                && msg_group.contains_account(account_id)
-                            {
-                                return true;
-                            }
-                        }
+                            let dst_addr =
+                                IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
-                        // check by previous partitions
-                        for prev_partitions_reader in prev_partitions_readers.values() {
-                            for prev_reader in prev_partitions_reader.range_readers().values() {
-                                if prev_reader.reader_state.buffer.msgs_count() > 0
-                                    && prev_reader
-                                        .reader_state
-                                        .buffer
-                                        .account_messages_count(account_id)
-                                        > 0
-                                {
-                                    return true;
-                                }
-                                if !prev_reader.fully_read
-                                    && prev_reader
-                                        .remaning_msgs_stats
-                                        .statistics()
-                                        .contains_key(&dst_addr)
-                                {
-                                    return true;
+                            for msg_group in prev_msg_groups.values() {
+                                if msg_group.messages_count() > 0 {
+                                    check_ops_count.saturating_add_assign(1);
+                                    if msg_group.contains_account(account_id) {
+                                        return (true, check_ops_count);
+                                    }
                                 }
                             }
-                        }
 
-                        // check by previous ranges
-                        for prev_reader in range_readers.values() {
-                            let buffer = &prev_reader
-                                .reader_state
-                                .get_state_by_partition(par_id)
-                                .unwrap()
-                                .buffer;
-                            if buffer.msgs_count() > 0
-                                && buffer.account_messages_count(account_id) > 0
-                            {
-                                return true;
+                            // check by previous partitions
+                            for prev_partitions_reader in prev_partitions_readers.values() {
+                                for prev_reader in prev_partitions_reader.range_readers().values() {
+                                    if prev_reader.reader_state.buffer.msgs_count() > 0 {
+                                        check_ops_count.saturating_add_assign(1);
+                                        if prev_reader
+                                            .reader_state
+                                            .buffer
+                                            .account_messages_count(account_id)
+                                            > 0
+                                        {
+                                            return (true, check_ops_count);
+                                        }
+                                    }
+                                    if !prev_reader.fully_read {
+                                        check_ops_count.saturating_add_assign(1);
+                                        if prev_reader
+                                            .remaning_msgs_stats
+                                            .statistics()
+                                            .contains_key(&dst_addr)
+                                        {
+                                            return (true, check_ops_count);
+                                        }
+                                    }
+                                }
                             }
-                        }
-                        false
-                    },
-                );
+
+                            // check by previous ranges
+                            for prev_reader in range_readers.values() {
+                                let buffer = &prev_reader
+                                    .reader_state
+                                    .get_state_by_partition(par_id)
+                                    .unwrap()
+                                    .buffer;
+                                if buffer.msgs_count() > 0 {
+                                    check_ops_count.saturating_add_assign(1);
+                                    if buffer.account_messages_count(account_id) > 0 {
+                                        return (true, check_ops_count);
+                                    }
+                                }
+                            }
+
+                            (false, check_ops_count)
+                        },
+                    );
+                res.metrics
+                    .add_to_msgs_groups_ops_count
+                    .saturating_add_assign(ops_count);
                 res.metrics.add_to_message_groups_timer.stop();
             }
 
@@ -882,6 +896,9 @@ impl ExternalsRangeReader {
                                     block_seqno: None,
                                     from_same_shard: None,
                                 }));
+                            metrics
+                                .add_to_msgs_groups_ops_count
+                                .saturating_add_assign(1);
                         }
                         metrics.add_to_message_groups_timer.stop();
 

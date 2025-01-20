@@ -106,8 +106,11 @@ impl MessagesBuffer {
         check_skip_account: F,
     ) -> FillMessageGroupResult
     where
-        F: Fn(&HashBytes) -> bool,
+        F: Fn(&HashBytes) -> (bool, u64),
     {
+        // evaluate ops count for wu calculation
+        let mut ops_count = 0;
+
         // take slots info from group
         let mut slots_info = std::mem::take(&mut msg_group.slots_info);
 
@@ -148,17 +151,20 @@ impl MessagesBuffer {
                     }
 
                     // skip accounts that do not pass the provided check
-                    if check_skip_account(&account_id) {
+                    let (skip_account, check_ops_count) = check_skip_account(&account_id);
+                    ops_count.saturating_add_assign(check_ops_count);
+                    if skip_account {
                         continue;
                     }
 
-                    self.move_account_messages_to_slot(
+                    let move_ops_count = self.move_account_messages_to_slot(
                         account_id,
                         msg_group,
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
+                    ops_count.saturating_add_assign(move_ops_count);
 
                     if slot_cx.slot.msgs_count() > 0 {
                         if slot_cx.remaning_capacity > 0 {
@@ -222,17 +228,20 @@ impl MessagesBuffer {
                 // try to get messages of accounts which are already included in slot
                 for account_id in slot_cx.slot.accounts.clone() {
                     // skip accounts that do not pass the provided check
-                    if check_skip_account(&account_id) {
+                    let (skip_account, check_ops_count) = check_skip_account(&account_id);
+                    ops_count.saturating_add_assign(check_ops_count);
+                    if skip_account {
                         continue;
                     }
 
-                    self.move_account_messages_to_slot(
+                    let move_ops_count = self.move_account_messages_to_slot(
                         account_id,
                         msg_group,
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
+                    ops_count.saturating_add_assign(move_ops_count);
 
                     if slot_cx.remaning_capacity == 0 {
                         break;
@@ -252,17 +261,20 @@ impl MessagesBuffer {
                     }
 
                     // skip accounts that do not pass the provided check
-                    if check_skip_account(&account_id) {
+                    let (skip_account, check_ops_count) = check_skip_account(&account_id);
+                    ops_count.saturating_add_assign(check_ops_count);
+                    if skip_account {
                         continue;
                     }
 
-                    self.move_account_messages_to_slot(
+                    let move_ops_count = self.move_account_messages_to_slot(
                         account_id,
                         msg_group,
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
                     );
+                    ops_count.saturating_add_assign(move_ops_count);
 
                     if slot_cx.remaning_capacity == 0 {
                         break;
@@ -272,6 +284,7 @@ impl MessagesBuffer {
         }
 
         // remove empty accounts from buffer
+        ops_count.saturating_add_assign(self.msgs.len() as u64);
         self.msgs.retain(|_, account_msgs| !account_msgs.is_empty());
 
         // 3. update slots index
@@ -308,6 +321,7 @@ impl MessagesBuffer {
 
         FillMessageGroupResult {
             collected_queue_msgs_keys,
+            ops_count,
         }
     }
 
@@ -318,18 +332,25 @@ impl MessagesBuffer {
         slot_cx: &mut SlotContext<'_>,
         collected_queue_msgs_keys: &mut Vec<QueueKey>,
         slots_index_updates: &mut BTreeMap<SlotId, SlotIndexUpdate>,
-    ) {
+    ) -> u64 {
+        // evaluate ops count for wu calculation
+        let mut ops_count = 0;
+
         let mut amount = 0;
         let mut int_count = 0;
         let mut ext_count = 0;
 
         if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
+            ops_count.saturating_add_assign(1);
+
             amount = account_msgs.len().min(slot_cx.remaning_capacity);
             if amount == 0 {
-                return;
+                return ops_count;
             }
 
             let slot_account_msgs = msg_group.msgs.entry(account_id).or_default();
+            ops_count.saturating_add_assign(1);
+
             if slot_account_msgs.is_empty() {
                 slot_cx.slot.accounts.push(account_id);
             }
@@ -352,7 +373,7 @@ impl MessagesBuffer {
         }
 
         if amount == 0 {
-            return;
+            return ops_count;
         }
 
         // update buffer msgs counter
@@ -379,11 +400,23 @@ impl MessagesBuffer {
                 new_int_count: slot_cx.slot.int_count,
                 new_ext_count: slot_cx.slot.ext_count,
             });
+
+        ops_count
     }
 }
 
 pub struct FillMessageGroupResult {
     pub collected_queue_msgs_keys: Vec<QueueKey>,
+    pub ops_count: u64,
+}
+
+pub trait SaturatingAddAssign {
+    fn saturating_add_assign(&mut self, rhs: Self);
+}
+impl SaturatingAddAssign for u64 {
+    fn saturating_add_assign(&mut self, rhs: Self) {
+        *self = self.saturating_add(rhs);
+    }
 }
 
 #[cfg(test)]
