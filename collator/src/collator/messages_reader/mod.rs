@@ -245,7 +245,7 @@ impl MessagesReader {
             .unwrap()
             .range_readers()
             .values()
-            .map(|r| &r.msgs_stats);
+            .filter_map(|r| r.reader_state.msgs_stats.as_ref());
         res.new_messages
             .init_partition_router(1, par_1_all_ranges_msgs_stats);
 
@@ -298,7 +298,9 @@ impl MessagesReader {
                 if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
                     continue;
                 }
-                aggregated_stats.append(&range_reader.msgs_stats);
+                if let Some(msgs_stats) = &range_reader.reader_state.msgs_stats {
+                    aggregated_stats.append(msgs_stats);
+                }
             }
 
             // check pending internals in iterators

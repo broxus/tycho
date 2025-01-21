@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use everscale_types::models::ShardIdent;
+use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 
 use super::super::messages_buffer::MessagesBuffer;
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
 };
+use crate::internal_queue::types::QueueStatistics;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{
     BlockSeqno, ExternalsProcessedUptoStuff, ExternalsRangeInfo, InternalsProcessedUptoStuff,
@@ -406,6 +407,12 @@ pub struct InternalsRangeReaderState {
     /// until all messages from previous iterator are not read
     pub buffer: MessagesBuffer,
 
+    /// Statistics shows all messages in current range
+    pub msgs_stats: Option<QueueStatistics>,
+    /// Statistics shows remaining not read messages from currebt range.
+    /// We reduce initial statistics by the number of messages that were read.
+    pub remaning_msgs_stats: Option<QueueStatistics>,
+
     pub shards: BTreeMap<ShardIdent, ShardReaderState>,
 
     /// Skip offset before collecting messages from this range.
@@ -418,9 +425,22 @@ pub struct InternalsRangeReaderState {
 }
 
 impl InternalsRangeReaderState {
+    pub fn contains_account_addr_in_remaning_msgs_stats(&self, account_addr: &IntAddr) -> bool {
+        match &self.remaning_msgs_stats {
+            None => false,
+            Some(remaning_msgs_stats) => {
+                remaning_msgs_stats.statistics().contains_key(account_addr)
+            }
+        }
+    }
+}
+
+impl InternalsRangeReaderState {
     pub fn from_range_info(range_info: &InternalsRangeStuff, processed_to: &ProcessedTo) -> Self {
         let mut res = Self {
             buffer: Default::default(),
+            msgs_stats: None,
+            remaning_msgs_stats: None,
             skip_offset: range_info.skip_offset,
             processed_offset: range_info.processed_offset,
             shards: Default::default(),
