@@ -355,6 +355,7 @@ impl MessagesBuffer {
                 slot_cx.slot.accounts.push(account_id);
             }
 
+            slot_account_msgs.reserve(amount);
             for msg in account_msgs.drain(..amount) {
                 match (&msg.info, &msg.special_origin) {
                     (MsgInfo::Int(int_msg_info), None) => {
