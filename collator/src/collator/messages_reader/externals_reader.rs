@@ -13,7 +13,7 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBufferLimits, SaturatingAddAssign,
 };
-use crate::collator::types::{AnchorsCache, ParsedMessage};
+use crate::collator::types::{AnchorsCache, MsgsExecutionParamsExtension, ParsedMessage};
 use crate::internal_queue::types::PartitionRouter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, PartitionId};
@@ -115,6 +115,10 @@ impl ExternalsReader {
         })
     }
 
+    pub fn open_ranges_limit_reached(&self) -> bool {
+        self.range_readers.len() >= self.msgs_exec_params.open_ranges_limit()
+    }
+
     pub fn reader_state(&self) -> &ExternalsReaderState {
         &self.reader_state
     }
@@ -180,6 +184,10 @@ impl ExternalsReader {
         })
     }
 
+    pub fn has_not_fully_read_ranges(&self) -> bool {
+        !self.all_ranges_fully_read
+    }
+
     pub fn has_pending_externals(&self) -> bool {
         self.anchors_cache.has_pending_externals()
     }
@@ -188,6 +196,13 @@ impl ExternalsReader {
         let (last_seqno, last_range_reader) = self.range_readers.pop_last().context(
             "externals reader should have at least one range reader after reading into buffer",
         )?;
+
+        if last_seqno < self.block_seqno {
+            // set that not all ranges fully read
+            // to force create and read next range reader for block
+            self.all_ranges_fully_read = false;
+        }
+
         self.range_readers.clear();
         self.range_readers.insert(last_seqno, last_range_reader);
         Ok(())
@@ -309,7 +324,7 @@ impl ExternalsReader {
             seqno = reader.seqno,
             fully_read = reader.fully_read,
             reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
-            "created existing range reader",
+            "externals reader: created existing range reader",
         );
 
         reader
@@ -384,7 +399,7 @@ impl ExternalsReader {
             seqno = reader.seqno,
             fully_read = reader.fully_read,
             reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
-            "created next range reader",
+            "externals reader: created next range reader",
         );
 
         reader
@@ -397,7 +412,7 @@ impl ExternalsReader {
     ) -> MessagesReaderMetrics {
         let mut metrics = MessagesReaderMetrics::default();
 
-        // skip if all ranges fully read
+        // skip if all open ranges fully read
         if self.all_ranges_fully_read {
             return metrics;
         }
@@ -499,8 +514,21 @@ impl ExternalsReader {
             // if all ranges fully read try create next one
             if all_ranges_fully_read {
                 if last_seqno < self.block_seqno {
-                    self.create_append_next_range_reader();
-                    seqno = self.block_seqno;
+                    if !self.open_ranges_limit_reached() {
+                        self.create_append_next_range_reader();
+                        seqno = self.block_seqno;
+                    } else {
+                        // otherwise set all open ranges read
+                        // to collect messages from all open ranges
+                        // and then create next range
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            seqno,
+                            open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                            "externals reader: open ranges limit reached",
+                        );
+                        self.all_ranges_fully_read = true;
+                        break;
+                    }
                 } else {
                     // if cannot create next one then store flag and exit
                     self.all_ranges_fully_read = true;
