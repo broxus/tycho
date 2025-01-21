@@ -115,7 +115,10 @@ impl Phase<ExecuteState> {
                         .increment(1);
                     break;
                 }
-            } else if !self.extra.messages_reader.has_pending_externals_in_cache()
+            } else if !self
+                .extra
+                .messages_reader
+                .has_not_fully_read_externals_ranges()
                 && !self
                     .extra
                     .messages_reader
