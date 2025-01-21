@@ -69,7 +69,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn has_pending_messages_from_partition(&self, partition_id: &PartitionId) -> bool {
         self.messages_for_current_shard
             .get(partition_id)
-            .map_or(false, |heap| !heap.is_empty())
+            .is_some_and(|heap| !heap.is_empty())
     }
 
     pub fn has_pending_messages(&self) -> bool {
