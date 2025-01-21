@@ -165,7 +165,7 @@ impl MessagesReader {
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
 
-            msgs_exec_params: cx.msgs_exec_params,
+            msgs_exec_params: cx.msgs_exec_params.clone(),
 
             metrics: Default::default(),
 
@@ -198,6 +198,7 @@ impl MessagesReader {
                 block_seqno: cx.block_seqno,
                 target_limits,
                 max_limits,
+                msgs_exec_params: cx.msgs_exec_params.clone(),
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts.clone(),
@@ -227,6 +228,7 @@ impl MessagesReader {
                 block_seqno: cx.block_seqno,
                 target_limits,
                 max_limits,
+                msgs_exec_params: cx.msgs_exec_params.clone(),
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts,
@@ -544,6 +546,10 @@ impl MessagesReader {
         self.externals_reader.has_messages_in_buffers()
     }
 
+    pub fn has_not_fully_read_externals_ranges(&self) -> bool {
+        self.externals_reader.has_not_fully_read_ranges()
+    }
+
     pub fn has_pending_externals_in_cache(&self) -> bool {
         self.externals_reader.has_pending_externals()
     }
@@ -818,7 +824,7 @@ impl MessagesReader {
 
         // collect existing internals
         if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals) {
-            all_internals_collected_before = par_reader.all_existing_messages_collected();
+            all_internals_collected_before = par_reader.all_read_existing_messages_collected();
 
             let CollectInternalsResult { metrics, .. } = par_reader.collect_messages(
                 par_reader_stage,
@@ -872,7 +878,7 @@ impl MessagesReader {
         // then we should collect all already read externals without reading more from cache
         // and only after that we can finalize existing internals read state
         if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals)
-            && par_reader.all_existing_messages_collected()
+            && par_reader.all_read_existing_messages_collected()
         {
             // log only first time
             if !all_internals_collected_before {
@@ -881,7 +887,7 @@ impl MessagesReader {
                     int_processed_to = ?par_reader.reader_state().processed_to,
                     int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
                     last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                    "all existing internals collected from partition",
+                    "all read existing internals collected from partition",
                 );
             }
 
@@ -933,7 +939,14 @@ impl MessagesReader {
                 externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
 
                 // switch to the "new messages processing" stage
-                *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
+                // if all existing messages read (last range reader was created in current block)
+                let (last_seqno, _) = par_reader.get_last_range_reader()?;
+                if last_seqno == &par_reader.block_seqno {
+                    *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
+                } else {
+                    // otherwise return to the reading of existing messages
+                    *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
+                }
             }
         }
 
