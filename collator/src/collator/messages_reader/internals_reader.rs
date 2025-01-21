@@ -298,7 +298,7 @@ impl InternalsParitionReader {
     #[tracing::instrument(skip_all)]
     fn create_existing_internals_range_reader(
         &self,
-        range_reader_state: InternalsRangeReaderState,
+        mut range_reader_state: InternalsRangeReaderState,
         seqno: BlockSeqno,
     ) -> Result<InternalsRangeReader> {
         let mut ranges = vec![];
@@ -317,13 +317,17 @@ impl InternalsParitionReader {
             });
         }
 
-        // get statistics for the range
-        // get statistics for the range
-        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
-        let remaning_msgs_stats = match fully_read {
-            true => QueueStatistics::default(),
-            false => msgs_stats.clone(),
-        };
+        // get statistics for the range if it was not loaded before
+        if range_reader_state.msgs_stats.is_none() {
+            let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+            let remaning_msgs_stats = match fully_read {
+                true => QueueStatistics::default(),
+                false => msgs_stats.clone(),
+            };
+
+            range_reader_state.msgs_stats = Some(msgs_stats);
+            range_reader_state.remaning_msgs_stats = Some(remaning_msgs_stats);
+        }
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
@@ -336,9 +340,6 @@ impl InternalsParitionReader {
             mq_adapter: self.mq_adapter.clone(),
             iterator_opt: None,
             initialized: false,
-
-            msgs_stats,
-            remaning_msgs_stats,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -421,6 +422,10 @@ impl InternalsParitionReader {
             buffer_limits: self.target_limits,
             reader_state: InternalsRangeReaderState {
                 buffer: Default::default(),
+
+                msgs_stats: Some(msgs_stats),
+                remaning_msgs_stats: Some(remaning_msgs_stats),
+
                 shards: shard_reader_states,
                 skip_offset: processed_offset,
                 processed_offset,
@@ -429,9 +434,6 @@ impl InternalsParitionReader {
             mq_adapter: self.mq_adapter.clone(),
             iterator_opt: None,
             initialized: false,
-
-            msgs_stats,
-            remaning_msgs_stats,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -551,9 +553,12 @@ impl InternalsParitionReader {
                         metrics.read_int_msgs_from_iterator_count += 1;
 
                         // update remaining messages statistics in iterator
-                        range_reader
-                            .remaning_msgs_stats
-                            .decrement_for_account(int_msg.item.message.dest().clone(), 1);
+                        if let Some(remaning_msgs_stats) =
+                            range_reader.reader_state.remaning_msgs_stats.as_mut()
+                        {
+                            remaning_msgs_stats
+                                .decrement_for_account(int_msg.item.message.dest().clone(), 1);
+                        }
                     }
                     None => {
                         range_reader.fully_read = true;
@@ -722,12 +727,6 @@ pub(super) struct InternalsRangeReader {
     pub(super) mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     pub(super) iterator_opt: Option<Box<dyn QueueIterator<EnqueuedMessage>>>,
     pub(super) initialized: bool,
-
-    /// Statistics shows all messages in current range
-    pub(super) msgs_stats: QueueStatistics,
-    /// Statistics shows remaining not read messages from currebt range.
-    /// We reduce initial statistics by the number of messages that were read.
-    pub(super) remaning_msgs_stats: QueueStatistics,
 }
 
 impl InternalsRangeReader {
@@ -810,9 +809,8 @@ impl InternalsRangeReader {
                         if !prev_reader.fully_read {
                             check_ops_count.saturating_add_assign(1);
                             if prev_reader
-                                .remaning_msgs_stats
-                                .statistics()
-                                .contains_key(&dst_addr)
+                                .reader_state
+                                .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
                             {
                                 return (true, check_ops_count);
                             }
@@ -836,9 +834,8 @@ impl InternalsRangeReader {
                     if !prev_reader.fully_read {
                         check_ops_count.saturating_add_assign(1);
                         if prev_reader
-                            .remaning_msgs_stats
-                            .statistics()
-                            .contains_key(&dst_addr)
+                            .reader_state
+                            .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
                         {
                             return (true, check_ops_count);
                         }
