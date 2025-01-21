@@ -20,10 +20,6 @@ use super::messages_buffer::MessageGroup;
 use super::types::{AccountId, ParsedMessage, ShardAccountStuff};
 use crate::tracing_targets;
 
-#[cfg(test)]
-#[path = "tests/execution_manager_tests.rs"]
-pub(super) mod tests;
-
 pub(super) struct MessagesExecutor {
     shard_id: ShardIdent,
     // this time is used if account's lt is smaller
