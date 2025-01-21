@@ -18,6 +18,10 @@ use crate::internal_queue::types::PartitionRouter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, PartitionId};
 
+#[cfg(test)]
+#[path = "../tests/externals_reader_tests.rs"]
+pub(super) mod tests;
+
 //=========
 // EXTERNALS READER
 //=========
@@ -440,7 +444,6 @@ impl ExternalsReader {
                         ReadNextExternalsMode::ToPreviuosReadTo
                     };
                 let mut read_res = range_reader.read_externals_into_buffers(
-                    self.next_chain_time,
                     &mut self.anchors_cache,
                     read_mode,
                     partition_router,
@@ -468,9 +471,9 @@ impl ExternalsReader {
                 }
 
                 // do not try to read from the next range
-                // if we already can fill all slots in messages group
+                // if we already can fill all slots in messages group from almost one buffer
                 if matches!(
-                    read_res.min_fill_state_by_slots,
+                    read_res.max_fill_state_by_slots,
                     BufferFillStateBySlots::CanFill
                 ) {
                     break 'main_loop;
@@ -659,27 +662,27 @@ impl ExternalsRangeReader {
             ))
     }
 
-    pub fn get_min_buffers_fill_state(
+    pub fn get_max_buffers_fill_state(
         &self,
     ) -> Result<(BufferFillStateByCount, BufferFillStateBySlots)> {
-        let mut fill_state_by_count = BufferFillStateByCount::IsFull;
-        let mut fill_state_by_slots = BufferFillStateBySlots::CanFill;
+        let mut fill_state_by_count = BufferFillStateByCount::NotFull;
+        let mut fill_state_by_slots = BufferFillStateBySlots::CanNotFill;
 
         for (par_id, par) in &self.reader_state.by_partitions {
             let buffer_limits = self.get_buffer_limits_by_partition(par_id)?;
             let (par_fill_state_by_count, par_fill_state_by_slots) =
                 par.buffer.check_is_filled(buffer_limits);
-            if par_fill_state_by_count == BufferFillStateByCount::NotFull {
-                fill_state_by_count = BufferFillStateByCount::NotFull;
+            if par_fill_state_by_count == BufferFillStateByCount::IsFull {
+                fill_state_by_count = BufferFillStateByCount::IsFull;
             }
-            if par_fill_state_by_slots == BufferFillStateBySlots::CanNotFill {
-                fill_state_by_slots = BufferFillStateBySlots::CanNotFill;
+            if par_fill_state_by_slots == BufferFillStateBySlots::CanFill {
+                fill_state_by_slots = BufferFillStateBySlots::CanFill;
             }
             if matches!(
                 (&fill_state_by_count, &fill_state_by_slots),
                 (
-                    BufferFillStateByCount::NotFull,
-                    BufferFillStateBySlots::CanNotFill
+                    BufferFillStateByCount::IsFull,
+                    BufferFillStateBySlots::CanFill
                 )
             ) {
                 break;
@@ -692,13 +695,14 @@ impl ExternalsRangeReader {
     #[tracing::instrument(skip_all, fields(for_shard_id = %self.for_shard_id, seqno = self.seqno))]
     fn read_externals_into_buffers(
         &mut self,
-        next_chain_time: u64,
         anchors_cache: &mut AnchorsCache,
         read_mode: ReadNextExternalsMode,
         partition_router: &PartitionRouter,
         processed_to_by_partitions: &BTreeMap<PartitionId, ExternalKey>,
     ) -> ReadExternalsRangeResult {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
+
+        let next_chain_time = self.reader_state.range.chain_time;
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
             next_chain_time,
@@ -717,10 +721,10 @@ impl ExternalsRangeReader {
 
         // check if buffer is full
         // or we can already fill required slots
-        let (mut min_fill_state_by_count, mut min_fill_state_by_slots) =
-            self.get_min_buffers_fill_state().unwrap(); // TODO: msgsv-v3: return error instead of panic
-        let mut buffers_filled = matches!(
-            (&min_fill_state_by_count, &min_fill_state_by_slots),
+        let (mut max_fill_state_by_count, mut max_fill_state_by_slots) =
+            self.get_max_buffers_fill_state().unwrap(); // TODO: msgsv-v3: return error instead of panic
+        let mut has_filled_buffer = matches!(
+            (&max_fill_state_by_count, &max_fill_state_by_slots),
             (BufferFillStateByCount::IsFull, _) | (_, BufferFillStateBySlots::CanFill)
         );
 
@@ -802,6 +806,8 @@ impl ExternalsRangeReader {
                     if self.for_shard_id.contains_address(&ext_msg.info.dst) {
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             anchor_id,
+                            anchor_chain_time = anchor.chain_time,
+                            next_chain_time,
                             "ext_msg hash: {}, dst: {} is expired by timeout {} ms",
                             ext_msg.hash(), ext_msg.info.dst, externals_expire_timeout_ms,
                         );
@@ -820,6 +826,8 @@ impl ExternalsRangeReader {
                 last_anchor_removed = true;
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
+                    anchor_chain_time = anchor.chain_time,
+                    next_chain_time,
                     "anchor fully skipped due to expiration, removed from anchors cache",
                 );
 
@@ -850,7 +858,7 @@ impl ExternalsRangeReader {
                 );
 
                 // add msg to buffer if it is not filled and prev_to not reached
-                if !(buffers_filled
+                if !(has_filled_buffer
                     || read_mode == ReadNextExternalsMode::ToPreviuosReadTo && prev_to_reached)
                 {
                     msgs_read_offset_in_last_anchor += 1;
@@ -914,10 +922,10 @@ impl ExternalsRangeReader {
 
                         // check if buffer is full
                         // or we can already fill required slots
-                        (min_fill_state_by_count, min_fill_state_by_slots) =
-                            self.get_min_buffers_fill_state().unwrap(); // TODO: msgs-v3: return error instead of panic
-                        buffers_filled = matches!(
-                            (&min_fill_state_by_count, &min_fill_state_by_slots),
+                        (max_fill_state_by_count, max_fill_state_by_slots) =
+                            self.get_max_buffers_fill_state().unwrap(); // TODO: msgs-v3: return error instead of panic
+                        has_filled_buffer = matches!(
+                            (&max_fill_state_by_count, &max_fill_state_by_slots),
                             (BufferFillStateByCount::IsFull, _)
                                 | (_, BufferFillStateBySlots::CanFill)
                         );
@@ -961,17 +969,17 @@ impl ExternalsRangeReader {
             }
 
             // stop reading when buffer filled
-            if buffers_filled {
+            if has_filled_buffer {
                 break;
             }
         }
 
-        if matches!(min_fill_state_by_slots, BufferFillStateBySlots::CanFill) {
+        if matches!(max_fill_state_by_slots, BufferFillStateBySlots::CanFill) {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
                 "externals reader: can fully fill all slots in message group",
             );
-        } else if matches!(min_fill_state_by_count, BufferFillStateByCount::IsFull) {
+        } else if matches!(max_fill_state_by_count, BufferFillStateByCount::IsFull) {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
                 "externals reader: messages buffers filled up to limits",
@@ -1018,7 +1026,7 @@ impl ExternalsRangeReader {
         ReadExternalsRangeResult {
             has_pending_externals,
             last_read_to_anchor_chain_time,
-            min_fill_state_by_slots,
+            max_fill_state_by_slots,
             metrics,
         }
     }
@@ -1039,8 +1047,8 @@ struct ReadExternalsRangeResult {
     /// Used to calc externals time diff.
     last_read_to_anchor_chain_time: Option<u64>,
 
-    /// Shows if we can fill all slots in message group from buffers
-    min_fill_state_by_slots: BufferFillStateBySlots,
+    /// Shows if we can fill all slots in message group from almost one buffer
+    max_fill_state_by_slots: BufferFillStateBySlots,
 
     metrics: MessagesReaderMetrics,
 }

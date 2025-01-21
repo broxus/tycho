@@ -145,12 +145,56 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         &self,
         _blocks: FastHashMap<ShardIdent, u32>,
     ) -> Vec<(ShardIdent, ShortQueueDiff)> {
-        todo!()
+        unimplemented!()
     }
 
     fn get_diffs_count_by_shard(&self, _shard_ident: &ShardIdent) -> usize {
         unimplemented!()
     }
+}
+
+#[cfg(FALSE)]
+const DEFAULT_BLOCK_LIMITS: BlockLimits = BlockLimits {
+    bytes: BlockParamLimits {
+        underload: 131072,
+        soft_limit: 524288,
+        hard_limit: 1048576,
+    },
+    gas: BlockParamLimits {
+        underload: 900000,
+        soft_limit: 1200000,
+        hard_limit: 20_000_000,
+    },
+    lt_delta: BlockParamLimits {
+        underload: 1000,
+        soft_limit: 5000,
+        hard_limit: 10000,
+    },
+};
+
+#[cfg(FALSE)]
+pub(crate) fn build_stub_collation_data(
+    next_block_id: BlockIdShort,
+    anchors_cache: &AnchorsCache,
+    start_lt: u64,
+) -> BlockCollationData {
+    BlockCollationDataBuilder::new(
+        next_block_id,
+        HashBytes::ZERO,
+        1,
+        anchors_cache
+            .last_imported_anchor()
+            .map(|a| a.ct)
+            .unwrap_or_default(),
+        Default::default(),
+        HashBytes::ZERO,
+        GlobalVersion {
+            version: 50,
+            capabilities: supported_capabilities(),
+        },
+        None,
+    )
+    .build(start_lt, DEFAULT_BLOCK_LIMITS)
 }
 
 #[cfg(FALSE)]
