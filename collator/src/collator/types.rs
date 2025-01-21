@@ -876,7 +876,7 @@ pub struct Dequeued {
     pub same_shard: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AnchorsCache {
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
