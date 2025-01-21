@@ -60,9 +60,9 @@ function download() {
 
 function ensure_exists() {
     local file_url="${test_base_url}/$1"
-    local file_path="${test_dir}/$1"
+    local file_path="${test_dir}/$2"
     local checksum_url="${test_base_url}/$1.sha256"
-    local checksum_path="${test_dir}/$1.sha256"
+    local checksum_path="${test_dir}/$2.sha256"
 
     echo "[$1]: Downloading checksum file..."
     curl --request GET -sL --url "${checksum_url}" --output "${checksum_path}"
@@ -88,9 +88,9 @@ function ensure_exists() {
     echo "[$1]: Done."
 }
 
-ensure_exists "states.tar.zst"
-ensure_exists "zerostate.boc"
+ensure_exists "states.tar.zst" "states.tar.zst"
+ensure_exists "2025-01-21_zerostate.boc" "zerostate.boc"
 
-ensure_exists "archive_1.bin"
-ensure_exists "archive_2.bin"
-ensure_exists "archive_3.bin"
+ensure_exists "2025-01-21_archive_1.bin" "archive_1.bin"
+ensure_exists "2025-01-21_archive_2.bin" "archive_2.bin"
+ensure_exists "2025-01-21_archive_3.bin" "archive_3.bin"
