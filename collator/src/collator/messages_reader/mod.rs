@@ -900,7 +900,7 @@ impl MessagesReader {
                     // mark all read messages processed
                     externals_reader.set_processed_to_current_position(&par_id)?;
                     // set skip offset to current offset
-                    externals_reader.set_skip_offset_to_current(&par_reader.partition_id)?;
+                    externals_reader.set_skip_offset_to_current(&par_id)?;
                 }
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
