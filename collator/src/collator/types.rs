@@ -1027,6 +1027,7 @@ pub struct RandSeed {
 
 pub trait MsgsExecutionParamsExtension {
     fn group_slots_fractions(&self) -> Result<BTreeMap<PartitionId, u8>>;
+    fn open_ranges_limit(&self) -> usize;
 }
 
 impl MsgsExecutionParamsExtension for MsgsExecutionParams {
@@ -1037,5 +1038,9 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
             res.insert(par_id, fraction);
         }
         Ok(res)
+    }
+
+    fn open_ranges_limit(&self) -> usize {
+        self.open_ranges_limit.max(2) as usize
     }
 }
