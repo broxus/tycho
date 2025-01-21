@@ -578,9 +578,8 @@ impl ExternalsReader {
                                     if !prev_reader.fully_read {
                                         check_ops_count.saturating_add_assign(1);
                                         if prev_reader
-                                            .remaning_msgs_stats
-                                            .statistics()
-                                            .contains_key(&dst_addr)
+                                            .reader_state
+                                            .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
                                         {
                                             return (true, check_ops_count);
                                         }
