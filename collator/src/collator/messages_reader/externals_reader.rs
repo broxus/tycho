@@ -667,12 +667,12 @@ impl ExternalsRangeReader {
 
         for (par_id, par) in &self.reader_state.by_partitions {
             let buffer_limits = self.get_buffer_limits_by_partition(par_id)?;
-            let (partition_fill_state_by_count, partition_fill_state_by_slots) =
+            let (par_fill_state_by_count, par_fill_state_by_slots) =
                 par.buffer.check_is_filled(buffer_limits);
-            if partition_fill_state_by_count == BufferFillStateByCount::NotFull {
+            if par_fill_state_by_count == BufferFillStateByCount::NotFull {
                 fill_state_by_count = BufferFillStateByCount::NotFull;
             }
-            if partition_fill_state_by_slots == BufferFillStateBySlots::CanNotFill {
+            if par_fill_state_by_slots == BufferFillStateBySlots::CanNotFill {
                 fill_state_by_slots = BufferFillStateBySlots::CanNotFill;
             }
             if matches!(

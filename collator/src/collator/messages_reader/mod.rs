@@ -697,19 +697,19 @@ impl MessagesReader {
         // collect messages after reading
         let mut partitions_readers = BTreeMap::new();
 
-        for (par_id, partition_reader_stage) in self.readers_stages.iter_mut() {
+        for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             // extract partition reader from state to use partition 0 buffer
             // to check for account skip on collecting messages from partition 1
-            let mut partition_reader = self
+            let mut par_reader = self
                 .internals_partition_readers
                 .remove(par_id)
                 .context("reader for partition should exist")?;
 
             // on refill collect only until the last range processed offset reached
             if read_mode == GetNextMessageGroupMode::Refill
-                && partition_reader.last_range_offset_reached()
+                && par_reader.last_range_offset_reached()
             {
-                partitions_readers.insert(*par_id, partition_reader);
+                partitions_readers.insert(*par_id, par_reader);
                 continue;
             }
 
@@ -725,8 +725,8 @@ impl MessagesReader {
                 msg_group,
                 collected_queue_msgs_keys,
             } = Self::collect_messages_for_partition(
-                partition_reader_stage,
-                &mut partition_reader,
+                par_reader_stage,
+                &mut par_reader,
                 &mut self.externals_reader,
                 has_pending_new_messages_for_partition,
                 &partitions_readers,
@@ -740,7 +740,7 @@ impl MessagesReader {
             self.new_messages
                 .remove_collected_messages(&collected_queue_msgs_keys);
 
-            partitions_readers.insert(*par_id, partition_reader);
+            partitions_readers.insert(*par_id, par_reader);
         }
         // return partition readers to state
         self.internals_partition_readers = partitions_readers;
@@ -797,8 +797,8 @@ impl MessagesReader {
     }
 
     fn collect_messages_for_partition(
-        partition_reader_stage: &mut MessagesReaderStage,
-        partition_reader: &mut InternalsParitionReader,
+        par_reader_stage: &mut MessagesReaderStage,
+        par_reader: &mut InternalsParitionReader,
         externals_reader: &mut ExternalsReader,
         has_pending_new_messages_for_partition: bool,
         prev_partitions_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
@@ -807,22 +807,19 @@ impl MessagesReader {
         let mut res = CollectMessageForPartitionResult::default();
 
         // update processed offset anyway
-        partition_reader.increment_curr_processed_offset();
-        externals_reader.increment_curr_processed_offset(&partition_reader.partition_id)?;
+        par_reader.increment_curr_processed_offset();
+        externals_reader.increment_curr_processed_offset(&par_reader.partition_id)?;
 
         // remember if all internals or externals were collected before to reduce spam in logs further
         let mut all_internals_collected_before = false;
         let all_read_externals_collected_before;
 
         // collect existing internals
-        if matches!(
-            partition_reader_stage,
-            MessagesReaderStage::ExistingAndExternals
-        ) {
-            all_internals_collected_before = partition_reader.all_existing_messages_collected();
+        if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals) {
+            all_internals_collected_before = par_reader.all_existing_messages_collected();
 
-            let CollectInternalsResult { metrics, .. } = partition_reader.collect_messages(
-                partition_reader_stage,
+            let CollectInternalsResult { metrics, .. } = par_reader.collect_messages(
+                par_reader_stage,
                 &mut res.msg_group,
                 prev_partitions_readers,
                 prev_msg_groups,
@@ -836,7 +833,7 @@ impl MessagesReader {
             all_read_externals_collected_before = !externals_reader.has_messages_in_buffers();
 
             let CollectExternalsResult { metrics } = externals_reader.collect_messages(
-                &partition_reader.partition_id,
+                &par_reader.partition_id,
                 &mut res.msg_group,
                 prev_partitions_readers,
                 prev_msg_groups,
@@ -845,15 +842,15 @@ impl MessagesReader {
         }
 
         // collect new internals
-        if matches!(partition_reader_stage, MessagesReaderStage::ExternalsAndNew) {
+        if matches!(par_reader_stage, MessagesReaderStage::ExternalsAndNew) {
             all_internals_collected_before =
-                partition_reader.all_new_messages_collected(has_pending_new_messages_for_partition);
+                par_reader.all_new_messages_collected(has_pending_new_messages_for_partition);
 
             let CollectInternalsResult {
                 metrics,
                 mut collected_queue_msgs_keys,
-            } = partition_reader.collect_messages(
-                partition_reader_stage,
+            } = par_reader.collect_messages(
+                par_reader_stage,
                 &mut res.msg_group,
                 prev_partitions_readers,
                 prev_msg_groups,
@@ -864,7 +861,7 @@ impl MessagesReader {
 
             // set skip offset to current offset
             // because we will not save collected new messages to the queue
-            partition_reader.set_skip_offset_to_current()?;
+            par_reader.set_skip_offset_to_current()?;
         }
 
         // switch to the next reader stage if required
@@ -872,24 +869,22 @@ impl MessagesReader {
         // if all existing internals collected
         // then we should collect all already read externals without reading more from cache
         // and only after that we can finalize existing internals read state
-        if matches!(
-            partition_reader_stage,
-            MessagesReaderStage::ExistingAndExternals
-        ) && partition_reader.all_existing_messages_collected()
+        if matches!(par_reader_stage, MessagesReaderStage::ExistingAndExternals)
+            && par_reader.all_existing_messages_collected()
         {
             // log only first time
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = partition_reader.partition_id,
-                    int_processed_to = ?partition_reader.reader_state().processed_to,
-                    int_curr_processed_offset = partition_reader.reader_state().curr_processed_offset,
-                    last_range_reader_state = ?partition_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                    partition_id = par_reader.partition_id,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
                     "all existing internals collected from partition",
                 );
             }
 
             // switch to the "collect only already read externals" stage
-            *partition_reader_stage = MessagesReaderStage::FinishExternals;
+            *par_reader_stage = MessagesReaderStage::FinishExternals;
         }
 
         // if all read externals collected
@@ -905,7 +900,7 @@ impl MessagesReader {
                     // mark all read messages processed
                     externals_reader.set_processed_to_current_position(&par_id)?;
                     // set skip offset to current offset
-                    externals_reader.set_skip_offset_to_current(&partition_reader.partition_id)?;
+                    externals_reader.set_skip_offset_to_current(&par_reader.partition_id)?;
                 }
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
@@ -924,44 +919,44 @@ impl MessagesReader {
 
             // if we are in the "collecting only already read externals" stage
             // then we can finalize existing internals read state
-            if matches!(partition_reader_stage, MessagesReaderStage::FinishExternals) {
+            if matches!(par_reader_stage, MessagesReaderStage::FinishExternals) {
                 // finalize existing intenals read state
                 // drop all ranges except the last one
-                partition_reader.retain_only_last_range_reader()?;
+                par_reader.retain_only_last_range_reader()?;
                 // mark all read messages processed
-                partition_reader.set_processed_to_current_position()?;
+                par_reader.set_processed_to_current_position()?;
                 // drop processing offset for existing internals
-                partition_reader.drop_processing_offset(true)?;
+                par_reader.drop_processing_offset(true)?;
                 // and drop processing offset for externals
-                externals_reader.drop_processing_offset(&partition_reader.partition_id, true)?;
+                externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
 
                 // switch to the "new messages processing" stage
-                *partition_reader_stage = MessagesReaderStage::ExternalsAndNew;
+                *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
             }
         }
 
         // if all new messages collected
         // finalize new messages read state
-        if matches!(partition_reader_stage, MessagesReaderStage::ExternalsAndNew)
-            && partition_reader.all_new_messages_collected(has_pending_new_messages_for_partition)
+        if matches!(par_reader_stage, MessagesReaderStage::ExternalsAndNew)
+            && par_reader.all_new_messages_collected(has_pending_new_messages_for_partition)
         {
             // mark all read messages processed
-            partition_reader.set_processed_to_current_position()?;
+            par_reader.set_processed_to_current_position()?;
 
             // if all read externals collected
             // drop processed offset both for externals and new message
             if all_read_externals_collected {
-                partition_reader.drop_processing_offset(true)?;
-                externals_reader.drop_processing_offset(&partition_reader.partition_id, true)?;
+                par_reader.drop_processing_offset(true)?;
+                externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
             }
 
             // log only first time
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = partition_reader.partition_id,
-                    int_processed_to = ?partition_reader.reader_state().processed_to,
-                    int_curr_processed_offset = partition_reader.reader_state().curr_processed_offset,
-                    last_range_reader_state = ?partition_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+                    partition_id = par_reader.partition_id,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
                     "all new internals collected from partition",
                 );
             }
