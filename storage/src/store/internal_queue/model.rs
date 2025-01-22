@@ -1,18 +1,18 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
 
 use crate::util::{StoredValue, StoredValueBuffer};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShardsInternalMessagesKey {
     pub shard_ident: ShardIdent,
-    pub partition: QueuePartition,
+    pub partition: QueuePartitionIdx,
     pub internal_message_key: QueueKey,
 }
 
 impl ShardsInternalMessagesKey {
     pub fn new(
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         shard_ident: ShardIdent,
         internal_message_key: QueueKey,
     ) -> Self {
@@ -47,7 +47,7 @@ impl StoredValue for ShardsInternalMessagesKey {
             panic!("Insufficient data for deserialization")
         }
 
-        let partition = QueuePartition::deserialize(reader);
+        let partition = QueuePartitionIdx::deserialize(reader);
         let shard_ident = ShardIdent::deserialize(reader);
         let internal_message_key = QueueKey::deserialize(reader);
 
@@ -120,7 +120,7 @@ impl StoredValue for RouterAddr {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StatKey {
     pub shard_ident: ShardIdent,
-    pub partition: QueuePartition,
+    pub partition: QueuePartitionIdx,
     pub min_message: QueueKey,
     pub max_message: QueueKey,
     pub dest: RouterAddr,
@@ -129,7 +129,7 @@ pub struct StatKey {
 impl StatKey {
     pub fn new(
         shard_ident: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         min_message: QueueKey,
         max_message: QueueKey,
         dest: RouterAddr,
@@ -146,12 +146,12 @@ impl StatKey {
 
 impl StoredValue for StatKey {
     const SIZE_HINT: usize = ShardIdent::SIZE_HINT
-        + QueuePartition::SIZE_HINT
+        + QueuePartitionIdx::SIZE_HINT
         + QueueKey::SIZE_HINT * 2
         + RouterAddr::SIZE_HINT;
 
     type OnStackSlice = [u8; ShardIdent::SIZE_HINT
-        + QueuePartition::SIZE_HINT
+        + QueuePartitionIdx::SIZE_HINT
         + QueueKey::SIZE_HINT * 2
         + RouterAddr::SIZE_HINT];
 
@@ -169,7 +169,7 @@ impl StoredValue for StatKey {
         }
 
         let shard_ident = ShardIdent::deserialize(reader);
-        let partition = QueuePartition::deserialize(reader);
+        let partition = QueuePartitionIdx::deserialize(reader);
         let min_message = QueueKey::deserialize(reader);
         let max_message = QueueKey::deserialize(reader);
         let dest = RouterAddr::deserialize(reader);
@@ -186,7 +186,7 @@ impl StoredValue for StatKey {
 
 pub struct QueueRange {
     pub shard_ident: ShardIdent,
-    pub partition: QueuePartition,
+    pub partition: QueuePartitionIdx,
     pub from: QueueKey,
     pub to: QueueKey,
 }

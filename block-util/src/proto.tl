@@ -23,10 +23,26 @@ block.queueKey lt:long hash:int256 = block.QueueKey;
 * @param shard_ident    shard identifier
 * @param bound          processed upto this bound
 */
-block.shardProcessedUpto
+block.shardProcessedTo
     shard_ident:block.shardIdent
     bound:block.queueKey
-    = block.ShardProcessedUpto;
+    = block.ShardProcessedTo;
+
+/**
+* Account address.
+*/
+block.routerAddr
+    workchain:int
+    account:int256
+    = block.RouterAddr;
+
+/**
+* Accounts partition.
+*/
+block.queuePartition
+    index:int
+    accounts:(vector block.routerAddr)
+    = block.QueuePartition;
 
 /**
 * Representation of an internal messages queue diff.
@@ -43,10 +59,12 @@ block.queueDiff
     prev_queue_diff_hash:int256
     shard_ident:block.shardIdent
     seqno:int
-    processed_upto:(vector block.shardProcessedUpto)
+    processed_to:(vector block.shardProcessedTo)
     min_message:block.queueKey
     max_message:block.queueKey
     messages:(vector int256)
+    router_partitions_src:(vector block.queuePartition)
+    router_partitions_dst:(vector block.queuePartition)
     = block.QueueDiff;
 
 /**

@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
@@ -77,7 +77,7 @@ where
     /// Create iterator for specified shard and return it
     fn iterator(
         &self,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
         for_shard_id: ShardIdent,
     ) -> Result<Vec<Box<dyn StateIterator<V>>>>;
@@ -101,7 +101,7 @@ where
     /// Load statistics for the given range by accounts
     fn load_statistics(
         &self,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics>;
     /// Get diffs for the given blocks from committed and uncommitted state
@@ -209,7 +209,7 @@ where
 {
     fn iterator(
         &self,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
         for_shard_id: ShardIdent,
     ) -> Result<Vec<Box<dyn StateIterator<V>>>> {
@@ -308,7 +308,7 @@ where
     fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
         let mut partitions = FastHashSet::default();
         // insert default partition  because we doesn't store it in router
-        partitions.insert(QueuePartition::default());
+        partitions.insert(QueuePartitionIdx::default());
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();
 
@@ -443,7 +443,7 @@ where
 
     fn load_statistics(
         &self,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics> {
         let snapshot = self.committed_state.snapshot();

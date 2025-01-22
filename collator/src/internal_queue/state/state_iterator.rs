@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{bail, Context, Result};
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_util::FastHashMap;
 
@@ -82,7 +82,7 @@ pub struct StateIteratorImpl<V: InternalMessageValue> {
 
 impl<V: InternalMessageValue> StateIteratorImpl<V> {
     pub fn new(
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         shard_iters_with_ranges: Vec<(OwnedIterator, QueueShardRange)>,
         receiver: ShardIdent,
     ) -> Result<Self> {
