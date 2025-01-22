@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use rayon::iter::ParallelIterator;
-use rayon::prelude::IntoParallelRefIterator;
 use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PeerId;
 
@@ -227,9 +225,9 @@ impl PrevPointProof {
     pub fn signatures_match(&self) -> bool {
         // according to the rule of thumb to yield every 0.01-0.1 ms,
         // and that each signature check takes near 0.03 ms,
-        // every check deserves its own async task - delegate to rayon
+        // every check deserves its own async task - delegate to rayon as a whole
         self.evidence
-            .par_iter()
+            .iter()
             .all(|(peer, sig)| sig.verifies(peer, &self.digest))
     }
 }
@@ -242,13 +240,13 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use everscale_crypto::ed25519::SecretKey;
     use rand::{thread_rng, RngCore};
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use tycho_util::sync::rayon_run;
 
     use super::*;
     use crate::engine::CachedConfig;
     use crate::models::{PointInfo, Through, UnixTime};
     use crate::test_utils::default_test_config;
-
     const PEERS: usize = 100;
     const MSG_COUNT: usize = 1;
     const MSG_BYTES: usize = 780768; // 64 * 100;
