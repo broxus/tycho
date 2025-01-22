@@ -306,7 +306,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "lazy_static",
  "lazycell",
  "log",
@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=488d283458841fe699b64b1a21d5dd310c58bdc3#488d283458841fe699b64b1a21d5dd310c58bdc3"
+source = "git+https://github.com/broxus/everscale-types.git?rev=65f384824a0a10447376f22f609acc81a2e32346#65f384824a0a10447376f22f609acc81a2e32346"
 dependencies = [
  "ahash",
  "anyhow",
@@ -976,7 +976,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=488d283458841fe699b64b1a21d5dd310c58bdc3#488d283458841fe699b64b1a21d5dd310c58bdc3"
+source = "git+https://github.com/broxus/everscale-types.git?rev=65f384824a0a10447376f22f609acc81a2e32346#65f384824a0a10447376f22f609acc81a2e32346"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1568,7 +1568,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]

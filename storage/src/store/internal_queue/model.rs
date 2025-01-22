@@ -191,13 +191,13 @@ pub struct QueueRange {
     pub to: QueueKey,
 }
 
-impl StoredValue for u8 {
-    const SIZE_HINT: usize = 1;
+impl StoredValue for QueuePartitionIdx {
+    const SIZE_HINT: usize = std::mem::size_of::<QueuePartitionIdx>();
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        buffer.write_raw_slice(&(*self).to_be_bytes());
+        buffer.write_raw_slice(&self.to_be_bytes());
     }
 
     fn deserialize(reader: &mut &[u8]) -> Self {
@@ -205,10 +205,10 @@ impl StoredValue for u8 {
             panic!("Insufficient data for deserialization");
         }
 
-        let mut partition_bytes = [0u8; 1];
-        partition_bytes.copy_from_slice(&reader[..1]);
-        let partition = u8::from_be_bytes(partition_bytes);
-        *reader = &reader[1..];
+        let mut partition_bytes = [0u8; 2];
+        partition_bytes.copy_from_slice(&reader[..2]);
+        let partition = u16::from_be_bytes(partition_bytes);
+        *reader = &reader[2..];
 
         partition
     }

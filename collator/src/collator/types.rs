@@ -14,7 +14,7 @@ use everscale_types::models::{
 };
 use tl_proto::TlWrite;
 use ton_executor::{AccountMeta, ExecutedTransaction};
-use tycho_block_util::queue::SerializedQueueDiff;
+use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
@@ -23,7 +23,7 @@ use tycho_util::FastHashMap;
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::ReaderState;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::types::processed_upto::{BlockSeqno, PartitionId, ProcessedUptoInfoStuff};
+use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, ProofFunds, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
@@ -1026,12 +1026,12 @@ pub struct RandSeed {
 }
 
 pub trait MsgsExecutionParamsExtension {
-    fn group_slots_fractions(&self) -> Result<BTreeMap<PartitionId, u8>>;
+    fn group_slots_fractions(&self) -> Result<BTreeMap<QueuePartitionIdx, u8>>;
     fn open_ranges_limit(&self) -> usize;
 }
 
 impl MsgsExecutionParamsExtension for MsgsExecutionParams {
-    fn group_slots_fractions(&self) -> Result<BTreeMap<PartitionId, u8>> {
+    fn group_slots_fractions(&self) -> Result<BTreeMap<QueuePartitionIdx, u8>> {
         let mut res = BTreeMap::new();
         for item in self.group_slots_fractions.iter() {
             let (par_id, fraction) = item?;

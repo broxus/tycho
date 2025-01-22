@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
 use super::internals_reader::{
     InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
@@ -22,7 +22,6 @@ use crate::internal_queue::types::{
     EnqueuedMessage, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
 use crate::tracing_targets;
-use crate::types::processed_upto::PartitionId;
 use crate::types::ProcessedTo;
 
 //=========
@@ -34,7 +33,7 @@ pub(super) struct NewMessagesState<V: InternalMessageValue> {
     messages: BTreeMap<QueueKey, Arc<V>>,
     partition_router: PartitionRouter,
 
-    messages_for_current_shard: BTreeMap<PartitionId, BinaryHeap<Reverse<MessageExt<V>>>>,
+    messages_for_current_shard: BTreeMap<QueuePartitionIdx, BinaryHeap<Reverse<MessageExt<V>>>>,
 }
 
 impl<V: InternalMessageValue> NewMessagesState<V> {
@@ -54,7 +53,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
 
     pub fn init_partition_router<'a>(
         &mut self,
-        partition_id: PartitionId,
+        partition_id: QueuePartitionIdx,
         partition_all_ranges_msgs_stats: impl Iterator<Item = &'a QueueStatistics>,
     ) {
         for stats in partition_all_ranges_msgs_stats {
@@ -66,9 +65,9 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         }
     }
 
-    pub fn has_pending_messages_from_partition(&self, partition_id: &PartitionId) -> bool {
+    pub fn has_pending_messages_from_partition(&self, partition_id: QueuePartitionIdx) -> bool {
         self.messages_for_current_shard
-            .get(partition_id)
+            .get(&partition_id)
             .is_some_and(|heap| !heap.is_empty())
     }
 
@@ -99,14 +98,14 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
 
     pub fn take_messages_for_current_shard(
         &mut self,
-        partition_id: &PartitionId,
+        partition_id: QueuePartitionIdx,
     ) -> Option<BinaryHeap<Reverse<MessageExt<V>>>> {
-        self.messages_for_current_shard.remove(partition_id)
+        self.messages_for_current_shard.remove(&partition_id)
     }
 
     pub fn set_messages_for_current_shard(
         &mut self,
-        partition_id: PartitionId,
+        partition_id: QueuePartitionIdx,
         messages: BinaryHeap<Reverse<MessageExt<V>>>,
     ) {
         if !messages.is_empty() {
@@ -252,7 +251,7 @@ impl InternalsParitionReader {
         self.update_new_messages_reader_to_boundary(current_next_lt)?;
 
         // if no new messages for current partition then return earlier
-        if !new_messages.has_pending_messages_from_partition(&self.partition_id) {
+        if !new_messages.has_pending_messages_from_partition(self.partition_id) {
             self.set_new_messages_range_reader_fully_read()?;
             return Ok(ReadNewMessagesResult {
                 taken_messages: vec![],
@@ -263,7 +262,7 @@ impl InternalsParitionReader {
 
         // take new messages from state
         let mut new_messages_for_current_shard = new_messages
-            .take_messages_for_current_shard(&self.partition_id)
+            .take_messages_for_current_shard(self.partition_id)
             .unwrap_or_default();
 
         // read new messages to buffer

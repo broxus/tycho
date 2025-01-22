@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{IntAddr, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
 use super::super::messages_buffer::MessagesBuffer;
 use crate::collator::messages_buffer::{
@@ -12,8 +12,7 @@ use crate::internal_queue::types::QueueStatistics;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{
     BlockSeqno, ExternalsProcessedUptoStuff, ExternalsRangeInfo, InternalsProcessedUptoStuff,
-    InternalsRangeStuff, Lt, PartitionId, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
-    ShardRangeInfo,
+    InternalsRangeStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff, ShardRangeInfo,
 };
 use crate::types::{DebugIter, ProcessedTo};
 
@@ -67,7 +66,7 @@ impl ReaderState {
         let mut processed_upto = ProcessedUptoInfoStuff::default();
         for (par_id, par) in &self.internals.partitions {
             let ext_reader_state_by_partition =
-                self.externals.get_state_by_partition(par_id).unwrap();
+                self.externals.get_state_by_partition(*par_id).unwrap();
             processed_upto
                 .partitions
                 .insert(*par_id, ProcessedUptoPartitionStuff {
@@ -79,7 +78,7 @@ impl ReaderState {
                             .iter()
                             .map(|(k, v)| {
                                 let ext_range_reader_state_by_partition =
-                                    v.get_state_by_partition(par_id).unwrap();
+                                    v.get_state_by_partition(*par_id).unwrap();
                                 (*k, (&v.range, ext_range_reader_state_by_partition).into())
                             })
                             .collect(),
@@ -139,7 +138,7 @@ pub struct ExternalsReaderState {
     pub ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
 
     /// Partition related externals reader state
-    pub by_partitions: BTreeMap<PartitionId, ExternalsReaderStateByPartition>,
+    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsReaderStateByPartition>,
 
     /// last read to anchor chain time
     pub last_read_to_anchor_chain_time: Option<u64>,
@@ -148,19 +147,19 @@ pub struct ExternalsReaderState {
 impl ExternalsReaderState {
     pub fn get_state_by_partition_mut(
         &mut self,
-        par_id: &PartitionId,
+        par_id: QueuePartitionIdx,
     ) -> Result<&mut ExternalsReaderStateByPartition> {
         self.by_partitions
-            .get_mut(par_id)
+            .get_mut(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {}", par_id))
     }
 
     pub fn get_state_by_partition(
         &self,
-        par_id: &PartitionId,
+        par_id: QueuePartitionIdx,
     ) -> Result<&ExternalsReaderStateByPartition> {
         self.by_partitions
-            .get(par_id)
+            .get(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {}", par_id))
     }
 }
@@ -179,15 +178,15 @@ pub struct ExternalsRangeReaderState {
     /// Range info
     pub range: ExternalsReaderRange,
     /// Partition related externals range reader state
-    pub by_partitions: BTreeMap<PartitionId, ExternalsRangeReaderStateByPartition>,
+    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsRangeReaderStateByPartition>,
 }
 
 impl ExternalsRangeReaderState {
     pub fn get_state_by_partition_mut(
         &mut self,
-        par_id: &PartitionId,
+        par_id: QueuePartitionIdx,
     ) -> Result<&mut ExternalsRangeReaderStateByPartition> {
-        self.by_partitions.get_mut(par_id).with_context(|| {
+        self.by_partitions.get_mut(&par_id).with_context(|| {
             format!(
                 "externals range reader state not exists for partition {}",
                 par_id
@@ -197,9 +196,9 @@ impl ExternalsRangeReaderState {
 
     pub fn get_state_by_partition(
         &self,
-        par_id: &PartitionId,
+        par_id: QueuePartitionIdx,
     ) -> Result<&ExternalsRangeReaderStateByPartition> {
-        self.by_partitions.get(par_id).with_context(|| {
+        self.by_partitions.get(&par_id).with_context(|| {
             format!(
                 "externals range reader state not exists for partition {}",
                 par_id
@@ -342,7 +341,7 @@ impl From<ExternalKey> for (MempoolAnchorId, u64) {
 
 #[derive(Default)]
 pub struct InternalsReaderState {
-    pub partitions: BTreeMap<PartitionId, InternalsPartitionReaderState>,
+    pub partitions: BTreeMap<QueuePartitionIdx, InternalsPartitionReaderState>,
 }
 
 impl InternalsReaderState {

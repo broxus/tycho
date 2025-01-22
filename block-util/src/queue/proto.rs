@@ -309,7 +309,7 @@ impl<'tl> TlRead<'tl> for RouterAddr {
     }
 }
 
-pub type QueuePartitionIdx = u8;
+pub type QueuePartitionIdx = u16;
 
 pub type RouterPartitions = BTreeMap<QueuePartitionIdx, BTreeSet<RouterAddr>>;
 
@@ -394,7 +394,7 @@ mod router_partitions_map {
 
     pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<QueuePartitionIdx, BTreeSet<RouterAddr>>> {
         let partition_count = u32::read_from(data)?;
-        if partition_count > 256 {
+        if partition_count > u16::MAX as u32 + 1 {
             return Err(TlError::InvalidData);
         }
 
@@ -402,7 +402,7 @@ mod router_partitions_map {
 
         let mut prev_index = None;
         for _ in 0..partition_count {
-            let Ok::<u8, _>(partition_index) = u32::read_from(data)?.try_into() else {
+            let Ok::<u16, _>(partition_index) = u32::read_from(data)?.try_into() else {
                 return Err(TlError::InvalidData);
             };
 

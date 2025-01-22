@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
 use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
@@ -18,7 +18,7 @@ use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
+use crate::types::processed_upto::{BlockSeqno, Lt};
 
 //=========
 // INTERNALS READER
@@ -26,7 +26,7 @@ use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
 
 // TODO: msgs-v3: rename to InternalsPartitionReader
 pub(super) struct InternalsParitionReader {
-    pub(super) partition_id: PartitionId,
+    pub(super) partition_id: QueuePartitionIdx,
     pub(super) for_shard_id: ShardIdent,
     pub(super) block_seqno: BlockSeqno,
 
@@ -51,7 +51,7 @@ pub(super) struct InternalsParitionReader {
 }
 
 pub(super) struct InternalsPartitionReaderContext {
-    pub partition_id: PartitionId,
+    pub partition_id: QueuePartitionIdx,
     pub for_shard_id: ShardIdent,
     pub block_seqno: BlockSeqno,
     pub target_limits: MessagesBufferLimits,
@@ -739,8 +739,8 @@ impl InternalsParitionReader {
         &mut self,
         par_reader_stage: &MessagesReaderStage,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
-        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectInternalsResult> {
         let mut res = CollectInternalsResult::default();
 
@@ -814,7 +814,7 @@ pub(super) enum InternalsRangeReaderKind {
 }
 
 pub(super) struct InternalsRangeReader {
-    pub(super) partition_id: PartitionId,
+    pub(super) partition_id: QueuePartitionIdx,
     pub(super) for_shard_id: ShardIdent,
     pub(super) seqno: BlockSeqno,
     pub(super) kind: InternalsRangeReaderKind,
@@ -865,9 +865,9 @@ impl InternalsRangeReader {
     fn collect_messages(
         &mut self,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
         prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader>,
-        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
+        prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> CollectMessagesFromRangeReaderResult {
         let FillMessageGroupResult {
             collected_queue_msgs_keys,
