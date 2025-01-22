@@ -30,7 +30,7 @@ where
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<Box<dyn QueueIterator<V>>>;
 
     /// Returns statistics for the specified ranges by partition
@@ -38,7 +38,7 @@ where
     fn get_statistics(
         &self,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
 
     /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
@@ -58,15 +58,15 @@ where
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator<V>>,
+        iterator: &mut dyn QueueIterator<V>,
         message: V,
     ) -> Result<()>;
     /// Commit processed messages in the iterator
     /// Save last message position for each shard
     fn commit_messages_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator<V>>,
-        messages: Vec<(ShardIdent, QueueKey)>,
+        iterator: &mut dyn QueueIterator<V>,
+        messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()>;
 
     fn clear_uncommitted_state(&self) -> Result<()>;
@@ -91,7 +91,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
 
@@ -115,7 +115,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn get_statistics(
         &self,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics> {
         let time_start = std::time::Instant::now();
 
@@ -170,7 +170,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn add_message_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator<V>>,
+        iterator: &mut dyn QueueIterator<V>,
         message: V,
     ) -> Result<()> {
         iterator.add_message(message)?;
@@ -179,8 +179,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn commit_messages_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator<V>>,
-        messages: Vec<(ShardIdent, QueueKey)>,
+        iterator: &mut dyn QueueIterator<V>,
+        messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()> {
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,

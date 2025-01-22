@@ -236,7 +236,7 @@ pub trait InternalMessageValue: Send + Sync + Ord + 'static {
     where
         Self: Sized;
 
-    fn serialize(&self) -> anyhow::Result<Vec<u8>>
+    fn serialize(&self, buffer: &mut Vec<u8>)
     where
         Self: Sized;
 
@@ -261,11 +261,12 @@ impl InternalMessageValue for EnqueuedMessage {
         }
     }
 
-    fn serialize(&self) -> anyhow::Result<Vec<u8>>
+    fn serialize(&self, buffer: &mut Vec<u8>)
     where
         Self: Sized,
     {
-        Ok(Boc::encode(&self.cell))
+        everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(self.cell.as_ref())
+            .encode(buffer);
     }
 
     fn source(&self) -> &IntAddr {
@@ -285,6 +286,7 @@ pub struct PartitionQueueKey {
     pub partition: QueuePartitionIdx,
     pub key: QueueKey,
 }
+
 #[derive(Debug, Clone)]
 pub struct QueueShardRange {
     pub shard_ident: ShardIdent,

@@ -15,18 +15,13 @@ mod store;
 
 mod util {
     pub use self::instance_id::*;
-    pub use self::owned_iterator::*;
     pub use self::slot_subscriptions::*;
     pub use self::stored_value::*;
 
     pub mod instance_id;
-    pub mod owned_iterator;
     mod slot_subscriptions;
     mod stored_value;
 }
-
-// TODO move to weedb
-pub use util::owned_iterator;
 
 const BASE_DB_SUBDIR: &str = "base";
 const RPC_DB_SUBDIR: &str = "rpc";

@@ -40,7 +40,6 @@ ton_executor = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 trait-variant = { workspace = true }
-weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
