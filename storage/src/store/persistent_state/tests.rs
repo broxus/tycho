@@ -371,10 +371,12 @@ async fn persistent_queue_state_read_write() -> Result<()> {
     }
 
     let mut read_messages = FastHashSet::default();
+
     let mut next_diff_index = 0;
-    while reader.read_next_diff()?.is_some() {
+    while let Some(mut part) = reader.read_next_queue_diff()? {
         next_diff_index += 1;
-        while let Some(cell) = reader.read_next_message()? {
+
+        while let Some(cell) = part.read_next_message()? {
             let exists = read_messages.insert(*cell.repr_hash());
             assert!(exists, "duplicate message");
 
@@ -385,7 +387,6 @@ async fn persistent_queue_state_read_write() -> Result<()> {
             assert!(msg.init.is_none());
             assert!(msg.body.is_empty());
         }
-        assert_eq!(reader.next_queue_diff_index(), next_diff_index);
         assert_eq!(read_messages.len(), next_diff_index * 5000);
     }
     assert_eq!(read_messages.len(), target_message_count);
