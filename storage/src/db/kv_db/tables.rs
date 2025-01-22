@@ -402,16 +402,16 @@ impl ColumnFamilyOptions<Caches> for InternalMessages {
 }
 
 /// Stores persistent internal messages
-pub struct ShardsInternalMessages;
-impl ColumnFamily for ShardsInternalMessages {
-    const NAME: &'static str = "shards_internal_messages";
+pub struct ShardInternalMessages;
+impl ColumnFamily for ShardInternalMessages {
+    const NAME: &'static str = "shard_int_msgs";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(true);
     }
 }
 
-impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
+impl ColumnFamilyOptions<Caches> for ShardInternalMessages {
     fn options(opts: &mut Options, caches: &mut Caches) {
         let mut block_factory = BlockBasedOptions::default();
         block_factory.set_block_cache(&caches.block_cache);
@@ -426,46 +426,46 @@ impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
 }
 
 /// Stores connections data
-pub struct ShardsInternalMessagesSession;
-impl ColumnFamily for ShardsInternalMessagesSession {
-    const NAME: &'static str = "shards_internal_messages_session";
+pub struct ShardInternalMessagesUncommited;
+impl ColumnFamily for ShardInternalMessagesUncommited {
+    const NAME: &'static str = "shard_int_msgs_uncommited";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(true);
     }
 }
 
-impl ColumnFamilyOptions<Caches> for ShardsInternalMessagesSession {
+impl ColumnFamilyOptions<Caches> for ShardInternalMessagesUncommited {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
     }
 }
 
-pub struct InternalMessagesDestStatUncommitted;
-impl ColumnFamily for InternalMessagesDestStatUncommitted {
-    const NAME: &'static str = "internal_messages_dest_stat_uncommitted";
+pub struct InternalMessageStats;
+impl ColumnFamily for InternalMessageStats {
+    const NAME: &'static str = "int_msg_stats";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(true);
     }
 }
 
-impl ColumnFamilyOptions<Caches> for InternalMessagesDestStatUncommitted {
+impl ColumnFamilyOptions<Caches> for InternalMessageStats {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
     }
 }
 
-pub struct InternalMessagesDestStat;
-impl ColumnFamily for InternalMessagesDestStat {
-    const NAME: &'static str = "internal_messages_dest_stat";
+pub struct InternalMessageStatsUncommited;
+impl ColumnFamily for InternalMessageStatsUncommited {
+    const NAME: &'static str = "int_msg_stats_uncommited";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(true);
     }
 }
 
-impl ColumnFamilyOptions<Caches> for InternalMessagesDestStat {
+impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommited {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
     }

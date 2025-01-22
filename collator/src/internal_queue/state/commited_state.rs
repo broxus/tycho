@@ -1,13 +1,13 @@
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueuePartitionIdx;
-use tycho_storage::Storage;
+use tycho_storage::{InternalQueueSnapshot, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
-use weedb::OwnedSnapshot;
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
+
 // CONFIG
 
 pub struct CommittedStateConfig {
@@ -57,14 +57,15 @@ pub trait CommittedStateFactory<V: InternalMessageValue> {
 
 pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
     /// Create snapshot
-    fn snapshot(&self) -> OwnedSnapshot;
+    fn snapshot(&self) -> InternalQueueSnapshot;
+
     /// Create iterator for given partition and ranges
     fn iterator(
         &self,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         receiver: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<Box<dyn StateIterator<V>>>;
 
     /// Delete messages in given partition and ranges
@@ -74,7 +75,7 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         range: &[QueueShardRange],
     ) -> Result<()>;
@@ -93,27 +94,23 @@ impl CommittedStateStdImpl {
 }
 
 impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
-    fn snapshot(&self) -> OwnedSnapshot {
+    fn snapshot(&self) -> InternalQueueSnapshot {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_snapshot_time");
-        self.storage.internal_queue_storage().snapshot()
+        self.storage.internal_queue_storage().make_snapshot()
     }
 
     fn iterator(
         &self,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         receiver: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<Box<dyn StateIterator<V>>> {
         let mut shard_iters_with_ranges = Vec::new();
 
         for range in ranges {
-            let iter = self
-                .storage
-                .internal_queue_storage()
-                .build_iterator_committed(snapshot);
-
-            shard_iters_with_ranges.push((iter, range));
+            let iter = snapshot.iter_messages_commited();
+            shard_iters_with_ranges.push((iter, range.clone()));
         }
 
         let iterator = StateIteratorImpl::new(partition, shard_iters_with_ranges, receiver)?;
@@ -136,23 +133,21 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
         let _histogram =
             HistogramGuard::begin("tycho_internal_queue_committed_statistics_load_time");
+
         for range in ranges {
-            self.storage
-                .internal_queue_storage()
-                .collect_committed_stats_in_range(
-                    snapshot,
-                    range.shard_ident,
-                    partition,
-                    range.from,
-                    range.to,
-                    result,
-                )?;
+            snapshot.collect_committed_stats_in_range(
+                range.shard_ident,
+                partition,
+                &range.from,
+                &range.to,
+                result,
+            )?;
         }
 
         Ok(())

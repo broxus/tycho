@@ -78,7 +78,7 @@ where
     fn iterator(
         &self,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
         for_shard_id: ShardIdent,
     ) -> Result<Vec<Box<dyn StateIterator<V>>>>;
     /// Add messages to uncommitted state from `diff.messages` and add diff to the cache
@@ -102,7 +102,7 @@ where
     fn load_statistics(
         &self,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
@@ -210,7 +210,7 @@ where
     fn iterator(
         &self,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
         for_shard_id: ShardIdent,
     ) -> Result<Vec<Box<dyn StateIterator<V>>>> {
         let snapshot = self.committed_state.snapshot();
@@ -219,7 +219,7 @@ where
             let _histogram =
                 HistogramGuard::begin("tycho_internal_queue_commited_state_iterator_create_time");
             self.committed_state
-                .iterator(&snapshot, for_shard_id, partition, ranges.clone())?
+                .iterator(&snapshot, for_shard_id, partition, ranges)?
         };
 
         let uncommitted_state_iterator = {
@@ -444,18 +444,18 @@ where
     fn load_statistics(
         &self,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics> {
         let snapshot = self.committed_state.snapshot();
         let mut statistics = FastHashMap::default();
 
         // load from committed state
         self.committed_state
-            .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
+            .load_statistics(&mut statistics, &snapshot, partition, ranges)?;
 
         // load from uncommitted state and add to the statistics
         self.uncommitted_state
-            .load_statistics(&mut statistics, &snapshot, partition, &ranges)?;
+            .load_statistics(&mut statistics, &snapshot, partition, ranges)?;
 
         let statistics = QueueStatistics::with_statistics(statistics);
 

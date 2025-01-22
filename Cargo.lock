@@ -3566,7 +3566,6 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "tycho-vm",
- "weedb",
 ]
 
 [[package]]
@@ -4095,9 +4094,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "960739abb9fe47311d360571e1887038f3a3837c2e21d64b15f6cd0d13a54d47"
+checksum = "ce5b35f90e43128653b3623cf75c84a968072ed691426d747dbeaf3755ee5b1d"
 dependencies = [
  "librocksdb-sys",
  "metrics",

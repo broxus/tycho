@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_storage::model::ShardsInternalMessagesKey;
-use tycho_storage::owned_iterator::OwnedIterator;
+use tycho_storage::InternalQueueMessagesIter;
 
 use crate::types::ShortAddr;
 
@@ -37,7 +37,7 @@ pub enum IterResult<'a> {
 pub struct ShardIterator {
     range: Range,
     receiver: ShardIdent,
-    iterator: OwnedIterator,
+    iterator: InternalQueueMessagesIter,
 }
 
 impl ShardIterator {
@@ -47,9 +47,13 @@ impl ShardIterator {
         from: QueueKey,
         to: QueueKey,
         receiver: ShardIdent,
-        mut iterator: OwnedIterator,
+        mut iterator: InternalQueueMessagesIter,
     ) -> Self {
-        iterator.seek(ShardsInternalMessagesKey::new(partition, shard_ident, from));
+        iterator.seek(&ShardsInternalMessagesKey::new(
+            partition,
+            shard_ident,
+            from,
+        ));
 
         let range = Range::from((partition, shard_ident, from, to));
 
@@ -60,41 +64,27 @@ impl ShardIterator {
         }
     }
 
-    pub fn shift(&mut self) {
-        self.iterator.next();
-    }
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<IterResult<'_>>> {
+        let Some(msg) = self.iterator.next()? else {
+            return Ok(None);
+        };
 
-    pub fn current(&mut self) -> Result<Option<IterResult<'_>>> {
-        if let Some(key) = self.iterator.key() {
-            let key = ShardsInternalMessagesKey::from(key);
-
-            // skip first key if it is equal to `from`
-            if key == self.range.from {
-                return Ok(Some(IterResult::Skip(None)));
-            }
-
-            if !self.range.contains(&key) {
-                return Ok(None);
-            }
-
-            let value = self.iterator.value().context("Failed to get value")?;
-            let dest_workchain = value[0] as i8;
-            let dest_prefix = u64::from_be_bytes(
-                value[1..9]
-                    .try_into()
-                    .context("Failed to deserialize destination prefix")?,
-            );
-            let short_addr = ShortAddr::new(dest_workchain as i32, dest_prefix);
-
-            return if self.receiver.contains_address(&short_addr) {
-                Ok(Some(IterResult::Value(&value[9..])))
-            } else {
-                Ok(Some(IterResult::Skip(Some((
-                    key.shard_ident,
-                    key.internal_message_key,
-                )))))
-            };
+        // skip first key if it is equal to `from`
+        if msg.key == self.range.from {
+            return Ok(Some(IterResult::Skip(None)));
         }
-        Ok(None)
+
+        if !self.range.contains(&msg.key) {
+            return Ok(None);
+        }
+
+        let short_addr = ShortAddr::new(msg.workchain as i32, msg.prefix);
+
+        Ok(Some(if self.receiver.contains_address(&short_addr) {
+            IterResult::Value(msg.message_boc)
+        } else {
+            IterResult::Skip(Some((msg.key.shard_ident, msg.key.internal_message_key)))
+        }))
     }
 }

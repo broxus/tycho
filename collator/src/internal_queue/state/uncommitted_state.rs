@@ -1,15 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
 use tycho_storage::model::{QueueRange, StatKey};
-use tycho_storage::Storage;
+use tycho_storage::{InternalQueueSnapshot, InternalQueueTransaction, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::rocksdb::WriteBatch;
-use weedb::OwnedSnapshot;
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{
@@ -68,10 +66,10 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
     /// Create iterator for given partition and ranges
     fn iterator(
         &self,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         receiver: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<Box<dyn StateIterator<V>>>;
 
     /// Move messages and statistics from uncommitted to committed state with given partitions and ranges
@@ -96,7 +94,7 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<()>;
@@ -117,20 +115,15 @@ impl UncommittedStateStdImpl {
 impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
     fn iterator(
         &self,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         receiver: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: &[QueueShardRange],
     ) -> Result<Box<dyn StateIterator<V>>> {
         let mut shard_iters_with_ranges = Vec::new();
 
         for range in ranges {
-            let iter = self
-                .storage
-                .internal_queue_storage()
-                .build_iterator_uncommitted(snapshot);
-
-            shard_iters_with_ranges.push((iter, range));
+            shard_iters_with_ranges.push((snapshot.iter_messages_uncommited(), range.clone()));
         }
 
         let iterator = StateIteratorImpl::new(partition, shard_iters_with_ranges, receiver)?;
@@ -142,24 +135,20 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         partitions: FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
-        let mut queue_ranges = vec![];
-        for partition in partitions {
-            for range in ranges {
-                queue_ranges.push(QueueRange {
-                    partition,
-                    shard_ident: range.shard_ident,
-                    from: range.from,
-                    to: range.to,
-                });
-            }
-        }
-        self.storage.internal_queue_storage().commit(queue_ranges)
+        let ranges = partitions.iter().flat_map(|&partition| {
+            ranges.iter().map(move |range| QueueRange {
+                partition,
+                shard_ident: range.shard_ident,
+                from: range.from,
+                to: range.to,
+            })
+        });
+
+        self.storage.internal_queue_storage().commit(ranges)
     }
 
     fn truncate(&self) -> Result<()> {
-        self.storage
-            .internal_queue_storage()
-            .clear_uncommitted_state()
+        self.storage.internal_queue_storage().clear_uncommited()
     }
 
     fn add_messages_with_statistics(
@@ -169,35 +158,32 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         messages: &BTreeMap<QueueKey, Arc<V>>,
         statistics: &DiffStatistics,
     ) -> Result<()> {
-        let mut batch = WriteBatch::default();
+        let mut tx = self.storage.internal_queue_storage().begin_transaction();
 
-        self.add_messages(&mut batch, source, partition_router, messages)?;
-        self.add_statistics(&mut batch, statistics)?;
+        Self::add_messages(&mut tx, source, partition_router, messages)?;
+        Self::add_statistics(&mut tx, statistics)?;
 
-        self.storage.internal_queue_storage().write_batch(batch)?;
-        Ok(())
+        tx.write()
     }
 
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
-        snapshot: &OwnedSnapshot,
+        snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
         let _histogram =
             HistogramGuard::begin("tycho_internal_queue_uncommitted_statistics_load_time");
+
         for range in ranges {
-            self.storage
-                .internal_queue_storage()
-                .collect_uncommitted_stats_in_range(
-                    snapshot,
-                    range.shard_ident,
-                    partition,
-                    range.from,
-                    range.to,
-                    result,
-                )?;
+            snapshot.collect_uncommitted_stats_in_range(
+                range.shard_ident,
+                partition,
+                &range.from,
+                &range.to,
+                result,
+            )?;
         }
 
         Ok(())
@@ -207,28 +193,28 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
 impl UncommittedStateStdImpl {
     /// write new messages to storage
     fn add_messages<V: InternalMessageValue>(
-        &self,
-        batch: &mut WriteBatch,
+        internal_queue_tx: &mut InternalQueueTransaction,
         source: ShardIdent,
         partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
     ) -> Result<()> {
+        let mut buffer = Vec::new();
         for (internal_message_key, message) in messages {
             let destination = message.destination();
             let partition = partition_router.get_partition(Some(message.source()), destination);
 
-            self.storage
-                .internal_queue_storage()
-                .insert_message_uncommitted(
-                    batch,
-                    tycho_storage::model::ShardsInternalMessagesKey::new(
-                        partition,
-                        source,
-                        *internal_message_key,
-                    ),
-                    destination,
-                    &message.serialize()?,
-                )?;
+            buffer.clear();
+            message.serialize(&mut buffer);
+
+            internal_queue_tx.insert_message_uncommitted(
+                &tycho_storage::model::ShardsInternalMessagesKey::new(
+                    partition,
+                    source,
+                    *internal_message_key,
+                ),
+                destination,
+                &buffer,
+            );
         }
 
         Ok(())
@@ -236,8 +222,7 @@ impl UncommittedStateStdImpl {
 
     /// write new statistics to storage
     fn add_statistics(
-        &self,
-        batch: &mut WriteBatch,
+        internal_queue_tx: &mut InternalQueueTransaction,
         diff_statistics: &DiffStatistics,
     ) -> Result<()> {
         let shard_ident = diff_statistics.shard_ident();
@@ -245,10 +230,11 @@ impl UncommittedStateStdImpl {
         let max_message = diff_statistics.max_message();
 
         for (partition, values) in diff_statistics.iter() {
-            for value in values {
-                let (addr, count) = value;
-                let dest = RouterAddr::from_int_addr(addr)
-                    .context("cannot add VarAddr to router statistics")?;
+            for (addr, count) in values {
+                let Some(dest) = RouterAddr::from_int_addr(addr) else {
+                    anyhow::bail!("cannot add VarAddr to router statistics");
+                };
+
                 let key = StatKey {
                     shard_ident: *shard_ident,
                     partition: *partition,
@@ -257,9 +243,7 @@ impl UncommittedStateStdImpl {
                     dest,
                 };
 
-                self.storage
-                    .internal_queue_storage()
-                    .insert_statistics_uncommitted(batch, &key, *count)?;
+                internal_queue_tx.insert_statistics_uncommitted(&key, *count);
             }
         }
 
