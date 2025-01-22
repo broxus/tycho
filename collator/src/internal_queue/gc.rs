@@ -4,7 +4,7 @@ use ahash::HashMapExt;
 use everscale_types::models::ShardIdent;
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
@@ -56,7 +56,7 @@ impl GcManager {
 
     pub fn update_delete_until(
         &self,
-        partitions: QueuePartition,
+        partitions: QueuePartitionIdx,
         shard: ShardIdent,
         end_key: QueueKey,
     ) {
@@ -119,4 +119,4 @@ fn gc_task<V: InternalMessageValue>(
     metrics::gauge!("tycho_internal_queue_gc_state_size").set(total_entries as f64);
 }
 
-type GcRange = FastHashMap<QueuePartition, FastHashMap<ShardIdent, QueueKey>>;
+type GcRange = FastHashMap<QueuePartitionIdx, FastHashMap<ShardIdent, QueueKey>>;

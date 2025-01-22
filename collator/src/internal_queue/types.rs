@@ -1,13 +1,13 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::{hash_map, BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{hash_map, BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
 use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
 use tycho_block_util::queue::{
-    QueueDiff, QueueDiffStuff, QueueKey, QueuePartition, RouterAddr, RouterDirection,
+    QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions,
 };
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -16,89 +16,89 @@ use crate::types::ProcessedTo;
 
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 pub struct PartitionRouter {
-    router: FastHashMap<RouterDirection, FastHashMap<IntAddr, QueuePartition>>,
-    partitions: FastHashSet<QueuePartition>,
+    src: FastHashMap<RouterAddr, QueuePartitionIdx>,
+    dst: FastHashMap<RouterAddr, QueuePartitionIdx>,
+    partitions: FastHashSet<QueuePartitionIdx>,
 }
 
 impl PartitionRouter {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_partitions(src: &RouterPartitions, dst: &RouterPartitions) -> Self {
+        let mut unique_partitions = FastHashSet::default();
+        let mut convert = |partitions: &RouterPartitions| {
+            let mut result =
+                FastHashMap::with_capacity_and_hasher(partitions.len(), Default::default());
+
+            for (partition, accounts) in partitions {
+                unique_partitions.insert(*partition);
+                result.extend(accounts.iter().map(|account| (*account, *partition)));
+            }
+
+            result
+        };
+
         Self {
-            router: Default::default(),
-            partitions: Default::default(),
+            src: convert(src),
+            dst: convert(dst),
+            partitions: unique_partitions,
         }
     }
 
     /// Returns the partition for the given source and destination addresses.
     /// If the partition is not found, returns the default partition.
-    pub fn get_partition(&self, src_addr: Option<&IntAddr>, dest_addr: &IntAddr) -> QueuePartition {
-        self.router
-            .get(&RouterDirection::Dest)
-            .and_then(|dest_router| dest_router.get(dest_addr).cloned())
+    pub fn get_partition(
+        &self,
+        src_addr: Option<&IntAddr>,
+        dest_addr: &IntAddr,
+    ) -> QueuePartitionIdx {
+        RouterAddr::from_int_addr(dest_addr)
+            .and_then(|dst| self.dst.get(&dst))
             .or_else(|| {
-                src_addr.and_then(|src_addr| {
-                    self.router
-                        .get(&RouterDirection::Src)
-                        .and_then(|src_router| src_router.get(src_addr).cloned())
-                })
+                src_addr
+                    .and_then(RouterAddr::from_int_addr)
+                    .and_then(|src| self.src.get(&src))
             })
+            .copied()
             .unwrap_or_default()
     }
 
-    /// Inserts the address into the router.
-    pub fn insert(
-        &mut self,
-        direction: RouterDirection,
-        addr: IntAddr,
-        partition: QueuePartition,
-    ) -> Result<()> {
-        if partition == QueuePartition::default() {
-            bail!("Attempt to insert address into default priority partition");
+    /// Inserts the address into the inbound router.
+    pub fn insert_src(&mut self, addr: &IntAddr, partition: QueuePartitionIdx) -> Result<()> {
+        if partition == QueuePartitionIdx::MIN {
+            anyhow::bail!("attempt to insert address into default priority partition");
         }
-
-        let direction_router = self.router.entry(direction).or_default();
-
-        direction_router.insert(addr, partition);
-
+        let Some(addr) = RouterAddr::from_int_addr(addr) else {
+            anyhow::bail!("attempt to insert a VarAddr into a priority partition");
+        };
+        self.src.insert(addr, partition);
         self.partitions.insert(partition);
-
         Ok(())
     }
 
-    pub fn partitions(&self) -> &FastHashSet<QueuePartition> {
+    /// Inserts the address into the outbound router.
+    pub fn insert_dst(&mut self, addr: &IntAddr, partition: QueuePartitionIdx) -> Result<()> {
+        if partition == QueuePartitionIdx::MIN {
+            anyhow::bail!("attempt to insert address into default priority partition");
+        }
+        let Some(addr) = RouterAddr::from_int_addr(addr) else {
+            anyhow::bail!("attempt to insert a VarAddr into a priority partition");
+        };
+        self.dst.insert(addr, partition);
+        self.partitions.insert(partition);
+        Ok(())
+    }
+
+    pub fn partitions(&self) -> &FastHashSet<QueuePartitionIdx> {
         &self.partitions
     }
 
     pub fn clear(&mut self) {
-        self.router.clear();
+        self.src.clear();
+        self.dst.clear();
         self.partitions.clear();
-    }
-}
-
-impl From<BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>>
-    for PartitionRouter
-{
-    fn from(
-        value: BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
-    ) -> Self {
-        let mut router = FastHashMap::default();
-
-        let mut full_partitions = FastHashSet::default();
-
-        for (direction, direction_router) in value {
-            let mut partitions = FastHashMap::default();
-            for (partition, addresses) in direction_router {
-                for address in &addresses {
-                    partitions.insert(address.to_int_addr(), partition);
-                    full_partitions.insert(partition);
-                }
-            }
-            router.insert(direction, partitions);
-        }
-
-        Self {
-            router,
-            partitions: full_partitions,
-        }
     }
 }
 
@@ -126,15 +126,13 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
     ) -> Result<Self> {
         let QueueDiff {
             processed_to,
-            partition_router,
+            router_partitions_src,
+            router_partitions_dst,
             ..
         } = queue_diff_stuff.as_ref();
-        let processed_to: BTreeMap<ShardIdent, QueueKey> = processed_to
-            .iter()
-            .map(|(shard_ident, key)| (*shard_ident, *key))
-            .collect();
 
-        let partition_router = PartitionRouter::from(partition_router.clone());
+        let partition_router =
+            PartitionRouter::with_partitions(router_partitions_src, router_partitions_dst);
 
         let mut messages: BTreeMap<QueueKey, Arc<_>> = BTreeMap::new();
         for msg in queue_diff_stuff.zip(out_msg_description) {
@@ -151,7 +149,7 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
 
         Ok(Self {
             messages,
-            processed_to,
+            processed_to: processed_to.clone(),
             partition_router,
         })
     }
@@ -259,7 +257,7 @@ impl InternalMessageValue for EnqueuedMessage {
                 let hash = *cell.repr_hash();
                 Ok(Self { info, cell, hash })
             }
-            _ => bail!("Expected internal message"),
+            _ => anyhow::bail!("Expected internal message"),
         }
     }
 
@@ -284,7 +282,7 @@ impl InternalMessageValue for EnqueuedMessage {
 }
 
 pub struct PartitionQueueKey {
-    pub partition: QueuePartition,
+    pub partition: QueuePartitionIdx,
     pub key: QueueKey,
 }
 #[derive(Debug, Clone)]
@@ -296,7 +294,7 @@ pub struct QueueShardRange {
 
 #[derive(Debug, Clone)]
 pub struct QueueRange {
-    pub partition: QueuePartition,
+    pub partition: QueuePartitionIdx,
     pub shard_ident: ShardIdent,
     pub from: QueueKey,
     pub to: QueueKey,
@@ -370,7 +368,7 @@ pub struct DiffStatistics {
 }
 
 impl DiffStatistics {
-    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartition, &FastHashMap<IntAddr, u64>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartitionIdx, &FastHashMap<IntAddr, u64>)> {
         self.inner.statistics.iter()
     }
 
@@ -386,7 +384,7 @@ impl DiffStatistics {
         &self.inner.max_message
     }
 
-    pub fn partition(&self, partition: QueuePartition) -> Option<&FastHashMap<IntAddr, u64>> {
+    pub fn partition(&self, partition: QueuePartitionIdx) -> Option<&FastHashMap<IntAddr, u64>> {
         self.inner.statistics.get(&partition)
     }
 }
@@ -395,7 +393,7 @@ struct DiffStatisticsInner {
     shard_ident: ShardIdent,
     min_message: QueueKey,
     max_message: QueueKey,
-    statistics: FastHashMap<QueuePartition, FastHashMap<IntAddr, u64>>,
+    statistics: FastHashMap<QueuePartitionIdx, FastHashMap<IntAddr, u64>>,
 }
 
 impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
@@ -463,11 +461,7 @@ mod tests {
         let mut src_map = BTreeMap::new();
         src_map.insert(10, BTreeSet::from([addr4]));
 
-        let mut router_data = BTreeMap::new();
-        router_data.insert(RouterDirection::Dest, dest_map);
-        router_data.insert(RouterDirection::Src, src_map);
-
-        let partition_router = PartitionRouter::from(router_data);
+        let partition_router = PartitionRouter::with_partitions(&src_map, &dest_map);
 
         {
             let expected_partitions = [1, 2, 10].into_iter().collect::<FastHashSet<_>>();
@@ -476,17 +470,17 @@ mod tests {
 
         {
             // Dest
-            let dest_router = partition_router.router.get(&RouterDirection::Dest).unwrap();
+            let dest_router = &partition_router.dst;
             // addr1 и addr2 -> partition 1
-            assert_eq!(*dest_router.get(&addr1.to_int_addr()).unwrap(), 1);
-            assert_eq!(*dest_router.get(&addr2.to_int_addr()).unwrap(), 1);
+            assert_eq!(*dest_router.get(&addr1).unwrap(), 1);
+            assert_eq!(*dest_router.get(&addr2).unwrap(), 1);
             // addr3 -> partition 2
-            assert_eq!(*dest_router.get(&addr3.to_int_addr()).unwrap(), 2);
+            assert_eq!(*dest_router.get(&addr3).unwrap(), 2);
 
             // Src
-            let src_router = partition_router.router.get(&RouterDirection::Src).unwrap();
+            let src_router = &partition_router.src;
             // addr4 -> partition 10
-            assert_eq!(*src_router.get(&addr4.to_int_addr()).unwrap(), 10);
+            assert_eq!(*src_router.get(&addr4).unwrap(), 10);
         }
     }
 }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
@@ -29,7 +29,7 @@ where
     fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
 
@@ -37,7 +37,7 @@ where
     /// and source shards (equal to iterator ranges)
     fn get_statistics(
         &self,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics>;
 
@@ -90,7 +90,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
@@ -114,7 +114,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     #[instrument(skip_all, fields(partition, ranges = ?ranges))]
     fn get_statistics(
         &self,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<QueueStatistics> {
         let time_start = std::time::Instant::now();
