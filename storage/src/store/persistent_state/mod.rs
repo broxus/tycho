@@ -18,7 +18,7 @@ use tycho_block_util::state::RefMcStateHandle;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashSet;
 
-pub use self::queue_state::reader::QueueStateReader;
+pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
