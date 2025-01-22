@@ -44,7 +44,6 @@ impl Signer {
             // first check BroadcastFilter, then DAG for top_dag_round exactly
             if broadcast_filter.has_point(round, author) {
                 // hold fast nodes from moving forward
-                // notice the engine is initiated with Round(0)), thus avoid panic
                 return SignatureResponse::TryLater;
             } else if round > head.next().round() {
                 // such points may be in BroadcastFilter only
@@ -64,17 +63,17 @@ impl Signer {
         };
         let state = match point_dag_round.view(author, |loc| {
             if loc.versions.is_empty() {
-                Err(())
+                Err(SignatureResponse::NoPoint)
+            } else if round > current_round {
+                // we found the point, but cannot sign future rounds
+                Err(SignatureResponse::TryLater)
             } else {
                 Ok(loc.state.clone())
             }
         }) {
             // locations are prepopulated for all expected peers
             None => return SignatureResponse::Rejected(SignatureRejectedReason::UnknownPeer),
-            // point may be moving from broadcast filter to dag, do not respond with `NoPoint`;
-            // anyway cannot sign future round, even if point future is resolved
-            Some(_) if round > current_round => return SignatureResponse::TryLater,
-            Some(Err(())) => return SignatureResponse::NoPoint,
+            Some(Err(err)) => return err,
             Some(Ok(state)) => state,
         };
         let keys = if round == current_round {
