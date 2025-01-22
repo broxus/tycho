@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -469,30 +469,31 @@ impl InternalsParitionReader {
 
         metrics.read_existing_messages_timer.start();
 
+        let mut ranges_seqno: VecDeque<_> = self.range_readers.keys().copied().collect();
         let mut last_seqno = 0;
-        let mut seqno = self
-            .range_readers
-            .first_key_value()
-            .map(|(k, _)| *k)
-            .unwrap_or_default();
 
         'main_loop: loop {
             // take next not fully read range and continue reading
             let mut all_ranges_fully_read = true;
-            while let Some(range_reader) = self.range_readers.get_mut(&seqno) {
+            while let Some(seqno) = ranges_seqno.pop_front() {
+                let range_reader = self.range_readers.get_mut(&seqno).unwrap_or_else(||
+                    panic!(
+                        "internals range reader should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
+                        self.for_shard_id, seqno, self.block_seqno,
+                    )
+                );
+
                 // remember last existing range
                 last_seqno = seqno;
 
                 // skip fully read ranges
                 if range_reader.fully_read {
-                    seqno += 1;
                     continue;
                 }
 
                 // on refill skip last range reader created in this block
                 if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
                     all_ranges_fully_read = false;
-                    seqno += 1;
                     continue;
                 }
 
@@ -600,9 +601,6 @@ impl InternalsParitionReader {
                 if !range_reader.fully_read {
                     all_ranges_fully_read = false;
                 }
-
-                // try to get next range
-                seqno += 1;
             }
 
             // if all ranges fully read try create next one
@@ -622,14 +620,14 @@ impl InternalsParitionReader {
                         self.create_append_next_range_reader(
                             last_range_reader_shards_and_offset_opt,
                         )?;
-                        seqno = self.block_seqno;
+                        ranges_seqno.push_back(self.block_seqno);
                     } else {
                         // otherwise set all open ranges read
                         // to collect messages from all open ranges
                         // and then create next range
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             partition_id = self.partition_id,
-                            seqno,
+                            last_seqno,
                             open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
                             "internals reader: open ranges limit reached",
                         );
