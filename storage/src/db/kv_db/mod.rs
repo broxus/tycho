@@ -132,10 +132,10 @@ weedb::tables! {
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
-        pub shards_internal_messages: tables::ShardsInternalMessages,
-        pub shards_internal_messages_uncommitted: tables::ShardsInternalMessagesSession,
-        pub internal_messages_statistics_committed: tables::InternalMessagesDestStat,
-        pub internal_messages_statistics_uncommitted: tables::InternalMessagesDestStatUncommitted,
+        pub shard_internal_messages: tables::ShardInternalMessages,
+        pub shard_internal_messages_uncommitted: tables::ShardInternalMessagesUncommited,
+        pub internal_message_stats: tables::InternalMessageStats,
+        pub internal_message_stats_uncommitted: tables::InternalMessageStatsUncommited,
     }
 }
 

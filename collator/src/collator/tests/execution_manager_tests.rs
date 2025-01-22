@@ -119,7 +119,7 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
 
     fn add_message_to_iterator(
         &self,
-        _iterator: &mut Box<dyn QueueIterator<V>>,
+        _iterator: &mut dyn QueueIterator<V>,
         _message: V,
     ) -> Result<()> {
         unimplemented!()
@@ -127,8 +127,8 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
 
     fn commit_messages_to_iterator(
         &self,
-        _iterator: &mut Box<dyn QueueIterator<V>>,
-        _messages: Vec<(ShardIdent, QueueKey)>,
+        _iterator: &mut dyn QueueIterator<V>,
+        _messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()> {
         unimplemented!()
     }

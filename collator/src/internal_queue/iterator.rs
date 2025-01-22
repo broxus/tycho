@@ -26,7 +26,7 @@ pub trait QueueIterator<V: InternalMessageValue>: Send {
     fn take_diff(&self) -> QueueDiffWithMessages<V>;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
-    fn commit(&mut self, messages: Vec<(ShardIdent, QueueKey)>) -> Result<()>;
+    fn commit(&mut self, messages: &[(ShardIdent, QueueKey)]) -> Result<()>;
     /// Add new message to iterator
     fn add_message(&mut self, message: V) -> Result<()>;
     /// Set iterator new messages buffer from full diff
@@ -172,16 +172,16 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
     }
 
     // Function to update the commit position
-    fn commit(&mut self, messages: Vec<(ShardIdent, QueueKey)>) -> Result<()> {
+    fn commit(&mut self, messages: &[(ShardIdent, QueueKey)]) -> Result<()> {
         for (source_shard, message_key) in messages {
             self.last_processed_message
-                .entry(source_shard)
+                .entry(*source_shard)
                 .and_modify(|e| {
-                    if &message_key > e {
-                        *e = message_key;
+                    if message_key > e {
+                        *e = *message_key;
                     }
                 })
-                .or_insert(message_key);
+                .or_insert(*message_key);
         }
         Ok(())
     }
