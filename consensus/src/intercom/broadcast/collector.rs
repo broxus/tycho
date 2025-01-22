@@ -2,6 +2,7 @@ use std::cmp;
 use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
+use tokio::time::MissedTickBehavior;
 
 use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
@@ -73,6 +74,9 @@ impl CollectorTask {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             CachedConfig::get().consensus.broadcast_retry_millis as _,
         ));
+        // no `interval.reset()` as may receive bcaster_signal after jump immediately
+        retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         let current_dag_round = self.current_dag_round.clone();
         let mut threshold = std::pin::pin!(current_dag_round.threshold().reached());
 
@@ -103,7 +107,7 @@ impl CollectorTask {
                     if self.is_ready() {
                         return;
                     } else {
-                        _ = self.collector_signal.send_replace(
+                        self.collector_signal.send_replace(
                             CollectorSignal::Retry { ready: self.is_includes_ready }
                         );
                     }
