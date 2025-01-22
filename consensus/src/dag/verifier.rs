@@ -8,7 +8,6 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
@@ -153,7 +152,7 @@ impl Verifier {
             // FIXME either sent or sender dropped - all the same; make distinct and do not drop
             Some(true)
         } else if let Some(proof) = prev_proof {
-            let mut signatures_fut = std::pin::pin!(rayon_run(move || proof.signatures_match()));
+            let mut signatures_fut = std::pin::pin!(proof.signatures_match());
             let certified = tokio::select! {
                 biased;
                 _ = &mut certified_rx => {
