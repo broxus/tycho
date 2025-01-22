@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -424,30 +424,31 @@ impl ExternalsReader {
             .map(|(par_id, par)| (*par_id, par.processed_to))
             .collect();
 
+        let mut ranges_seqno: VecDeque<_> = self.range_readers.keys().copied().collect();
         let mut last_seqno = 0;
-        let mut seqno = self
-            .range_readers
-            .first_key_value()
-            .map(|(k, _)| *k)
-            .unwrap_or_default();
 
         'main_loop: loop {
             let mut last_ext_read_res_opt = None;
             let mut all_ranges_fully_read = true;
-            while let Some(range_reader) = self.range_readers.get_mut(&seqno) {
+            while let Some(seqno) = ranges_seqno.pop_front() {
+                let range_reader = self.range_readers.get_mut(&seqno).unwrap_or_else(||
+                    panic!(
+                        "externals range reader should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
+                        self.for_shard_id, seqno, self.block_seqno,
+                    )
+                );
+
                 // remember last existing range
                 last_seqno = seqno;
 
                 // skip fully read ranges
                 if range_reader.fully_read {
-                    seqno += 1;
                     continue;
                 }
 
                 // on refill skip last range reader created in this block
                 if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
                     all_ranges_fully_read = false;
-                    seqno += 1;
                     continue;
                 }
 
@@ -495,9 +496,6 @@ impl ExternalsReader {
                 }
 
                 last_ext_read_res_opt = Some(read_res);
-
-                // try to get next range
-                seqno += 1;
             }
 
             // update the pending externals flag from the last range
@@ -516,13 +514,13 @@ impl ExternalsReader {
                 if last_seqno < self.block_seqno {
                     if !self.open_ranges_limit_reached() {
                         self.create_append_next_range_reader();
-                        seqno = self.block_seqno;
+                        ranges_seqno.push_back(self.block_seqno);
                     } else {
                         // otherwise set all open ranges read
                         // to collect messages from all open ranges
                         // and then create next range
                         tracing::debug!(target: tracing_targets::COLLATOR,
-                            seqno,
+                            last_seqno,
                             open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
                             "externals reader: open ranges limit reached",
                         );
