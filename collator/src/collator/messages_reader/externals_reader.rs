@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
+use tycho_block_util::queue::QueuePartitionIdx;
 
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
@@ -16,7 +17,7 @@ use crate::collator::messages_buffer::{
 use crate::collator::types::{AnchorsCache, MsgsExecutionParamsExtension, ParsedMessage};
 use crate::internal_queue::types::PartitionRouter;
 use crate::tracing_targets;
-use crate::types::processed_upto::{BlockSeqno, PartitionId};
+use crate::types::processed_upto::BlockSeqno;
 
 #[cfg(test)]
 #[path = "../tests/externals_reader_tests.rs"]
@@ -36,7 +37,7 @@ pub(super) struct ExternalsReader {
     next_chain_time: u64,
     msgs_exec_params: Arc<MsgsExecutionParams>,
     /// Target limits for filling message group from the buffer
-    buffer_limits_by_partitions: BTreeMap<PartitionId, MessagesBufferLimits>,
+    buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
     anchors_cache: AnchorsCache,
     /// Should not read `.ranges` after reader creation because they moved into `.range_readers`
     reader_state: ExternalsReaderState,
@@ -50,7 +51,7 @@ impl ExternalsReader {
         block_seqno: BlockSeqno,
         next_chain_time: u64,
         msgs_exec_params: Arc<MsgsExecutionParams>,
-        buffer_limits_by_partitions: BTreeMap<PartitionId, MessagesBufferLimits>,
+        buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
         anchors_cache: AnchorsCache,
         mut reader_state: ExternalsReaderState,
     ) -> Self {
@@ -79,7 +80,7 @@ impl ExternalsReader {
     pub fn finalize(mut self) -> Result<FinalizedExternalsReader> {
         // collect range reader states
         let mut range_readers = self.range_readers.into_iter().peekable();
-        let mut max_processed_offsets = BTreeMap::<PartitionId, u32>::new();
+        let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
         while let Some((seqno, mut range_reader)) = range_readers.next() {
             // TODO: msgs-v3: update offset in the last range reader on the go?
 
@@ -88,7 +89,7 @@ impl ExternalsReader {
             for (par_id, par) in &self.reader_state.by_partitions {
                 let range_reader_state_by_partition = range_reader
                     .reader_state
-                    .get_state_by_partition_mut(par_id)?;
+                    .get_state_by_partition_mut(*par_id)?;
                 let max_processed_offset = max_processed_offsets
                     .entry(*par_id)
                     .and_modify(|max| {
@@ -123,7 +124,7 @@ impl ExternalsReader {
         &self.reader_state
     }
 
-    pub fn get_partition_ids(&self) -> Vec<PartitionId> {
+    pub fn get_partition_ids(&self) -> Vec<QueuePartitionIdx> {
         self.reader_state.by_partitions.keys().copied().collect()
     }
 
@@ -131,9 +132,12 @@ impl ExternalsReader {
         self.reader_state.last_read_to_anchor_chain_time
     }
 
-    fn get_buffer_limits_by_partition(&self, par_id: &PartitionId) -> Result<MessagesBufferLimits> {
+    fn get_buffer_limits_by_partition(
+        &self,
+        par_id: QueuePartitionIdx,
+    ) -> Result<MessagesBufferLimits> {
         self.buffer_limits_by_partitions
-            .get(par_id)
+            .get(&par_id)
             .cloned()
             .with_context(|| format!(
                 "externals reader does not contain buffer limits for partition {} (for_shard_id: {}, block_seqno: {})",
@@ -150,7 +154,7 @@ impl ExternalsReader {
         })
     }
 
-    pub fn get_last_range_reader_offsets_by_partitions(&self) -> Vec<(PartitionId, u32)> {
+    pub fn get_last_range_reader_offsets_by_partitions(&self) -> Vec<(QueuePartitionIdx, u32)> {
         self.get_last_range_reader()
             .map(|(_, r)| {
                 r.reader_state
@@ -237,7 +241,7 @@ impl ExternalsReader {
         Ok(self.range_readers.get_mut(&last_seqno).unwrap())
     }
 
-    pub fn increment_curr_processed_offset(&mut self, par_id: &PartitionId) -> Result<()> {
+    pub fn increment_curr_processed_offset(&mut self, par_id: &QueuePartitionIdx) -> Result<()> {
         let reader_state_by_partition = self
             .reader_state
             .by_partitions
@@ -252,7 +256,7 @@ impl ExternalsReader {
     /// Drop current offset and offset in the last range reader state
     pub fn drop_processing_offset(
         &mut self,
-        par_id: &PartitionId,
+        par_id: QueuePartitionIdx,
         drop_skip_offset: bool,
     ) -> Result<()> {
         let reader_state_by_partition = self.reader_state.get_state_by_partition_mut(par_id)?;
@@ -271,7 +275,7 @@ impl ExternalsReader {
         Ok(())
     }
 
-    pub fn set_skip_offset_to_current(&mut self, par_id: &PartitionId) -> Result<()> {
+    pub fn set_skip_offset_to_current(&mut self, par_id: QueuePartitionIdx) -> Result<()> {
         let curr_processed_offset = self
             .reader_state
             .get_state_by_partition(par_id)?
@@ -287,7 +291,7 @@ impl ExternalsReader {
         Ok(())
     }
 
-    pub fn set_processed_to_current_position(&mut self, par_id: &PartitionId) -> Result<()> {
+    pub fn set_processed_to_current_position(&mut self, par_id: QueuePartitionIdx) -> Result<()> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
         let current_position = last_range_reader.reader_state.range.current_position;
 
@@ -543,10 +547,10 @@ impl ExternalsReader {
 
     pub fn collect_messages(
         &mut self,
-        par_id: &PartitionId,
+        par_id: QueuePartitionIdx,
         msg_group: &mut MessageGroup,
-        prev_partitions_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
-        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectExternalsResult> {
         let mut res = CollectExternalsResult::default();
 
@@ -664,7 +668,7 @@ pub(super) struct ExternalsRangeReader {
     seqno: BlockSeqno,
     msgs_exec_params: Arc<MsgsExecutionParams>,
     /// Target limits for filling message group from the buffer
-    buffer_limits_by_partitions: BTreeMap<PartitionId, MessagesBufferLimits>,
+    buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
     reader_state: ExternalsRangeReaderState,
     fully_read: bool,
 }
@@ -676,7 +680,7 @@ impl ExternalsRangeReader {
 
     fn get_buffer_limits_by_partition(
         &self,
-        partitions_id: &PartitionId,
+        partitions_id: &QueuePartitionIdx,
     ) -> Result<&MessagesBufferLimits> {
         self.buffer_limits_by_partitions
             .get(partitions_id)
@@ -723,7 +727,7 @@ impl ExternalsRangeReader {
         anchors_cache: &mut AnchorsCache,
         read_mode: ReadNextExternalsMode,
         partition_router: &PartitionRouter,
-        processed_to_by_partitions: &BTreeMap<PartitionId, ExternalKey>,
+        processed_to_by_partitions: &BTreeMap<QueuePartitionIdx, ExternalKey>,
     ) -> ReadExternalsRangeResult {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
 

@@ -635,7 +635,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     })?;
 
     // Param 28
-    let mut group_slots_fractions = Dict::<u8, u8>::new();
+    let mut group_slots_fractions = Dict::<u16, u8>::new();
     group_slots_fractions.set(0, 80)?;
     group_slots_fractions.set(1, 10)?;
 

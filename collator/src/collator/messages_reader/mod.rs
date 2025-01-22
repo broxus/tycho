@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
 use self::externals_reader::*;
 use self::internals_reader::*;
@@ -19,7 +19,7 @@ use crate::internal_queue::types::{
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::{BlockSeqno, Lt, PartitionId};
+use crate::types::processed_upto::{BlockSeqno, Lt};
 use crate::types::DebugIter;
 
 mod externals_reader;
@@ -57,9 +57,9 @@ pub(super) struct MessagesReader {
     new_messages: NewMessagesState<EnqueuedMessage>,
 
     externals_reader: ExternalsReader,
-    internals_partition_readers: BTreeMap<PartitionId, InternalsParitionReader>,
+    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
 
-    readers_stages: BTreeMap<PartitionId, MessagesReaderStage>,
+    readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
 
 #[derive(Default)]
@@ -93,9 +93,9 @@ impl MessagesReader {
         let group_limit = cx.msgs_exec_params.group_limit as usize;
 
         let mut internals_buffer_limits_by_partitions =
-            BTreeMap::<PartitionId, MessagesBufferLimits>::new();
+            BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
         let mut externals_buffer_limits_by_partitions =
-            BTreeMap::<PartitionId, MessagesBufferLimits>::new();
+            BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
 
         // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
 
@@ -317,14 +317,13 @@ impl MessagesReader {
                         .get_last_range_reader()?
                         .1
                         .reader_state()
-                        .get_state_by_partition(&par_id)?;
+                        .get_state_by_partition(par_id)?;
 
                     if last_int_range_reader.reader_state.skip_offset
                         == last_ext_range_reader.skip_offset
                     {
                         par_reader.drop_processing_offset(true)?;
-                        self.externals_reader
-                            .drop_processing_offset(&par_id, true)?;
+                        self.externals_reader.drop_processing_offset(par_id, true)?;
                     }
                 }
             }
@@ -615,12 +614,12 @@ impl MessagesReader {
         current_next_lt: u64,
     ) -> Result<Option<MessageGroup>> {
         // we collect separate messages groups by partitions them merge them into one
-        let mut msg_groups = BTreeMap::<PartitionId, MessageGroup>::new();
+        let mut msg_groups = BTreeMap::<QueuePartitionIdx, MessageGroup>::new();
 
         // TODO: msgs-v3: try to read all in parallel
 
         // collect separate metrics by partitions
-        let mut metrics_by_partitions = BTreeMap::<PartitionId, MessagesReaderMetrics>::new();
+        let mut metrics_by_partitions = BTreeMap::<QueuePartitionIdx, MessagesReaderMetrics>::new();
 
         // count how many times prev processed offset reached in readers
         let mut prev_processed_offset_reached_count = 0;
@@ -720,7 +719,7 @@ impl MessagesReader {
             // collect existing internals, externals and new internals
             let has_pending_new_messages_for_partition = self
                 .new_messages
-                .has_pending_messages_from_partition(par_id);
+                .has_pending_messages_from_partition(*par_id);
             let CollectMessageForPartitionResult {
                 metrics,
                 msg_group,
@@ -802,8 +801,8 @@ impl MessagesReader {
         par_reader: &mut InternalsParitionReader,
         externals_reader: &mut ExternalsReader,
         has_pending_new_messages_for_partition: bool,
-        prev_partitions_readers: &BTreeMap<PartitionId, InternalsParitionReader>,
-        prev_msg_groups: &BTreeMap<PartitionId, MessageGroup>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();
 
@@ -834,7 +833,7 @@ impl MessagesReader {
             all_read_externals_collected_before = !externals_reader.has_messages_in_buffers();
 
             let CollectExternalsResult { metrics } = externals_reader.collect_messages(
-                &par_reader.partition_id,
+                par_reader.partition_id,
                 &mut res.msg_group,
                 prev_partitions_readers,
                 prev_msg_groups,
@@ -899,9 +898,9 @@ impl MessagesReader {
                 let par_ids = externals_reader.get_partition_ids();
                 for par_id in par_ids {
                     // mark all read messages processed
-                    externals_reader.set_processed_to_current_position(&par_id)?;
+                    externals_reader.set_processed_to_current_position(par_id)?;
                     // set skip offset to current offset
-                    externals_reader.set_skip_offset_to_current(&par_id)?;
+                    externals_reader.set_skip_offset_to_current(par_id)?;
                 }
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
@@ -929,7 +928,7 @@ impl MessagesReader {
                 // drop processing offset for existing internals
                 par_reader.drop_processing_offset(true)?;
                 // and drop processing offset for externals
-                externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
+                externals_reader.drop_processing_offset(par_reader.partition_id, true)?;
 
                 // switch to the "new messages processing" stage
                 // if all existing messages read (last range reader was created in current block)
@@ -955,7 +954,7 @@ impl MessagesReader {
             // drop processed offset both for externals and new message
             if all_read_externals_collected {
                 par_reader.drop_processing_offset(true)?;
-                externals_reader.drop_processing_offset(&par_reader.partition_id, true)?;
+                externals_reader.drop_processing_offset(par_reader.partition_id, true)?;
             }
 
             // log only first time
