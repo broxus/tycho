@@ -101,6 +101,17 @@ impl MessagesBuffer {
         }
     }
 
+    pub fn remove_messages_by_accounts(&mut self, addresses_to_remove: &FastHashSet<HashBytes>) {
+        self.msgs.retain(|k, v| {
+            if addresses_to_remove.contains(k) {
+                self.int_count -= v.len();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// Returns queue keys of collected internal queue messages.
     pub fn fill_message_group<F>(
         &mut self,
