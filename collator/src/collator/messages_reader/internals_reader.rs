@@ -284,7 +284,7 @@ impl InternalsParitionReader {
         mut range_reader_state: InternalsRangeReaderState,
         seqno: BlockSeqno,
     ) -> Result<InternalsRangeReader> {
-        let mut ranges = vec![];
+        let mut ranges = Vec::with_capacity(range_reader_state.shards.len());
 
         let mut fully_read = true;
         for (shard_id, shard_reader_state) in &range_reader_state.shards {
@@ -302,7 +302,7 @@ impl InternalsParitionReader {
 
         // get statistics for the range if it was not loaded before
         if range_reader_state.msgs_stats.is_none() {
-            let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+            let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, &ranges)?;
             let remaning_msgs_stats = match fully_read {
                 true => QueueStatistics::default(),
                 false => msgs_stats.clone(),
@@ -377,7 +377,7 @@ impl InternalsParitionReader {
             .into_iter()
             .chain(self.mc_top_shards_end_lts.iter().cloned());
 
-        let mut ranges = vec![];
+        let mut ranges = Vec::with_capacity(1 + self.mc_top_shards_end_lts.len());
 
         let mut fully_read = true;
         for (shard_id, end_lt) in all_end_lts {
@@ -412,7 +412,7 @@ impl InternalsParitionReader {
         }
 
         // get statistics for the range
-        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, &ranges)?;
         let remaning_msgs_stats = match fully_read {
             true => QueueStatistics::default(),
             false => msgs_stats.clone(),
@@ -831,7 +831,7 @@ impl InternalsRangeReader {
     fn init(&mut self) -> Result<()> {
         // do not init iterator if range is fully read
         if !self.fully_read {
-            let mut ranges = vec![];
+            let mut ranges = Vec::with_capacity(self.reader_state.shards.len());
 
             for (shard_id, shard_reader_state) in &self.reader_state.shards {
                 let shard_range_to = QueueKey::max_for_lt(shard_reader_state.to);
@@ -844,7 +844,7 @@ impl InternalsRangeReader {
 
             let iterator =
                 self.mq_adapter
-                    .create_iterator(self.for_shard_id, self.partition_id, ranges)?;
+                    .create_iterator(self.for_shard_id, self.partition_id, &ranges)?;
 
             self.iterator_opt = Some(iterator);
         }

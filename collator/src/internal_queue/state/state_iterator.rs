@@ -7,20 +7,24 @@ use ahash::HashMapExt;
 use anyhow::{bail, Context, Result};
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_storage::owned_iterator::OwnedIterator;
+use tycho_storage::InternalQueueMessagesIter;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
 use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
 
 pub struct ShardIteratorWithRange {
-    pub iter: OwnedIterator,
+    pub iter: InternalQueueMessagesIter,
     pub range_start: QueueKey,
     pub range_end: QueueKey,
 }
 
 impl ShardIteratorWithRange {
-    pub fn new(iter: OwnedIterator, range_start: QueueKey, range_end: QueueKey) -> Self {
+    pub fn new(
+        iter: InternalQueueMessagesIter,
+        range_start: QueueKey,
+        range_end: QueueKey,
+    ) -> Self {
         ShardIteratorWithRange {
             iter,
             range_start,
@@ -83,7 +87,7 @@ pub struct StateIteratorImpl<V: InternalMessageValue> {
 impl<V: InternalMessageValue> StateIteratorImpl<V> {
     pub fn new(
         partition: QueuePartitionIdx,
-        shard_iters_with_ranges: Vec<(OwnedIterator, QueueShardRange)>,
+        shard_iters_with_ranges: Vec<(InternalQueueMessagesIter, QueueShardRange)>,
         receiver: ShardIdent,
     ) -> Result<Self> {
         let mut iters = FastHashMap::with_capacity(shard_iters_with_ranges.len());
@@ -120,14 +124,14 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
     fn refill_queue(&mut self) -> Result<()> {
         self.iters_to_remove.clear();
 
-        for (shard_ident, iter) in &mut self.iters {
+        'outer: for (shard_ident, iter) in &mut self.iters {
             if self.in_queue.contains(shard_ident) {
                 continue;
             }
 
-            loop {
-                match iter.current()? {
-                    Some(IterResult::Value(value)) => {
+            while let Some(msg) = iter.next()? {
+                match msg {
+                    IterResult::Value(value) => {
                         let message =
                             V::deserialize(value).context("Failed to deserialize message")?;
 
@@ -135,25 +139,19 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
 
                         self.message_queue.push(Reverse(message_ext));
                         self.in_queue.insert(*shard_ident);
-                        iter.shift();
-                        break;
+                        continue 'outer;
                     }
-                    Some(IterResult::Skip(Some((shard_partition, queue_key)))) => {
-                        // skip if we are not receiver for this message
+                    // skip if we are not receiver for this message
+                    IterResult::Skip(Some((shard_partition, queue_key))) => {
                         self.current_position.insert(shard_partition, queue_key);
-                        iter.shift();
                     }
-                    Some(IterResult::Skip(None)) => {
-                        // skip if it's a first key in range
-                        iter.shift();
-                    }
-                    None => {
-                        // remove iterator if it's empty
-                        self.iters_to_remove.push(*shard_ident);
-                        break;
-                    }
+                    // skip if it's a first key in range
+                    IterResult::Skip(None) => {}
                 }
             }
+
+            // remove iterator if it's empty
+            self.iters_to_remove.push(*shard_ident);
         }
 
         for key in &self.iters_to_remove {

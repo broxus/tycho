@@ -5,8 +5,8 @@ use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
 use crate::util::{StoredValue, StoredValueBuffer};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShardsInternalMessagesKey {
-    pub shard_ident: ShardIdent,
     pub partition: QueuePartitionIdx,
+    pub shard_ident: ShardIdent,
     pub internal_message_key: QueueKey,
 }
 
@@ -93,7 +93,7 @@ impl StoredValue for RouterAddr {
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        buffer.write_raw_slice(&self.workchain.to_be_bytes());
+        buffer.write_raw_slice(&[self.workchain as u8]);
         buffer.write_raw_slice(&self.account.0);
     }
 
@@ -150,10 +150,7 @@ impl StoredValue for StatKey {
         + QueueKey::SIZE_HINT * 2
         + RouterAddr::SIZE_HINT;
 
-    type OnStackSlice = [u8; ShardIdent::SIZE_HINT
-        + QueuePartitionIdx::SIZE_HINT
-        + QueueKey::SIZE_HINT * 2
-        + RouterAddr::SIZE_HINT];
+    type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
         self.shard_ident.serialize(buffer);

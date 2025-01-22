@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use everscale_types::cell::{Cell, CellSliceRange, HashBytes};
 use everscale_types::models::{
     AccountStatus, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason, CurrencyCollection,
@@ -50,8 +49,8 @@ impl InternalMessageValue for StoredObject {
     where
         Self: Sized,
     {
-        let key = u64::from_be_bytes(bytes[..8].try_into()?);
-        let workchain = i8::from_be_bytes(bytes[8].to_be_bytes());
+        let key = u64::from_le_bytes(bytes[..8].try_into()?);
+        let workchain = bytes[8] as i8;
         let addr = HashBytes::from_slice(&bytes[9..]);
         let dest = IntAddr::Std(StdAddr::new(workchain, addr));
         Ok(StoredObject {
@@ -61,20 +60,18 @@ impl InternalMessageValue for StoredObject {
         })
     }
 
-    fn serialize(&self) -> anyhow::Result<Vec<u8>>
+    fn serialize(&self, buffer: &mut Vec<u8>)
     where
         Self: Sized,
     {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.key.to_be_bytes());
+        buffer.extend_from_slice(&self.key.to_le_bytes());
         match &self.dest {
             IntAddr::Std(addr) => {
-                bytes.extend_from_slice(&addr.workchain.to_be_bytes());
-                bytes.extend_from_slice(&addr.address.0);
+                buffer.push(addr.workchain as u8);
+                buffer.extend_from_slice(&addr.address.0);
             }
-            IntAddr::Var(_) => return Err(anyhow!("Unsupported address type")),
+            IntAddr::Var(_) => unreachable!(),
         }
-        Ok(bytes)
     }
 
     fn source(&self) -> &IntAddr {
@@ -109,7 +106,7 @@ fn test_statistics_check_statistics(
     dest_3_normal_priority: RouterAddr,
 ) -> anyhow::Result<()> {
     // check two diff statistics
-    let statistics_low_priority_partition = queue.load_statistics(1, vec![QueueShardRange {
+    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
             lt: 1,
@@ -134,7 +131,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 10000);
 
     let statistics_normal_priority_partition =
-        queue.load_statistics(QueuePartitionIdx::default(), vec![QueueShardRange {
+        queue.load_statistics(QueuePartitionIdx::default(), &[QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
                 lt: 1,
@@ -153,7 +150,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_3_stat, 2000);
 
     // check first diff
-    let statistics_low_priority_partition = queue.load_statistics(1, vec![QueueShardRange {
+    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
             lt: 1,
@@ -178,7 +175,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 5000);
 
     // check second diff
-    let statistics_low_priority_partition = queue.load_statistics(1, vec![QueueShardRange {
+    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
             lt: 20000,
@@ -468,7 +465,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let iterators = queue.iterator(1, ranges.clone(), ShardIdent::new_full(-1))?;
+    let iterators = queue.iterator(1, &ranges, ShardIdent::new_full(-1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -479,7 +476,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let iterators = queue.iterator(
         QueuePartitionIdx::default(),
-        ranges,
+        &ranges,
         ShardIdent::new_full(0),
     )?;
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
@@ -507,7 +504,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let iterators = queue.iterator(1, ranges.clone(), ShardIdent::new_full(-1))?;
+    let iterators = queue.iterator(1, &ranges, ShardIdent::new_full(-1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -518,7 +515,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let iterators = queue.iterator(
         QueuePartitionIdx::default(),
-        ranges,
+        &ranges,
         ShardIdent::new_full(0),
     )?;
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
@@ -718,7 +715,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         },
     };
 
-    let statistics = queue.load_statistics(1, vec![stat_range1, stat_range2])?;
+    let statistics = queue.load_statistics(1, &[stat_range1, stat_range2])?;
 
     let stat = statistics
         .statistics()
@@ -727,7 +724,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         .unwrap_or_default();
     assert_eq!(stat, 30000);
 
-    let iterators = queue.iterator(1, ranges.clone(), ShardIdent::new_full(-1))?;
+    let iterators = queue.iterator(1, &ranges, ShardIdent::new_full(-1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -812,14 +809,14 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     ranges.push(queue_range);
 
     let partition = QueuePartitionIdx::default();
-    let iterators = queue.iterator(partition, ranges.clone(), ShardIdent::new_full(1))?;
+    let iterators = queue.iterator(partition, &ranges, ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next().ok().is_some());
 
     queue.clear_uncommitted_state()?;
 
-    let iterators = queue.iterator(partition, ranges.clone(), ShardIdent::new_full(1))?;
+    let iterators = queue.iterator(partition, &ranges, ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next()?.is_none());
