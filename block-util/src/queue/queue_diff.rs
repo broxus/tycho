@@ -104,7 +104,8 @@ impl QueueDiffStuff {
                     min_message: QueueKey::MIN,
                     max_message: QueueKey::MIN,
                     messages: Vec::new(),
-                    partition_router: Default::default(),
+                    router_partitions_src: Default::default(),
+                    router_partitions_dst: Default::default(),
                 },
             }),
         }
@@ -137,7 +138,8 @@ impl QueueDiffStuff {
                     min_message: Default::default(),
                     max_message: Default::default(),
                     messages: Default::default(),
-                    partition_router: Default::default(),
+                    router_partitions_src: Default::default(),
+                    router_partitions_dst: Default::default(),
                 },
             }),
         }
@@ -371,7 +373,8 @@ mod tests {
                         hash: message_hashes[9],
                     },
                     messages: message_hashes.clone(),
-                    partition_router: Default::default(),
+                    router_partitions_src: Default::default(),
+                    router_partitions_dst: Default::default(),
                 },
             }),
         };

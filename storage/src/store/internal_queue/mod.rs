@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr, RouterDirection};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, ReadOptions, WriteBatch, WriteBatchWithTransaction};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
@@ -49,7 +48,7 @@ impl InternalQueueStorage {
         &self,
         snapshot: &OwnedSnapshot,
         shard_ident: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         from: QueueKey,
         to: QueueKey,
         result: &mut FastHashMap<IntAddr, u64>,
@@ -70,7 +69,7 @@ impl InternalQueueStorage {
         &self,
         snapshot: &OwnedSnapshot,
         shard_ident: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         from: QueueKey,
         to: QueueKey,
         result: &mut FastHashMap<IntAddr, u64>,
@@ -90,7 +89,7 @@ impl InternalQueueStorage {
     fn collect_dest_counts_in_range(
         iter: &mut DBRawIterator<'_>,
         shard_ident: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         from: QueueKey,
         to: QueueKey,
         result: &mut FastHashMap<IntAddr, u64>,
@@ -161,23 +160,13 @@ impl InternalQueueStorage {
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
-            let get_partition = |router: &BTreeMap<
-                RouterDirection,
-                BTreeMap<QueuePartition, BTreeSet<RouterAddr>>,
-            >,
-                                 router_direction: &RouterDirection,
-                                 router_addr: &RouterAddr| {
-                let mut partition = None;
-                if let Some(partitions) = router.get(router_direction) {
-                    for (p, addresses) in partitions {
-                        if addresses.contains(router_addr) {
-                            partition = Some(p);
-                            break;
-                        }
+            let get_partition = |partitions: &RouterPartitions, router_addr: &RouterAddr| {
+                for (p, addresses) in partitions {
+                    if addresses.contains(router_addr) {
+                        return Some(*p);
                     }
                 }
-
-                partition.cloned()
+                None
             };
 
             let mapped = MappedFile::from_existing_file(file)?;
@@ -188,7 +177,7 @@ impl InternalQueueStorage {
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
             let mut buffer = Vec::new();
-            let mut statistics: FastHashMap<QueuePartition, FastHashMap<RouterAddr, u64>> =
+            let mut statistics: FastHashMap<QueuePartitionIdx, FastHashMap<RouterAddr, u64>> =
                 FastHashMap::default();
             while reader.read_next_diff()?.is_some() {
                 let current_diff_index = reader.next_queue_diff_index() - 1;
@@ -217,21 +206,11 @@ impl InternalQueueStorage {
                         workchain: dest.workchain,
                         account: dest.address,
                     };
-                    let current_diff = &reader.state().header.queue_diffs[current_diff_index];
 
-                    let mut partition = get_partition(
-                        &current_diff.partition_router,
-                        &RouterDirection::Dest,
-                        &dest_addr,
-                    );
-                    if partition.is_none() {
-                        partition = get_partition(
-                            &current_diff.partition_router,
-                            &RouterDirection::Src,
-                            &src_addr,
-                        );
-                    }
-                    let partition = partition.unwrap_or_default();
+                    let current_diff = &reader.state().header.queue_diffs[current_diff_index];
+                    let partition = get_partition(&current_diff.router_partitions_dst, &dest_addr)
+                        .or_else(|| get_partition(&current_diff.router_partitions_src, &src_addr))
+                        .unwrap_or_default();
 
                     let key = ShardsInternalMessagesKey {
                         partition,

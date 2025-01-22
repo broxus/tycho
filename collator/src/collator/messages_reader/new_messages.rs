@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{MsgInfo, ShardIdent};
-use tycho_block_util::queue::{QueueKey, RouterDirection};
+use tycho_block_util::queue::QueueKey;
 
 use super::internals_reader::{
     InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
@@ -60,7 +60,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         for stats in partition_all_ranges_msgs_stats {
             for account_addr in stats.statistics().keys() {
                 self.partition_router
-                    .insert(RouterDirection::Dest, account_addr.clone(), partition_id)
+                    .insert_dst(account_addr, partition_id)
                     .unwrap();
             }
         }
