@@ -179,10 +179,8 @@ impl InternalQueueStorage {
             let mut buffer = Vec::new();
             let mut statistics: FastHashMap<QueuePartitionIdx, FastHashMap<RouterAddr, u64>> =
                 FastHashMap::default();
-            while reader.read_next_diff()?.is_some() {
-                let current_diff_index = reader.next_queue_diff_index() - 1;
-
-                while let Some(cell) = reader.read_next_message()? {
+            while let Some(mut part) = reader.read_next_queue_diff()? {
+                while let Some(cell) = part.read_next_message()? {
                     let msg_hash = cell.repr_hash();
                     let msg = cell.parse::<Message<'_>>()?;
                     let MsgInfo::Int(int_msg_info) = &msg.info else {
@@ -207,9 +205,9 @@ impl InternalQueueStorage {
                         account: dest.address,
                     };
 
-                    let current_diff = &reader.state().header.queue_diffs[current_diff_index];
-                    let partition = get_partition(&current_diff.router_partitions_dst, &dest_addr)
-                        .or_else(|| get_partition(&current_diff.router_partitions_src, &src_addr))
+                    let queue_diff = part.queue_diff();
+                    let partition = get_partition(&queue_diff.router_partitions_dst, &dest_addr)
+                        .or_else(|| get_partition(&queue_diff.router_partitions_src, &src_addr))
                         .unwrap_or_default();
 
                     let key = ShardsInternalMessagesKey {
@@ -231,15 +229,14 @@ impl InternalQueueStorage {
                     *partition_stats.entry(dest_addr).or_insert(0) += 1;
                 }
 
-                let current_diff = &reader.state().header.queue_diffs[current_diff_index];
-
+                let queue_diff = part.queue_diff();
                 for (partition, statistics) in statistics.drain() {
                     for (dest, count) in statistics.iter() {
                         let key = StatKey {
                             shard_ident,
                             partition,
-                            min_message: current_diff.min_message,
-                            max_message: current_diff.max_message,
+                            min_message: queue_diff.min_message,
+                            max_message: queue_diff.max_message,
                             dest: *dest,
                         };
 
