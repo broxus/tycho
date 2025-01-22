@@ -30,9 +30,6 @@ pub struct DagLocation {
     /// may become proven by the next round point(s) of a node;
     /// even if we marked a proven point as invalid, consensus may ignore our decision
     pub versions: BTreeMap<Digest, DagPointFuture>,
-    /// If author produced and sent a point with invalid sig, that only affects equivocation,
-    /// but that point cannot be used in any other way.
-    pub bad_sig_in_broadcast: bool,
 }
 
 impl DagLocation {
@@ -40,7 +37,6 @@ impl DagLocation {
         DagLocation {
             state: InclusionState::new(parent),
             versions: BTreeMap::new(),
-            bad_sig_in_broadcast: false,
         }
     }
 

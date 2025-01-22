@@ -36,7 +36,7 @@ impl Responder {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
-        broadcast_filter.advance_round(head, downloader, store, round_ctx);
+        broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
         // Note that `next_dag_round` for Signer should be advanced _after_ new points
         //  are moved from BroadcastFilter into DAG. Then Signer will look for points
         //  (of rounds greater than local engine round, including top dag round exactly)
@@ -44,8 +44,6 @@ impl Responder {
         //  Otherwise local Signer will skip BroadcastFilter check and search in DAG directly,
         //  will not find cached point and will ask to repeat broadcast once more, and local
         //  BroadcastFilter may account such repeated broadcast as malicious.
-        //  Though some points of top_dag_round (exactly) may be cached in BroadcastFilter while
-        //  others are being moved into Dag, all of them will be in DAG after one more round.
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
             head: head.clone(),
