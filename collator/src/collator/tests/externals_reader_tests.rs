@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::RouterDirection;
 
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
 use crate::collator::messages_reader::{
@@ -73,9 +72,7 @@ fn test_read_externals() {
     );
 
     let mut partition_router = PartitionRouter::new();
-    partition_router
-        .insert(RouterDirection::Dest, dst_addrs[3].clone(), 1)
-        .unwrap();
+    partition_router.insert_dst(&dst_addrs[3], 1).unwrap();
 
     let msgs_exec_params = Arc::new(MsgsExecutionParams {
         externals_expire_timeout: 60,

@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_types::models::{IntAddr, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartition, RouterAddr};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
 use tycho_storage::model::{QueueRange, StatKey};
 use tycho_storage::Storage;
 use tycho_util::metrics::HistogramGuard;
@@ -70,14 +70,14 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
     /// Move messages and statistics from uncommitted to committed state with given partitions and ranges
     fn commit(
         &self,
-        partitions: FastHashSet<QueuePartition>,
+        partitions: FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<()>;
 
@@ -97,7 +97,7 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<()>;
 }
@@ -119,7 +119,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>> {
         let mut shard_iters_with_ranges = Vec::new();
@@ -139,7 +139,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
 
     fn commit(
         &self,
-        partitions: FastHashSet<QueuePartition>,
+        partitions: FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
         let mut queue_ranges = vec![];
@@ -182,7 +182,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
         let _histogram =
@@ -247,7 +247,8 @@ impl UncommittedStateStdImpl {
         for (partition, values) in diff_statistics.iter() {
             for value in values {
                 let (addr, count) = value;
-                let dest = RouterAddr::try_from(addr.clone())?;
+                let dest = RouterAddr::from_int_addr(addr)
+                    .context("cannot add VarAddr to router statistics")?;
                 let key = StatKey {
                     shard_ident: *shard_ident,
                     partition: *partition,

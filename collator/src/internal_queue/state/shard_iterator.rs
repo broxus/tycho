@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::{QueueKey, QueuePartition};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_storage::model::ShardsInternalMessagesKey;
 use tycho_storage::owned_iterator::OwnedIterator;
 
@@ -18,8 +18,8 @@ impl Range {
     }
 }
 
-impl From<(QueuePartition, ShardIdent, QueueKey, QueueKey)> for Range {
-    fn from(value: (QueuePartition, ShardIdent, QueueKey, QueueKey)) -> Self {
+impl From<(QueuePartitionIdx, ShardIdent, QueueKey, QueueKey)> for Range {
+    fn from(value: (QueuePartitionIdx, ShardIdent, QueueKey, QueueKey)) -> Self {
         let (partition, shard_ident, from, to) = value;
 
         let from = ShardsInternalMessagesKey::new(partition, shard_ident, from);
@@ -42,7 +42,7 @@ pub struct ShardIterator {
 
 impl ShardIterator {
     pub fn new(
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         shard_ident: ShardIdent,
         from: QueueKey,
         to: QueueKey,

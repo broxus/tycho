@@ -1,6 +1,6 @@
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
-use tycho_block_util::queue::QueuePartition;
+use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_storage::Storage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -63,19 +63,19 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
     /// Delete messages in given partition and ranges
-    fn delete(&self, partition: QueuePartition, ranges: &[QueueShardRange]) -> Result<()>;
+    fn delete(&self, partition: QueuePartitionIdx, ranges: &[QueueShardRange]) -> Result<()>;
 
     /// Load statistics for given partition and ranges
     fn load_statistics(
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         range: &[QueueShardRange],
     ) -> Result<()>;
 }
@@ -102,7 +102,7 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn StateIterator<V>>> {
         let mut shard_iters_with_ranges = Vec::new();
@@ -120,7 +120,7 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         Ok(Box::new(iterator))
     }
 
-    fn delete(&self, partition: QueuePartition, ranges: &[QueueShardRange]) -> Result<()> {
+    fn delete(&self, partition: QueuePartitionIdx, ranges: &[QueueShardRange]) -> Result<()> {
         let mut queue_ranges = vec![];
         for range in ranges {
             queue_ranges.push(tycho_storage::model::QueueRange {
@@ -137,7 +137,7 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         &self,
         result: &mut FastHashMap<IntAddr, u64>,
         snapshot: &OwnedSnapshot,
-        partition: QueuePartition,
+        partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
         let _histogram =

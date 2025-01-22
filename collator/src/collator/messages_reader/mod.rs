@@ -6,9 +6,14 @@ use anyhow::{Context, Result};
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 
+use self::externals_reader::*;
+use self::internals_reader::*;
+use self::new_messages::*;
+pub(super) use self::reader_state::*;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
+use crate::internal_queue::queue::ShortQueueDiff;
 use crate::internal_queue::types::{
     EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
@@ -21,14 +26,6 @@ mod externals_reader;
 mod internals_reader;
 mod new_messages;
 mod reader_state;
-
-use externals_reader::*;
-use internals_reader::*;
-use new_messages::*;
-pub(super) use reader_state::*;
-use tycho_block_util::queue::RouterDirection;
-
-use crate::internal_queue::queue::ShortQueueDiff;
 
 pub(super) struct FinalizedMessagesReader {
     pub has_unprocessed_messages: bool,
@@ -405,7 +402,7 @@ impl MessagesReader {
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, msgs_count,
                     );
-                    partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
+                    partition_router.insert_dst(&dest_int_address, 1)?;
                 }
             } else {
                 tracing::trace!(target: tracing_targets::COLLATOR,
@@ -434,9 +431,8 @@ impl MessagesReader {
                             dest_int_address,
                         );
                         // getting remote shard partition from diff
-                        let remote_shard_partition = diff
-                            .router()
-                            .get_partition(Default::default(), &dest_int_address);
+                        let remote_shard_partition =
+                            diff.router().get_partition(None, &dest_int_address);
 
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             "remote shard partition for address {} is {}",
@@ -448,11 +444,8 @@ impl MessagesReader {
                                 "move address {} to partition {} because it has partition {} in diff",
                                 dest_int_address, remote_shard_partition, remote_shard_partition,
                             );
-                            partition_router.insert(
-                                RouterDirection::Dest,
-                                dest_int_address,
-                                remote_shard_partition,
-                            )?;
+                            partition_router
+                                .insert_dst(&dest_int_address, remote_shard_partition)?;
                             continue;
                         }
 
@@ -487,7 +480,7 @@ impl MessagesReader {
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, total_msgs,
                     );
-                    partition_router.insert(RouterDirection::Dest, dest_int_address, 1)?;
+                    partition_router.insert_dst(&dest_int_address, 1)?;
                 }
             }
         }
