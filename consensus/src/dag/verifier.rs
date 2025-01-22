@@ -42,22 +42,28 @@ pub enum PointMap {
 
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyError {
-    #[error("point before genesis cannot be verified")]
-    BeforeGenesis,
+    #[error("cannot verify: {0}")]
+    Fail(VerifyFailReason),
     #[error("signature does not match author")]
     BadSig,
-    #[error("uninit {:?} peer set of {} len at round {}", .0.2, .0.0, .0.1.0)]
-    Uninit((usize, Round, PointMap)),
-    #[error("author is not scheduled")]
-    UnknownAuthor,
     #[error("ill-formed: {0}")]
     IllFormed(IllFormedReason),
 }
-
+#[derive(thiserror::Error, Debug)]
+pub enum VerifyFailReason {
+    #[error("point before genesis cannot be verified")]
+    BeforeGenesis,
+    #[error("uninit {:?} peer set of {} len at round {}", .0.2, .0.0, .0.1.0)]
+    Uninit((usize, Round, PointMap)),
+    #[error("author is not scheduled: outdated peer schedule or author out of nowhere")]
+    UnknownAuthor,
+}
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
     #[error("unknown after load from DB")]
-    AfterLoadFromDb,
+    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    #[error("too large payload: {0} bytes")]
+    TooLargePayload(usize),
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
     #[error("links both anchor roles to same round")]
@@ -377,7 +383,7 @@ impl Verifier {
         });
 
         for (dag_round, author, digest) in includes.chain(witness) {
-            let shared = dag_round.add_dependency_exact(
+            let shared = dag_round.add_dependency(
                 author,
                 digest,
                 &info.data().author,
@@ -506,7 +512,7 @@ impl Verifier {
             includes_peers,   // @ r-1
             witness_peers,    // @ r-2
         ) = match (point.round() - Genesis::id().round.prev().0).0 {
-            0 => return Some(VerifyError::BeforeGenesis),
+            0 => return Some(VerifyError::Fail(VerifyFailReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(point.round()).clone();
                 ((peer_count_genesis(a.len(), point.round()), a), None, None)
@@ -544,6 +550,14 @@ impl Verifier {
         if let Some(reason) = Self::links_across_genesis(point) {
             return Some(VerifyError::IllFormed(reason));
         }
+
+        // check size only now, as config seems up to date
+        let payload_bytes: usize = point.payload().iter().fold(0, |acc, msg| acc + msg.len());
+        if payload_bytes > CachedConfig::get().consensus.payload_batch_bytes as usize {
+            let reason = IllFormedReason::TooLargePayload(payload_bytes);
+            return Some(VerifyError::IllFormed(reason));
+        }
+
         if !point.is_well_formed() {
             return Some(VerifyError::IllFormed(IllFormedReason::NotDescribed));
         }
@@ -553,11 +567,13 @@ impl Verifier {
         match same_round_peers {
             (Err(round), scheduled) => {
                 let len = scheduled.len();
-                return Some(VerifyError::Uninit((len, round, PointMap::Evidence)));
+                let reason = VerifyFailReason::Uninit((len, round, PointMap::Evidence));
+                return Some(VerifyError::Fail(reason));
             }
             (Ok(total), scheduled) => {
                 if !scheduled.contains(&point.data().author) {
-                    return Some(VerifyError::UnknownAuthor);
+                    let reason = VerifyFailReason::UnknownAuthor;
+                    return Some(VerifyError::Fail(reason));
                 }
                 if !point.evidence().is_empty() {
                     if total == PeerCount::GENESIS {
@@ -586,7 +602,8 @@ impl Verifier {
         match includes_peers {
             Some((Err(round), scheduled)) => {
                 let len = scheduled.len();
-                return Some(VerifyError::Uninit((len, round, PointMap::Includes)));
+                let reason = VerifyFailReason::Uninit((len, round, PointMap::Includes));
+                return Some(VerifyError::Fail(reason));
             }
             None => {
                 if !point.data().includes.is_empty() {
@@ -616,7 +633,8 @@ impl Verifier {
         match witness_peers {
             Some((Err(round), scheduled)) => {
                 let len = scheduled.len();
-                return Some(VerifyError::Uninit((len, round, PointMap::Witness)));
+                let reason = VerifyFailReason::Uninit((len, round, PointMap::Witness));
+                return Some(VerifyError::Fail(reason));
             }
             None => {
                 if !point.data().witness.is_empty() {
@@ -704,12 +722,10 @@ impl ValidateCtx {
 
     fn verified(result: &Result<(), VerifyError>) {
         let label = match result {
-            Err(VerifyError::BeforeGenesis | VerifyError::Uninit(_)) => "bad_round",
-            Err(
-                VerifyError::UnknownAuthor
-                | VerifyError::IllFormed(IllFormedReason::UnknownPeers(_)),
-            ) => "bad_peer",
-            Err(VerifyError::BadSig | VerifyError::IllFormed(_)) => "ill_formed",
+            Err(VerifyError::Fail(_)) => "failed",
+            Err(VerifyError::IllFormed(IllFormedReason::UnknownPeers(_))) => "bad_peer",
+            Err(VerifyError::BadSig) => "bad_sig",
+            Err(VerifyError::IllFormed(_)) => "ill_formed",
             Ok(_) => {
                 metrics::counter!("tycho_mempool_points_verify_ok").increment(1);
                 return;
