@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use tracing::Span;
+
 use crate::metrics::HistogramGuard;
 
 macro_rules! rayon_run_impl {
@@ -7,7 +9,10 @@ macro_rules! rayon_run_impl {
         pub async fn $func_name<T: 'static + Send>(f: impl FnOnce() -> T + Send + 'static) -> T {
             static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-            let guard = Guard { finished: false };
+            let guard = Guard {
+                span: Span::current(),
+                finished: false,
+            };
 
             let (send, recv) = tokio::sync::oneshot::channel();
             let wait_time_histogram = HistogramGuard::begin(concat!($prefix, "_queue_time"));
@@ -37,6 +42,7 @@ rayon_run_impl!(rayon_run, spawn, "tycho_rayon_lifo");
 rayon_run_impl!(rayon_run_fifo, spawn_fifo, "tycho_rayon_fifo");
 
 struct Guard {
+    span: Span,
     finished: bool,
 }
 
@@ -49,7 +55,10 @@ impl Guard {
 impl Drop for Guard {
     fn drop(&mut self) {
         if !self.finished {
-            tracing::warn!("rayon_run has been aborted");
+            tracing::warn!(
+                parent: &self.span,
+                "rayon_run has been aborted"
+            );
         }
     }
 }
