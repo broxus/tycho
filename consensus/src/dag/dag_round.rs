@@ -170,11 +170,7 @@ impl DagRound {
         })
     }
 
-    pub fn set_bad_sig_in_broadcast_exact(&self, author: &PeerId) {
-        self.edit(author, |loc| loc.bad_sig_in_broadcast = true);
-    }
-
-    pub fn add_ill_formed_broadcast_exact(
+    pub fn add_ill_formed_broadcast(
         &self,
         point: &Point,
         reason: &IllFormedReason,
@@ -199,7 +195,7 @@ impl DagRound {
     }
 
     /// Point already verified
-    pub fn add_broadcast_exact(
+    pub fn add_broadcast(
         &self,
         point: &Point,
         downloader: &Downloader,
@@ -226,7 +222,7 @@ impl DagRound {
 
     /// notice: `round` must exactly match point's round,
     /// otherwise dependency will resolve to [`DagPoint::NotFound`]
-    pub fn add_evicted_broadcast_exact(
+    pub fn add_pruned_broadcast(
         &self,
         author: &PeerId,
         digest: &Digest,
@@ -245,7 +241,7 @@ impl DagRound {
 
     /// notice: `round` must exactly match point's round,
     /// otherwise dependency will resolve to [`DagPoint::NotFound`]
-    pub fn add_dependency_exact(
+    pub fn add_dependency(
         &self,
         author: &PeerId,
         digest: &Digest,

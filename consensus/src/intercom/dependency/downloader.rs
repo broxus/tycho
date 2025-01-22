@@ -409,11 +409,7 @@ impl<T: DownloadType> DownloadTask<T> {
                         );
                         Some(DownloadResult::IllFormed(point, reason))
                     }
-                    Err(
-                        error @ (VerifyError::BeforeGenesis
-                        | VerifyError::UnknownAuthor
-                        | VerifyError::Uninit(_)),
-                    ) => {
+                    Err(VerifyError::Fail(error)) => {
                         panic!(
                             "should not receive {error} for downloaded {:?}",
                             point.id().alt()

@@ -91,8 +91,6 @@ impl PointBody {
                 && self.data.time > self.data.anchor_time
         };
         is_special_ok
-            && CachedConfig::get().consensus.payload_batch_bytes as usize
-                >= self.payload.iter().map(|x| x.len()).sum()
             // proof for previous point consists of digest and 2F++ evidences
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
             && self.evidence.is_empty() != self.data.includes.contains_key(&self.data.author)
