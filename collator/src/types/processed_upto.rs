@@ -5,11 +5,11 @@ use everscale_types::models::{
     ExternalsRange, InternalsRange, Lazy, MsgsExecutionParams, ProcessedUptoInfo,
     ProcessedUptoPartition, ShardIdent, ShardIdentFull, ShardRange,
 };
+use tycho_block_util::queue::QueuePartitionIdx;
 
 use super::ProcessedTo;
 use crate::mempool::MempoolAnchorId;
 
-pub type PartitionId = u8;
 pub type Lt = u64;
 pub type BlockSeqno = u32;
 
@@ -18,7 +18,7 @@ pub type BlockSeqno = u32;
 pub struct ProcessedUptoInfoStuff {
     /// We split messages by partitions.
     /// Main partition 0 and others.
-    pub partitions: BTreeMap<PartitionId, ProcessedUptoPartitionStuff>,
+    pub partitions: BTreeMap<QueuePartitionIdx, ProcessedUptoPartitionStuff>,
 
     /// Actual messages execution params used for collated block.
     /// They help to refill messages buffers on sync/restart and
