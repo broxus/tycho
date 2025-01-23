@@ -700,7 +700,7 @@ impl BlockStorage {
             let mut key = [0u8; tables::Archives::KEY_LEN];
             key[..4].copy_from_slice(&archive_id_bytes);
             key[4..].copy_from_slice(&ARCHIVE_OVERRIDE_NEXT_MAGIC.to_be_bytes());
-            batch.put_cf(&chunks_cf, key, &next_id.to_le_bytes());
+            batch.put_cf(&chunks_cf, key, next_id.to_le_bytes());
         }
         // 4. Store info that archive commit is in progress
         if let Some(to_commit) = archive_id.to_commit {
