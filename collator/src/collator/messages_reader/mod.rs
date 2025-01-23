@@ -905,6 +905,10 @@ impl MessagesReader {
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
                 externals_reader.set_from_to_current_position_in_last_range_reader()?;
+                // drop last read to anchor chain time when no pending externals in cache
+                if !externals_reader.has_pending_externals() {
+                    externals_reader.drop_last_read_to_anchor_chain_time();
+                }
             }
 
             // log only first time

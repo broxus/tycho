@@ -433,13 +433,13 @@ impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BufferFillStateByCount {
     IsFull,
     NotFull,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BufferFillStateBySlots {
     CanFill,
     CanNotFill,
