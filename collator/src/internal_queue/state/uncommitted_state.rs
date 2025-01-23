@@ -198,6 +198,7 @@ impl UncommittedStateStdImpl {
         partition_router: &PartitionRouter,
         messages: &BTreeMap<QueueKey, Arc<V>>,
     ) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_apply_diff_add_messages_time");
         let mut buffer = Vec::new();
         for (internal_message_key, message) in messages {
             let destination = message.destination();
@@ -225,6 +226,8 @@ impl UncommittedStateStdImpl {
         internal_queue_tx: &mut InternalQueueTransaction,
         diff_statistics: &DiffStatistics,
     ) -> Result<()> {
+        let _histogram =
+            HistogramGuard::begin("tycho_internal_queue_apply_diff_add_statistics_time");
         let shard_ident = diff_statistics.shard_ident();
         let min_message = diff_statistics.min_message();
         let max_message = diff_statistics.max_message();
@@ -245,6 +248,11 @@ impl UncommittedStateStdImpl {
 
                 internal_queue_tx.insert_statistics_uncommitted(&key, *count);
             }
+            metrics::counter!(
+                "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
+                "partition" => partition.to_string(),
+            )
+            .increment(values.len() as u64);
         }
 
         Ok(())
