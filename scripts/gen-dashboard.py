@@ -1247,7 +1247,8 @@ def collator_message_metrics() -> RowPanel:
 
 
 def collator_queue_metrics() -> RowPanel:
-    legend_format = "{{instance}} - {{shard}}"
+    legend_format = "{{instance}} wc: {{workchain}}"
+    legend_format_partition = "{{instance}} par_id: {{partition}}"
     metrics = [
         create_gauge_panel(
             "tycho_do_collate_int_msgs_queue_calc", "Calculated Internal queue len"
@@ -1283,6 +1284,18 @@ def collator_queue_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_internal_queue_committed_statistics_load_time", "Committed statistics load time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_apply_diff_add_statistics_time", "Apply statistics time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_apply_diff_add_messages_time", "Apply messages time"
+        ),
+        create_counter_panel(
+            "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
+            "Statistics accounts count",
+            legend_format=legend_format_partition,
+            by_labels=["instance", "partition"]
         ),
         create_heatmap_panel(
             "tycho_internal_queue_snapshot_time", "Snapshot time"
