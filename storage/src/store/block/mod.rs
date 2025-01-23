@@ -42,7 +42,7 @@ pub struct BlockStorage {
     blocks_cache: BlocksCache,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
-    archive_ids: RwLock<BTreeSet<u32>>,
+    archive_ids: RwLock<ArchiveIds>,
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
@@ -170,14 +170,15 @@ impl BlockStorage {
 
         let db = self.db.clone();
 
-        let (archive_ids, archives_to_commit) = tokio::task::spawn_blocking(move || {
+        let (archive_ids, override_next_id, to_commit) = tokio::task::spawn_blocking(move || {
             let mut iter = db.archives.raw_iterator();
             iter.seek_to_first();
 
             let mut archive_ids = BTreeSet::new();
             let mut archives_to_commit = Vec::new();
+            let mut override_next_id = None;
             loop {
-                let Some(key) = iter.key() else {
+                let Some((key, value)) = iter.item() else {
                     if let Err(e) = iter.status() {
                         tracing::error!("failed to iterate through archives: {e:?}");
                     }
@@ -189,19 +190,29 @@ impl BlockStorage {
 
                 const _: () = const {
                     // Rely on the specific order of these constants
-                    assert!(
-                        ARCHIVE_STARTED_MAGIC < ARCHIVE_TO_COMMIT_MAGIC
-                            && ARCHIVE_TO_COMMIT_MAGIC < ARCHIVE_SIZE_MAGIC
-                    );
+                    assert!(ARCHIVE_STARTED_MAGIC < ARCHIVE_OVERRIDE_NEXT_MAGIC);
+                    assert!(ARCHIVE_OVERRIDE_NEXT_MAGIC < ARCHIVE_TO_COMMIT_MAGIC);
+                    assert!(ARCHIVE_TO_COMMIT_MAGIC < ARCHIVE_SIZE_MAGIC);
                 };
 
                 let mut skip = None;
+
+                if let Some(next_id) = override_next_id {
+                    // Reset override when it is not needed.
+                    if archive_id > next_id {
+                        override_next_id = None;
+                    }
+                }
 
                 // Chunk keys are sorted by offset.
                 match chunk_index {
                     // "Started" magic comes first, and indicates that the archive exists.
                     ARCHIVE_STARTED_MAGIC => {
                         archive_ids.insert(archive_id);
+                    }
+                    // "Override" marig comes next, and sets the next archive id if was finished earlier.
+                    ARCHIVE_OVERRIDE_NEXT_MAGIC => {
+                        override_next_id = Some(u32::from_le_bytes(value[..4].try_into().unwrap()));
                     }
                     // "To commit" magic comes next, commit should have been started.
                     ARCHIVE_TO_COMMIT_MAGIC => {
@@ -237,18 +248,23 @@ impl BlockStorage {
                 }
             }
 
-            Ok::<_, anyhow::Error>((archive_ids, archives_to_commit))
+            Ok::<_, anyhow::Error>((archive_ids, override_next_id, archives_to_commit))
         })
         .await??;
 
-        self.archive_ids.write().extend(archive_ids);
+        {
+            let mut ids = self.archive_ids.write();
+            ids.items.extend(archive_ids);
+            ids.override_next_id = override_next_id;
+        }
 
         tracing::info!(
             elapsed = %humantime::format_duration(started_at.elapsed()),
+            ?override_next_id,
             "finished preloading archive ids"
         );
 
-        for archive_id in archives_to_commit {
+        for archive_id in to_commit {
             tracing::info!(archive_id, "clear partially committed archive");
             // Solves the problem of non-deterministic compression when commit archive
             // was interrupted and should be rewritten
@@ -458,7 +474,7 @@ impl BlockStorage {
     }
 
     pub fn list_archive_ids(&self) -> Vec<u32> {
-        self.archive_ids.read().iter().cloned().collect()
+        self.archive_ids.read().items.iter().cloned().collect()
     }
 
     pub async fn load_block_data_raw_ref<'a>(
@@ -679,7 +695,14 @@ impl BlockStorage {
             key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
             batch.put_cf(&chunks_cf, key, []);
         }
-        // 3. Store info that archive commit is in progress
+        // 3. Store info about overriding next archive id
+        if let Some(next_id) = archive_id.override_next_id {
+            let mut key = [0u8; tables::Archives::KEY_LEN];
+            key[..4].copy_from_slice(&archive_id_bytes);
+            key[4..].copy_from_slice(&ARCHIVE_OVERRIDE_NEXT_MAGIC.to_be_bytes());
+            batch.put_cf(&chunks_cf, key, &next_id.to_le_bytes());
+        }
+        // 4. Store info that archive commit is in progress
         if let Some(to_commit) = archive_id.to_commit {
             let mut key = [0u8; tables::Archives::KEY_LEN];
             key[..4].copy_from_slice(&to_commit.to_be_bytes());
@@ -720,13 +743,13 @@ impl BlockStorage {
     pub fn get_archive_id(&self, mc_seqno: u32) -> ArchiveId {
         let archive_ids = self.archive_ids.read();
 
-        if !matches!(archive_ids.last(), Some(id) if mc_seqno < *id) {
+        if !matches!(archive_ids.items.last(), Some(id) if mc_seqno < *id) {
             // Return `TooNew` if there are no archives yet, or the requested
             // seqno is greater than the beginning of the last archive. beg
             return ArchiveId::TooNew;
         }
 
-        match archive_ids.range(..=mc_seqno).next_back() {
+        match archive_ids.items.range(..=mc_seqno).next_back() {
             // NOTE: handles case when mc_seqno is far in the future.
             // However if there is a key block between `id` and `mc_seqno`,
             // this will return an archive without that specified block.
@@ -887,17 +910,23 @@ impl BlockStorage {
 
         let mut archive_ids = self.archive_ids.write();
 
-        let retained_ids = match archive_ids.iter().rev().find(|&id| *id < until_id).cloned() {
+        let retained_ids = match archive_ids
+            .items
+            .iter()
+            .rev()
+            .find(|&id| *id < until_id)
+            .cloned()
+        {
             // Splits `archive_ids` into two parts - [..until_id] and [until_id..]
             // `archive_ids` will now contain [..until_id]
-            Some(until_id) => archive_ids.split_off(&until_id),
+            Some(until_id) => archive_ids.items.split_off(&until_id),
             None => {
                 tracing::trace!("nothing to remove");
                 return Ok(());
             }
         };
         // so we must swap maps to retain [until_id..] and get ids to remove
-        let removed_ids = std::mem::replace(&mut *archive_ids, retained_ids);
+        let removed_ids = std::mem::replace(&mut archive_ids.items, retained_ids);
 
         // Print removed range bounds and compute real `until_id`
         let (Some(first), Some(last)) = (removed_ids.first(), removed_ids.last()) else {
@@ -906,7 +935,7 @@ impl BlockStorage {
         };
 
         let len = removed_ids.len();
-        let until_id = match archive_ids.first() {
+        let until_id = match archive_ids.items.first() {
             Some(until_id) => *until_id,
             None => *last + 1,
         };
@@ -1002,28 +1031,41 @@ impl BlockStorage {
         let mut archive_ids = self.archive_ids.write();
 
         // Get the closest archive id
-        let prev_id = archive_ids.range(..=mc_seqno).next_back().cloned();
+        let prev_id = archive_ids.items.range(..=mc_seqno).next_back().cloned();
 
         if force_split_archive {
-            let is_new = archive_ids.insert(mc_seqno);
-            return PreparedArchiveId {
-                id: mc_seqno,
-                is_new,
-                to_commit: if is_new { prev_id } else { None },
-            };
+            archive_ids.override_next_id = Some(mc_seqno + 1);
+        } else if let Some(next_id) = archive_ids.override_next_id {
+            match mc_seqno.cmp(&next_id) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    let is_new = archive_ids.items.insert(mc_seqno);
+                    return PreparedArchiveId {
+                        id: mc_seqno,
+                        is_new,
+                        override_next_id: None,
+                        to_commit: if is_new { prev_id } else { None },
+                    };
+                }
+                std::cmp::Ordering::Greater => {
+                    archive_ids.override_next_id = None;
+                }
+            }
         }
 
         let mut archive_id = PreparedArchiveId {
             id: prev_id.unwrap_or_default(),
+            override_next_id: archive_ids.override_next_id,
             ..Default::default()
         };
 
         let is_first_archive = prev_id.is_none();
         if is_first_archive || mc_seqno.saturating_sub(archive_id.id) >= ARCHIVE_PACKAGE_SIZE {
-            let is_new = archive_ids.insert(mc_seqno);
+            let is_new = archive_ids.items.insert(mc_seqno);
             archive_id = PreparedArchiveId {
                 id: mc_seqno,
                 is_new,
+                override_next_id: None,
                 to_commit: if is_new { prev_id } else { None },
             };
         }
@@ -1392,6 +1434,12 @@ pub enum ArchiveId {
     NotFound,
 }
 
+#[derive(Default)]
+struct ArchiveIds {
+    items: BTreeSet<u32>,
+    override_next_id: Option<u32>,
+}
+
 fn remove_blocks(
     db: BaseDb,
     max_blocks_per_batch: Option<usize>,
@@ -1578,8 +1626,10 @@ const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
 const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
 // Reserved key in which we store the fact that the archive must be committed
 const ARCHIVE_TO_COMMIT_MAGIC: u64 = u64::MAX - 1;
+// Reserved key in which we store the next archive id to override.
+const ARCHIVE_OVERRIDE_NEXT_MAGIC: u64 = u64::MAX - 2;
 // Reserved key in which we store the fact that archive was started
-const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 2;
+const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 3;
 
 const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1MB
 
@@ -1592,6 +1642,7 @@ const BLOCK_DATA_STARTED_MAGIC: u32 = u32::MAX - 2;
 struct PreparedArchiveId {
     id: u32,
     is_new: bool,
+    override_next_id: Option<u32>,
     to_commit: Option<u32>,
 }
 
