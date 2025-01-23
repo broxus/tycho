@@ -21,7 +21,7 @@ cp -f "${root_dir}/.temp/zerostate.boc" "${root_dir}/test/data/zerostate.boc"
 
 # dump first empty block
 output=$($tycho_bin node list-blocks --control-socket .temp/control1.sock)
-block_id=$(echo "$output" | jq -r '.blocks[0]')
+block_id=$(echo "$output" | jq -r '.blocks[1]')
 
 echo ${block_id} > "${root_dir}/test/data/first_block_id.txt"
 $tycho_bin node dump-block -b "${block_id}" --control-socket .temp/control1.sock "${root_dir}/test/data/first_block.bin"
