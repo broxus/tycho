@@ -57,7 +57,7 @@ impl Drop for ValidatorsResolver {
 
 impl ValidatorsResolver {
     pub fn new(network: Network, overlay: PublicOverlay, config: ValidatorsConfig) -> Self {
-        let (peers_tx, peers_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (peers_tx, peers_rx) = mpsc::unbounded_channel();
 
         let peer_resolver = overlay.peer_resolver().clone();
 
@@ -120,7 +120,7 @@ impl BlockSubscriber for ValidatorsResolver {
         if !cx.is_key_block {
             return futures_util::future::ready(Ok(()));
         }
-
+        tracing::info!("updating validators");
         let config = match cx.block.load_custom() {
             Ok(extra) => &extra.config,
             Err(e) => {
@@ -330,7 +330,7 @@ impl Validators {
         use futures_util::StreamExt;
         use rand::seq::SliceRandom;
 
-        tracing::debug!("started");
+        tracing::debug!("started resolving peers");
         scopeguard::defer! {
             tracing::debug!("finished");
         }
@@ -436,7 +436,7 @@ impl Validators {
             self.target_validators_gauge.set(count as f64);
 
             // Done
-            tracing::debug!(epoch, "updated current validators list");
+            tracing::info!(epoch, "updated current validators list");
         }
     }
 }
