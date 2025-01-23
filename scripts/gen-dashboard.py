@@ -1103,7 +1103,12 @@ def collation_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_collator_anchor_import_skipped_count",
             "Number of anchor import skipped",
-            labels_selectors=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"']
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_block_diff_tail_len",
+            "Diff tail length",
+            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Collation Metrics", metrics)
@@ -1149,6 +1154,16 @@ def collator_execution_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_do_collate_one_tick_account_msgs_exec_max_time",
             "MAX exec time in group",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_processed_upto_ext_ranges",
+            "Externals ProcessedUpto ranges count",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_processed_upto_int_ranges",
+            "Internals ProcessedUpto ranges count",
             labels=['workchain=~"$workchain"'],
         ),
     ]
@@ -1254,6 +1269,30 @@ def collator_queue_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
+        create_gauge_panel(
+            "tycho_internal_queue_gc_state_size", "Total GC state size",
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_commited_state_iterator_create_time", "Commited iterator init time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_uncommited_state_iterator_create_time", "Uncommitted iterator init time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_uncommitted_statistics_load_time", "Uncommited statistics load time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_committed_statistics_load_time", "Committed statistics load time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_snapshot_time", "Snapshot time"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_create_iterator_time", "Create iterator time"
+        ),
+        create_counter_panel(
+            "tycho_collator_queue_adapter_iterators_count", "Iterators count"
+        ),
     ]
     return create_row("collator: Queue Metrics", metrics)
 
@@ -1332,23 +1371,63 @@ def collator_wu_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
+            "tycho_do_collate_wu_to_mcs_prepare",
+            "Wu price on prepare",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_read_ext_msgs",
+            "Wu spent on read externals",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
+            "Wu price on read externals",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
+            "Wu spent on read existing internals",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
+            "Wu price on read existing internals",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_read_new_int_msgs",
+            "Wu spent on read new internals",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
+            "Wu price on read new internals",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_add_msgs_to_groups",
+            "Wu spent on add msgs to groups",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
+            "Wu price on add msgs to groups",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
             "tycho_do_collate_wu_on_execute",
             "Wu spent on execute",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_on_finalize",
-            "Wu spent on finalize",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_all",
-            "Wu spent on prepare, execute and finalize",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_prepare",
-            "Wu price on prepare",
+            "tycho_do_collate_wu_to_mcs_execute",
+            "Wu price on execute total",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
@@ -1365,16 +1444,20 @@ def collator_wu_metrics() -> RowPanel:
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_execute",
-            "Wu price on execute total",
+            "tycho_do_collate_wu_on_finalize",
+            "Wu spent on finalize",
             labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_finalize",
             "Wu price on finalize",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_all",
+            "Wu spent total on prepare, execute and finalize",
+            labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_to_mcs_total",

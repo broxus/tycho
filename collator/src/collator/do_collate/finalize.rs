@@ -15,36 +15,51 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashMap;
 
 use super::phase::{Phase, PhaseState};
 use super::PrevData;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::execution_manager::MessagesExecutor;
-use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
+use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
-    BlockCollationData, ExecuteResult, FinalizedBlock, PreparedInMsg, PreparedOutMsg,
-    UpdateQueueDiffResult,
+    BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
+    PreparedInMsg, PreparedOutMsg,
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
+use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardHashesExt};
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizeState {
     pub execute_result: ExecuteResult,
+    pub executor: MessagesExecutor,
 }
 
 impl PhaseState for FinalizeState {}
 
+pub struct FinalizeBlockContext {
+    pub collation_session: Arc<CollationSessionInfo>,
+    pub wu_used_from_last_anchor: u64,
+    pub usage_tree: UsageTree,
+    pub queue_diff: SerializedQueueDiff,
+    pub collator_config: Arc<CollatorConfig>,
+    pub processed_upto: ProcessedUptoInfoStuff,
+    pub diff_tail_len: u32,
+}
+
 impl Phase<FinalizeState> {
-    pub fn update_queue_diff(
+    pub fn finalize_messages_reader(
         &mut self,
-        mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
-        shard_id: ShardIdent,
+        messages_reader: MessagesReader,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Result<(UpdateQueueDiffResult, impl FnOnce() -> Result<Duration>)> {
-        let labels = [("workchain", shard_id.workchain().to_string())];
+    ) -> Result<(
+        FinalizeMessagesReaderResult,
+        impl FnOnce() -> Result<Duration>,
+    )> {
+        let labels = [("workchain", self.state.shard_id.workchain().to_string())];
 
         let prev_hash = self
             .state
@@ -54,23 +69,56 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
+        // getting top shard blocks
+        let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
+            self.state
+                .collation_data
+                .top_shard_blocks
+                .iter()
+                .map(|b| (b.block_id.shard, b.block_id.seqno))
+                .collect()
+        } else {
+            let mut top_blocks: FastHashMap<ShardIdent, u32> = self
+                .state
+                .mc_data
+                .shards
+                .iter()
+                .filter(|(shard, descr)| {
+                    descr.top_sc_block_updated && shard != &self.state.shard_id
+                })
+                .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
+                .collect();
+
+            top_blocks.insert(
+                self.state.mc_data.block_id.shard,
+                self.state.mc_data.block_id.seqno,
+            );
+
+            top_blocks
+        };
+
+        let diffs = mq_adapter.get_diffs(top_shard_blocks);
+
         // get queue diff and check for pending internals
-        let histogram_create_queue_diff =
-            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
-
-        let (has_pending_internals_in_iterator, diff_with_messages) = mq_iterator_adapter.release(
-            !self.state.msgs_buffer.has_pending_messages(),
-            &mut self.state.msgs_buffer.current_iterator_positions,
-        )?;
-
-        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
-
-        let diff_messages_len = diff_with_messages.messages.len();
-        let has_unprocessed_messages =
-            self.state.msgs_buffer.has_pending_messages() || has_pending_internals_in_iterator;
+        let create_queue_diff_elapsed;
+        let FinalizedMessagesReader {
+            has_unprocessed_messages,
+            queue_diff_with_msgs,
+            reader_state,
+            anchors_cache,
+        } = {
+            let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
+                "tycho_do_collate_create_queue_diff_time",
+                &labels,
+            );
+            let finalize_message_reader_res =
+                messages_reader.finalize(self.extra.executor.min_next_lt(), diffs)?;
+            create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+            finalize_message_reader_res
+        };
 
         let (min_message, max_message) = {
-            let messages = &diff_with_messages.messages;
+            let messages = &queue_diff_with_msgs.messages;
             match messages.first_key_value().zip(messages.last_key_value()) {
                 Some(((min, _), (max, _))) => (*min, *max),
                 None => (
@@ -81,25 +129,22 @@ impl Phase<FinalizeState> {
         };
 
         let queue_diff = QueueDiffStuff::builder(
-            shard_id,
+            self.state.shard_id,
             self.state.collation_data.block_id_short.seqno,
             &prev_hash,
         )
-        .with_processed_upto(
-            diff_with_messages
-                .processed_upto
-                .iter()
-                .map(|(k, v)| (*k, v.lt, &v.hash)),
-        )
+        .with_processed_to(reader_state.internals.get_min_processed_to_by_shards())
         .with_messages(
             &min_message,
             &max_message,
-            diff_with_messages.messages.keys().map(|k| &k.hash),
+            queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
         )
         .serialize();
 
         let queue_diff_hash = *queue_diff.hash();
         tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
+
+        let queue_diff_messages_count = queue_diff_with_msgs.messages.len();
 
         // start async update queue task
         let update_queue_task = {
@@ -115,7 +160,14 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
-                mq_adapter.apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)?;
+                let statistics = (&queue_diff_with_msgs, block_id_short.shard).into();
+                mq_adapter.apply_diff(
+                    queue_diff_with_msgs,
+                    block_id_short,
+                    &queue_diff_hash,
+                    statistics,
+                    max_message,
+                )?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
                 Ok(apply_queue_diff_elapsed)
@@ -123,10 +175,13 @@ impl Phase<FinalizeState> {
         };
 
         Ok((
-            UpdateQueueDiffResult {
+            FinalizeMessagesReaderResult {
                 queue_diff,
+                queue_diff_messages_count,
                 has_unprocessed_messages,
-                diff_messages_len,
+                reader_state,
+                anchors_cache,
+
                 create_queue_diff_elapsed,
             },
             update_queue_task,
@@ -135,14 +190,19 @@ impl Phase<FinalizeState> {
 
     pub fn finalize_block(
         mut self,
-        collation_session: Arc<CollationSessionInfo>,
-        wu_used_from_last_anchor: u64,
-        usage_tree: UsageTree,
-        queue_diff: SerializedQueueDiff,
-        collator_config: Arc<CollatorConfig>,
-        executor: MessagesExecutor,
-    ) -> Result<(FinalizedBlock, ExecuteResult)> {
+        ctx: FinalizeBlockContext,
+    ) -> Result<(FinalizeBlockResult, ExecuteResult)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
+
+        let FinalizeBlockContext {
+            collation_session,
+            wu_used_from_last_anchor,
+            usage_tree,
+            queue_diff,
+            collator_config,
+            processed_upto,
+            diff_tail_len,
+        } = ctx;
 
         let wu_params_finalize = self
             .state
@@ -156,6 +216,8 @@ impl Phase<FinalizeState> {
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
+
+        let executor = self.extra.executor;
 
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = executor.executor_params().state_libs.clone();
@@ -272,10 +334,8 @@ impl Phase<FinalizeState> {
                 .state
                 .prev_shard_data
                 .processed_upto()
-                .externals
-                .as_ref()
-                .map(|ext_upto| ext_upto.processed_to.0)
-                .unwrap_or_default();
+                .get_min_externals_processed_to()?
+                .0;
             let config_params =
                 processed_accounts
                     .new_config_params
@@ -363,14 +423,19 @@ impl Phase<FinalizeState> {
             );
 
             // compute total wu used from last anchor
-            let wu_used_from_last_anchor = wu_used_from_last_anchor
-                .saturating_add(self.extra.execute_result.prepare_groups_wu_total)
+            let new_wu_used_from_last_anchor = wu_used_from_last_anchor
+                .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
                 .saturating_add(self.extra.execute_result.execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "wu_used_from_last_anchor: {:?}",
-                wu_used_from_last_anchor
+                "wu_used_from_last_anchor: old={}, new={}, \
+                prepare_msg_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
+                wu_used_from_last_anchor,
+                new_wu_used_from_last_anchor,
+                self.extra.execute_result.prepare_msg_groups_wu.total_wu,
+                self.extra.execute_result.execute_groups_wu_total,
+                finalize_wu_total,
             );
 
             // build new state
@@ -383,17 +448,10 @@ impl Phase<FinalizeState> {
                 gen_utime_ms: new_block_info.gen_utime_ms,
                 gen_lt: new_block_info.end_lt,
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
-                processed_upto: Lazy::new(
-                    &self
-                        .state
-                        .collation_data
-                        .processed_upto
-                        .clone()
-                        .try_into()?,
-                )?,
+                processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
-                overload_history: wu_used_from_last_anchor,
+                overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: self.state.prev_shard_data.total_validator_fees().clone(),
@@ -483,6 +541,8 @@ impl Phase<FinalizeState> {
                 None
             };
 
+            self.state.collation_data.diff_tail_len = diff_tail_len;
+
             // construct block
             let block = Block {
                 global_id: self.state.mc_data.global_id,
@@ -492,6 +552,7 @@ impl Phase<FinalizeState> {
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
+                    tail_len: diff_tail_len,
                 },
                 extra: Lazy::new(&new_block_extra)?,
             };
@@ -528,7 +589,7 @@ impl Phase<FinalizeState> {
                 block_info: &new_block_info,
                 prev_ref: &prev_ref,
                 state: &new_observable_state,
-                processed_upto: &self.state.collation_data.processed_upto,
+                processed_upto: &processed_upto,
                 mc_top_shards: self.state.collation_data.shards(),
                 mc_state_extra: mc_state_extra.as_ref(),
                 merkle_update: &state_update,
@@ -536,6 +597,8 @@ impl Phase<FinalizeState> {
                 mc_block_extra: new_mc_block_extra.as_ref(),
             },
         );
+
+        let processed_to_anchor_id = processed_upto.get_min_externals_processed_to()?.0;
 
         let new_mc_data = match mc_state_extra {
             None => None,
@@ -552,8 +615,32 @@ impl Phase<FinalizeState> {
 
                 let top_processed_to_anchor = detect_top_processed_to_anchor(
                     shards.iter().map(|(_, d)| *d),
-                    self.state.collation_data.processed_upto.externals.as_ref(),
+                    processed_to_anchor_id,
                 );
+
+                let mut shards_processed_to = FastHashMap::default();
+
+                for (shard_id, _) in shards.iter() {
+                    // Extract processed information for updated shards
+                    let shard_processed_to = self
+                        .state
+                        .collation_data
+                        .top_shard_blocks
+                        .iter()
+                        .find(|top_block_info| top_block_info.block_id.shard == *shard_id)
+                        .map(|top_block_info| top_block_info.processed_to.clone())
+                        .or_else(|| {
+                            self.state
+                                .mc_data
+                                .shards_processed_to
+                                .get(shard_id)
+                                .cloned()
+                        });
+
+                    if let Some(value) = shard_processed_to {
+                        shards_processed_to.insert(*shard_id, value);
+                    }
+                }
 
                 Some(Arc::new(McData {
                     global_id: new_block.as_ref().global_id,
@@ -571,10 +658,10 @@ impl Phase<FinalizeState> {
                     validator_info: extra.validator_info,
                     consensus_info: extra.consensus_info,
 
-                    processed_upto: self.state.collation_data.processed_upto.clone(),
+                    processed_upto,
                     top_processed_to_anchor,
-
                     ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
+                    shards_processed_to,
                 }))
             }
         };
@@ -587,18 +674,17 @@ impl Phase<FinalizeState> {
             block: new_block,
             is_key_block: new_block_info.key_block,
             prev_blocks_ids: self.state.prev_shard_data.blocks_ids().clone(),
-            top_shard_blocks_ids: self.state.collation_data.top_shard_blocks_ids.clone(),
+            top_shard_blocks_ids: self
+                .state
+                .collation_data
+                .top_shard_blocks
+                .iter()
+                .map(|b| b.block_id)
+                .collect(),
             collated_data,
             collated_file_hash: HashBytes::ZERO,
             chain_time: self.state.collation_data.get_gen_chain_time(),
-            processed_to_anchor_id: self
-                .state
-                .collation_data
-                .processed_upto
-                .externals
-                .as_ref()
-                .map(|upto| upto.processed_to.0)
-                .unwrap_or_default(),
+            processed_to_anchor_id,
             value_flow,
             created_by: self.state.collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
@@ -624,7 +710,7 @@ impl Phase<FinalizeState> {
         );
 
         Ok((
-            FinalizedBlock {
+            FinalizeBlockResult {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
@@ -632,7 +718,6 @@ impl Phase<FinalizeState> {
                 new_observable_state,
                 finalize_wu_total,
                 old_mc_data: self.state.mc_data,
-                msgs_buffer: self.state.msgs_buffer,
                 collation_config: self.state.collation_config,
             },
             self.extra.execute_result,

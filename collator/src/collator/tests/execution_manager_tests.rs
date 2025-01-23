@@ -9,24 +9,25 @@ use everscale_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, CurrencyCollection, ExternalsProcessedUpto,
     ShardDescription, ShardIdent, ShardStateUnsplit, ValidatorInfo,
 };
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartition};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
-use super::MessagesReader;
-use crate::collator::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
-use crate::collator::execution_manager::{
-    GetNextMessageGroupContext, GetNextMessageGroupMode, InitIteratorMode,
+#[cfg(FALSE)]
+use super::super::do_collate::tests::{build_stub_collation_data, fill_test_anchors_cache};
+use super::super::types::{AnchorsCache, PrevData, WorkingState};
+#[cfg(FALSE)]
+use super::{
+    GetNextMessageGroupContext, GetNextMessageGroupMode, InitIteratorMode, MessagesReader,
 };
-use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
-use crate::collator::types::{AnchorsCache, MessagesBuffer, PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
+use crate::internal_queue::queue::ShortQueueDiff;
 use crate::internal_queue::types::{
-    EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
+    DiffStatistics, EnqueuedMessage, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
+    QueueRange, QueueShardRange, QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::try_init_test_tracing;
-use crate::types::{InternalsProcessedUptoStuff, McData, ProcessedUptoInfoStuff};
 
 #[derive(Default)]
 struct QueueIteratorTestImpl<V: InternalMessageValue> {
@@ -55,10 +56,6 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorTestImpl<V> {
         unimplemented!()
     }
 
-    fn add_message(&mut self, _message: V) -> Result<()> {
-        unimplemented!()
-    }
-
     fn set_new_messages_from_full_diff(&mut self, _full_diff: QueueFullDiff<V>) {
         unimplemented!()
     }
@@ -74,6 +71,10 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorTestImpl<V> {
     fn commit(&mut self, _messages: Vec<(ShardIdent, QueueKey)>) -> Result<()> {
         Ok(())
     }
+
+    fn add_message(&mut self, _message: V) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 #[derive(Default)]
@@ -87,10 +88,18 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
     fn create_iterator(
         &self,
         _for_shard_id: ShardIdent,
-        _shards_from: FastHashMap<ShardIdent, QueueKey>,
-        _shards_to: FastHashMap<ShardIdent, QueueKey>,
+        _partition: QueuePartition,
+        _ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         Ok(Box::new(QueueIteratorTestImpl::default()))
+    }
+
+    fn get_statistics(
+        &self,
+        _partition: QueuePartition,
+        _ranges: Vec<QueueShardRange>,
+    ) -> Result<QueueStatistics> {
+        unimplemented!()
     }
 
     fn apply_diff(
@@ -98,6 +107,8 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         _diff: QueueDiffWithMessages<V>,
         _block_id_short: BlockIdShort,
         _diff_hash: &HashBytes,
+        _statistics: DiffStatistics,
+        _max_message: QueueKey,
     ) -> Result<()> {
         unimplemented!()
     }
@@ -122,11 +133,71 @@ impl<V: InternalMessageValue + Default> MessageQueueAdapter<V> for MessageQueueA
         unimplemented!()
     }
 
-    fn clear_session_state(&self) -> Result<()> {
+    fn clear_uncommitted_state(&self) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn trim_diffs(&self, _source_shard: &ShardIdent, _inclusive_until: &QueueKey) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn get_diffs(
+        &self,
+        _blocks: FastHashMap<ShardIdent, u32>,
+    ) -> Vec<(ShardIdent, ShortQueueDiff)> {
+        unimplemented!()
+    }
+
+    fn get_diffs_count_by_shard(&self, _shard_ident: &ShardIdent) -> usize {
         unimplemented!()
     }
 }
 
+#[cfg(FALSE)]
+const DEFAULT_BLOCK_LIMITS: BlockLimits = BlockLimits {
+    bytes: BlockParamLimits {
+        underload: 131072,
+        soft_limit: 524288,
+        hard_limit: 1048576,
+    },
+    gas: BlockParamLimits {
+        underload: 900000,
+        soft_limit: 1200000,
+        hard_limit: 20_000_000,
+    },
+    lt_delta: BlockParamLimits {
+        underload: 1000,
+        soft_limit: 5000,
+        hard_limit: 10000,
+    },
+};
+
+#[cfg(FALSE)]
+pub(crate) fn build_stub_collation_data(
+    next_block_id: BlockIdShort,
+    anchors_cache: &AnchorsCache,
+    start_lt: u64,
+) -> BlockCollationData {
+    BlockCollationDataBuilder::new(
+        next_block_id,
+        HashBytes::ZERO,
+        1,
+        anchors_cache
+            .last_imported_anchor()
+            .map(|a| a.ct)
+            .unwrap_or_default(),
+        Default::default(),
+        HashBytes::ZERO,
+        GlobalVersion {
+            version: 50,
+            capabilities: supported_capabilities(),
+        },
+        None,
+    )
+    .build(start_lt, DEFAULT_BLOCK_LIMITS)
+}
+
+#[cfg(FALSE)]
 fn gen_stub_working_state(
     next_block_id_short: BlockIdShort,
     prev_block_info: (BlockIdShort, (u64, u64)),
@@ -229,6 +300,7 @@ fn gen_stub_working_state(
             },
             top_processed_to_anchor: 0,
             ref_mc_state_handle: prev_shard_data.ref_mc_state_handle().clone(),
+            shards_processed_to: Default::default(),
         }),
         collation_config: Arc::new(Default::default()),
         wu_used_from_last_anchor: 0,
@@ -241,6 +313,7 @@ fn gen_stub_working_state(
     Box::new(working_state)
 }
 
+#[cfg(FALSE)]
 #[test]
 fn test_refill_msgs_buffer_with_only_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);

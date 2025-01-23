@@ -441,6 +441,36 @@ impl ColumnFamilyOptions<Caches> for ShardsInternalMessagesSession {
     }
 }
 
+pub struct InternalMessagesDestStatUncommitted;
+impl ColumnFamily for InternalMessagesDestStatUncommitted {
+    const NAME: &'static str = "internal_messages_dest_stat_uncommitted";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for InternalMessagesDestStatUncommitted {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
+pub struct InternalMessagesDestStat;
+impl ColumnFamily for InternalMessagesDestStat {
+    const NAME: &'static str = "internal_messages_dest_stat";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for InternalMessagesDestStat {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,

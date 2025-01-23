@@ -33,12 +33,9 @@ impl<V: InternalMessageValue> StatesIteratorsManager<V> {
     }
 
     pub fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey> {
-        let mut result = FastHashMap::default();
-        for iterator in &self.iterators {
-            for (shard, position) in iterator.current_position() {
-                result.insert(shard, position);
-            }
-        }
-        result
+        self.iterators
+            .iter()
+            .flat_map(|iterator| iterator.current_position())
+            .collect()
     }
 }

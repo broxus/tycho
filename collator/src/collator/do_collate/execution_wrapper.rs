@@ -11,47 +11,26 @@ use everscale_types::models::{
 use ton_executor::ExecutedTransaction;
 use tycho_block_util::queue::QueueKey;
 
-use super::BlockCollationData;
 use crate::collator::execution_manager::MessagesExecutor;
-use crate::collator::mq_iterator_adapter::QueueIteratorAdapter;
-use crate::collator::types::{ParsedMessage, PreparedInMsg, PreparedOutMsg, SpecialOrigin};
+use crate::collator::types::{
+    BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, SpecialOrigin,
+};
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 
 pub struct ExecutorWrapper {
     pub executor: MessagesExecutor,
     pub max_new_message_key_to_current_shard: QueueKey,
-    pub mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
     pub shard_id: ShardIdent,
-    pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 }
 
 impl ExecutorWrapper {
-    pub fn new(
-        executor: MessagesExecutor,
-        max_new_message_key_to_current_shard: QueueKey,
-        mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
-        shard_id: ShardIdent,
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Self {
+    pub fn new(executor: MessagesExecutor, shard_id: ShardIdent) -> Self {
         Self {
             executor,
-            max_new_message_key_to_current_shard,
-            mq_iterator_adapter,
+            max_new_message_key_to_current_shard: QueueKey::MIN,
             shard_id,
-            mq_adapter,
         }
-    }
-
-    pub fn destruct(
-        self,
-    ) -> (
-        MessagesExecutor,
-        QueueIteratorAdapter<EnqueuedMessage>,
-        Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) {
-        (self.executor, self.mq_iterator_adapter, self.mq_adapter)
     }
 
     pub fn process_transaction(
@@ -59,36 +38,37 @@ impl ExecutorWrapper {
         executed: ExecutedTransaction,
         in_message: Option<Box<ParsedMessage>>,
         collation_data: &mut BlockCollationData,
-    ) -> Result<()> {
-        let new_messages = new_transaction(collation_data, &self.shard_id, executed, in_message)?;
+    ) -> Result<Vec<Arc<EnqueuedMessage>>> {
+        let mut new_messages = vec![];
 
-        collation_data.new_msgs_created_count += new_messages.len() as u64;
-        for new_message in new_messages {
-            let MsgInfo::Int(int_msg_info) = new_message.info else {
+        let out_msgs = new_transaction(collation_data, &self.shard_id, executed, in_message)?;
+        collation_data.new_msgs_created_count += out_msgs.len() as u64;
+
+        for out_msg in out_msgs {
+            let MsgInfo::Int(int_msg_info) = out_msg.info else {
                 continue;
             };
 
-            if new_message.dst_in_current_shard {
+            if out_msg.dst_in_current_shard {
                 let new_message_key = QueueKey {
                     lt: int_msg_info.created_lt,
-                    hash: *new_message.cell.repr_hash(),
+                    hash: *out_msg.cell.repr_hash(),
                 };
                 self.max_new_message_key_to_current_shard =
                     std::cmp::max(self.max_new_message_key_to_current_shard, new_message_key);
             }
 
-            collation_data.inserted_new_msgs_to_iterator_count += 1;
-
-            let enqueued_message = EnqueuedMessage::from((int_msg_info, new_message.cell));
-
-            self.mq_adapter
-                .add_message_to_iterator(self.mq_iterator_adapter.iterator(), enqueued_message)?;
+            collation_data.inserted_new_msgs_count += 1;
+            new_messages.push(Arc::new(EnqueuedMessage::from((
+                int_msg_info,
+                out_msg.cell,
+            ))));
         }
 
         collation_data.next_lt = self.executor.min_next_lt();
         collation_data.block_limit.lt_current = collation_data.next_lt;
 
-        Ok(())
+        Ok(new_messages)
     }
 
     /// Create special transactions for the collator
@@ -96,30 +76,34 @@ impl ExecutorWrapper {
         &mut self,
         config: &BlockchainConfig,
         collator_data: &mut BlockCollationData,
-    ) -> Result<()> {
+    ) -> Result<Vec<Arc<EnqueuedMessage>>> {
         tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions");
 
         // TODO: Execute in parallel if addresses are distinct?
 
+        let mut result = vec![];
+
         if !collator_data.value_flow.recovered.tokens.is_zero() {
-            self.create_special_transaction(
+            let mut new_messages = self.create_special_transaction(
                 &config.get_fee_collector_address()?,
                 collator_data.value_flow.recovered.clone(),
                 SpecialOrigin::Recover,
                 collator_data,
             )?;
+            result.append(&mut new_messages);
         }
 
         if !collator_data.value_flow.minted.other.is_empty() {
-            self.create_special_transaction(
+            let mut new_messages = self.create_special_transaction(
                 &config.get_minter_address()?,
                 collator_data.value_flow.minted.clone(),
                 SpecialOrigin::Mint,
                 collator_data,
             )?;
+            result.append(&mut new_messages);
         }
 
-        Ok(())
+        Ok(result)
     }
 
     fn create_special_transaction(
@@ -128,7 +112,7 @@ impl ExecutorWrapper {
         amount: CurrencyCollection,
         special_origin: SpecialOrigin,
         collation_data: &mut BlockCollationData,
-    ) -> Result<()> {
+    ) -> Result<Vec<Arc<EnqueuedMessage>>> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             account_addr = %account_id,
@@ -138,7 +122,7 @@ impl ExecutorWrapper {
         );
 
         let Some(account_stuff) = self.executor.take_account_stuff_if(account_id, |_| true)? else {
-            return Ok(());
+            return Ok(vec![]);
         };
 
         let in_message = {
@@ -166,7 +150,8 @@ impl ExecutorWrapper {
                 dst_in_current_shard: true,
                 cell,
                 special_origin: Some(special_origin),
-                dequeued: None,
+                block_seqno: Some(collation_data.block_id_short.seqno),
+                from_same_shard: None,
             })
         };
 
@@ -176,9 +161,7 @@ impl ExecutorWrapper {
 
         let executor_output = executed.result?;
 
-        self.process_transaction(executor_output, Some(executed.in_message), collation_data)?;
-
-        Ok(())
+        self.process_transaction(executor_output, Some(executed.in_message), collation_data)
     }
 
     pub fn create_ticktock_transactions(
@@ -186,7 +169,7 @@ impl ExecutorWrapper {
         config: &BlockchainConfig,
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
-    ) -> Result<()> {
+    ) -> Result<Vec<Arc<EnqueuedMessage>>> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             kind = ?tick_tock,
@@ -195,12 +178,19 @@ impl ExecutorWrapper {
 
         // TODO: Execute in parallel since these are unique accounts
 
+        let mut result = vec![];
+
         for account_id in config.get_fundamental_addresses()?.keys() {
-            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data)?;
+            let mut new_messages =
+                self.create_ticktock_transaction(&account_id?, tick_tock, collation_data)?;
+            result.append(&mut new_messages);
         }
 
-        self.create_ticktock_transaction(&config.address, tick_tock, collation_data)?;
-        Ok(())
+        let mut new_messages =
+            self.create_ticktock_transaction(&config.address, tick_tock, collation_data)?;
+        result.append(&mut new_messages);
+
+        Ok(result)
     }
 
     fn create_ticktock_transaction(
@@ -208,7 +198,7 @@ impl ExecutorWrapper {
         account_id: &HashBytes,
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
-    ) -> Result<()> {
+    ) -> Result<Vec<Arc<EnqueuedMessage>>> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             account_addr = %account_id,
@@ -223,16 +213,14 @@ impl ExecutorWrapper {
                     TickTock::Tock => stuff.special.tock,
                 })?
         else {
-            return Ok(());
+            return Ok(vec![]);
         };
 
         let executor_output = self
             .executor
             .execute_ticktock_transaction(account_stuff, tick_tock)?;
 
-        self.process_transaction(executor_output, None, collation_data)?;
-
-        Ok(())
+        self.process_transaction(executor_output, None, collation_data)
     }
 }
 
@@ -309,7 +297,8 @@ fn new_transaction(
                     dst_in_current_shard,
                     cell: out_msg_cell,
                     special_origin: None,
-                    dequeued: None,
+                    block_seqno: Some(collation_data.block_id_short.seqno),
+                    from_same_shard: Some(true),
                 }));
             }
             MsgInfo::ExtOut(_) => {
@@ -378,14 +367,17 @@ fn process_in_message(
             }))?
         }
         // Dequeued messages have a dedicated `InMsg` type
-        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) if in_msg.dequeued.is_some() => {
+        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _)
+        // check if the message is dequeued or moved from previous collation
+            if in_msg.block_seqno.unwrap_or_default() < collation_data.block_id_short.seqno =>
+        {
             collation_data.execute_count_int += 1;
 
-            let same_shard = in_msg.dequeued.map(|d| d.same_shard).unwrap_or_default();
+            let from_same_shard = in_msg.from_same_shard.unwrap_or_default();
 
             let envelope = Lazy::new(&MsgEnvelope {
                 // NOTE: `cur_addr` is not used in current routing between shards logic
-                cur_addr: if same_shard {
+                cur_addr: if from_same_shard {
                     IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
                 } else {
                     IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
@@ -404,7 +396,7 @@ fn process_in_message(
 
             let in_msg = Lazy::new(&in_msg)?;
 
-            if same_shard {
+            if from_same_shard {
                 let out_msg = OutMsg::DequeueImmediate(OutMsgDequeueImmediate {
                     out_msg_envelope: envelope.clone(),
                     reimport: in_msg.clone(),

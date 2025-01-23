@@ -7,6 +7,7 @@ use anyhow::Result;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
@@ -17,6 +18,8 @@ use tycho_util::FastHashMap;
 use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
 use crate::utils::block::detect_top_processed_to_anchor;
+
+pub mod processed_upto;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -73,124 +76,6 @@ pub struct BlockCollationResult {
     pub force_next_mc_block: ForceMasterCollation,
 }
 
-/// Processed up to info for externals and internals.
-#[derive(Default, Clone)]
-pub struct ProcessedUptoInfoStuff {
-    /// Externals processed up to point and range
-    pub externals: Option<ExternalsProcessedUpto>,
-    /// Internals processed up to points and ranges by shards
-    pub internals: BTreeMap<ShardIdent, InternalsProcessedUptoStuff>,
-    /// Offset of processed messages from buffer.
-    /// Will be `!=0` if there were unprocessed messages in buffer from prev collation.
-    pub processed_offset: u32,
-}
-
-impl std::fmt::Debug for ProcessedUptoInfoStuff {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProcessedUpto")
-            .field("offset", &self.processed_offset)
-            .field(
-                "externals",
-                &self.externals.as_ref().map(DisplayExternalsProcessedUpto),
-            )
-            .field(
-                "internals",
-                &DebugIter(self.internals.iter().map(|(k, v)| (k, DebugDisplay(v)))),
-            )
-            .finish()
-    }
-}
-
-pub struct DisplayExternalsProcessedUpto<'a>(pub &'a ExternalsProcessedUpto);
-impl std::fmt::Debug for DisplayExternalsProcessedUpto<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl std::fmt::Display for DisplayExternalsProcessedUpto<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "processed_to: {}, read_to: {}",
-            DisplayTupleRef(&self.0.processed_to),
-            DisplayTupleRef(&self.0.read_to),
-        )
-    }
-}
-
-impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
-    type Error = everscale_types::error::Error;
-
-    fn try_from(value: ProcessedUptoInfo) -> std::result::Result<Self, Self::Error> {
-        let mut res = Self {
-            processed_offset: value.processed_offset,
-            externals: value.externals,
-            ..Default::default()
-        };
-        for item in value.internals.iter() {
-            let (shard_id_full, int_upto_info) = item?;
-            res.internals.insert(
-                ShardIdent::try_from(shard_id_full)?,
-                InternalsProcessedUptoStuff {
-                    processed_to_msg: int_upto_info.processed_to_msg.into(),
-                    read_to_msg: int_upto_info.read_to_msg.into(),
-                },
-            );
-        }
-        Ok(res)
-    }
-}
-
-impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
-    type Error = everscale_types::error::Error;
-
-    fn try_from(value: ProcessedUptoInfoStuff) -> std::result::Result<Self, Self::Error> {
-        let mut res = Self {
-            processed_offset: value.processed_offset,
-            externals: value.externals,
-            ..Default::default()
-        };
-        for (shard_id, int_upto_info) in value.internals {
-            res.internals.set(
-                ShardIdentFull::from(shard_id),
-                InternalsProcessedUpto::from(int_upto_info),
-            )?;
-        }
-        Ok(res)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct InternalsProcessedUptoStuff {
-    /// Internals processed up to message (LT, Hash).
-    /// All internals upto this point
-    /// already processed during previous blocks collations.
-    ///
-    /// Needs to read internals from this point to reproduce buffer state from prev collation.
-    pub processed_to_msg: QueueKey,
-    /// Needs to read internals to this point (LT, Hash) to reproduce buffer state from prev collation.
-    pub read_to_msg: QueueKey,
-}
-
-impl std::fmt::Display for InternalsProcessedUptoStuff {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "processed_to: {}, read_to: {}",
-            self.processed_to_msg, self.read_to_msg
-        )
-    }
-}
-
-impl From<InternalsProcessedUptoStuff> for InternalsProcessedUpto {
-    fn from(value: InternalsProcessedUptoStuff) -> Self {
-        Self {
-            processed_to_msg: value.processed_to_msg.split(),
-            read_to_msg: value.read_to_msg.split(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct McData {
     pub global_id: i32,
@@ -216,10 +101,15 @@ pub struct McData {
     pub top_processed_to_anchor: MempoolAnchorId,
 
     pub ref_mc_state_handle: RefMcStateHandle,
+
+    pub shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
 }
 
 impl McData {
-    pub fn load_from_state(state_stuff: &ShardStateStuff) -> Result<Arc<Self>> {
+    pub fn load_from_state(
+        state_stuff: &ShardStateStuff,
+        shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+    ) -> Result<Arc<Self>> {
         let block_id = *state_stuff.block_id();
         let extra = state_stuff.state_extra()?;
         let state = state_stuff.as_ref();
@@ -237,7 +127,7 @@ impl McData {
         let shards = extra.shards.as_vec()?;
         let top_processed_to_anchor = detect_top_processed_to_anchor(
             shards.iter().map(|(_, d)| *d),
-            processed_upto.externals.as_ref(),
+            processed_upto.get_min_externals_processed_to()?.0,
         );
 
         Ok(Arc::new(Self {
@@ -260,6 +150,7 @@ impl McData {
             top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
+            shards_processed_to,
         }))
     }
 
@@ -433,6 +324,7 @@ pub struct TopBlockDescription {
     pub proof_funds: ProofFunds,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
+    pub processed_to: ProcessedTo,
 }
 
 #[derive(Debug)]
@@ -605,19 +497,7 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display
     }
 }
 
-pub(super) struct DisplayTuple<T1, T2>(pub (T1, T2));
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTuple<T1, T2> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple<T1, T2> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, {})", self.0 .0, self.0 .1)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct ShardDescriptionShort {
     pub ext_processed_to_anchor_id: u32,
     pub top_sc_block_updated: bool,
@@ -670,3 +550,11 @@ where
         Ok(res)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct TopShardBlockInfo {
+    pub block_id: BlockId,
+    pub processed_to: ProcessedTo,
+}
+
+pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;

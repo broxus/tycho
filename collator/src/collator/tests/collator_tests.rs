@@ -4,8 +4,7 @@ use async_trait::async_trait;
 use everscale_types::cell::HashBytes;
 use everscale_types::dict::Dict;
 use everscale_types::models::{
-    BlockId, BlockchainConfig, CurrencyCollection, ExternalsProcessedUpto, ShardIdent,
-    ValidatorInfo,
+    BlockId, BlockchainConfig, CurrencyCollection, ShardIdent, ValidatorInfo,
 };
 use tycho_block_util::state::MinRefMcStateTracker;
 
@@ -13,7 +12,11 @@ use crate::collator::types::AnchorsCache;
 use crate::collator::{CollatorStdImpl, InitAnchorSource};
 use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener};
 use crate::test_utils::try_init_test_tracing;
-use crate::types::{McData, ProcessedUptoInfoStuff, ShardDescriptionShort};
+use crate::types::processed_upto::{
+    ExternalsProcessedUptoStuff, ExternalsRangeInfo, ProcessedUptoInfoExtension,
+    ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
+};
+use crate::types::{McData, ShardDescriptionShort};
 
 struct MempoolEventStubListener;
 #[async_trait]
@@ -274,7 +277,7 @@ fn test_get_anchors_processing_info() {
         file_hash: Default::default(),
     };
     let prev_gen_chain_time = 0;
-    let prev_processed_upto_externals = None;
+    let prev_processed_upto_externals = ExternalsProcessedUptoStuff::default();
 
     // mc data
     let tracker = MinRefMcStateTracker::new();
@@ -287,11 +290,7 @@ fn test_get_anchors_processing_info() {
             file_hash: Default::default(),
         },
         gen_chain_time: 0,
-        processed_upto: ProcessedUptoInfoStuff {
-            internals: Default::default(),
-            externals: None,
-            processed_offset: 0,
-        },
+        processed_upto: ProcessedUptoInfoStuff::default(),
         shards: vec![(ShardIdent::new_full(0), ShardDescriptionShort {
             seqno: 0,
             ext_processed_to_anchor_id: 0,
@@ -316,6 +315,7 @@ fn test_get_anchors_processing_info() {
         consensus_info: Default::default(),
         top_processed_to_anchor: 0,
         ref_mc_state_handle: tracker.insert(0),
+        shards_processed_to: Default::default(),
     };
 
     //------
@@ -325,7 +325,7 @@ fn test_get_anchors_processing_info() {
         &mc_data,
         &prev_block_id,
         prev_gen_chain_time,
-        prev_processed_upto_externals.as_ref(),
+        prev_processed_upto_externals.processed_to,
     );
     assert!(anchors_proc_info_opt.is_none());
 
@@ -339,17 +339,41 @@ fn test_get_anchors_processing_info() {
         file_hash: Default::default(),
     };
     let prev_gen_chain_time = 1732479499855;
-    let prev_processed_upto_externals = Some(ExternalsProcessedUpto {
+    let prev_processed_upto_externals = ExternalsProcessedUptoStuff {
         processed_to: (1764, 23429),
-        read_to: (1764, 23429),
-    });
+        ranges: [(17, ExternalsRangeInfo {
+            skip_offset: 0,
+            processed_offset: 0,
+            chain_time: prev_gen_chain_time,
+            from: (0, 0),
+            to: (1764, 23429),
+        })]
+        .iter()
+        .cloned()
+        .collect(),
+    };
 
     mc_data.block_id.seqno = 967;
     mc_data.gen_chain_time = 1732479499855;
-    mc_data.processed_upto.externals = Some(ExternalsProcessedUpto {
-        processed_to: (1752, 12000),
-        read_to: (1752, 12000),
-    });
+    mc_data
+        .processed_upto
+        .partitions
+        .insert(0, ProcessedUptoPartitionStuff {
+            externals: ExternalsProcessedUptoStuff {
+                processed_to: (1752, 12000),
+                ranges: [(967, ExternalsRangeInfo {
+                    skip_offset: 0,
+                    processed_offset: 0,
+                    chain_time: mc_data.gen_chain_time,
+                    from: (0, 0),
+                    to: (1752, 12000),
+                })]
+                .iter()
+                .cloned()
+                .collect(),
+            },
+            internals: Default::default(),
+        });
     let (_, shard_desc) = mc_data.shards.get_mut(0).unwrap();
     shard_desc.seqno = 17;
     shard_desc.ext_processed_to_anchor_id = 1764;
@@ -362,23 +386,17 @@ fn test_get_anchors_processing_info() {
         &mc_data,
         &prev_block_id,
         prev_gen_chain_time,
-        prev_processed_upto_externals.as_ref(),
+        prev_processed_upto_externals.processed_to,
     );
     assert!(anchors_proc_info_opt.is_some());
     let anchors_proc_info = anchors_proc_info_opt.unwrap();
     assert_eq!(
         anchors_proc_info.processed_to_anchor_id,
-        prev_processed_upto_externals
-            .as_ref()
-            .map(|upto| upto.processed_to.0)
-            .unwrap_or_default(),
+        prev_processed_upto_externals.processed_to.0,
     );
     assert_eq!(
         anchors_proc_info.processed_to_msgs_offset,
-        prev_processed_upto_externals
-            .as_ref()
-            .map(|upto| upto.processed_to.1)
-            .unwrap_or_default(),
+        prev_processed_upto_externals.processed_to.1,
     );
     assert_eq!(
         anchors_proc_info.last_imported_chain_time,
@@ -391,10 +409,25 @@ fn test_get_anchors_processing_info() {
     // master still processed less externals then shard
     mc_data.block_id.seqno = 968;
     mc_data.gen_chain_time = 1732479502300;
-    mc_data.processed_upto.externals = Some(ExternalsProcessedUpto {
-        processed_to: (1756, 7000),
-        read_to: (1756, 7000),
-    });
+    mc_data
+        .processed_upto
+        .partitions
+        .insert(0, ProcessedUptoPartitionStuff {
+            externals: ExternalsProcessedUptoStuff {
+                processed_to: (1756, 7000),
+                ranges: [(968, ExternalsRangeInfo {
+                    skip_offset: 0,
+                    processed_offset: 0,
+                    chain_time: mc_data.gen_chain_time,
+                    from: (1752, 12000),
+                    to: (1756, 7000),
+                })]
+                .iter()
+                .cloned()
+                .collect(),
+            },
+            internals: Default::default(),
+        });
     let (_, shard_desc) = mc_data.shards.get_mut(0).unwrap();
     shard_desc.seqno = 17;
     shard_desc.top_sc_block_updated = false;
@@ -407,23 +440,17 @@ fn test_get_anchors_processing_info() {
         &mc_data,
         &prev_block_id,
         prev_gen_chain_time,
-        prev_processed_upto_externals.as_ref(),
+        prev_processed_upto_externals.processed_to,
     );
     assert!(anchors_proc_info_opt.is_some());
     let anchors_proc_info = anchors_proc_info_opt.unwrap();
     assert_eq!(
         anchors_proc_info.processed_to_anchor_id,
-        prev_processed_upto_externals
-            .as_ref()
-            .map(|upto| upto.processed_to.0)
-            .unwrap_or_default(),
+        prev_processed_upto_externals.processed_to.0,
     );
     assert_eq!(
         anchors_proc_info.processed_to_msgs_offset,
-        prev_processed_upto_externals
-            .as_ref()
-            .map(|upto| upto.processed_to.1)
-            .unwrap_or_default(),
+        prev_processed_upto_externals.processed_to.1,
     );
     assert_eq!(
         anchors_proc_info.last_imported_chain_time,
@@ -436,10 +463,25 @@ fn test_get_anchors_processing_info() {
     // but master processed anchors ahead of shard
     mc_data.block_id.seqno = 1005;
     mc_data.gen_chain_time = 1732479530330;
-    mc_data.processed_upto.externals = Some(ExternalsProcessedUpto {
-        processed_to: (1816, 23429),
-        read_to: (1816, 23429),
-    });
+    mc_data
+        .processed_upto
+        .partitions
+        .insert(0, ProcessedUptoPartitionStuff {
+            externals: ExternalsProcessedUptoStuff {
+                processed_to: (1816, 23429),
+                ranges: [(1005, ExternalsRangeInfo {
+                    skip_offset: 0,
+                    processed_offset: 0,
+                    chain_time: mc_data.gen_chain_time,
+                    from: (1756, 7000),
+                    to: (1816, 23429),
+                })]
+                .iter()
+                .cloned()
+                .collect(),
+            },
+            internals: Default::default(),
+        });
     let (_, shard_desc) = mc_data.shards.get_mut(0).unwrap();
     shard_desc.top_sc_block_updated = false;
 
@@ -450,29 +492,23 @@ fn test_get_anchors_processing_info() {
         &mc_data,
         &prev_block_id,
         prev_gen_chain_time,
-        prev_processed_upto_externals.as_ref(),
+        prev_processed_upto_externals.processed_to,
     );
     assert!(anchors_proc_info_opt.is_some());
     let anchors_proc_info = anchors_proc_info_opt.unwrap();
+    let min_externals_processed_to = mc_data
+        .processed_upto
+        .get_min_externals_processed_to()
+        .unwrap_or_default();
     assert_eq!(
         anchors_proc_info.processed_to_anchor_id,
-        mc_data
-            .processed_upto
-            .externals
-            .as_ref()
-            .map(|upto| upto.processed_to.0)
-            .unwrap_or_default(),
+        min_externals_processed_to.0,
         "prev_block_id: {:?}, prev_gen_chain_time: {}, prev_processed_upto_externals: {:?}, mc_data: {:?}",
         prev_block_id, prev_gen_chain_time, prev_processed_upto_externals, mc_data,
     );
     assert_eq!(
         anchors_proc_info.processed_to_msgs_offset,
-        mc_data
-            .processed_upto
-            .externals
-            .as_ref()
-            .map(|upto| upto.processed_to.1)
-            .unwrap_or_default(),
+        min_externals_processed_to.1,
     );
     assert_eq!(
         anchors_proc_info.last_imported_chain_time,

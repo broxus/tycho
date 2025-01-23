@@ -1,4 +1,4 @@
-use std::collections::{hash_map, BTreeMap, VecDeque};
+use std::collections::{hash_map, VecDeque};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
@@ -6,13 +6,11 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
-    BlockId, BlockIdShort, CollationConfig, ExternalsProcessedUpto, ProcessedUptoInfo, ShardIdent,
-    ValidatorDescription,
+    BlockId, BlockIdShort, CollationConfig, ProcessedUptoInfo, ShardIdent, ValidatorDescription,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
-use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::metrics::HistogramGuard;
@@ -37,10 +35,11 @@ use crate::mempool::{
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
+use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, DisplayIter, DisplayTuple, McData,
-    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedTo, ShardDescriptionExt,
+    ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -143,14 +142,16 @@ where
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
         let processed_upto = state.state().processed_upto.load()?;
 
-        metrics_report_last_applied_block_and_anchor(state, &processed_upto);
+        metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state_cloned = state.clone();
 
         self.spawn_task(move |worker| {
             Box::pin(async move {
-                worker
-                    .detect_top_processed_to_anchor_and_notify_mempool(state_cloned, processed_upto)
+                worker.detect_top_processed_to_anchor_and_notify_mempool(
+                    state_cloned,
+                    processed_upto.get_min_externals_processed_to()?.0,
+                )
             })
         })
         .await?;
@@ -167,7 +168,7 @@ where
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
         let processed_upto = state.state().processed_upto.load()?;
 
-        metrics_report_last_applied_block_and_anchor(state, &processed_upto);
+        metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state = state.clone();
         self.enqueue_task(method_to_async_closure!(handle_block_from_bc, state))
@@ -180,16 +181,12 @@ where
 fn metrics_report_last_applied_block_and_anchor(
     state: &ShardStateStuff,
     processed_upto: &ProcessedUptoInfo,
-) {
+) -> Result<()> {
     let block_id = state.block_id();
     let labels = [("workchain", block_id.shard.workchain().to_string())];
 
     let block_ct = state.get_gen_chain_time();
-    let processed_to_anchor_id = processed_upto
-        .externals
-        .as_ref()
-        .map(|upto| upto.processed_to.0)
-        .unwrap_or_default();
+    let processed_to_anchor_id = processed_upto.get_min_externals_processed_to()?.0;
 
     metrics::gauge!("tycho_last_applied_block_seqno", &labels).set(block_id.seqno);
     metrics::gauge!("tycho_last_processed_to_anchor_id", &labels).set(processed_to_anchor_id);
@@ -200,6 +197,8 @@ fn metrics_report_last_applied_block_and_anchor(
         processed_to_anchor_id = processed_to_anchor_id,
         "last applied block",
     );
+
+    Ok(())
 }
 
 #[async_trait]
@@ -355,7 +354,7 @@ where
     fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
         state: ShardStateStuff,
-        processed_upto: ProcessedUptoInfo,
+        mc_processed_to_anchor_id: MempoolAnchorId,
     ) -> Result<()> {
         // will make this only for master blocks
         if !state.block_id().is_masterchain() {
@@ -368,24 +367,24 @@ where
                 .as_vec()?
                 .into_iter()
                 .map(|(_, descr)| descr),
-            processed_upto.externals.as_ref(),
+            mc_processed_to_anchor_id,
         )
     }
 
     fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
         &self,
         mc_top_shards: I,
-        mc_ext_processed_upto: Option<&ExternalsProcessedUpto>,
+        mc_processed_to_anchor_id: MempoolAnchorId,
     ) -> Result<()>
     where
         I: Iterator<Item = ShardDescriptionShort>,
     {
         let top_processed_to_anchor =
-            detect_top_processed_to_anchor(mc_top_shards, mc_ext_processed_upto);
+            detect_top_processed_to_anchor(mc_top_shards, mc_processed_to_anchor_id);
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             top_processed_to_anchor,
-            mc_processed_to_anchor = mc_ext_processed_upto.map(|upto| upto.processed_to.0),
+            mc_processed_to_anchor_id,
             "detected minimal top_processed_to_anchor, will notify mempool",
 
         );
@@ -476,10 +475,15 @@ where
 
         let queue_diff_with_msgs =
             QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
+
+        let statistics = (&queue_diff_with_msgs, queue_diff.block_id().shard).into();
+
         mq_adapter.apply_diff(
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
+            statistics,
+            queue_diff.as_ref().max_message,
         )
     }
 
@@ -722,7 +726,7 @@ where
                 "collator was cancelled before",
             );
 
-            self.mq_adapter.clear_session_state()?;
+            self.mq_adapter.clear_uncommitted_state()?;
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
                 .get_last_collated_block_and_applied_mc_queue_range();
@@ -768,7 +772,7 @@ where
                     }
                 }
 
-                self.mq_adapter.clear_session_state()?;
+                self.mq_adapter.clear_uncommitted_state()?;
             }
 
             tracing::debug!(
@@ -984,7 +988,7 @@ where
                 }
             }
 
-            self.mq_adapter.clear_session_state()?;
+            self.mq_adapter.clear_uncommitted_state()?;
         }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1101,7 +1105,12 @@ where
                 // so we can report top processed anchor here
                 self.detect_top_processed_to_anchor_and_notify_mempool_impl(
                     state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
-                    state.state().processed_upto.load()?.externals.as_ref(),
+                    state
+                        .state()
+                        .processed_upto
+                        .load()?
+                        .get_min_externals_processed_to()?
+                        .0,
                 )?;
 
                 // NOTE: here master block subgraph could be already extracted,
@@ -1176,17 +1185,30 @@ where
                     new_genesis_time_millis = mp_cfg_override.genesis_info.genesis_millis,
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
-                self.mq_adapter.clear_session_state()?;
+                self.mq_adapter.clear_uncommitted_state()?;
             }
         }
 
-        // get min internals processed upto
-        let min_processed_to_by_shards = self
+        // internals processed upto
+        let processed_to_by_shards = self
             .read_min_processed_to_for_mc_block(&last_applied_mc_block_key)
             .await?;
 
+        // calc internals processed upto
+        let mut min_processed_to_by_shards = ProcessedTo::default();
+
+        // find min processed to by shards for trim tail
+        for min_processed_upto in processed_to_by_shards.values() {
+            for (shard_id, to_key) in min_processed_upto.clone() {
+                min_processed_to_by_shards
+                    .entry(shard_id)
+                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
+                    .or_insert(to_key);
+            }
+        }
+
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            min_processed_to_by_shards = %DisplayIter(min_processed_to_by_shards.iter().map(DisplayTuple)),
+            ?min_processed_to_by_shards,
         );
 
         // find first applied mc block and tail shard blocks and get previous
@@ -1209,8 +1231,8 @@ where
 
         // try load required previous queue diffs
         let mut prev_queue_diffs = vec![];
-        for (shard_id, min_processed_to) in min_processed_to_by_shards {
-            let Some((_, prev_block_ids)) = before_tail_block_ids.get(&shard_id) else {
+        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
+            let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
                 continue;
             };
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
@@ -1248,7 +1270,7 @@ where
                     );
                     return Ok(false);
                 };
-                let diff_required = queue_diff_stuff.as_ref().max_message > min_processed_to;
+                let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     diff_block_id = %prev_block_id.as_short_id(),
                     diff_required,
@@ -1266,10 +1288,12 @@ where
 
                     let queue_diff_with_messages =
                         QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs)?;
+
                     prev_queue_diffs.push((
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
+                        queue_diff_stuff.as_ref().max_message,
                     ));
 
                     let prev_ids_info = block_stuff.construct_prev_id()?;
@@ -1282,9 +1306,19 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id)) = prev_queue_diffs.pop() {
-            self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id(), &diff_hash)?;
+        while let Some((diff, diff_hash, block_id, max_message)) = prev_queue_diffs.pop() {
+            let statistics = (&diff, block_id.shard).into();
+            self.mq_adapter.apply_diff(
+                diff,
+                block_id.as_short_id(),
+                &diff_hash,
+                statistics,
+                max_message,
+            )?;
+        }
+        // trim diffs tails for all shards
+        for (shard_id, min_processed_to) in min_processed_to_by_shards {
+            self.mq_adapter.trim_diffs(&shard_id, &min_processed_to)?;
         }
 
         // sync all applied blocks
@@ -1325,7 +1359,7 @@ where
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
                 // to avoid panics if next block was already collated before an it is incorrect
-                self.mq_adapter.clear_session_state()?;
+                self.mq_adapter.clear_uncommitted_state()?;
 
                 let state = mc_block_entry.cached_state()?;
 
@@ -1347,9 +1381,9 @@ where
 
                 // reset top shard blocks info
                 // because next we will start to collate new shard blocks after the sync
-                self.blocks_cache.reset_top_shard_blocks_additional_info()?;
+                self.blocks_cache.reset_top_shard_blocks_additional_info();
 
-                let mc_data = McData::load_from_state(state)?;
+                let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
 
                 // remove all previous blocks from cache
                 let mut to_block_keys = vec![mc_block_entry.key()];
@@ -1381,8 +1415,8 @@ where
     async fn read_min_processed_to_for_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<BTreeMap<ShardIdent, QueueKey>> {
-        let mut result = BTreeMap::new();
+    ) -> Result<FastHashMap<ShardIdent, ProcessedTo>> {
+        let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
             return Ok(result);
@@ -1397,26 +1431,20 @@ where
                 Some(processed_to) => processed_to,
                 None => {
                     // try get from storage
-                    let loaded = utils::load_only_queue_diff_stuff(
+                    utils::load_only_queue_diff_stuff(
                         self.state_node_adapter.as_ref(),
                         &top_block_id,
                     )
-                    .await?;
-
-                    loaded.as_ref().processed_upto.clone()
+                    .await?
+                    .as_ref()
+                    .processed_to
+                    .clone()
+                    .into_iter()
+                    .collect()
                 }
             };
 
-            for (shard_id, to_key) in processed_to {
-                result
-                    .entry(shard_id)
-                    .and_modify(|min| {
-                        if &to_key < min {
-                            *min = to_key;
-                        }
-                    })
-                    .or_insert(to_key);
-            }
+            result.insert(top_block_id.shard, processed_to.clone());
         }
 
         Ok(result)
@@ -2172,7 +2200,7 @@ where
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Equeued next attempt to collate block for shard {}",
+            "Enqueued next attempt to collate block for shard {}",
             shard_id,
         );
 

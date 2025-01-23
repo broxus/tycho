@@ -35,6 +35,7 @@ pub trait QueueIterator<V: InternalMessageValue>: Send {
 
 pub struct QueueIteratorImpl<V: InternalMessageValue> {
     for_shard: ShardIdent,
+    // partition: QueuePartition,
     messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
     new_messages: BTreeMap<QueueKey, Arc<V>>,
     iterators_manager: StatesIteratorsManager<V>,
@@ -128,9 +129,9 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         let mut diff = QueueDiffWithMessages::new();
 
         // fill processed_upto
-        for (shard_id, message_key) in self.last_processed_message.iter() {
+        for (shard_ident, message_key) in self.last_processed_message.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
-            diff.processed_upto.insert(*shard_id, *message_key);
+            diff.processed_to.insert(*shard_ident, *message_key);
         }
 
         // move new messages
@@ -160,9 +161,9 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         // actually we update last processed message via commit()
         // during the execution, so we can just use value as is
 
-        for (shard_id, message_key) in self.last_processed_message.iter() {
+        for (shard_ident, message_key) in self.last_processed_message.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
-            diff.processed_upto.insert(*shard_id, *message_key);
+            diff.processed_to.insert(*shard_ident, *message_key);
         }
 
         diff.messages = self.new_messages.clone();

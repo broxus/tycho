@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -26,15 +27,8 @@ impl QueueDiffStuffBuilder {
         }
     }
 
-    // TODO: Use iterator of `(ShardIdent, QueueKey)`?
-    pub fn with_processed_upto<'a, I>(mut self, processed_upto: I) -> Self
-    where
-        I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
-    {
-        self.inner_mut().diff.processed_upto = processed_upto
-            .into_iter()
-            .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
-            .collect();
+    pub fn with_processed_to(mut self, processed_to: BTreeMap<ShardIdent, QueueKey>) -> Self {
+        self.inner_mut().diff.processed_to = processed_to;
         self
     }
 
@@ -79,6 +73,10 @@ impl SerializedQueueDiff {
         &self.inner.diff.hash
     }
 
+    pub fn processed_to(&self) -> &BTreeMap<ShardIdent, QueueKey> {
+        &self.inner.diff.processed_to
+    }
+
     fn inner_mut(&mut self) -> &mut Inner {
         Arc::get_mut(&mut self.inner).expect("inner is not shared")
     }
@@ -102,10 +100,11 @@ impl QueueDiffStuff {
                     prev_hash: HashBytes::ZERO,
                     shard_ident: block_id.shard,
                     seqno: block_id.seqno,
-                    processed_upto: BTreeMap::from([(block_id.shard, QueueKey::MIN)]),
+                    processed_to: BTreeMap::from([(block_id.shard, QueueKey::MIN)]),
                     min_message: QueueKey::MIN,
                     max_message: QueueKey::MIN,
                     messages: Vec::new(),
+                    partition_router: Default::default(),
                 },
             }),
         }
@@ -134,10 +133,11 @@ impl QueueDiffStuff {
                     prev_hash: *prev_hash,
                     shard_ident,
                     seqno,
-                    processed_upto: Default::default(),
+                    processed_to: Default::default(),
                     min_message: Default::default(),
                     max_message: Default::default(),
                     messages: Default::default(),
+                    partition_router: Default::default(),
                 },
             }),
         }
@@ -361,7 +361,7 @@ mod tests {
                     prev_hash: HashBytes::ZERO,
                     shard_ident: ShardIdent::BASECHAIN,
                     seqno: 1,
-                    processed_upto: Default::default(),
+                    processed_to: Default::default(),
                     min_message: QueueKey {
                         lt: 0,
                         hash: message_hashes[0],
@@ -371,6 +371,7 @@ mod tests {
                         hash: message_hashes[9],
                     },
                     messages: message_hashes.clone(),
+                    partition_router: Default::default(),
                 },
             }),
         };

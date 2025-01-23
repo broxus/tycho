@@ -241,7 +241,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         let out_msgs = OutMsgDescr::try_from_sorted_slice(&messages)?;
 
         let queue_diff = QueueDiffStuff::builder(shard, seqno, &prev_hash)
-            .with_processed_upto([(shard, 0, &HashBytes::ZERO)])
+            .with_processed_to([(shard, QueueKey::min_for_lt(0))].into())
             .with_messages(
                 &QueueKey::max_for_lt(0),
                 &QueueKey::max_for_lt(0),
@@ -351,9 +351,16 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         written
     };
 
+    let tail_len = blocks
+        .iter()
+        .rev()
+        .map(|block| block.queue_diff.as_ref().clone())
+        .len() as u32;
+
     // Read queue queue state from file
     let top_update = OutMsgQueueUpdates {
         diff_hash: *blocks.last().unwrap().queue_diff.diff_hash(),
+        tail_len,
     };
     let mut reader = QueueStateReader::begin_from_mapped(&decompressed, &top_update)?;
     assert_eq!(reader.state().header, target_header);
@@ -363,17 +370,25 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         tracing::info!(i, chunk_size = %ByteSize(chunk.len() as u64));
     }
 
-    let mut read_messages = 0;
-    while let Some(cell) = reader.read_next_message()? {
-        let msg = cell.parse::<Message<'_>>()?;
-        let MsgInfo::Int(_) = msg.info else {
-            panic!("unexpected message type");
-        };
-        assert!(msg.init.is_none());
-        assert!(msg.body.is_empty());
-        read_messages += 1;
+    let mut read_messages = FastHashSet::default();
+    let mut next_diff_index = 0;
+    while reader.read_next_diff()?.is_some() {
+        next_diff_index += 1;
+        while let Some(cell) = reader.read_next_message()? {
+            let exists = read_messages.insert(*cell.repr_hash());
+            assert!(exists, "duplicate message");
+
+            let msg = cell.parse::<Message<'_>>()?;
+
+            matches!(msg.info, MsgInfo::Int(_));
+
+            assert!(msg.init.is_none());
+            assert!(msg.body.is_empty());
+        }
+        assert_eq!(reader.next_queue_diff_index(), next_diff_index);
+        assert_eq!(read_messages.len(), next_diff_index * 5000);
     }
-    assert_eq!(read_messages, target_message_count);
+    assert_eq!(read_messages.len(), target_message_count);
 
     reader.finish()?;
 

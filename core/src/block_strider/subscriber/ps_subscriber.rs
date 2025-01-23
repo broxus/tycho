@@ -1,11 +1,8 @@
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::ShardIdent;
 use tycho_block_util::block::BlockStuff;
-use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::{BlockHandle, Storage};
 
@@ -145,18 +142,6 @@ impl Inner {
 
         let mut shard_block_handles = Vec::new();
 
-        // Compute the minimal referenced LT for each shard
-        let mut min_processed_upto = BTreeMap::new();
-        let merge = |block_handle: BlockHandle,
-                     mut processed_upto: BTreeMap<ShardIdent, QueueKey>| async move {
-            let queue_diff = blocks.load_queue_diff(&block_handle).await?;
-            for (&shard, &key) in &queue_diff.as_ref().processed_upto {
-                let existing = processed_upto.entry(shard).or_insert(key);
-                *existing = std::cmp::min(*existing, key);
-            }
-            Ok::<_, anyhow::Error>(processed_upto)
-        };
-
         for entry in mc_block.load_custom()?.shards.latest_blocks() {
             let block_id = entry?;
             if block_id.seqno == 0 {
@@ -172,32 +157,20 @@ impl Inner {
             //       first, without waiting for other states or queues to be saved.
             block_handles.set_block_persistent(&block_handle);
 
-            min_processed_upto = merge(block_handle.clone(), min_processed_upto).await?;
             shard_block_handles.push(block_handle);
         }
-        min_processed_upto = merge(mc_block_handle.clone(), min_processed_upto).await?;
 
         // Store queue state for each shard
         let mc_seqno = mc_block_handle.id().seqno;
         for block_handle in shard_block_handles {
             let block = blocks.load_block_data(&block_handle).await?;
-
-            let min_shard = min_processed_upto
-                .get(&block.id().shard)
-                .copied()
-                .unwrap_or_default();
             persistent_states
-                .store_queue_state(mc_seqno, &block_handle, block, min_shard.lt)
+                .store_queue_state(mc_seqno, &block_handle, block)
                 .await?;
         }
 
-        // Store queue state for masterchain
-        let min_mc = min_processed_upto
-            .get(&ShardIdent::MASTERCHAIN)
-            .copied()
-            .unwrap_or_default();
         persistent_states
-            .store_queue_state(mc_seqno, &mc_block_handle, mc_block, min_mc.lt)
+            .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
             .await
     }
 }

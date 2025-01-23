@@ -1,5 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 
+use anyhow::bail;
 use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -22,13 +24,16 @@ pub struct QueueDiff {
     /// Seqno of the corresponding block.
     pub seqno: u32,
     /// collator boundaries.
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    // TODO: should rename field in `proto.tl` on network reset
+    pub processed_to: BTreeMap<ShardIdent, QueueKey>,
     /// Min message queue key.
     pub min_message: QueueKey,
     /// Max message queue key.
     pub max_message: QueueKey,
     /// List of message hashes (sorted ASC).
     pub messages: Vec<HashBytes>,
+    /// Partition router
+    pub partition_router: BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
 }
 
 impl QueueDiff {
@@ -55,9 +60,10 @@ impl TlWrite for QueueDiff {
         4 + tl::hash_bytes::SIZE_HINT
             + tl::shard_ident::SIZE_HINT
             + 4
-            + processed_upto_map::size_hint(&self.processed_upto)
+            + processed_to_map::size_hint(&self.processed_to)
             + 2 * QueueKey::SIZE_HINT
             + messages_list::size_hint(&self.messages)
+            + partition_router_list::size_hint(&self.partition_router)
     }
 
     fn write_to<P>(&self, packet: &mut P)
@@ -68,10 +74,11 @@ impl TlWrite for QueueDiff {
         tl::hash_bytes::write(&self.prev_hash, packet);
         tl::shard_ident::write(&self.shard_ident, packet);
         packet.write_u32(self.seqno);
-        processed_upto_map::write(&self.processed_upto, packet);
+        processed_to_map::write(&self.processed_to, packet);
         self.min_message.write_to(packet);
         self.max_message.write_to(packet);
         messages_list::write(&self.messages, packet);
+        partition_router_list::write(&self.partition_router, packet);
     }
 }
 
@@ -89,10 +96,11 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             prev_hash: tl::hash_bytes::read(data)?,
             shard_ident: tl::shard_ident::read(data)?,
             seqno: u32::read_from(data)?,
-            processed_upto: processed_upto_map::read(data)?,
+            processed_to: processed_to_map::read(data)?,
             min_message: QueueKey::read_from(data)?,
             max_message: QueueKey::read_from(data)?,
             messages: messages_list::read(data)?,
+            partition_router: partition_router_list::read(data)?,
         };
 
         if result.max_message < result.min_message {
@@ -109,7 +117,7 @@ impl<'tl> TlRead<'tl> for QueueDiff {
 }
 
 /// Persistent internal messages queue state.
-#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[derive(Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueState", scheme = "proto.tl")]
 pub struct QueueState {
     pub header: QueueStateHeader,
@@ -123,7 +131,7 @@ pub struct QueueState {
 /// Persistent internal messages queue state.
 ///
 /// A non-owned version of [`QueueState`].
-#[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+#[derive(Clone, PartialEq, Eq, TlWrite, TlRead)]
 #[tl(boxed, id = "block.queueState", scheme = "proto.tl")]
 pub struct QueueStateRef<'tl> {
     pub header: QueueStateHeader,
@@ -146,12 +154,14 @@ pub struct QueueStateHeader {
 }
 
 /// Queue key.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
 pub struct QueueKey {
     pub lt: u64,
     #[tl(with = "tl::hash_bytes")]
     pub hash: HashBytes,
 }
+
+pub type QueuePartition = u8;
 
 impl QueueKey {
     const SIZE_HINT: usize = 8 + 32;
@@ -200,13 +210,19 @@ impl From<QueueKey> for (u64, HashBytes) {
     }
 }
 
-impl std::fmt::Display for QueueKey {
+impl std::fmt::Debug for QueueKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LT_HASH({}_{})", self.lt, self.hash)
+        write!(f, "{}", self)
     }
 }
 
-mod processed_upto_map {
+impl std::fmt::Display for QueueKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LT_HASH({}_{:.9})", self.lt, format!("{}", self.hash))
+    }
+}
+
+mod processed_to_map {
     use tl_proto::{TlPacket, TlResult};
 
     use super::*;
@@ -223,9 +239,9 @@ mod processed_upto_map {
     pub fn write<P: TlPacket>(items: &BTreeMap<ShardIdent, QueueKey>, packet: &mut P) {
         packet.write_u32(items.len() as u32);
 
-        for (shard_ident, processed_upto) in items {
+        for (shard_ident, processed_to) in items {
             tl::shard_ident::write(shard_ident, packet);
-            processed_upto.write_to(packet);
+            processed_to.write_to(packet);
         }
     }
 
@@ -367,6 +383,93 @@ mod messages_list {
     }
 }
 
+mod partition_router_list {
+    use tl_proto::{TlPacket, TlResult};
+
+    use super::*;
+
+    const MAX_DIRECTIONS: usize = 2;
+    const MAX_PARTITIONS_PER_DIRECTION: QueuePartition = 255;
+    const MAX_ADDRS_PER_PARTITION: usize = 1_000_000;
+
+    pub fn size_hint(
+        items: &BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
+    ) -> usize {
+        let mut size = 4;
+        for (direction, partitions) in items {
+            size += direction.max_size_hint();
+            size += 4; // partitions count
+            for addrs in partitions.values() {
+                size += 1; // partition u8
+                size += 4; // addresses count
+                size += addrs.len() * RouterAddr::SIZE_HINT;
+            }
+        }
+        size
+    }
+
+    pub fn write<P: TlPacket>(
+        items: &BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
+        packet: &mut P,
+    ) {
+        packet.write_u32(items.len() as u32);
+        for (direction, partitions) in items {
+            direction.write_to(packet);
+            packet.write_u32(partitions.len() as u32);
+            for (partition, addrs) in partitions {
+                packet.write_raw_slice(&[*partition]);
+                packet.write_u32(addrs.len() as u32);
+                for addr in addrs {
+                    addr.write_to(packet);
+                }
+            }
+        }
+    }
+
+    pub fn read(
+        data: &mut &[u8],
+    ) -> TlResult<BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>> {
+        let len = u32::read_from(data)? as usize;
+        if len > MAX_DIRECTIONS {
+            return Err(tl_proto::TlError::InvalidData);
+        }
+
+        let mut result = BTreeMap::new();
+
+        for _ in 0..len {
+            let direction = RouterDirection::read_from(data)?;
+
+            let partitions_len = u32::read_from(data)? as usize;
+            if partitions_len > MAX_PARTITIONS_PER_DIRECTION as usize {
+                return Err(tl_proto::TlError::InvalidData);
+            }
+
+            let mut partitions = BTreeMap::new();
+            for _ in 0..partitions_len {
+                let partition = data[0];
+                *data = &data[1..];
+
+                let addrs_len = u32::read_from(data)? as usize;
+                if addrs_len > MAX_ADDRS_PER_PARTITION {
+                    return Err(tl_proto::TlError::InvalidData);
+                }
+
+                let mut addrs = BTreeSet::new();
+                for _ in 0..addrs_len {
+                    let addr = RouterAddr::read_from(data)?;
+                    addrs.insert(addr);
+                }
+
+                partitions.insert(partition, addrs);
+            }
+
+            result.insert(direction, partitions);
+        }
+
+        Ok(result)
+    }
+}
+
 mod state_messages_list {
     use super::*;
 
@@ -435,18 +538,125 @@ mod state_messages_list_ref {
     }
 }
 
+/// Std dest addr
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RouterAddr {
+    pub workchain: i8,
+    pub account: HashBytes,
+}
+
+impl RouterAddr {
+    pub const MIN: Self = Self {
+        workchain: i8::MIN,
+        account: HashBytes::ZERO,
+    };
+
+    pub const MAX: Self = Self {
+        workchain: i8::MAX,
+        account: HashBytes([0xff; 32]),
+    };
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+#[tl(boxed)]
+pub enum RouterDirection {
+    #[tl(id = 0)]
+    Dest = 0,
+    #[tl(id = 1)]
+    Src = 1,
+}
+
+impl TryFrom<IntAddr> for RouterAddr {
+    type Error = anyhow::Error;
+
+    fn try_from(value: IntAddr) -> Result<Self, Self::Error> {
+        match value {
+            IntAddr::Std(addr) => Ok(Self {
+                workchain: addr.workchain,
+                account: addr.address,
+            }),
+            IntAddr::Var(_) => {
+                bail!("VarAddr is not supported")
+            }
+        }
+    }
+}
+
+impl TlWrite for RouterAddr {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        1 + tl::hash_bytes::SIZE_HINT
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: tl_proto::TlPacket,
+    {
+        packet.write_raw_slice(&[self.workchain as u8]);
+        tl::hash_bytes::write(&self.account, packet);
+    }
+}
+
+impl<'tl> TlRead<'tl> for RouterAddr {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(data: &mut &'tl [u8]) -> tl_proto::TlResult<Self> {
+        if data.is_empty() {
+            return Err(tl_proto::TlError::UnexpectedEof);
+        }
+
+        let workchain = data[0] as i8;
+        *data = &data[1..];
+
+        let account = tl::hash_bytes::read(data)?;
+
+        Ok(Self { workchain, account })
+    }
+}
+
+impl RouterAddr {
+    pub const SIZE_HINT: usize = 1 + 32;
+
+    pub fn to_int_addr(&self) -> IntAddr {
+        IntAddr::Std(StdAddr {
+            anycast: None,
+            workchain: self.workchain,
+            address: self.account,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn queue_diff_binary_repr() {
+        let mut partition_router = BTreeMap::new();
+
+        let addr1 = RouterAddr {
+            workchain: 0,
+            account: HashBytes::from([0x01; 32]),
+        };
+
+        let addr2 = RouterAddr {
+            workchain: 1,
+            account: HashBytes::from([0x02; 32]),
+        };
+
+        let mut partition_map = BTreeMap::new();
+        partition_map.insert(1, BTreeSet::from([addr1, addr2]));
+
+        partition_router.insert(RouterDirection::Dest, partition_map);
+
         let mut diff = QueueDiff {
             hash: HashBytes::ZERO, // NOTE: Uninitialized
             prev_hash: HashBytes::from([0x33; 32]),
             shard_ident: ShardIdent::MASTERCHAIN,
             seqno: 123,
-            processed_upto: BTreeMap::from([
+            processed_to: BTreeMap::from([
                 (ShardIdent::MASTERCHAIN, QueueKey {
                     lt: 1,
                     hash: HashBytes::from([0x11; 32]),
@@ -469,6 +679,7 @@ mod tests {
                 HashBytes::from([0x02; 32]),
                 HashBytes::from([0x03; 32]),
             ],
+            partition_router,
         };
 
         let bytes = tl_proto::serialize(&diff);
@@ -485,6 +696,22 @@ mod tests {
     fn queue_state_binary_repr() {
         let mut queue_diffs = Vec::<QueueDiff>::new();
         for seqno in 1..=10 {
+            let mut partition_router = BTreeMap::new();
+
+            let addr1 = RouterAddr {
+                workchain: 0,
+                account: HashBytes::from([0x01; 32]),
+            };
+
+            let addr2 = RouterAddr {
+                workchain: 1,
+                account: HashBytes::from([0x02; 32]),
+            };
+
+            let mut partition_map = BTreeMap::new();
+            partition_map.insert(1, BTreeSet::from([addr1, addr2]));
+
+            partition_router.insert(RouterDirection::Dest, partition_map);
             let prev_hash = queue_diffs.last().map(|diff| diff.hash).unwrap_or_default();
 
             let mut diff = QueueDiff {
@@ -492,7 +719,7 @@ mod tests {
                 prev_hash,
                 shard_ident: ShardIdent::MASTERCHAIN,
                 seqno,
-                processed_upto: BTreeMap::from([
+                processed_to: BTreeMap::from([
                     (ShardIdent::MASTERCHAIN, QueueKey {
                         lt: 10 * seqno as u64,
                         hash: HashBytes::from([seqno as u8; 32]),
@@ -515,6 +742,7 @@ mod tests {
                     HashBytes::from([0x02; 32]),
                     HashBytes::from([0x03; 32]),
                 ],
+                partition_router,
             };
 
             // NOTE: We need this for the hash computation.

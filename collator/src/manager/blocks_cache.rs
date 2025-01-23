@@ -6,7 +6,7 @@ use everscale_types::models::{
     BlockId, BlockIdShort, ConsensusInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -18,7 +18,8 @@ use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProofFunds, TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, ProofFunds,
+    TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -44,6 +45,12 @@ impl BlocksCache {
         for mut shard_cache in self.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
+                    let processed_to = entry
+                        .int_processed_to()
+                        .iter()
+                        .map(|(shard, queue_key)| (*shard, *queue_key))
+                        .collect();
+
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
                     {
@@ -55,6 +62,7 @@ impl BlocksCache {
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
                             #[cfg(feature = "block-creator-stats")]
                             creators: std::mem::take(&mut shard_cache.data.creators),
+                            processed_to,
                         });
                         break;
                     }
@@ -85,11 +93,10 @@ impl BlocksCache {
         Ok(consensus_info)
     }
 
-    pub fn reset_top_shard_blocks_additional_info(&self) -> Result<()> {
+    pub fn reset_top_shard_blocks_additional_info(&self) {
         for mut shard_cache in self.shards.iter_mut() {
-            shard_cache.data.reset_top_shard_block_additional_info()?;
+            shard_cache.data.reset_top_shard_block_additional_info();
         }
-        Ok(())
     }
 
     /// Find shard block in cache and then get containing master block id if link exists
@@ -133,7 +140,7 @@ impl BlocksCache {
     pub fn get_all_processed_to_by_mc_block_from_cache(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, Option<BTreeMap<ShardIdent, QueueKey>>>> {
+    ) -> Result<FastHashMap<BlockId, Option<ProcessedTo>>> {
         let mut all_processed_to = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
@@ -149,6 +156,9 @@ impl BlocksCache {
                     mc_block_key,
                 )
             };
+
+            let processed_to = mc_block_entry.int_processed_to().clone();
+
             updated_top_shard_block_ids = mc_block_entry
                 .top_shard_blocks_info
                 .iter()
@@ -156,10 +166,7 @@ impl BlocksCache {
                 .map(|(id, _)| id)
                 .cloned()
                 .collect::<Vec<_>>();
-            all_processed_to.insert(
-                mc_block_entry.block_id,
-                Some(mc_block_entry.int_processed_to().clone()),
-            );
+            all_processed_to.insert(mc_block_entry.block_id, Some(processed_to));
         }
 
         for top_sc_block_id in updated_top_shard_block_ids {
@@ -167,15 +174,16 @@ impl BlocksCache {
                 continue;
             }
 
+            let mut processed_to_opt = None;
+
             // try to find in cache
-            let mut int_processed_to_opt = None;
             if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    int_processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
+                    processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
                 }
             }
 
-            all_processed_to.insert(top_sc_block_id, int_processed_to_opt);
+            all_processed_to.insert(top_sc_block_id, processed_to_opt);
         }
 
         Ok(all_processed_to)
@@ -900,14 +908,12 @@ impl ShardBlocksCacheData {
         Ok(())
     }
 
-    fn reset_top_shard_block_additional_info(&mut self) -> Result<()> {
+    fn reset_top_shard_block_additional_info(&mut self) {
         self.value_flow = Default::default();
         self.proof_funds = Default::default();
 
         #[cfg(feature = "block-creator-stats")]
         self.creators.clear();
-
-        Ok(())
     }
 }
 

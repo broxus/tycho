@@ -1,26 +1,120 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{hash_map, BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
 use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
-use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::{
+    QueueDiff, QueueDiffStuff, QueueKey, QueuePartition, RouterAddr, RouterDirection,
+};
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::state::state_iterator::MessageExt;
+use crate::types::ProcessedTo;
+
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
+pub struct PartitionRouter {
+    router: FastHashMap<RouterDirection, FastHashMap<IntAddr, QueuePartition>>,
+    partitions: FastHashSet<QueuePartition>,
+}
+
+impl PartitionRouter {
+    pub fn new() -> Self {
+        Self {
+            router: Default::default(),
+            partitions: Default::default(),
+        }
+    }
+
+    /// Returns the partition for the given source and destination addresses.
+    /// If the partition is not found, returns the default partition.
+    pub fn get_partition(&self, src_addr: Option<&IntAddr>, dest_addr: &IntAddr) -> QueuePartition {
+        self.router
+            .get(&RouterDirection::Dest)
+            .and_then(|dest_router| dest_router.get(dest_addr).cloned())
+            .or_else(|| {
+                src_addr.and_then(|src_addr| {
+                    self.router
+                        .get(&RouterDirection::Src)
+                        .and_then(|src_router| src_router.get(src_addr).cloned())
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Inserts the address into the router.
+    pub fn insert(
+        &mut self,
+        direction: RouterDirection,
+        addr: IntAddr,
+        partition: QueuePartition,
+    ) -> Result<()> {
+        if partition == QueuePartition::default() {
+            bail!("Attempt to insert address into default priority partition");
+        }
+
+        let direction_router = self.router.entry(direction).or_default();
+
+        direction_router.insert(addr, partition);
+
+        self.partitions.insert(partition);
+
+        Ok(())
+    }
+
+    pub fn partitions(&self) -> &FastHashSet<QueuePartition> {
+        &self.partitions
+    }
+
+    pub fn clear(&mut self) {
+        self.router.clear();
+        self.partitions.clear();
+    }
+}
+
+impl From<BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>>
+    for PartitionRouter
+{
+    fn from(
+        value: BTreeMap<RouterDirection, BTreeMap<QueuePartition, BTreeSet<RouterAddr>>>,
+    ) -> Self {
+        let mut router = FastHashMap::default();
+
+        let mut full_partitions = FastHashSet::default();
+
+        for (direction, direction_router) in value {
+            let mut partitions = FastHashMap::default();
+            for (partition, addresses) in direction_router {
+                for address in &addresses {
+                    partitions.insert(address.to_int_addr(), partition);
+                    full_partitions.insert(partition);
+                }
+            }
+            router.insert(direction, partitions);
+        }
+
+        Self {
+            router,
+            partitions: full_partitions,
+        }
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
-    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub processed_to: ProcessedTo,
+    pub partition_router: PartitionRouter,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
     pub fn new() -> Self {
         Self {
             messages: BTreeMap::new(),
-            processed_upto: BTreeMap::new(),
+            processed_to: BTreeMap::new(),
+            partition_router: Default::default(),
         }
     }
 }
@@ -30,11 +124,17 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         queue_diff_stuff: &QueueDiffStuff,
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
-        let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
-        let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
+        let QueueDiff {
+            processed_to,
+            partition_router,
+            ..
+        } = queue_diff_stuff.as_ref();
+        let processed_to: BTreeMap<ShardIdent, QueueKey> = processed_to
             .iter()
             .map(|(shard_ident, key)| (*shard_ident, *key))
             .collect();
+
+        let partition_router = PartitionRouter::from(partition_router.clone());
 
         let mut messages: BTreeMap<QueueKey, Arc<_>> = BTreeMap::new();
         for msg in queue_diff_stuff.zip(out_msg_description) {
@@ -51,7 +151,8 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
 
         Ok(Self {
             messages,
-            processed_upto,
+            processed_to,
+            partition_router,
         })
     }
 }
@@ -90,8 +191,12 @@ impl From<(IntMsgInfo, Cell)> for EnqueuedMessage {
 }
 
 impl EnqueuedMessage {
-    pub fn destination(&self) -> &IntAddr {
+    pub fn dest(&self) -> &IntAddr {
         &self.info.dst
+    }
+
+    pub fn src(&self) -> &IntAddr {
+        &self.info.src
     }
 
     pub fn hash(&self) -> &HashBytes {
@@ -137,6 +242,8 @@ pub trait InternalMessageValue: Send + Sync + Ord + 'static {
     where
         Self: Sized;
 
+    fn source(&self) -> &IntAddr;
+
     fn destination(&self) -> &IntAddr;
 
     fn key(&self) -> QueueKey;
@@ -163,11 +270,223 @@ impl InternalMessageValue for EnqueuedMessage {
         Ok(Boc::encode(&self.cell))
     }
 
+    fn source(&self) -> &IntAddr {
+        self.src()
+    }
+
     fn destination(&self) -> &IntAddr {
-        self.destination()
+        self.dest()
     }
 
     fn key(&self) -> QueueKey {
         self.key()
+    }
+}
+
+pub struct PartitionQueueKey {
+    pub partition: QueuePartition,
+    pub key: QueueKey,
+}
+#[derive(Debug, Clone)]
+pub struct QueueShardRange {
+    pub shard_ident: ShardIdent,
+    pub from: QueueKey,
+    pub to: QueueKey,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueRange {
+    pub partition: QueuePartition,
+    pub shard_ident: ShardIdent,
+    pub from: QueueKey,
+    pub to: QueueKey,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct QueueStatistics {
+    statistics: FastHashMap<IntAddr, u64>,
+}
+
+impl QueueStatistics {
+    pub fn with_statistics(statistics: FastHashMap<IntAddr, u64>) -> Self {
+        Self { statistics }
+    }
+
+    pub fn statistics(&self) -> &FastHashMap<IntAddr, u64> {
+        &self.statistics
+    }
+
+    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        if let hash_map::Entry::Occupied(mut occupied) = self.statistics.entry(account_addr) {
+            let value = occupied.get_mut();
+            *value -= count;
+            if *value == 0 {
+                occupied.remove();
+            }
+        }
+    }
+
+    pub fn append(&mut self, other: &Self) {
+        for (account_addr, &msgs_count) in &other.statistics {
+            self.statistics
+                .entry(account_addr.clone())
+                .and_modify(|count| *count += msgs_count)
+                .or_insert(msgs_count);
+        }
+    }
+
+    pub fn append_diff_statistics(&mut self, diff_statistics: &DiffStatistics) {
+        for (_, par_stats) in diff_statistics.inner.statistics.clone() {
+            for (account_addr, msgs_count) in par_stats {
+                self.statistics
+                    .entry(account_addr)
+                    .and_modify(|count| *count += msgs_count)
+                    .or_insert(msgs_count);
+            }
+        }
+    }
+}
+
+impl PartialEq for QueueStatistics {
+    fn eq(&self, other: &Self) -> bool {
+        self.statistics == other.statistics
+    }
+}
+
+impl Eq for QueueStatistics {}
+
+impl IntoIterator for QueueStatistics {
+    type Item = (IntAddr, u64);
+    type IntoIter = hash_map::IntoIter<IntAddr, u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.statistics.into_iter()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffStatistics {
+    inner: Arc<DiffStatisticsInner>,
+}
+
+impl DiffStatistics {
+    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartition, &FastHashMap<IntAddr, u64>)> {
+        self.inner.statistics.iter()
+    }
+
+    pub fn shard_ident(&self) -> &ShardIdent {
+        &self.inner.shard_ident
+    }
+
+    pub fn min_message(&self) -> &QueueKey {
+        &self.inner.min_message
+    }
+
+    pub fn max_message(&self) -> &QueueKey {
+        &self.inner.max_message
+    }
+
+    pub fn partition(&self, partition: QueuePartition) -> Option<&FastHashMap<IntAddr, u64>> {
+        self.inner.statistics.get(&partition)
+    }
+}
+#[derive(Debug, Clone)]
+struct DiffStatisticsInner {
+    shard_ident: ShardIdent,
+    min_message: QueueKey,
+    max_message: QueueKey,
+    statistics: FastHashMap<QueuePartition, FastHashMap<IntAddr, u64>>,
+}
+
+impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
+    fn from(value: (&QueueDiffWithMessages<V>, ShardIdent)) -> Self {
+        let (diff, shard_ident) = value;
+        let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
+        let max_message = diff.messages.keys().last().cloned().unwrap_or_default();
+
+        let mut statistics = FastHashMap::default();
+
+        for message in diff.messages.values() {
+            let destination = message.destination();
+
+            let partition = diff
+                .partition_router
+                .get_partition(Some(message.source()), destination);
+
+            *statistics
+                .entry(partition)
+                .or_insert(FastHashMap::default())
+                .entry(destination.clone())
+                .or_insert(0) += 1;
+        }
+
+        Self {
+            inner: Arc::new(DiffStatisticsInner {
+                shard_ident,
+                min_message,
+                max_message,
+                statistics,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::*;
+
+    #[test]
+    fn test_partition_router_from_btreemap() {
+        let addr1 = RouterAddr {
+            workchain: 0,
+            account: HashBytes([0x01; 32]),
+        };
+        let addr2 = RouterAddr {
+            workchain: 0,
+            account: HashBytes([0x02; 32]),
+        };
+        let addr3 = RouterAddr {
+            workchain: 1,
+            account: HashBytes([0x03; 32]),
+        };
+        let addr4 = RouterAddr {
+            workchain: 1,
+            account: HashBytes([0x04; 32]),
+        };
+
+        let mut dest_map = BTreeMap::new();
+        dest_map.insert(1, BTreeSet::from([addr1, addr2]));
+        dest_map.insert(2, BTreeSet::from([addr3]));
+
+        let mut src_map = BTreeMap::new();
+        src_map.insert(10, BTreeSet::from([addr4]));
+
+        let mut router_data = BTreeMap::new();
+        router_data.insert(RouterDirection::Dest, dest_map);
+        router_data.insert(RouterDirection::Src, src_map);
+
+        let partition_router = PartitionRouter::from(router_data);
+
+        {
+            let expected_partitions = [1, 2, 10].into_iter().collect::<FastHashSet<_>>();
+            assert_eq!(partition_router.partitions(), &expected_partitions);
+        }
+
+        {
+            // Dest
+            let dest_router = partition_router.router.get(&RouterDirection::Dest).unwrap();
+            // addr1 и addr2 -> partition 1
+            assert_eq!(*dest_router.get(&addr1.to_int_addr()).unwrap(), 1);
+            assert_eq!(*dest_router.get(&addr2.to_int_addr()).unwrap(), 1);
+            // addr3 -> partition 2
+            assert_eq!(*dest_router.get(&addr3.to_int_addr()).unwrap(), 2);
+
+            // Src
+            let src_router = partition_router.router.get(&RouterDirection::Src).unwrap();
+            // addr4 -> partition 10
+            assert_eq!(*src_router.get(&addr4.to_int_addr()).unwrap(), 10);
+        }
     }
 }

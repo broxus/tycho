@@ -9,6 +9,7 @@ use everscale_types::prelude::*;
 use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
+use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
@@ -16,21 +17,22 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
+use super::messages_reader::ReaderState;
 use super::types::{
-    AnchorsCache, BlockCollationDataBuilder, CollationResult, ExecuteResult, FinalizedBlock,
-    FinalizedCollationResult, ParsedExternals, PrevData, ReadNextExternalsMode, WorkingState,
+    AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, CollationResult,
+    ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
+    FinalizeMessagesReaderResult, PrevData, ShardDescriptionExt, WorkingState,
 };
 use super::{CollatorStdImpl, ForceMasterCollation};
-use crate::collator::types::{
-    AnchorInfo, BlockCollationData, FinalResult, ParsedMessage, RandSeed, ShardDescriptionExt,
-    UpdateQueueDiffResult,
-};
+use crate::collator::do_collate::finalize::FinalizeBlockContext;
+use crate::collator::types::RandSeed;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, TopBlockDescription,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
+    TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -42,6 +44,7 @@ mod execution_wrapper;
 mod finalize;
 mod phase;
 mod prepare;
+pub mod work_units;
 
 impl CollatorStdImpl {
     /// [`force_next_mc_block`] - should force next master block collation after this block
@@ -70,7 +73,7 @@ impl CollatorStdImpl {
             wu_used_from_last_anchor,
             prev_shard_data,
             usage_tree,
-            msgs_buffer,
+            reader_state,
             ..
         } = *working_state;
 
@@ -93,7 +96,7 @@ impl CollatorStdImpl {
             ..
         }) = self.anchors_cache.last_imported_anchor()
         else {
-            bail!("last_imported_anchor should exist when we collationg block")
+            bail!("last_imported_anchor should exist when we collating block")
         };
         let created_by = author.to_bytes().into();
 
@@ -110,7 +113,6 @@ impl CollatorStdImpl {
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
-            msgs_buffer,
             mc_data,
             prev_shard_data,
             shard_id: self.shard_id,
@@ -118,6 +120,7 @@ impl CollatorStdImpl {
 
         let CollationResult {
             finalized,
+            reader_state,
             anchors_cache,
             execute_result,
             final_result,
@@ -132,6 +135,7 @@ impl CollatorStdImpl {
                 Self::run(
                     config,
                     mq_adapter,
+                    reader_state,
                     anchors_cache,
                     state,
                     collation_session,
@@ -154,17 +158,17 @@ impl CollatorStdImpl {
         self.logs(
             &execute_result,
             &final_result,
-            finalize_wu_total,
             &finalized.collation_data,
             block_id,
         );
 
-        let FinalizedCollationResult {
+        let FinalizeCollationResult {
             handle_block_candidate_elapsed,
         } = self
             .finalize_collation(
                 final_result.has_unprocessed_messages,
                 finalized,
+                reader_state,
                 tracker,
                 force_next_mc_block,
             )
@@ -219,9 +223,11 @@ impl CollatorStdImpl {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run(
-        config: Arc<CollatorConfig>,
+        collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        reader_state: ReaderState,
         anchors_cache: AnchorsCache,
         state: Box<ActualState>,
         collation_session: Arc<CollationSessionInfo>,
@@ -229,25 +235,31 @@ impl CollatorStdImpl {
         usage_tree: UsageTree,
     ) -> Result<CollationResult> {
         let shard_id = state.shard_id;
-        let labels: [(&str, String); 1] = [("workchain", shard_id.workchain().to_string())];
+        let labels = [("workchain", shard_id.workchain().to_string())];
+        let mc_data = state.mc_data.clone();
 
-        let prepare_histogram =
+        // prepare execution
+        let histogram_prepare =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
-        let prepare_phase =
-            Phase::<PrepareState>::new(config.clone(), mq_adapter, anchors_cache, state);
+        let prepare_phase = Phase::<PrepareState>::new(
+            collator_config.clone(),
+            mq_adapter.clone(),
+            reader_state,
+            anchors_cache,
+            state,
+        );
 
         let mut execute_phase = prepare_phase.run()?;
 
-        let prepare_elapsed = prepare_histogram.finish();
+        let prepare_elapsed = histogram_prepare.finish();
 
-        let is_masterchain = shard_id.is_masterchain();
-        let execute_tick_elapsed = if is_masterchain {
-            // execute tick transaction and special transactions (mint, recover)
+        // execute tick transaction and special transactions (mint, recover)
+        let execute_tick_elapsed = if shard_id.is_masterchain() {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
-            execute_phase.execute_tick_transaction()?;
+            execute_phase.execute_tick_transactions()?;
 
             execute_phase.execute_special_transactions()?;
 
@@ -256,67 +268,123 @@ impl CollatorStdImpl {
             Duration::ZERO
         };
 
-        let execute_histogram =
-            HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
+        // execute incoming messages
+        let execute_elapsed = {
+            let histogram =
+                HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
 
-        execute_phase.run()?;
+            execute_phase.run()?;
 
-        let execute_elapsed = execute_histogram.finish();
+            histogram.finish()
+        };
 
         // execute tock transaction
-        let execute_tock_elapsed = if is_masterchain {
+        let execute_tock_elapsed = if shard_id.is_masterchain() {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
-            execute_phase.execute_tock_transaction()?;
+
+            execute_phase.execute_tock_transactions()?;
 
             histogram.finish()
         } else {
             Duration::ZERO
         };
 
-        let (mut finalize_phase, anchors_cache, execution_wrapper) = execute_phase.destruct();
-
-        let (executor, mq_iterator_adapter, mq_adapter) = execution_wrapper.destruct();
+        let (mut finalize_phase, messages_reader) = execute_phase.finish();
 
         let (
-            UpdateQueueDiffResult {
+            FinalizeMessagesReaderResult {
                 queue_diff,
+                queue_diff_messages_count,
                 has_unprocessed_messages,
-                diff_messages_len,
+                reader_state,
+                anchors_cache,
                 create_queue_diff_elapsed,
             },
             update_queue_task,
-        ) = finalize_phase.update_queue_diff(mq_iterator_adapter, shard_id, mq_adapter)?;
+        ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
 
         let finalize_block_timer = std::time::Instant::now();
+
+        let mut processed_upto = reader_state.get_updated_processed_upto();
+        // store actual messages execution params
+        processed_upto.msgs_exec_params = Some(
+            finalize_phase
+                .state
+                .collation_config
+                .msgs_exec_params
+                .clone(),
+        );
+
+        // log updated processed upto
+        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
+
+        // report actual ranges count to metrics
+        for (partition_id, partition) in &processed_upto.partitions {
+            let labels = [
+                ("workchain", shard_id.workchain().to_string()),
+                ("partition", partition_id.to_string()),
+            ];
+            metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
+                .set(partition.externals.ranges.len() as f64);
+            metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
+                .set(partition.internals.ranges.len() as f64);
+        }
+
+        // get min processed to for current shard from shard and mc_data
+        let current_min_processed_to = processed_upto
+            .get_min_internals_processed_to_by_shards()
+            .get(&shard_id)
+            .cloned();
+        let min_processed_to_from_mc_data = mc_data
+            .processed_upto
+            .get_min_internals_processed_to_by_shards()
+            .get(&shard_id)
+            .cloned();
+
+        // calculate minimal internals processed_to for this shard
+        let min_processed_to = calculate_min_internals_processed_to(
+            &shard_id,
+            current_min_processed_to,
+            min_processed_to_from_mc_data,
+            &mc_data.shards,
+            &mc_data.shards_processed_to,
+        );
+
+        // trim outdated diffs and calc queue diffs tail lenght
+        if let Some(value) = min_processed_to {
+            mq_adapter.trim_diffs(&shard_id, &value)?;
+        };
+        let diff_tail_len = mq_adapter.get_diffs_count_by_shard(&shard_id) as u32 + 1;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
             || {
                 let _span = span.enter();
 
-                finalize_phase.finalize_block(
+                finalize_phase.finalize_block(FinalizeBlockContext {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
                     queue_diff,
-                    config,
-                    executor,
-                )
+                    collator_config,
+                    processed_upto,
+                    diff_tail_len,
+                })
             },
             // wait update queue task before returning collation result
             // to be sure that queue was updated before block commit and next block collation
             update_queue_task,
         );
-        // build block candidate and new state
         let (finalized, execute_result) = finalize_phase_result?;
+
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
         let apply_queue_diff_elapsed = update_queue_task_result?;
 
         assert_eq!(
             finalized.collation_data.int_enqueue_count,
-            finalized.collation_data.inserted_new_msgs_to_iterator_count
+            finalized.collation_data.inserted_new_msgs_count
                 - finalized.collation_data.execute_count_new_int
         );
 
@@ -324,7 +392,7 @@ impl CollatorStdImpl {
             prepare_elapsed,
             finalize_block_elapsed,
             has_unprocessed_messages,
-            diff_messages_len,
+            queue_diff_messages_count,
             execute_elapsed,
             execute_tick_elapsed,
             execute_tock_elapsed,
@@ -334,346 +402,10 @@ impl CollatorStdImpl {
 
         Ok(CollationResult {
             finalized,
+            reader_state,
             anchors_cache,
             execute_result,
             final_result,
-        })
-    }
-
-    /// Read specified number of externals from imported anchors
-    /// using actual `processed_upto` info
-    #[allow(clippy::vec_box)]
-    pub(super) fn read_next_externals(
-        shard_id: &ShardIdent,
-        anchors_cache: &mut AnchorsCache,
-        count: usize,
-        next_chain_time: u64,
-        processed_upto_externals: &mut Option<ExternalsProcessedUpto>,
-        current_reader_position: Option<(u32, u64)>,
-        read_mode: ReadNextExternalsMode,
-    ) -> Result<ParsedExternals> {
-        let labels = [("workchain", shard_id.workchain().to_string())];
-
-        tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-            "shard: {}, count: {}", shard_id, count,
-        );
-
-        // get previous read_to
-        let (prev_read_to_anchor_id, prev_read_to_msgs_offset) = processed_upto_externals
-            .as_ref()
-            .map(|upto| upto.read_to)
-            .unwrap_or_default();
-
-        let was_read_to_opt = current_reader_position.or_else(|| {
-            processed_upto_externals
-                .as_ref()
-                .map(|upto| upto.processed_to)
-        });
-        let (was_read_to_anchor_id, was_read_to_msgs_offset) = was_read_to_opt.unwrap_or_default();
-        tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-            "prev_read_to: ({}, {}), read_mode: {:?}, current_reader_position: {:?}, was_read_to: ({}, {})",
-            prev_read_to_anchor_id, prev_read_to_msgs_offset,
-            read_mode, current_reader_position,
-            was_read_to_anchor_id, was_read_to_msgs_offset,
-        );
-
-        // when read_from is not defined on the blockchain start
-        // then read from the first available anchor
-        let mut read_from_anchor_id_opt = None;
-        let mut last_read_anchor_id_opt = None;
-        let mut msgs_read_offset_in_last_anchor = 0;
-        let mut total_msgs_collected = 0;
-        let mut ext_messages = vec![];
-        let mut has_pending_externals_in_last_read_anchor = false;
-
-        let mut anchors_cache_fully_read = false;
-        let mut last_read_to_anchor_chain_time = None;
-        let mut prev_read_to_reached = false;
-
-        let mut count_expired_anchors = 0_u32;
-        let mut count_expired_messages = 0_u64;
-
-        let next_idx = 0;
-        loop {
-            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "try read next anchor from cache",
-            );
-            // try read next anchor
-            let next_entry = anchors_cache.get(next_idx);
-            let (anchor_id, anchor) = match next_entry {
-                Some(entry) => entry,
-                // stop reading if there is no next anchor
-                None => {
-                    tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "no next entry in anchors cache",
-                    );
-                    anchors_cache_fully_read = true;
-                    break;
-                }
-            };
-
-            if anchor_id < was_read_to_anchor_id {
-                // skip and remove already read anchor from cache
-                assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "anchor with id {} already read, removed from anchors cache", anchor_id,
-                );
-                // try read next anchor
-                continue;
-            }
-
-            if read_from_anchor_id_opt.is_none() {
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "read_from_anchor_id: {}", anchor_id,
-                );
-                read_from_anchor_id_opt = Some(anchor_id);
-            }
-            last_read_anchor_id_opt = Some(anchor_id);
-            last_read_to_anchor_chain_time = Some(anchor.chain_time);
-            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "last_read_anchor_id: {}", anchor_id,
-            );
-
-            // detect messages read offset for current anchor
-            if anchor_id == was_read_to_anchor_id {
-                // read first anchor from offset in processed upto
-                msgs_read_offset_in_last_anchor = was_read_to_msgs_offset;
-            } else {
-                // read every next anchor from 0
-                msgs_read_offset_in_last_anchor = 0;
-            }
-
-            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "next anchor externals count: {}, msgs_read_offset_in_last_anchor: {}",
-                anchor.externals.len(), msgs_read_offset_in_last_anchor,
-            );
-
-            // possibly previous read_to already reached
-            if read_mode == ReadNextExternalsMode::ToPreviuosReadTo
-                && ((anchor_id == prev_read_to_anchor_id
-                    && msgs_read_offset_in_last_anchor == prev_read_to_msgs_offset)
-                    || anchor_id > prev_read_to_anchor_id)
-            {
-                // then do not read externals
-                return Ok(ParsedExternals {
-                    ext_messages: vec![],
-                    current_reader_position,
-                    last_read_to_anchor_chain_time: None,
-                    was_stopped_on_prev_read_to_reached: true,
-                    count_expired_anchors: 0,
-                    count_expired_messages: 0,
-                });
-            }
-
-            // skip and remove fully read anchor
-            if anchor_id == was_read_to_anchor_id
-                && anchor.externals.len() == was_read_to_msgs_offset as usize
-            {
-                assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "anchor with id {} was fully read before, removed from anchors cache", anchor_id,
-                );
-                // try read next anchor
-                continue;
-            }
-
-            // skip expired anchor
-            const EXTERNALS_EXPIRE_TIMEOUT: u64 = 60_000; // 1 minute
-
-            if next_chain_time.saturating_sub(anchor.chain_time) > EXTERNALS_EXPIRE_TIMEOUT {
-                let iter_from = if anchor_id == was_read_to_anchor_id {
-                    was_read_to_msgs_offset as usize
-                } else {
-                    0
-                };
-                let iter = anchor.iter_externals(iter_from);
-                let mut expired_msgs_count = 0;
-                for ext_msg in iter {
-                    if shard_id.contains_address(&ext_msg.info.dst) {
-                        tracing::trace!(target: tracing_targets::COLLATOR,
-                            "ext_msg hash: {}, dst: {} is expired by timeout {} ms",
-                            ext_msg.hash(), ext_msg.info.dst, EXTERNALS_EXPIRE_TIMEOUT,
-                        );
-                        expired_msgs_count += 1;
-                    }
-                }
-
-                metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
-                    .increment(expired_msgs_count);
-                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                    .decrement(expired_msgs_count as f64);
-
-                // skip and remove expired anchor
-                assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "anchor with id {} fully skipped due to expiration, removed from anchors cache", anchor_id,
-                );
-
-                count_expired_anchors = count_expired_anchors.saturating_add(1);
-                count_expired_messages = count_expired_messages.saturating_add(expired_msgs_count);
-
-                // try read next anchor
-                continue;
-            }
-
-            // get iterator and read messages
-            let mut msgs_collected_from_last_anchor = 0;
-            let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
-
-            for ext_msg in iter {
-                tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "read ext_msg dst: {}", ext_msg.info.dst,
-                );
-
-                if total_msgs_collected < count && !prev_read_to_reached {
-                    msgs_read_offset_in_last_anchor += 1;
-                }
-                let stop_reading = if shard_id.contains_address(&ext_msg.info.dst) {
-                    if total_msgs_collected < count && !prev_read_to_reached {
-                        // get msgs for target shard until target count reached
-                        ext_messages.push(Box::new(ParsedMessage {
-                            info: MsgInfo::ExtIn(ext_msg.info.clone()),
-                            dst_in_current_shard: true,
-                            cell: ext_msg.cell.clone(),
-                            special_origin: None,
-                            dequeued: None,
-                        }));
-                        total_msgs_collected += 1;
-                        msgs_collected_from_last_anchor += 1;
-                        tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                            "collected ext_msg dst: {}", ext_msg.info.dst,
-                        );
-                        false
-                    } else {
-                        // when target msgs count reached
-                        // continue looking thru remaining msgs
-                        // to detect if exist unread for target shard
-                        has_pending_externals_in_last_read_anchor = true;
-                        true
-                    }
-                } else {
-                    false
-                };
-
-                // if required, stop reading anchors when previous read_to reached
-                if read_mode == ReadNextExternalsMode::ToPreviuosReadTo
-                    && anchor_id == prev_read_to_anchor_id
-                    && msgs_read_offset_in_last_anchor == prev_read_to_msgs_offset
-                {
-                    prev_read_to_reached = true;
-                }
-
-                if stop_reading {
-                    break;
-                }
-            }
-
-            metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                .decrement(msgs_collected_from_last_anchor as f64);
-
-            tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "{} externals collected from anchor {}, msgs_read_offset_in_last_anchor: {}",
-                msgs_collected_from_last_anchor, anchor_id, msgs_read_offset_in_last_anchor,
-            );
-
-            // remove fully read anchor
-            if anchor.externals.len() == msgs_read_offset_in_last_anchor as usize {
-                assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "anchor with id {} just fully read, removed from anchors cache", anchor_id,
-                );
-            }
-
-            if prev_read_to_reached {
-                tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "stopped reading externals when prev read_to reached: ({}, {})",
-                    prev_read_to_anchor_id, prev_read_to_msgs_offset,
-                );
-                break;
-            }
-
-            if total_msgs_collected == count {
-                // stop reading anchors when target msgs count reached
-                break;
-            }
-        }
-
-        tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-            "total_msgs_collected: {}, target msgs count: {}, has_pending_externals_in_last_read_anchor: {}",
-            total_msgs_collected, count, has_pending_externals_in_last_read_anchor,
-        );
-
-        // update read up to info
-        if last_read_anchor_id_opt.is_none() || anchors_cache_fully_read {
-            if let Some(&AnchorInfo {
-                id, all_exts_count, ..
-            }) = anchors_cache.last_imported_anchor()
-            {
-                last_read_anchor_id_opt = Some(id);
-                msgs_read_offset_in_last_anchor = all_exts_count as _;
-                if read_from_anchor_id_opt.is_none() {
-                    read_from_anchor_id_opt = Some(id);
-                }
-            }
-        }
-        let current_reader_position = if let Some(last_read_anchor_id) = last_read_anchor_id_opt {
-            let current_read_to = (last_read_anchor_id, msgs_read_offset_in_last_anchor);
-
-            // update processed read to only when current position is above
-            if let Some(externals_upto) = processed_upto_externals {
-                if last_read_anchor_id > prev_read_to_anchor_id
-                    || (current_read_to.0 == prev_read_to_anchor_id
-                        && current_read_to.1 > prev_read_to_msgs_offset)
-                {
-                    externals_upto.read_to = current_read_to;
-                }
-            } else {
-                *processed_upto_externals = Some(ExternalsProcessedUpto {
-                    processed_to: (read_from_anchor_id_opt.unwrap(), was_read_to_msgs_offset),
-                    read_to: current_read_to,
-                });
-            }
-
-            Some(current_read_to)
-        } else {
-            None
-        };
-
-        // check if we still have pending externals
-        let has_pending_externals = if has_pending_externals_in_last_read_anchor {
-            true
-        } else {
-            let has_pending_externals = if last_read_anchor_id_opt.is_some() {
-                anchors_cache.len() > 0
-            } else {
-                anchors_cache.has_pending_externals()
-            };
-
-            tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "remaning anchors in cache has pending externals: {}", has_pending_externals,
-            );
-            has_pending_externals
-        };
-
-        if !has_pending_externals {
-            tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
-                processed_upto_externals,
-            );
-        }
-
-        anchors_cache.set_has_pending_externals(has_pending_externals);
-
-        Ok(ParsedExternals {
-            ext_messages,
-            current_reader_position,
-            last_read_to_anchor_chain_time,
-            was_stopped_on_prev_read_to_reached: prev_read_to_reached,
-            count_expired_anchors,
-            count_expired_messages,
         })
     }
 
@@ -847,6 +579,7 @@ impl CollatorStdImpl {
                 proof_funds,
                 #[cfg(feature = "block-creator-stats")]
                 creators,
+                processed_to,
             } = top_block_descr;
 
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
@@ -904,7 +637,14 @@ impl CollatorStdImpl {
                 collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
             }
 
-            collation_data_builder.top_shard_blocks_ids.push(block_id);
+            let top_shard_block_info = TopShardBlockInfo {
+                block_id,
+                processed_to,
+            };
+
+            collation_data_builder
+                .top_shard_blocks
+                .push(top_shard_block_info);
             #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }
@@ -991,7 +731,6 @@ impl CollatorStdImpl {
             rand_seed,
             mc_data.block_id.seqno,
             next_chain_time,
-            prev_shard_data.processed_upto().clone(),
             created_by,
             GlobalVersion {
                 version: self.config.supported_block_version,
@@ -1045,10 +784,11 @@ impl CollatorStdImpl {
     async fn finalize_collation(
         &mut self,
         has_unprocessed_messages: bool,
-        finalized: FinalizedBlock,
+        finalized: FinalizeBlockResult,
+        reader_state: ReaderState,
         tracker: MinRefMcStateTracker,
         force_next_mc_block: ForceMasterCollation,
-    ) -> Result<FinalizedCollationResult> {
+    ) -> Result<FinalizeCollationResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
         let block_id = *finalized.block_candidate.block.id();
@@ -1114,7 +854,7 @@ impl CollatorStdImpl {
                 new_mc_data,
                 collation_config,
                 has_unprocessed_messages,
-                finalized.msgs_buffer,
+                reader_state,
                 tracker,
             )?;
 
@@ -1127,7 +867,7 @@ impl CollatorStdImpl {
 
             handle_block_candidate_elapsed = histogram.finish();
         }
-        Ok(FinalizedCollationResult {
+        Ok(FinalizeCollationResult {
             handle_block_candidate_elapsed,
         })
     }
@@ -1170,13 +910,15 @@ impl CollatorStdImpl {
             "tycho_do_collate_new_msgs_inserted_to_iterator_count",
             &labels
         )
-        .increment(collation_data.inserted_new_msgs_to_iterator_count);
+        .increment(collation_data.inserted_new_msgs_count);
         metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
-            .increment(collation_data.read_new_msgs_from_iterator_count);
+            .increment(collation_data.read_new_msgs_count);
         metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
             .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
             .set(collation_data.block_id_short.seqno);
+        metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
+            .set(collation_data.diff_tail_len);
     }
 
     fn wu_metrics(
@@ -1187,21 +929,73 @@ impl CollatorStdImpl {
         total_elapsed: Duration,
     ) {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        // prepare
         metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
-            .set(execute_result.prepare_groups_wu_total as f64);
+            .set(execute_result.prepare_msg_groups_wu.total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
+            .set(execute_result.prepare_msg_groups_wu.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_ext_msgs", &labels)
+            .set(execute_result.prepare_msg_groups_wu.read_ext_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_ext_msgs_wu_price(),
+        );
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_existing_int_msgs_wu as f64,
+        );
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_existing_int_msgs_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_new_int_msgs", &labels)
+            .set(execute_result.prepare_msg_groups_wu.read_new_int_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .read_new_int_msgs_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_add_msgs_to_groups", &labels)
+            .set(execute_result.prepare_msg_groups_wu.add_msgs_to_groups_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
+            &labels
+        )
+        .set(
+            execute_result
+                .prepare_msg_groups_wu
+                .add_msgs_to_groups_wu_price(),
+        );
+
         metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
             .set(execute_result.execute_groups_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
         metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
             execute_result.execute_groups_wu_total as f64
                 + finalize_wu_total as f64
-                + execute_result.prepare_groups_wu_total as f64,
+                + execute_result.prepare_msg_groups_wu.total_wu as f64,
         );
 
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels).set(
-            execute_result.fill_msgs_total_elapsed.as_nanos() as f64
-                / execute_result.prepare_groups_wu_total as f64,
-        );
         metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
             (execute_result.execute_msgs_total_elapsed.as_nanos() as f64
                 + execute_result.process_txs_total_elapsed.as_nanos() as f64)
@@ -1222,16 +1016,14 @@ impl CollatorStdImpl {
             total_elapsed.as_nanos() as f64
                 / (execute_result.execute_groups_wu_total
                     + finalize_wu_total
-                    + execute_result.prepare_groups_wu_total) as f64,
+                    + execute_result.prepare_msg_groups_wu.total_wu) as f64,
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn logs(
         &self,
         execute_result: &ExecuteResult,
         final_result: &FinalResult,
-        finalize_wu_total: u64,
         collation_data: &BlockCollationData,
         block_id: BlockId,
     ) {
@@ -1242,23 +1034,23 @@ impl CollatorStdImpl {
             start_lt={}, end_lt={}, exec_count={}, \
             exec_ext={}, ext_err={}, exec_int={}, exec_new_int={}, \
             enqueue_count={}, dequeue_count={}, \
-            new_msgs_created={}, new_msgs_added={}, \
+            new_msgs_created={}, queue_diff_messages_count={}, \
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
             total_execute_msgs_time_mc={}, \
-            wu_used_for_prepare_msgs_groups={}, wu_used_for_execute: {}, wu_used_for_finalize: {}",
+            diffs_tail_len: {}",
             block_id,
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
             collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created_count, final_result.diff_messages_len,
+            collation_data.new_msgs_created_count, final_result.queue_diff_messages_count,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
-            collation_data.read_new_msgs_from_iterator_count, collation_data.inserted_new_msgs_to_iterator_count, final_result.has_unprocessed_messages,
+            collation_data.read_new_msgs_count, collation_data.inserted_new_msgs_count, final_result.has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
-            execute_result.prepare_groups_wu_total, execute_result.execute_groups_wu_total, finalize_wu_total
+            collation_data.diff_tail_len,
         );
 
         tracing::debug!(
@@ -1268,7 +1060,7 @@ impl CollatorStdImpl {
             execute_tock = %format_duration(final_result.execute_tock_elapsed),
             execute_total = %format_duration(final_result.execute_elapsed),
 
-            fill_msgs_total = %format_duration(execute_result.fill_msgs_total_elapsed),
+            fill_msgs_total = %format_duration(execute_result.prepare_msg_groups_wu.total_elapsed),
             init_iterator = %format_duration(execute_result.init_iterator_elapsed),
             read_existing = %format_duration(execute_result.read_existing_messages_elapsed),
             read_ext = %format_duration(execute_result.read_ext_messages_elapsed),
@@ -1315,4 +1107,76 @@ impl CollatorStdImpl {
             "total collation timings"
         );
     }
+}
+
+fn calculate_min_internals_processed_to(
+    shard_id: &ShardIdent,
+    current_min_processed_to: Option<QueueKey>,
+    min_processed_to_from_mc_data: Option<QueueKey>,
+    mc_data_shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
+    mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+) -> Option<QueueKey> {
+    fn find_min_processed_to(
+        shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
+        mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+        shard_id: &ShardIdent,
+        min_processed_to: &mut Option<QueueKey>,
+        skip_condition: impl Fn(&ShardIdent) -> bool,
+    ) {
+        // Iterate through shards with updated top shard blocks and find min processed_to
+        for (shard, descr) in shards {
+            if skip_condition(shard) {
+                continue;
+            }
+
+            if descr.top_sc_block_updated {
+                if let Some(value) = mc_data_shards_processed_to.get(shard) {
+                    if let Some(v) = value.get(shard_id) {
+                        *min_processed_to = match *min_processed_to {
+                            Some(current_min) => Some(current_min.min(*v)),
+                            None => Some(*v),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    let mut min_processed_to: Option<QueueKey> = None;
+
+    if shard_id.is_masterchain() {
+        find_min_processed_to(
+            mc_data_shards,
+            mc_data_shards_processed_to,
+            shard_id,
+            &mut min_processed_to,
+            |_| false,
+        );
+
+        // Combine with current and masterchain values
+        min_processed_to = [current_min_processed_to, min_processed_to]
+            .into_iter()
+            .flatten()
+            .min();
+    } else {
+        find_min_processed_to(
+            mc_data_shards,
+            mc_data_shards_processed_to,
+            shard_id,
+            &mut min_processed_to,
+            |shard| shard == shard_id || shard.is_masterchain(),
+        );
+
+        // Combine with current and masterchain values and shard values
+        min_processed_to = [
+            current_min_processed_to,
+            min_processed_to,
+            min_processed_to_from_mc_data,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+    }
+
+    min_processed_to
 }

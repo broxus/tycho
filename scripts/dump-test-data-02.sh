@@ -17,7 +17,7 @@ echo "tycho_bin: $tycho_bin"
 
 source "${script_dir}/common.sh"
 
-# dump not empty block #10 from shard 0:80
+# dump not empty block #20 from shard 0:80
 CHECK_INTERVAL=10
 TARGET_COUNT=20
 while true; do
