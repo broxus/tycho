@@ -392,6 +392,7 @@ impl CmdOnce {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
+            let fee_factor = config.compute_fee_factor()?;
             let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             config.check_stake(*stake)?;
@@ -428,17 +429,18 @@ impl CmdOnce {
                 );
 
                 // Send stake
-                let internal = ElectionsContext::make_elector_message(
-                    &config.elector_addr,
-                    &wallet.address,
-                    &node_keys,
-                    elections.elect_at,
-                    stake_diff,
+                let internal = ElectionsContext::make_elector_message(ElectorMessage {
+                    elector_addr: &config.elector_addr,
+                    wallet: &wallet.address,
+                    node_keys: &node_keys,
+                    election_id: elections.elect_at,
+                    stake: stake_diff,
                     stake_factor,
-                    config.signature_id,
-                );
+                    fee_factor,
+                    signature_id: config.signature_id,
+                });
                 wallet
-                    .transfer(internal, self.transfer.into_params())
+                    .transfer(internal, self.transfer.into_params(fee_factor))
                     .await
                     .map(Some)?
             } else {
@@ -499,6 +501,7 @@ impl CmdRecover {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
+            let fee_factor = config.compute_fee_factor()?;
             let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             // Find reward
@@ -508,9 +511,9 @@ impl CmdRecover {
             };
 
             // Send recover message
-            let internal = ElectionsContext::make_recover_msg(&config.elector_addr);
+            let internal = ElectionsContext::make_recover_msg(&config.elector_addr, fee_factor);
             let message = wallet
-                .transfer(internal, self.transfer.into_params())
+                .transfer(internal, self.transfer.into_params(fee_factor))
                 .await?;
 
             // Done
@@ -583,6 +586,7 @@ impl CmdWithdraw {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
+            let fee_factor = config.compute_fee_factor()?;
             let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             let amount = match self.amount {
@@ -597,7 +601,7 @@ impl CmdWithdraw {
                 payload,
             };
             let message = wallet
-                .transfer(internal, self.transfer.into_params())
+                .transfer(internal, self.transfer.into_params(fee_factor))
                 .await?;
 
             print_json(serde_json::json!({
@@ -636,16 +640,30 @@ struct ElectionsContext<'a> {
     recover_stake: bool,
 }
 
+struct ElectorMessage<'a> {
+    elector_addr: &'a StdAddr,
+    wallet: &'a StdAddr,
+    node_keys: &'a ed25519::KeyPair,
+    election_id: u32,
+    stake: u128,
+    stake_factor: u32,
+    fee_factor: u64,
+    signature_id: Option<i32>,
+}
+
 impl ElectionsContext<'_> {
-    fn make_elector_message(
-        elector_addr: &StdAddr,
-        wallet: &StdAddr,
-        node_keys: &ed25519::KeyPair,
-        election_id: u32,
-        stake: u128,
-        stake_factor: u32,
-        signature_id: Option<i32>,
-    ) -> InternalMessage {
+    fn make_elector_message(ctx: ElectorMessage<'_>) -> InternalMessage {
+        let ElectorMessage {
+            elector_addr,
+            wallet,
+            node_keys,
+            election_id,
+            stake,
+            stake_factor,
+            fee_factor,
+            signature_id,
+        } = ctx;
+
         let adnl_addr = HashBytes(node_keys.public_key.to_bytes());
         let validator_key = adnl_addr;
 
@@ -681,13 +699,13 @@ impl ElectionsContext<'_> {
         // Final message
         InternalMessage {
             to: elector_addr.clone(),
-            amount: Amount::Exact(stake + ONE_CC),
+            amount: Amount::Exact(stake + apply_fee_factor(ONE_CC, fee_factor)),
             bounce: true,
             payload,
         }
     }
 
-    fn make_recover_msg(elector_addr: &StdAddr) -> InternalMessage {
+    fn make_recover_msg(elector_addr: &StdAddr, fee_factor: u64) -> InternalMessage {
         let payload = elector::methods::recover_stake()
             .encode_internal_input(&[now_millis().into_abi().named("query_id")])
             .unwrap()
@@ -696,7 +714,7 @@ impl ElectionsContext<'_> {
 
         InternalMessage {
             to: elector_addr.clone(),
-            amount: Amount::Exact(ONE_CC),
+            amount: Amount::Exact(apply_fee_factor(ONE_CC, fee_factor)),
             bounce: true,
             payload,
         }
@@ -713,6 +731,7 @@ struct SimpleValidatorParams {
 impl SimpleValidatorParams {
     async fn elect(self, ctx: ElectionsContext<'_>) -> Result<()> {
         ctx.config.check_stake(*self.stake_per_round)?;
+        let fee_factor = ctx.config.compute_fee_factor()?;
         let stake_factor = ctx.config.compute_stake_factor(self.stake_factor)?;
         let wallet = Wallet::new(ctx.client, &self.wallet_secret, ctx.config.signature_id);
 
@@ -722,9 +741,10 @@ impl SimpleValidatorParams {
                 // TODO: Lock some guard
 
                 tracing::info!(%stake, "recovering stake");
-                let message = ElectionsContext::make_recover_msg(&ctx.config.elector_addr);
+                let message =
+                    ElectionsContext::make_recover_msg(&ctx.config.elector_addr, fee_factor);
                 wallet
-                    .transfer(message, TransferParams::reliable())
+                    .transfer(message, TransferParams::reliable(fee_factor))
                     .await
                     .context("failed to recover stake")?;
             }
@@ -752,17 +772,18 @@ impl SimpleValidatorParams {
             "electing as single",
         );
 
-        let message = ElectionsContext::make_elector_message(
-            &ctx.config.elector_addr,
-            &wallet.address,
-            &node_keys,
-            ctx.current.elect_at,
-            *self.stake_per_round,
+        let message = ElectionsContext::make_elector_message(ElectorMessage {
+            elector_addr: &ctx.config.elector_addr,
+            wallet: &wallet.address,
+            node_keys: &node_keys,
+            election_id: ctx.current.elect_at,
+            stake: *self.stake_per_round,
             stake_factor,
-            ctx.config.signature_id,
-        );
+            fee_factor,
+            signature_id: ctx.config.signature_id,
+        });
         wallet
-            .transfer(message, TransferParams::reliable())
+            .transfer(message, TransferParams::reliable(fee_factor))
             .await
             .context("failed to send stake")?;
 
@@ -790,10 +811,10 @@ struct TransferArgs {
 }
 
 impl TransferArgs {
-    fn into_params(self) -> TransferParams {
+    fn into_params(self, fee_factor: u64) -> TransferParams {
         TransferParams {
             reserve: if self.wait_balance {
-                TransferParams::DEFAULT_RESERVE
+                apply_fee_factor(TransferParams::DEFAULT_RESERVE, fee_factor)
             } else {
                 0
             },
@@ -978,14 +999,21 @@ impl TransferParams {
     const DEFAULT_RESERVE: u128 = ONE_CC / 2;
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(40);
 
-    fn reliable() -> Self {
+    fn reliable(fee_factor: u64) -> Self {
         Self {
-            reserve: Self::DEFAULT_RESERVE,
+            reserve: apply_fee_factor(Self::DEFAULT_RESERVE, fee_factor),
             timeout: Self::DEFAULT_TIMEOUT,
             wait_for_balance: true,
             wait_for_delivery: true,
         }
     }
+}
+
+const fn apply_fee_factor(mut value: u128, fee_factor: u64) -> u128 {
+    value = value.saturating_mul(fee_factor as u128);
+
+    let r = value & 0xffff != 0;
+    (value >> 16) + r as u128
 }
 
 #[derive(Debug, Clone)]
@@ -1244,6 +1272,14 @@ impl ParsedBlockchainConfig {
         Ok(stake_factor)
     }
 
+    fn compute_fee_factor(&self) -> Result<u64> {
+        const BASE_GAS_PRICE: u64 = 10_000 << 16;
+
+        let gas_price = self.config.get_gas_prices(true)?.gas_price;
+        let value = gas_price.checked_shl(16).context("gas price is too big")? / BASE_GAS_PRICE;
+        Ok(value)
+    }
+
     fn compute_elections_timeline(&self, now: u32) -> Result<Timeline> {
         let timings = self.config.get_election_timings()?;
         let current_vset = self.config.get_current_validator_set()?;
@@ -1285,4 +1321,38 @@ enum Timeline {
     AfterElections {
         until_round_end: u32,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fee_factor() {
+        const BASE_GAS_PRICE: u64 = 10_000 << 16;
+
+        fn compute_fee_factor(new_gas_price: u64) -> u64 {
+            new_gas_price.checked_shl(16).unwrap() / BASE_GAS_PRICE
+        }
+
+        // Base fee.
+        let fee_factor = compute_fee_factor(BASE_GAS_PRICE);
+        assert_eq!(fee_factor, 1 << 16);
+        assert_eq!(apply_fee_factor(ONE_CC, fee_factor), ONE_CC);
+
+        // Increased fee.
+        let fee_factor = compute_fee_factor(60 * BASE_GAS_PRICE);
+        assert_eq!(apply_fee_factor(ONE_CC, fee_factor), ONE_CC * 60);
+
+        // Increased fee (with decimals).
+        let fee_factor = compute_fee_factor((30.5f64 * BASE_GAS_PRICE as f64) as u64);
+        assert_eq!(
+            apply_fee_factor(ONE_CC, fee_factor),
+            (ONE_CC as f64 * 30.5f64) as u128
+        );
+
+        // Decreased fee (with decimals).
+        let fee_factor = compute_fee_factor(BASE_GAS_PRICE / 2);
+        assert_eq!(apply_fee_factor(ONE_CC, fee_factor), ONE_CC / 2);
+    }
 }
