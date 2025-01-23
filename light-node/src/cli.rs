@@ -299,6 +299,25 @@ impl<C> Node<C> {
     where
         S: StateSubscriber,
     {
+        // notify subscriber with an initial validators list
+        let mc_state = self
+            .storage
+            .shard_state_storage()
+            .load_state(last_block_id)
+            .await?;
+
+        let validator_subscriber = self
+            .blockchain_rpc_client
+            .overlay_client()
+            .validators_resolver()
+            .clone();
+
+        {
+            let config = mc_state.config_params()?;
+            let current_validator_set = config.get_current_validator_set()?;
+            validator_subscriber.update_validator_set(&current_validator_set);
+        }
+
         // Create RPC
         let rpc_state = if let Some(config) = &self.rpc_config {
             let rpc_state = RpcState::builder()
