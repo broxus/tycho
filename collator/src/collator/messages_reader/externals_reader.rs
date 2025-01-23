@@ -132,6 +132,10 @@ impl ExternalsReader {
         self.reader_state.last_read_to_anchor_chain_time
     }
 
+    pub(super) fn drop_last_read_to_anchor_chain_time(&mut self) {
+        self.reader_state.last_read_to_anchor_chain_time = None;
+    }
+
     fn get_buffer_limits_by_partition(
         &self,
         par_id: QueuePartitionIdx,
@@ -431,8 +435,9 @@ impl ExternalsReader {
         let mut ranges_seqno: VecDeque<_> = self.range_readers.keys().copied().collect();
         let mut last_seqno = 0;
 
+        let mut last_ext_read_res_opt = None;
+
         'main_loop: loop {
-            let mut last_ext_read_res_opt = None;
             let mut all_ranges_fully_read = true;
             while let Some(seqno) = ranges_seqno.pop_front() {
                 let range_reader = self.range_readers.get_mut(&seqno).unwrap_or_else(||
@@ -490,26 +495,14 @@ impl ExternalsReader {
                     }
                 }
 
-                // do not try to read from the next range
-                // if we already can fill all slots in messages group from almost one buffer
-                if matches!(
-                    read_res.max_fill_state_by_slots,
-                    BufferFillStateBySlots::CanFill
-                ) {
-                    break 'main_loop;
-                }
+                let max_fill_state_by_slots = read_res.max_fill_state_by_slots;
 
                 last_ext_read_res_opt = Some(read_res);
-            }
 
-            // update the pending externals flag from the last range
-            if last_seqno == self.block_seqno {
-                if let Some(read_res) = last_ext_read_res_opt {
-                    self.anchors_cache
-                        .set_has_pending_externals(read_res.has_pending_externals);
-                    if let Some(ct) = read_res.last_read_to_anchor_chain_time {
-                        self.reader_state.last_read_to_anchor_chain_time = Some(ct);
-                    }
+                // do not try to read from the next range
+                // if we already can fill all slots in messages group from almost one buffer
+                if max_fill_state_by_slots == BufferFillStateBySlots::CanFill {
+                    break 'main_loop;
                 }
             }
 
@@ -539,6 +532,19 @@ impl ExternalsReader {
             } else {
                 // exit when we stopped reading and range was not fully read
                 break;
+            }
+        }
+
+        if let Some(read_res) = last_ext_read_res_opt {
+            // update last read to anchor chain time only from the last range read result
+            if let Some(ct) = read_res.last_read_to_anchor_chain_time {
+                self.reader_state.last_read_to_anchor_chain_time = Some(ct);
+            }
+
+            // update the pending externals flag from the actual range (created in current block)
+            if last_seqno == self.block_seqno {
+                self.anchors_cache
+                    .set_has_pending_externals(read_res.has_pending_externals);
             }
         }
 
