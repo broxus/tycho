@@ -6,6 +6,11 @@ import "google/protobuf/struct.proto";
 package rpc;
 
 message Request {
+
+  message GetLibraryCell {
+    bytes hash = 1;
+  }
+
   message GetContractState {
     bytes address = 1;
     optional uint64 last_transaction_lt = 2;
@@ -42,12 +47,12 @@ message Request {
     google.protobuf.Empty  get_status = 4;
     google.protobuf.Empty  get_timings = 5;
     GetContractState       get_contract_state = 6;
-
     GetTransaction         get_transaction = 7;
     GetDstTransaction      get_dst_transaction = 8;
     GetTransactionsList    get_transactions_list = 9;
     GetAccountsByCodeHash  get_accounts_by_code_hash = 10;
     SendMessage            send_message = 11;
+    GetLibraryCell         get_library_cell = 12;
   }
 }
 
@@ -87,6 +92,10 @@ message Response {
 
   message GetAccountsByCodeHash {
     repeated bytes account = 1;
+  }
+
+  message GetLibraryCell {
+    optional bytes cell = 1;
   }
 
   message GetContractState {
@@ -139,6 +148,7 @@ message Response {
     GetAccountsByCodeHash   get_accounts = 8;
     GetContractState        get_contract_state = 9;
     google.protobuf.Empty   send_message = 10;
+    GetLibraryCell          get_library_cell = 11;
   }
 }
 
