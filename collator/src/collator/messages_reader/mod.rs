@@ -555,6 +555,13 @@ impl MessagesReader {
         self.externals_reader.has_not_fully_read_ranges()
     }
 
+    pub fn can_read_and_collect_more_messages(&self) -> bool {
+        self.has_not_fully_read_externals_ranges()
+            || self.has_not_fully_read_internals_ranges()
+            || self.has_pending_new_messages()
+            || self.has_messages_in_buffers()
+    }
+
     pub fn has_pending_externals_in_cache(&self) -> bool {
         self.externals_reader.has_pending_externals()
     }
@@ -803,10 +810,14 @@ impl MessagesReader {
             DebugMessageGroup(&msg_group),
         );
 
+        // retun None when messages group is empty
         if msg_group.len() == 0
+            // and we reached previous processed offset on refill
             && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
-                || !self.has_pending_new_messages()
-                || !self.has_messages_in_buffers())
+                // or we do not have messages in buffers and no pending new messages and all ranges fully read
+                // so we cannot read more messages into buffers and then collect them
+                || !self.can_read_and_collect_more_messages()
+            )
         {
             Ok(None)
         } else {
