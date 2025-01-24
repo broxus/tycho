@@ -254,6 +254,16 @@ impl MessagesReader {
         res.new_messages
             .init_partition_router(1, par_1_all_ranges_msgs_stats);
 
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            readers_stages = ?res.readers_stages,
+            externals_all_ranges_read_and_collected = res.externals_reader.all_ranges_read_and_collected(),
+            internals_all_read_existing_messages_collected = ?DebugIter(res
+                .internals_partition_readers
+                .iter()
+                .map(|(par_id, par)| (par_id, par.all_read_existing_messages_collected()))),
+            "messages reader created",
+        );
+
         Ok(res)
     }
 
@@ -272,6 +282,16 @@ impl MessagesReader {
         for (_, par_reader_stage) in self.readers_stages.iter_mut() {
             *par_reader_stage = initial_reader_stage;
         }
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            readers_stages = ?self.readers_stages,
+            externals_all_ranges_read_and_collected = self.externals_reader.all_ranges_read_and_collected(),
+            internals_all_read_existing_messages_collected = ?DebugIter(self
+                .internals_partition_readers
+                .iter()
+                .map(|(par_id, par)| (par_id, par.all_read_existing_messages_collected()))),
+            "messages reader state was reset",
+        );
     }
 
     pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
@@ -711,6 +731,10 @@ impl MessagesReader {
             let metrics = self
                 .externals_reader
                 .read_into_buffers(read_mode, self.new_messages.partition_router());
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "external messages read: ext={}",
+                metrics.read_ext_msgs_count,
+            );
             self.metrics.append(metrics);
         }
 
@@ -783,6 +807,11 @@ impl MessagesReader {
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
+            int_msgs_count_in_buffers = ?DebugIter(self
+                .internals_partition_readers
+                .iter()
+                .map(|(par_id, par)| (par_id, par.count_messages_in_buffers()))),
+            ext_msgs_count_in_buffers = ?self.externals_reader.count_messages_in_buffers_by_partitions(),
             "collected message groups by partitions: {:?}",
             DebugIter(msg_groups.iter().map(|(par_id, g)| (*par_id, DisplayMessageGroup(g)))),
         );
@@ -930,13 +959,25 @@ impl MessagesReader {
             }
         }
 
+        let partition_id = par_reader.partition_id;
+        let update_reader_stage = |curr: &mut MessagesReaderStage, new| {
+            let old = *curr;
+            *curr = new;
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                partition_id,
+                ?old,
+                ?new,
+                "messages partition reader stage updated",
+            );
+        };
+
         // if all read externals collected from the previous block collation
         // then we can switch to the "read existing internals stage"
         if all_read_externals_collected
             && *par_reader_stage == MessagesReaderStage::FinishPreviousExternals
         {
             // switch to the "read existing internals stage" stage
-            *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
+            update_reader_stage(par_reader_stage, MessagesReaderStage::ExistingAndExternals);
         }
 
         // if all existing internals collected
@@ -957,7 +998,10 @@ impl MessagesReader {
             }
 
             // switch to the "collect only already read externals" stage
-            *par_reader_stage = MessagesReaderStage::FinishCurrentExternals;
+            update_reader_stage(
+                par_reader_stage,
+                MessagesReaderStage::FinishCurrentExternals,
+            );
         }
 
         // if all read externals collected from current block collation
@@ -980,10 +1024,10 @@ impl MessagesReader {
             // if all existing messages read (last range reader was created in current block)
             let (last_seqno, _) = par_reader.get_last_range_reader()?;
             if last_seqno == &par_reader.block_seqno {
-                *par_reader_stage = MessagesReaderStage::ExternalsAndNew;
+                update_reader_stage(par_reader_stage, MessagesReaderStage::ExternalsAndNew);
             } else {
                 // otherwise return to the reading of existing messages
-                *par_reader_stage = MessagesReaderStage::ExistingAndExternals;
+                update_reader_stage(par_reader_stage, MessagesReaderStage::ExistingAndExternals);
             }
         }
 
