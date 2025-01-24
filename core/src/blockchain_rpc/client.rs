@@ -183,6 +183,8 @@ impl BlockchainRpcClient {
         // we wait for all the responses to come back but cap them at `broadcast_timeout_upper_bound`
         // all peers timeouts are calculated based on p90 of the previous responses time weighted average
         // This will make broadcast timeout to be adaptive based on the network conditions
+        tracing::debug!(?targets, "broadcasting external message");
+
         for validator in targets.as_ref() {
             let client = client.clone();
             let validator = validator.clone();

@@ -188,7 +188,9 @@ impl Future for Connecting {
         Pin::new(&mut self.inner).poll(cx).map(|res| match res {
             Ok(c) => match extract_peer_id(&c) {
                 Some(peer_id) => Ok(Connection::with_peer_id(c, self.origin, peer_id)),
-                None => Err(ConnectionInitError::InvalidCertificate),
+                None => Err(ConnectionInitError::InvalidCertificate(Arc::from(
+                    "no peer id",
+                ))),
             },
             Err(e) => Err(ConnectionInitError::ConnectionFailed(e)),
         })
@@ -224,7 +226,9 @@ impl Future for ConnectingFallback {
                 Some(e) => Err(ConnectionInitError::ConnectionFailed(e)),
                 None => match extract_peer_id(&c) {
                     Some(peer_id) => Ok(Connection::with_peer_id(c, self.origin, peer_id)),
-                    None => Err(ConnectionInitError::InvalidCertificate),
+                    None => Err(ConnectionInitError::InvalidCertificate(Arc::from(
+                        "no peer id",
+                    ))),
                 },
             }
         })
@@ -242,6 +246,6 @@ pub(crate) enum Into0RttResult {
 pub(crate) enum ConnectionInitError {
     #[error(transparent)]
     ConnectionFailed(quinn::ConnectionError),
-    #[error("invalid certificate")]
-    InvalidCertificate,
+    #[error("invalid certificate {0}")]
+    InvalidCertificate(Arc<str>),
 }

@@ -538,7 +538,7 @@ impl ConnectionManager {
                 }
 
                 for callback in callbacks {
-                    _ = callback.send(Err(brief_error));
+                    _ = callback.send(Err(brief_error.clone()));
                 }
             }
         }
@@ -868,7 +868,7 @@ impl DelayedCallbacks {
 
     fn execute_with_error(self) -> delay_queue::Key {
         for callback in self.callbacks {
-            _ = callback.send(Err(self.error));
+            _ = callback.send(Err(self.error.clone()));
         }
         self.delay_key
     }
@@ -910,8 +910,8 @@ enum FullConnectionError {
     InvalidAddress(#[source] std::io::Error),
     #[error(transparent)]
     ConnectionFailed(quinn::ConnectionError),
-    #[error("invalid certificate")]
-    InvalidCertificate,
+    #[error("invalid certificate {0}")]
+    InvalidCertificate(Arc<str>),
     #[error("handshake failed")]
     HandshakeFailed(#[source] HandshakeError),
     #[error("connection timeout")]
@@ -932,12 +932,14 @@ impl FullConnectionError {
 
         match self {
             Self::InvalidAddress(_) => ConnectionError::InvalidAddress,
-            Self::ConnectionFailed(e) if is_crypto_error(e) => ConnectionError::InvalidCertificate,
-            Self::ConnectionFailed(_) => ConnectionError::ConnectionInitFailed,
-            Self::InvalidCertificate => ConnectionError::InvalidCertificate,
-            Self::HandshakeFailed(HandshakeError::ConnectionFailed(e)) if is_crypto_error(e) => {
-                ConnectionError::InvalidCertificate
+            Self::ConnectionFailed(e)
+            | Self::HandshakeFailed(HandshakeError::ConnectionFailed(e))
+                if is_crypto_error(e) =>
+            {
+                ConnectionError::InvalidCertificate(Arc::from(e.to_string().as_str()))
             }
+            Self::ConnectionFailed(_) => ConnectionError::ConnectionInitFailed,
+            Self::InvalidCertificate(e) => ConnectionError::InvalidCertificate(e.clone()),
             Self::HandshakeFailed(_) => ConnectionError::HandshakeFailed,
             Self::Timeout => ConnectionError::Timeout,
         }
@@ -962,7 +964,7 @@ impl From<ConnectionInitError> for FullConnectionError {
     fn from(value: ConnectionInitError) -> Self {
         match value {
             ConnectionInitError::ConnectionFailed(e) => Self::ConnectionFailed(e),
-            ConnectionInitError::InvalidCertificate => Self::InvalidCertificate,
+            ConnectionInitError::InvalidCertificate(e) => Self::InvalidCertificate(e),
         }
     }
 }

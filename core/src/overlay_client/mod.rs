@@ -46,7 +46,7 @@ impl PublicOverlayClient {
             .collect::<Vec<_>>();
 
         let neighbours = Neighbours::new(entries, config.neighbors.keep);
-        let subscriber =
+        let validators_resolver =
             ValidatorsResolver::new(network.clone(), overlay.clone(), config.validators.clone());
 
         let mut res = Inner {
@@ -54,7 +54,7 @@ impl PublicOverlayClient {
             overlay,
             neighbours,
             config,
-            validators_resolver: subscriber,
+            validators_resolver,
             ping_task: None,
             update_task: None,
             score_task: None,
@@ -391,15 +391,19 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        tracing::info!("dropping overlay client");
         if let Some(handle) = self.ping_task.take() {
+            tracing::info!("aborting ping task");
             handle.abort();
         }
 
         if let Some(handle) = self.update_task.take() {
+            tracing::info!("aborting update task");
             handle.abort();
         }
 
         if let Some(handle) = self.cleanup_task.take() {
+            tracing::info!("aborting cleanup task");
             handle.abort();
         }
     }
@@ -505,7 +509,7 @@ fn apply_network_error(error: &anyhow::Error, neighbour: &Neighbour) {
     };
 
     match error {
-        ConnectionError::InvalidAddress | ConnectionError::InvalidCertificate => {
+        ConnectionError::InvalidAddress | ConnectionError::InvalidCertificate(_) => {
             neighbour.punish(PunishReason::Malicious);
         }
         ConnectionError::Timeout => {

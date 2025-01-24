@@ -438,14 +438,14 @@ impl MaxBufferSize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectionError {
     #[error("invalid address")]
     InvalidAddress,
     #[error("connection init failed")]
     ConnectionInitFailed,
-    #[error("invalid certificate")]
-    InvalidCertificate,
+    #[error("invalid certificate: {0}")]
+    InvalidCertificate(Arc<str>),
     #[error("handshake failed")]
     HandshakeFailed,
     #[error("connection timeout")]
@@ -551,7 +551,7 @@ mod tests {
         fn assert_is_invalid_certificate(e: anyhow::Error) {
             // A non-recursive downcast to find a connection error
             let e = (*e).downcast_ref::<ConnectionError>().unwrap();
-            assert_eq!(*e, ConnectionError::InvalidCertificate);
+            assert!(matches!(e, ConnectionError::InvalidCertificate(_)));
         }
 
         let err = peer1

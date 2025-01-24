@@ -77,6 +77,8 @@ impl rustls::client::danger::ServerCertVerifier for CertVerifierWithPeerId {
         }
 
         let peer_id = peer_id_from_certificate(end_entity)?;
+        let matched = peer_id == self.peer_id;
+        tracing::warn!(peer_id = %peer_id, expected= %self.peer_id, %matched, "peer id from certificate");
         if peer_id != self.peer_id {
             return Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::Other(rustls::OtherError(Arc::new(
