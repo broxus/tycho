@@ -46,7 +46,7 @@ impl PublicOverlayClient {
             .collect::<Vec<_>>();
 
         let neighbours = Neighbours::new(entries, config.neighbors.keep);
-        let subscriber =
+        let validators_resolver =
             ValidatorsResolver::new(network.clone(), overlay.clone(), config.validators.clone());
 
         let mut res = Inner {
@@ -54,7 +54,7 @@ impl PublicOverlayClient {
             overlay,
             neighbours,
             config,
-            validators_resolver: subscriber,
+            validators_resolver,
             ping_task: None,
             update_task: None,
             score_task: None,
@@ -192,7 +192,11 @@ impl Clone for Inner {
 }
 
 impl Inner {
+    #[tracing::instrument(name = "ping_neighbours", skip_all)]
     async fn ping_neighbours_task(self) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
         let req = Request::from_tl(overlay::Ping);
 
         // Start pinging neighbours
@@ -230,7 +234,11 @@ impl Inner {
         }
     }
 
+    #[tracing::instrument(name = "update_neighbours", skip_all)]
     async fn update_neighbours_task(self) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
         let ttl = self.overlay.entry_ttl_sec();
         let max_neighbours = self.config.neighbors.keep;
         let default_roundtrip = self.config.neighbors.default_roundtrip;
@@ -266,7 +274,11 @@ impl Inner {
         }
     }
 
+    #[tracing::instrument(name = "apply_score", skip_all)]
     async fn apply_score_task(self) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
         let mut interval = tokio::time::interval(self.config.neighbors.apply_score_interval);
 
         loop {
@@ -278,7 +290,11 @@ impl Inner {
         }
     }
 
+    #[tracing::instrument(name = "cleanup_neighbours", skip_all)]
     async fn cleanup_neighbours_task(self) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
         loop {
             self.overlay.entries_removed().notified().await;
 

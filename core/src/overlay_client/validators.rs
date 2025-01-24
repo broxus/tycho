@@ -49,12 +49,6 @@ pub struct ValidatorsResolver {
     inner: Arc<Inner>,
 }
 
-impl Drop for ValidatorsResolver {
-    fn drop(&mut self) {
-        self.inner.resolver_worker_handle.abort();
-    }
-}
-
 impl ValidatorsResolver {
     pub fn new(network: Network, overlay: PublicOverlay, config: ValidatorsConfig) -> Self {
         let (peers_tx, peers_rx) = mpsc::unbounded_channel();
@@ -152,6 +146,7 @@ struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        tracing::info!("stopping validators resolver");
         self.resolver_worker_handle.abort();
     }
 }
@@ -179,6 +174,14 @@ impl Validator {
     }
 }
 
+impl std::fmt::Debug for Validator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Validator")
+            .field("peer_id", &self.peer_id())
+            .finish()
+    }
+}
+
 struct Validators {
     config: ValidatorsConfig,
 
@@ -199,7 +202,11 @@ struct Validators {
 }
 
 impl Validators {
+    #[tracing::instrument(name = "resolve_validators", skip_all)]
     async fn listen(self: &Arc<Self>, mut peers_rx: PeersRx, peer_resolver: PeerResolver) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
         let mut current_peers = None;
 
         let local_id = peer_resolver.dht_service().local_id();
@@ -250,15 +257,22 @@ impl Validators {
             *current_epoch
         };
 
+        tracing::debug!(epoch, ?peers, "preparing validators");
+
         // Filter targets
         {
             let targets = self.targets.load_full();
+            // changed will be set to true if ANY validator is not in the list of peers
             let mut changed = false;
+
+            // list of validators which are in the list of peers(are alive)
             let targets = targets
                 .iter()
                 .filter(|validator| {
                     // NOTE: Don't remove from `peers` here since we need it for the `resolved` list
                     let retain = peers.contains(&validator.inner.handle.peer_info().id);
+                    tracing::debug!(id = %validator.peer_id(), ?retain, "filtering validator");
+
                     changed |= !retain;
                     retain
                 })
@@ -273,9 +287,15 @@ impl Validators {
             self.target_validators_gauge.set(count as f64);
         }
 
+        tracing::debug!(epoch, "prepared validators");
+
         // Remove old resolved validators and skip existing ones
+
         {
             let resolved = self.resolved.load_full();
+
+            tracing::debug!(epoch, ?resolved, ?peers, "resolving validators");
+
             let mut changed = false;
             let resolved = resolved
                 .iter()
@@ -288,6 +308,8 @@ impl Validators {
                 .collect::<Vec<_>>();
 
             let count = resolved.len();
+
+            tracing::debug!(epoch, ?resolved, count, "resolved validators");
             if changed {
                 self.resolved.store(Arc::new(resolved));
             }
@@ -330,9 +352,9 @@ impl Validators {
         use futures_util::StreamExt;
         use rand::seq::SliceRandom;
 
-        tracing::debug!("started resolving peers");
+        tracing::debug!(epoch, "started resolving peers");
         scopeguard::defer! {
-            tracing::debug!("finished");
+            tracing::debug!(epoch,"finished monitoring resolved validators");
         }
 
         let request = Request::from_tl(overlay::Ping);
