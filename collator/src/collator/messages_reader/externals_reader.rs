@@ -183,6 +183,18 @@ impl ExternalsReader {
             .sum()
     }
 
+    pub fn count_messages_in_buffers_by_partitions(&self) -> BTreeMap<QueuePartitionIdx, usize> {
+        self.range_readers
+            .values()
+            .fold(BTreeMap::new(), |mut curr, r| {
+                for (par_id, par) in &r.reader_state.by_partitions {
+                    let sum = curr.entry(*par_id).or_default();
+                    *sum = sum.saturating_add(par.buffer.msgs_count());
+                }
+                curr
+            })
+    }
+
     pub fn has_messages_in_buffers(&self) -> bool {
         self.range_readers.values().any(|v| {
             v.reader_state
