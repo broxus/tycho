@@ -662,7 +662,9 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
         work_units_params: WorkUnitsParams {
             prepare: WorkUnitsParamsPrepare {
-                fixed_part: 500_000,    // 500 ns
+                fixed_part: 500_000, // 500 ns
+                msgs_stats: 0,
+                remaning_msgs_stats: 0,
                 read_ext_msgs: 200,     // 200 ns
                 read_int_msgs: 5_000,   // 5 mcs
                 read_new_msgs: 500,     // 500 ns
@@ -689,6 +691,10 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
                 state_update_min: 15_000_000, // 15 ms
                 state_update_accounts: 500,   // 0.5 mcs
                 state_update_msg: 2_000,      // 2 mcs
+                create_diff: 0,
+                serialize_diff: 0,
+                apply_diff: 0,
+                diff_tail_len: 0,
             },
         },
     })?;
