@@ -741,6 +741,7 @@ impl Phase<FinalizeState> {
             state_update_min,
             state_update_accounts,
             state_update_msg,
+            ..
         } = wu_params_finalize;
 
         let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;

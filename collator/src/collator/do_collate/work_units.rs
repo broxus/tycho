@@ -34,6 +34,7 @@ impl PrepareMsgGroupsWu {
             read_int_msgs,
             read_new_msgs,
             add_to_msg_groups,
+            ..
         } = wu_params_prepare;
 
         let read_ext_msgs_wu = msgs_reader_metrics
