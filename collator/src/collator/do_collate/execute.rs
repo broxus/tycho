@@ -118,13 +118,7 @@ impl Phase<ExecuteState> {
             } else if !self
                 .extra
                 .messages_reader
-                .has_not_fully_read_externals_ranges()
-                && !self
-                    .extra
-                    .messages_reader
-                    .has_not_fully_read_internals_ranges()
-                && !self.extra.messages_reader.has_pending_new_messages()
-                && !self.extra.messages_reader.has_messages_in_buffers()
+                .can_read_and_collect_more_messages()
             {
                 // stop reading message groups when all buffers are empty
                 // and all internals ranges, new messages, and externals fully read as well
