@@ -156,7 +156,7 @@ impl Query {
         self.candidates.local_id.as_bytes()
     }
 
-    #[tracing::instrument(level = "debug", skip_all)]
+    #[tracing::instrument(skip_all)]
     pub async fn find_value(mut self) -> Option<Box<Value>> {
         // Prepare shared request
         let request_body = Bytes::from(tl_proto::serialize(rpc::FindValue {
@@ -240,7 +240,7 @@ impl Query {
         None
     }
 
-    #[tracing::instrument(level = "debug", skip_all)]
+    #[tracing::instrument(skip_all)]
     pub async fn find_peers(mut self, depth: Option<usize>) -> FastHashMap<PeerId, Arc<PeerInfo>> {
         // Prepare shared request
         let request_body = Bytes::from(tl_proto::serialize(rpc::FindNode {

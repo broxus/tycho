@@ -113,6 +113,7 @@ impl CmdRun {
 pub struct Node<C> {
     zerostate: ZerostateId,
 
+    network: Network,
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
@@ -220,6 +221,7 @@ impl<C> Node<C> {
             .build();
 
         let public_overlay = PublicOverlay::builder(zerostate.compute_public_overlay_id())
+            .named("blockchain_rpc")
             .with_peer_resolver(peer_resolver.clone())
             .build(blockchain_rpc_service);
         overlay_service.add_public_overlay(&public_overlay);
@@ -227,7 +229,7 @@ impl<C> Node<C> {
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_config(node_config.blockchain_rpc_client)
             .with_public_overlay_client(PublicOverlayClient::new(
-                network,
+                network.clone(),
                 public_overlay,
                 node_config.public_overlay_client,
             ))
@@ -243,6 +245,7 @@ impl<C> Node<C> {
 
         Ok(Self {
             zerostate,
+            network,
             dht_client,
             peer_resolver,
             overlay_service,
@@ -418,6 +421,10 @@ impl<C> Node<C> {
 
     pub fn blockchain_rpc_client(&self) -> &BlockchainRpcClient {
         &self.blockchain_rpc_client
+    }
+
+    pub fn network(&self) -> &Network {
+        &self.network
     }
 
     pub fn config(&self) -> &NodeConfig<C> {
