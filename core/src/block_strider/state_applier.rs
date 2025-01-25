@@ -6,7 +6,7 @@ use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
-use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
+use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockConnection, BlockHandle, NewBlockMeta, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
@@ -24,14 +24,9 @@ impl<S> ShardStateApplier<S>
 where
     S: StateSubscriber,
 {
-    pub fn new(
-        mc_state_tracker: MinRefMcStateTracker,
-        storage: Storage,
-        state_subscriber: S,
-    ) -> Self {
+    pub fn new(storage: Storage, state_subscriber: S) -> Self {
         Self {
             inner: Arc::new(Inner {
-                mc_state_tracker,
                 storage,
                 state_subscriber,
             }),
@@ -137,12 +132,7 @@ where
 
             // Apply state
             let state = self
-                .compute_and_store_state_update(
-                    &cx.block,
-                    &self.inner.mc_state_tracker,
-                    &handle,
-                    prev_root_cell,
-                )
+                .compute_and_store_state_update(&cx.block, &handle, prev_root_cell)
                 .await?;
 
             (state, handles)
@@ -236,7 +226,6 @@ where
     async fn compute_and_store_state_update(
         &self,
         block: &BlockStuff,
-        mc_state_tracker: &MinRefMcStateTracker,
         handle: &BlockHandle,
         prev_root: Cell,
     ) -> Result<ShardStateStuff> {
@@ -250,10 +239,13 @@ where
         let new_state = rayon_run(move || update.apply(&prev_root))
             .await
             .context("Failed to apply state update")?;
-        let new_state = ShardStateStuff::from_root(block.id(), new_state, mc_state_tracker)
-            .context("Failed to create new state")?;
 
         let state_storage = self.inner.storage.shard_state_storage();
+
+        let new_state =
+            ShardStateStuff::from_root(block.id(), new_state, state_storage.min_ref_mc_state())
+                .context("Failed to create new state")?;
+
         state_storage
             .store_state(handle, &new_state, StoreStateHint {
                 block_data_size: Some(block.data_size()),
@@ -312,7 +304,6 @@ enum RefMcStateHandles {
 }
 
 struct Inner<S> {
-    mc_state_tracker: MinRefMcStateTracker,
     storage: Storage,
     state_subscriber: S,
 }

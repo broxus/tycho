@@ -5,7 +5,6 @@ use everscale_crypto::ed25519;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
-use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::commited_state::CommittedStateImplFactory;
@@ -74,11 +73,7 @@ async fn test_collation_process_on_stubs() {
             zerostate_id,
             storage.clone(),
         ))
-        .with_state_subscriber(
-            MinRefMcStateTracker::default(),
-            storage.clone(),
-            PrintSubscriber,
-        )
+        .with_state_subscriber(storage.clone(), PrintSubscriber)
         .build();
 
     block_strider.run().await.unwrap();
@@ -138,11 +133,7 @@ async fn test_collation_process_on_stubs() {
             zerostate_id,
             storage.clone(),
         ))
-        .with_state_subscriber(
-            MinRefMcStateTracker::default(),
-            storage.clone(),
-            state_node_adapter,
-        )
+        .with_state_subscriber(storage.clone(), state_node_adapter)
         .build();
 
     let strider_handle = block_strider.run();

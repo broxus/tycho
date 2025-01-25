@@ -6,7 +6,7 @@ use everscale_types::models::{Block, BlockId, ShardStateUnsplit};
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{NewBlockMeta, Storage};
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {
@@ -30,7 +30,7 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
 
 pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp().await?;
-    let tracker = MinRefMcStateTracker::default();
+    let shard_states = storage.shard_state_storage();
 
     // master state
     let zerostate = Boc::decode(include_bytes!("../../test/data/zerostate.boc"))?;
@@ -55,7 +55,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
         &master_block_id,
         master_state,
         master_root,
-        &tracker,
+        shard_states.min_ref_mc_state(),
     )?;
 
     let meta_data = NewBlockMeta {
@@ -67,8 +67,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
         .block_handle_storage()
         .create_or_load_handle(&master_block_id, meta_data);
 
-    storage
-        .shard_state_storage()
+    shard_states
         .store_state(&handle, &master_state_stuff, Default::default())
         .await?;
 
@@ -129,7 +128,8 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
             file_hash,
         };
 
-        let shard_state_stuff = ShardStateStuff::from_root(&block_id, root, &tracker)?;
+        let shard_state_stuff =
+            ShardStateStuff::from_root(&block_id, root, shard_states.min_ref_mc_state())?;
 
         let (handle, _) =
             storage
@@ -140,8 +140,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
                     ref_by_mc_seqno: master_block_id.seqno,
                 });
 
-        storage
-            .shard_state_storage()
+        shard_states
             .store_state(&handle, &shard_state_stuff, Default::default())
             .await?;
     }

@@ -52,7 +52,7 @@ impl ShardStateStorage {
             temp_file_storage,
             cell_storage,
             gc_lock: Default::default(),
-            min_ref_mc_state: Default::default(),
+            min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
         }))

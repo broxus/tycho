@@ -52,10 +52,8 @@ async fn persistent_shard_state() -> Result<()> {
 
     // Check seqno
     let min_ref_mc_state = shard_states.min_ref_mc_state();
-    assert_eq!(
-        min_ref_mc_state.seqno(),
-        Some(zerostate.as_ref().min_ref_mc_seqno)
-    );
+    // NOTE: Zerostates do not affect the minimal seqno reference.
+    assert_eq!(min_ref_mc_state.seqno(), None);
 
     // Load zerostate from db
     {

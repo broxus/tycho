@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use clap::Args;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
-use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProviderExt, BlockStrider,
     BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
@@ -118,8 +117,6 @@ pub struct Node<C> {
     overlay_service: OverlayService,
     storage: Storage,
     blockchain_rpc_client: BlockchainRpcClient,
-
-    state_tracker: MinRefMcStateTracker,
 
     rpc_config: Option<RpcConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
@@ -238,9 +235,6 @@ impl<C> Node<C> {
             "initialized blockchain rpc"
         );
 
-        // Setup block strider
-        let state_tracker = MinRefMcStateTracker::default();
-
         Ok(Self {
             zerostate,
             dht_client,
@@ -248,7 +242,6 @@ impl<C> Node<C> {
             overlay_service,
             storage,
             blockchain_rpc_client,
-            state_tracker,
             config,
             rpc_config: node_config.rpc,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
@@ -377,7 +370,6 @@ impl<C> Node<C> {
             .with_block_subscriber(
                 (
                     ShardStateApplier::new(
-                        self.state_tracker.clone(),
                         self.storage.clone(),
                         (rpc_state.1, subscriber, ps_subscriber),
                     ),

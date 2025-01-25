@@ -26,7 +26,7 @@ pub(crate) fn parse_zerostate(data: &Vec<u8>) -> Result<ShardStateStuff> {
         file_hash,
     };
 
-    let tracker = MinRefMcStateTracker::default();
+    let tracker = MinRefMcStateTracker::new();
     ShardStateStuff::from_root(&block_id, root, &tracker)
 }
 

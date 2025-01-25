@@ -13,7 +13,9 @@ pub struct MinRefMcStateTracker {
 impl MinRefMcStateTracker {
     #[inline]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(Inner::default()),
+        }
     }
 
     pub fn seqno(&self) -> Option<u32> {
@@ -22,6 +24,13 @@ impl MinRefMcStateTracker {
 
     pub fn insert(&self, mc_seqno: u32) -> RefMcStateHandle {
         self.inner.insert(mc_seqno)
+    }
+
+    pub fn insert_untracked(&self) -> RefMcStateHandle {
+        RefMcStateHandle(Arc::new(HandleInner {
+            min_ref_mc_state: self.inner.clone(),
+            mc_seqno: None,
+        }))
     }
 
     #[inline]
@@ -36,14 +45,6 @@ impl MinRefMcStateTracker {
 pub struct RefMcStateHandle(Arc<HandleInner>);
 
 impl RefMcStateHandle {
-    #[cfg(any(test, feature = "test"))]
-    pub fn new_untracked(mc_seqno: u32) -> Self {
-        Self(Arc::new(HandleInner {
-            min_ref_mc_state: Arc::new(Inner::default()),
-            mc_seqno,
-        }))
-    }
-
     pub fn tracker(&self) -> &MinRefMcStateTracker {
         MinRefMcStateTracker::wrap(&self.0.min_ref_mc_state)
     }
@@ -70,7 +71,7 @@ impl Inner {
             counter.fetch_add(1, Ordering::Release);
             return RefMcStateHandle(Arc::new(HandleInner {
                 min_ref_mc_state: self.clone(),
-                mc_seqno,
+                mc_seqno: Some(mc_seqno),
             }));
         }
         drop(counters);
@@ -94,7 +95,7 @@ impl Inner {
 
         RefMcStateHandle(Arc::new(HandleInner {
             min_ref_mc_state: self.clone(),
-            mc_seqno,
+            mc_seqno: Some(mc_seqno),
         }))
     }
 
@@ -126,12 +127,14 @@ impl Inner {
 
 struct HandleInner {
     min_ref_mc_state: Arc<Inner>,
-    mc_seqno: u32,
+    mc_seqno: Option<u32>,
 }
 
 impl Drop for HandleInner {
     fn drop(&mut self) {
-        self.min_ref_mc_state.remove(self.mc_seqno);
+        if let Some(mc_seqno) = self.mc_seqno {
+            self.min_ref_mc_state.remove(mc_seqno);
+        }
     }
 }
 

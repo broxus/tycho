@@ -9,7 +9,6 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{
     BlockIdExt, BlockIdRelation, BlockStuff, BlockStuffAug, ShardHeights,
 };
-use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -82,7 +81,6 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
 impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
     pub fn with_state_subscriber<S>(
         self,
-        mc_state_tracker: MinRefMcStateTracker,
         storage: Storage,
         state_subscriber: S,
     ) -> BlockStriderBuilder<T1, T2, ShardStateApplier<S>>
@@ -92,7 +90,7 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
         BlockStriderBuilder {
             state: self.state,
             provider: self.provider,
-            subscriber: ShardStateApplier::new(mc_state_tracker, storage, state_subscriber),
+            subscriber: ShardStateApplier::new(storage, state_subscriber),
         }
     }
 }
