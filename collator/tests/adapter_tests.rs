@@ -83,11 +83,7 @@ async fn test_storage_accessors() {
             zerostate_id,
             storage.clone(),
         ))
-        .with_state_subscriber(
-            MinRefMcStateTracker::default(),
-            storage.clone(),
-            PrintSubscriber,
-        )
+        .with_state_subscriber(storage.clone(), PrintSubscriber)
         .build();
 
     block_strider.run().await.unwrap();
@@ -160,11 +156,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
             zerostate_id,
             storage.clone(),
         ))
-        .with_state_subscriber(
-            MinRefMcStateTracker::default(),
-            storage.clone(),
-            PrintSubscriber,
-        )
+        .with_state_subscriber(storage.clone(), PrintSubscriber)
         .build();
 
     block_strider.run().await.unwrap();

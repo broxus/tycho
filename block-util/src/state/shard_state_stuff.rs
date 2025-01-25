@@ -53,7 +53,15 @@ impl ShardStateStuff {
 
         anyhow::ensure!(shard_state.seqno == block_id.seqno, "state seqno mismatch");
 
-        let handle = tracker.insert(shard_state.min_ref_mc_seqno);
+        let handle = if block_id.seqno == 0 {
+            // Insert zerostates as untracked states to prevent their cache
+            // to hold back the global archives GC. This handle will still
+            // point to a shared tracker, but will have not touch any ref.
+            tracker.insert_untracked()
+        } else {
+            tracker.insert(shard_state.min_ref_mc_seqno)
+        };
+
         Ok(Self {
             inner: Arc::new(Inner {
                 block_id: *block_id,
@@ -65,7 +73,11 @@ impl ShardStateStuff {
         })
     }
 
-    pub fn deserialize_zerostate(zerostate_id: &BlockId, bytes: &[u8]) -> Result<Self> {
+    pub fn deserialize_zerostate(
+        zerostate_id: &BlockId,
+        bytes: &[u8],
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self> {
         anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
 
         let file_hash = Boc::file_hash_blake(bytes);
@@ -84,11 +96,7 @@ impl ShardStateStuff {
             got = root.repr_hash(),
         );
 
-        Self::from_root(
-            zerostate_id,
-            root,
-            ZEROSTATE_REFS.get_or_init(MinRefMcStateTracker::new),
-        )
+        Self::from_root(zerostate_id, root, tracker)
     }
 
     pub fn block_id(&self) -> &BlockId {
@@ -163,15 +171,13 @@ pub struct Inner {
     root: Cell,
 }
 
-static ZEROSTATE_REFS: std::sync::OnceLock<MinRefMcStateTracker> = std::sync::OnceLock::new();
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn min_ref_mc_state() {
-        let state = MinRefMcStateTracker::default();
+        let state = MinRefMcStateTracker::new();
 
         {
             let _handle = state.insert(10);

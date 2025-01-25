@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdExt, BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, CheckProof, OptionalBlockStuff, PersistentBlockStriderState, ProofChecker,
@@ -104,12 +104,10 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
                 ref_by_mc_seqno: 0,
             });
 
-    storage
-        .shard_state_storage()
+    let shard_states = storage.shard_state_storage();
+    shard_states
         .store_state(&handle, &zerostate, Default::default())
         .await?;
-
-    let tracker = MinRefMcStateTracker::default();
 
     let global_id = zerostate.state().global_id;
     let gen_utime = zerostate.state().gen_utime;
@@ -136,7 +134,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
             file_hash,
         };
 
-        let state = ShardStateStuff::from_root(&block_id, root, &tracker)?;
+        let state = ShardStateStuff::from_root(&block_id, root, shard_states.min_ref_mc_state())?;
 
         let (handle, _) =
             storage
@@ -181,10 +179,9 @@ async fn archives() -> Result<()> {
     let storage = prepare_storage(config, zerostate).await?;
 
     // Init state applier
-    let state_tracker = MinRefMcStateTracker::new();
     let state_subscriber = DummySubscriber;
 
-    let state_applier = ShardStateApplier::new(state_tracker, storage.clone(), state_subscriber);
+    let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
 
     // Archive provider
     let archive_data = utils::read_file("archive_1.bin")?;
@@ -289,10 +286,9 @@ async fn heavy_archives() -> Result<()> {
     let storage = prepare_storage(config, zerostate).await?;
 
     // Init state applier
-    let state_tracker = MinRefMcStateTracker::new();
     let state_subscriber = DummySubscriber;
 
-    let state_applier = ShardStateApplier::new(state_tracker, storage.clone(), state_subscriber);
+    let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
 
     // Archive provider
     let archive_path = integration_test_path.join("archive_1.bin");

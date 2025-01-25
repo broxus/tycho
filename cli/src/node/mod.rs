@@ -9,7 +9,6 @@ use everscale_types::models::*;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
-use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::commited_state::CommittedStateImplFactory;
@@ -61,8 +60,6 @@ pub struct Node {
     storage: Storage,
     rpc_mempool_adapter: RpcMempoolAdapter,
     blockchain_rpc_client: BlockchainRpcClient,
-
-    state_tracker: MinRefMcStateTracker,
 
     starter_config: StarterConfig,
     rpc_config: Option<RpcConfig>,
@@ -193,9 +190,6 @@ impl Node {
             "initialized blockchain rpc"
         );
 
-        // Setup block strider
-        let state_tracker = MinRefMcStateTracker::default();
-
         Ok(Self {
             keypair,
             network,
@@ -206,7 +200,6 @@ impl Node {
             storage,
             rpc_mempool_adapter,
             blockchain_rpc_client,
-            state_tracker,
             starter_config: node_config.starter,
             rpc_config: node_config.rpc,
             control_config: node_config.control,
@@ -462,7 +455,6 @@ impl Node {
             .with_block_subscriber(
                 (
                     ShardStateApplier::new(
-                        self.state_tracker.clone(),
                         self.storage.clone(),
                         (
                             collator,

@@ -334,12 +334,13 @@ impl StarterInner {
         P: ZerostateProvider,
     {
         tracing::info!("import zerostates");
-        // Use a separate tracker for zerostates
-        let tracker = MinRefMcStateTracker::default();
+
+        let state_storage = self.storage.shard_state_storage();
+        let tracker = state_storage.min_ref_mc_state();
 
         // Read all zerostates
         let mut zerostates = FastHashMap::default();
-        for loaded in provider.load_zerostates(&tracker) {
+        for loaded in provider.load_zerostates(tracker) {
             let state = loaded?;
             if let Some(prev) = zerostates.insert(*state.block_id(), state) {
                 anyhow::bail!("duplicate zerostate {}", prev.block_id());
@@ -376,7 +377,7 @@ impl StarterInner {
                 }
                 None => {
                     tracing::debug!(block_id = %block_id, "creating default zerostate");
-                    let state = make_shard_state(&tracker, global_id, shard_ident, gen_utime)
+                    let state = make_shard_state(tracker, global_id, shard_ident, gen_utime)
                         .context("failed to create shard zerostate")?;
 
                     anyhow::ensure!(
@@ -399,7 +400,6 @@ impl StarterInner {
 
         // Import all zerostates
         let handle_storage = self.storage.block_handle_storage();
-        let state_storage = self.storage.shard_state_storage();
         let persistent_states = self.storage.persistent_state_storage();
 
         for state in to_import {
