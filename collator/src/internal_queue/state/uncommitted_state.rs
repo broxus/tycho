@@ -163,6 +163,9 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         Self::add_messages(&mut tx, source, partition_router, messages)?;
         Self::add_statistics(&mut tx, statistics)?;
 
+        let _histogram =
+            HistogramGuard::begin("tycho_internal_queue_add_messages_with_statistics_write_time");
+
         tx.write()
     }
 

@@ -1303,6 +1303,9 @@ def collator_queue_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_internal_queue_create_iterator_time", "Create iterator time"
         ),
+        create_heatmap_panel(
+            "tycho_internal_queue_add_messages_with_statistics_write_time", "Write uncommited data time"
+        ),
         create_counter_panel(
             "tycho_collator_queue_adapter_iterators_count", "Iterators count"
         ),
@@ -1547,6 +1550,11 @@ def collator_core_operations_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_do_collate_apply_queue_diff_time",
             "async Apply message queue diff",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_build_statistics_time",
+            "Build statistics",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
