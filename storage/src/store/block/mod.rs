@@ -11,6 +11,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use parking_lot::RwLock;
 use tl_proto::TlWrite;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
     ArchiveData, ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
@@ -75,9 +76,10 @@ impl BlockStorage {
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
-        let archive_notifier = {
-            let archive_id = Arc::new(tokio::sync::Mutex::new(None));
-            ArchiveNotifier { archive_id }
+        let (archive_notifier_tx, _) = broadcast::channel(4);
+
+        let archive_notifier = ArchiveNotifier {
+            tx: archive_notifier_tx,
         };
 
         let archive_chunk_size =
@@ -288,9 +290,8 @@ impl BlockStorage {
             let mut task = self.spawn_commit_archive(archive_id);
             task.finish().await?;
 
-            // New archive committed
-            let mut new_id = self.archive_notifier.archive_id.lock().await;
-            *new_id = Some(task.archive_id);
+            // Notify archive subscribers
+            self.archive_notifier.tx.send(task.archive_id).ok();
         }
 
         Ok(())
@@ -742,10 +743,8 @@ impl BlockStorage {
                 // Wait commit archive
                 task.finish().await?;
 
-                // NOTE: We must wait until all handlers of the previous archive are completed
-                // and after that when the mutex is released we write a new archive
-                let mut new_id = self.archive_notifier.archive_id.lock().await;
-                *new_id = Some(task.archive_id);
+                // Notify archive subscribers
+                self.archive_notifier.tx.send(task.archive_id).ok();
             }
             *prev_archive_commit = Some(self.spawn_commit_archive(to_commit));
         }
@@ -853,8 +852,8 @@ impl BlockStorage {
         }))
     }
 
-    pub fn archive_listener(&self) -> Arc<tokio::sync::Mutex<Option<u32>>> {
-        self.archive_notifier.archive_id.clone()
+    pub fn subscribe_to_archive(&self) -> broadcast::Receiver<u32> {
+        self.archive_notifier.tx.subscribe()
     }
 
     pub fn archive_chunks_iterator(
@@ -1696,7 +1695,7 @@ struct PreparedArchiveId {
 }
 
 struct ArchiveNotifier {
-    archive_id: Arc<tokio::sync::Mutex<Option<u32>>>,
+    tx: broadcast::Sender<u32>,
 }
 
 struct ArchiveIterator<'a> {
