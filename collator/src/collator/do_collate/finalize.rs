@@ -154,13 +154,21 @@ impl Phase<FinalizeState> {
             move || {
                 let _span = span.enter();
 
+                let histogram = HistogramGuard::begin_with_labels(
+                    "tycho_do_collate_build_statistics_time",
+                    &labels,
+                );
+
+                let statistics = (&queue_diff_with_msgs, block_id_short.shard).into();
+
+                histogram.finish();
+
                 // apply queue diff
                 let histogram = HistogramGuard::begin_with_labels(
                     "tycho_do_collate_apply_queue_diff_time",
                     &labels,
                 );
 
-                let statistics = (&queue_diff_with_msgs, block_id_short.shard).into();
                 mq_adapter.apply_diff(
                     queue_diff_with_msgs,
                     block_id_short,
