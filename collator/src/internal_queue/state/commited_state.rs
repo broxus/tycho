@@ -1,6 +1,7 @@
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_storage::model::ShardsInternalMessagesKey;
 use tycho_storage::{InternalQueueSnapshot, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -106,14 +107,19 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<Box<dyn StateIterator<V>>> {
-        let mut shard_iters_with_ranges = Vec::new();
+        let mut shards_iters = Vec::new();
 
         for range in ranges {
-            let iter = snapshot.iter_messages_commited();
-            shard_iters_with_ranges.push((iter, range.clone()));
+            // exclude from key
+            let from_key = range.from.next_value();
+            let from = ShardsInternalMessagesKey::new(partition, range.shard_ident, from_key);
+            // include to key
+            let to_key = range.to.next_value();
+            let to = ShardsInternalMessagesKey::new(partition, range.shard_ident, to_key);
+            shards_iters.push((snapshot.iter_messages_commited(from, to), range.shard_ident));
         }
 
-        let iterator = StateIteratorImpl::new(partition, shard_iters_with_ranges, receiver)?;
+        let iterator = StateIteratorImpl::new(shards_iters, receiver)?;
         Ok(Box::new(iterator))
     }
 

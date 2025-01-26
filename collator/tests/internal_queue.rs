@@ -454,11 +454,11 @@ async fn test_queue() -> anyhow::Result<()> {
     let queue_range = QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
-            lt: 0,
+            lt: 10000,
             hash: HashBytes::default(),
         },
         to: QueueKey {
-            lt: 16000,
+            lt: 15500,
             hash: HashBytes::default(),
         },
     };
@@ -472,7 +472,7 @@ async fn test_queue() -> anyhow::Result<()> {
     while iterator_manager.next()?.is_some() {
         read_count += 1;
     }
-    assert_eq!(read_count, 15000);
+    assert_eq!(read_count, 5000);
 
     let iterators = queue.iterator(
         QueuePartitionIdx::default(),
@@ -485,7 +485,7 @@ async fn test_queue() -> anyhow::Result<()> {
         read_count += 1;
     }
 
-    assert_eq!(read_count, 1000);
+    assert_eq!(read_count, 500);
 
     // check two diff iterator
     let mut ranges = Vec::new();
