@@ -807,9 +807,15 @@ impl MessagesReader {
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
+            int_curr_processed_offset = ?DebugIter(self
+                .internals_partition_readers.iter()
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+            ext_curr_processed_offset = ?DebugIter(self
+                .externals_reader.reader_state()
+                .by_partitions.iter()
+                .map(|(par_id, par)| (par_id, par.curr_processed_offset))),
             int_msgs_count_in_buffers = ?DebugIter(self
-                .internals_partition_readers
-                .iter()
+                .internals_partition_readers.iter()
                 .map(|(par_id, par)| (par_id, par.count_messages_in_buffers()))),
             ext_msgs_count_in_buffers = ?self.externals_reader.count_messages_in_buffers_by_partitions(),
             "collected message groups by partitions: {:?}",
