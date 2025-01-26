@@ -1554,7 +1554,7 @@ def collator_core_operations_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_do_collate_build_statistics_time",
-            "Build statistics",
+            "async Apply message queue diff: inc. Build statistics",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(

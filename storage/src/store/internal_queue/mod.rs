@@ -414,17 +414,33 @@ pub struct InternalQueueSnapshot {
 }
 
 impl InternalQueueSnapshot {
-    pub fn iter_messages_commited(&self) -> InternalQueueMessagesIter {
-        self.iter_messages(&self.db.shard_internal_messages)
+    pub fn iter_messages_commited(
+        &self,
+        from: ShardsInternalMessagesKey,
+        to: ShardsInternalMessagesKey,
+    ) -> InternalQueueMessagesIter {
+        self.iter_messages(&self.db.shard_internal_messages, from, to)
     }
 
-    pub fn iter_messages_uncommited(&self) -> InternalQueueMessagesIter {
-        self.iter_messages(&self.db.shard_internal_messages_uncommitted)
+    pub fn iter_messages_uncommited(
+        &self,
+        from: ShardsInternalMessagesKey,
+        to: ShardsInternalMessagesKey,
+    ) -> InternalQueueMessagesIter {
+        self.iter_messages(&self.db.shard_internal_messages_uncommitted, from, to)
     }
 
-    fn iter_messages<T: ColumnFamily>(&self, table: &Table<T>) -> InternalQueueMessagesIter {
+    fn iter_messages<T: ColumnFamily>(
+        &self,
+        table: &Table<T>,
+        from: ShardsInternalMessagesKey,
+        to: ShardsInternalMessagesKey,
+    ) -> InternalQueueMessagesIter {
         let mut read_config = table.new_read_config();
         read_config.set_snapshot(&self.snapshot);
+
+        read_config.set_iterate_lower_bound(from.to_vec().to_vec());
+        read_config.set_iterate_upper_bound(to.to_vec().to_vec());
 
         let db = self.db.rocksdb();
         let iter = db.raw_iterator_cf_opt(&table.cf(), read_config);
@@ -525,6 +541,11 @@ pub struct InternalQueueMessagesIter {
 impl InternalQueueMessagesIter {
     pub fn seek(&mut self, key: &ShardsInternalMessagesKey) {
         self.inner.seek(key.to_vec());
+        self.first = true;
+    }
+
+    pub fn seek_to_first(&mut self) {
+        self.inner.seek_to_first();
         self.first = true;
     }
 

@@ -191,6 +191,31 @@ impl QueueKey {
         }
     }
 
+    // add min step to the key
+    pub fn next_value(&self) -> Self {
+        let mut new_lt = self.lt;
+        let mut new_hash = self.hash;
+
+        if new_hash.0 == [0xff; 32] {
+            new_lt += 1;
+            new_hash = HashBytes::ZERO;
+        } else {
+            let carry = 1u8;
+            for byte in new_hash.0.iter_mut().rev() {
+                let (res, overflow) = byte.overflowing_add(carry);
+                *byte = res;
+                if !overflow {
+                    break;
+                }
+            }
+        }
+
+        Self {
+            lt: new_lt,
+            hash: new_hash,
+        }
+    }
+
     #[inline]
     pub const fn split(self) -> (u64, HashBytes) {
         (self.lt, self.hash)
@@ -746,5 +771,86 @@ mod tests {
 
         let parsed = tl_proto::deserialize::<QueueStateHeader>(&bytes).unwrap();
         assert_eq!(state, parsed);
+    }
+
+    #[test]
+    fn test_next_value() {
+        // 1) Check increment when hash is all zeros
+        let key_zero = QueueKey {
+            lt: 5,
+            hash: HashBytes::ZERO,
+        };
+        let next_zero = key_zero.next_value();
+        // Expect that lt remains unchanged and hash is [0..0, 1]
+        assert_eq!(
+            next_zero.lt, 5,
+            "LT must remain the same if hash is not full 0xFF"
+        );
+        let mut expected_hash_zero = [0u8; 32];
+        expected_hash_zero[31] = 1;
+        assert_eq!(
+            next_zero.hash.0, expected_hash_zero,
+            "Hash should increment by 1"
+        );
+
+        // 2) Check increment when hash has partial 0xFF at the end
+        //    e.g., last two bytes are 0xFF, but not the whole array
+        let mut partial_ff = [0u8; 32];
+        partial_ff[30] = 0xFF;
+        partial_ff[31] = 0xFF;
+        let key_partial_ff = QueueKey {
+            lt: 10,
+            hash: HashBytes(partial_ff),
+        };
+        let next_partial_ff = key_partial_ff.next_value();
+        // Expected result: carry rolls over the last two 0xFF bytes
+        // and increments the next byte
+        let mut expected_hash_partial = [0u8; 32];
+        expected_hash_partial[29] = 0x01; // incremented by carry
+                                          // bytes 30, 31 become 0x00
+        assert_eq!(
+            next_partial_ff.lt, 10,
+            "LT must remain the same with partial 0xFF"
+        );
+        assert_eq!(
+            next_partial_ff.hash.0, expected_hash_partial,
+            "Hash should be incremented correctly with carry"
+        );
+
+        // 3) Check increment when hash is fully 0xFF
+        let key_full_ff = QueueKey {
+            lt: 999,
+            hash: HashBytes([0xFF; 32]),
+        };
+        let next_full_ff = key_full_ff.next_value();
+        // Expect that hash resets to zero and LT increments by 1
+        assert_eq!(
+            next_full_ff.lt, 1000,
+            "LT must increment if hash was all 0xFF"
+        );
+        assert_eq!(next_full_ff.hash.0, [0u8; 32], "Hash should reset to zero");
+
+        // 4) A quick check of mid-range increment with carry:
+        //    Example: [.., 0x01, 0xFF, 0xFF]
+        let mut mid_hash = [0u8; 32];
+        mid_hash[29] = 0x01;
+        mid_hash[30] = 0xFF;
+        mid_hash[31] = 0xFF;
+        let key_mid = QueueKey {
+            lt: 50,
+            hash: HashBytes(mid_hash),
+        };
+        let next_mid = key_mid.next_value();
+        // We expect that byte 29 increments to 0x02 and the last two bytes become 0x00
+        let mut expected_mid_hash = [0u8; 32];
+        expected_mid_hash[29] = 0x02;
+        assert_eq!(
+            next_mid.lt, 50,
+            "LT should remain the same for a mid-range carry"
+        );
+        assert_eq!(
+            next_mid.hash.0, expected_mid_hash,
+            "Hash should increment the correct byte after partial 0xFF"
+        );
     }
 }

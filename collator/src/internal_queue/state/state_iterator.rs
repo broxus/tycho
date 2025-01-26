@@ -6,12 +6,12 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{bail, Context, Result};
 use everscale_types::models::ShardIdent;
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::queue::QueueKey;
 use tycho_storage::InternalQueueMessagesIter;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
-use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
+use crate::internal_queue::types::InternalMessageValue;
 
 pub struct ShardIteratorWithRange {
     pub iter: InternalQueueMessagesIter,
@@ -86,21 +86,13 @@ pub struct StateIteratorImpl<V: InternalMessageValue> {
 
 impl<V: InternalMessageValue> StateIteratorImpl<V> {
     pub fn new(
-        partition: QueuePartitionIdx,
-        shard_iters_with_ranges: Vec<(InternalQueueMessagesIter, QueueShardRange)>,
+        shard_iters: Vec<(InternalQueueMessagesIter, ShardIdent)>,
         receiver: ShardIdent,
     ) -> Result<Self> {
-        let mut iters = FastHashMap::with_capacity(shard_iters_with_ranges.len());
+        let mut iters = FastHashMap::with_capacity(shard_iters.len());
 
-        for (iter, range) in shard_iters_with_ranges {
-            let QueueShardRange {
-                shard_ident,
-                from,
-                to,
-            } = range;
-
-            let shard_iterator =
-                ShardIterator::new(partition, shard_ident, from, to, receiver, iter);
+        for (iter, shard_ident) in shard_iters {
+            let shard_iterator = ShardIterator::new(receiver, iter);
 
             match iters.entry(shard_ident) {
                 Entry::Occupied(_) => {
