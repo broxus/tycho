@@ -229,6 +229,9 @@ fn test_read_externals() {
     let by_par = range_reader.reader_state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 4);
 
+    // flag will be dropped after refill
+    externals_reader.all_ranges_fully_read = false;
+
     // continue reading on block 2
     println!("continue reading on block 2");
     let metrics =

@@ -608,19 +608,29 @@ impl InternalsParitionReader {
                 if last_seqno < self.block_seqno {
                     // if open ranges limit not reached
                     if !self.open_ranges_limit_reached() {
-                        let last_range_reader_shards_and_offset_opt = self
-                            .get_last_range_reader()
-                            .map(|(_, reader)| {
-                                Some((
-                                    reader.reader_state.shards.clone(),
-                                    reader.reader_state.processed_offset,
-                                ))
-                            })
-                            .unwrap_or_default();
-                        self.create_append_next_range_reader(
-                            last_range_reader_shards_and_offset_opt,
-                        )?;
-                        ranges_seqno.push_back(self.block_seqno);
+                        if read_mode == GetNextMessageGroupMode::Continue {
+                            let last_range_reader_shards_and_offset_opt = self
+                                .get_last_range_reader()
+                                .map(|(_, reader)| {
+                                    Some((
+                                        reader.reader_state.shards.clone(),
+                                        reader.reader_state.processed_offset,
+                                    ))
+                                })
+                                .unwrap_or_default();
+                            self.create_append_next_range_reader(
+                                last_range_reader_shards_and_offset_opt,
+                            )?;
+                            ranges_seqno.push_back(self.block_seqno);
+                        } else {
+                            // do not create next range reader on refill
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                last_seqno,
+                                "internals reader: do not create next range reader on Refill",
+                            );
+                            self.all_ranges_fully_read = true;
+                            break;
+                        }
                     } else {
                         // otherwise set all open ranges read
                         // to collect messages from all open ranges

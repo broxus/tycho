@@ -311,8 +311,12 @@ impl ExternalsReader {
         let last_range_reader_by_partition = last_range_reader
             .reader_state
             .get_state_by_partition_mut(par_id)?;
-        last_range_reader_by_partition.processed_offset = curr_processed_offset;
-        last_range_reader_by_partition.skip_offset = curr_processed_offset;
+        // update processed offset only if current is greater
+        // because this method could be called on refill before the processed_offset reached
+        if curr_processed_offset > last_range_reader_by_partition.processed_offset {
+            last_range_reader_by_partition.processed_offset = curr_processed_offset;
+            last_range_reader_by_partition.skip_offset = curr_processed_offset;
+        }
 
         Ok(())
     }
@@ -532,8 +536,18 @@ impl ExternalsReader {
             if all_ranges_fully_read {
                 if last_seqno < self.block_seqno {
                     if !self.open_ranges_limit_reached() {
-                        self.create_append_next_range_reader();
-                        ranges_seqno.push_back(self.block_seqno);
+                        if read_mode == GetNextMessageGroupMode::Continue {
+                            self.create_append_next_range_reader();
+                            ranges_seqno.push_back(self.block_seqno);
+                        } else {
+                            // do not create next range reader on refill
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                last_seqno,
+                                "externals reader: do not create next range reader on Refill",
+                            );
+                            self.all_ranges_fully_read = true;
+                            break;
+                        }
                     } else {
                         // otherwise set all open ranges read
                         // to collect messages from all open ranges
