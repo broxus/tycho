@@ -438,6 +438,22 @@ impl ColumnFamily for ShardInternalMessagesUncommited {
 impl ColumnFamilyOptions<Caches> for ShardInternalMessagesUncommited {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
+
+        let mut block_factory = BlockBasedOptions::default();
+        block_factory.set_block_cache(&caches.block_cache);
+        block_factory.set_whole_key_filtering(true);
+        block_factory.set_bloom_filter(10.0, false);
+        block_factory.set_optimize_filters_for_memory(true);
+
+        opts.set_block_based_table_factory(&block_factory);
+        opts.set_avoid_unnecessary_blocking_io(true);
+
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        opts.set_max_write_buffer_number(2);
+
+        opts.set_memtable_whole_key_filtering(true);
+
+        opts.set_target_file_size_base(256 * 1024 * 1024);
     }
 }
 
@@ -468,6 +484,22 @@ impl ColumnFamily for InternalMessageStatsUncommited {
 impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommited {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
+
+        let mut block_factory = BlockBasedOptions::default();
+        block_factory.set_block_cache(&caches.block_cache);
+        block_factory.set_whole_key_filtering(true);
+        block_factory.set_bloom_filter(10.0, false);
+        block_factory.set_optimize_filters_for_memory(true);
+
+        opts.set_block_based_table_factory(&block_factory);
+        opts.set_avoid_unnecessary_blocking_io(true);
+
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        opts.set_max_write_buffer_number(2);
+
+        opts.set_memtable_whole_key_filtering(true);
+
+        opts.set_target_file_size_base(256 * 1024 * 1024);
     }
 }
 
