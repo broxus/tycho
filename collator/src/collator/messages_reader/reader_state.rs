@@ -474,6 +474,14 @@ impl std::fmt::Debug for DebugInternalsRangeReaderState<'_> {
             .field("processed_offset", &self.0.processed_offset)
             .field("buffer.msgs_count", &self.0.buffer.msgs_count())
             .field(
+                "remaning_msgs_stats.accounts_count",
+                &self
+                    .0
+                    .remaning_msgs_stats
+                    .as_ref()
+                    .map(|s| s.statistics().len()),
+            )
+            .field(
                 "shards",
                 &DebugIter(
                     self.0

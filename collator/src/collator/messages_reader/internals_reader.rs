@@ -302,14 +302,7 @@ impl InternalsParitionReader {
 
         // get statistics for the range if it was not loaded before
         if range_reader_state.msgs_stats.is_none() {
-            let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, &ranges)?;
-            let remaning_msgs_stats = match fully_read {
-                true => QueueStatistics::default(),
-                false => msgs_stats.clone(),
-            };
-
-            range_reader_state.msgs_stats = Some(msgs_stats);
-            range_reader_state.remaning_msgs_stats = Some(remaning_msgs_stats);
+            self.load_msg_stats(&mut range_reader_state, fully_read, &ranges)?;
         }
 
         let reader = InternalsRangeReader {
@@ -335,6 +328,35 @@ impl InternalsParitionReader {
         );
 
         Ok(reader)
+    }
+
+    fn load_msg_stats(
+        &self,
+        range_reader_state: &mut InternalsRangeReaderState,
+        fully_read: bool,
+        ranges: &[QueueShardRange],
+    ) -> Result<()> {
+        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        let remaning_msgs_stats = match fully_read {
+            true => QueueStatistics::default(),
+            false => {
+                let mut remaning_msgs_stats = msgs_stats.clone();
+                // should reduce remaning stats if buffer is not empty
+                if range_reader_state.buffer.msgs_count() > 0 {
+                    for (account_id, msgs) in range_reader_state.buffer.iter() {
+                        let int_addr =
+                            IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
+                        remaning_msgs_stats.decrement_for_account(int_addr, msgs.len() as u64);
+                    }
+                }
+                remaning_msgs_stats
+            }
+        };
+
+        range_reader_state.msgs_stats = Some(msgs_stats);
+        range_reader_state.remaning_msgs_stats = Some(remaning_msgs_stats);
+
+        Ok(())
     }
 
     fn create_append_next_range_reader(
@@ -411,16 +433,23 @@ impl InternalsParitionReader {
             });
         }
 
-        // get statistics for the range
-        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, &ranges)?;
-        let remaning_msgs_stats = match fully_read {
-            true => QueueStatistics::default(),
-            false => msgs_stats.clone(),
-        };
-
         let processed_offset = last_range_reader_shards_and_offset_opt
             .map(|(_, processed_offset)| processed_offset)
             .unwrap_or_default();
+
+        let mut range_reader_state = InternalsRangeReaderState {
+            buffer: Default::default(),
+
+            msgs_stats: None,
+            remaning_msgs_stats: None,
+
+            shards: shard_reader_states,
+            skip_offset: processed_offset,
+            processed_offset,
+        };
+
+        // get statistics for the range
+        self.load_msg_stats(&mut range_reader_state, fully_read, &ranges)?;
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
@@ -428,16 +457,7 @@ impl InternalsParitionReader {
             seqno,
             kind: InternalsRangeReaderKind::Next,
             buffer_limits: self.target_limits,
-            reader_state: InternalsRangeReaderState {
-                buffer: Default::default(),
-
-                msgs_stats: Some(msgs_stats),
-                remaning_msgs_stats: Some(remaning_msgs_stats),
-
-                shards: shard_reader_states,
-                skip_offset: processed_offset,
-                processed_offset,
-            },
+            reader_state: range_reader_state,
             fully_read,
             mq_adapter: self.mq_adapter.clone(),
             iterator_opt: None,

@@ -45,6 +45,10 @@ impl MessagesBuffer {
         self.int_count + self.ext_count
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<Box<ParsedMessage>>)> {
+        self.msgs.iter()
+    }
+
     pub fn add_message(&mut self, msg: Box<ParsedMessage>) {
         assert_eq!(
             msg.special_origin, None,
