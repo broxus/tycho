@@ -5,10 +5,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use everscale_types::boc::BocRepr;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use tycho_util::bc::ExtMsgRepr;
 
 pub use self::cache::ProtoEndpointCache;
 use self::protos::rpc::{self, request, response, Request};
@@ -66,7 +66,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         Some(request::Call::SendMessage(p)) => {
-            if let Err(e) = BocRepr::decode::<OwnedMessage, _>(&p.message) {
+            if let Err(e) = ExtMsgRepr::decode(&p.message) {
                 return ProtoErrorResponse {
                     code: INVALID_BOC_CODE,
                     message: e.to_string().into(),

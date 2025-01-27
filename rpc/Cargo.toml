@@ -33,7 +33,7 @@ tracing = { workspace = true }
 tycho-block-util = { workspace = true }
 tycho-core = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-util = { workspace = true }
+tycho-util = { workspace = true, features = ["bc"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
