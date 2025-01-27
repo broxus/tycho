@@ -569,20 +569,22 @@ impl RpcStorage {
             } else {
                 let merkle_update = block.as_ref().state_update.load()?;
 
-                let old = merkle_update
-                    .old
-                    .virtualize()
-                    .parse::<ShardStateUnsplit>()?;
+                // Accounts dict is stored in the second cell.
+                let get_accounts = |cell: Cell| {
+                    let mut cs = cell.as_slice()?;
+                    cs.skip_first(0, 1)?;
+                    cs.load_reference_cloned().map(Cell::virtualize)
+                };
 
-                let new = merkle_update
-                    .new
-                    .virtualize()
-                    .parse::<ShardStateUnsplit>()?;
+                let old_accounts = get_accounts(merkle_update.old)?;
+                let new_accounts = get_accounts(merkle_update.new)?;
 
-                if old.accounts.inner().repr_hash() == new.accounts.inner().repr_hash() {
+                if old_accounts.repr_hash() == new_accounts.repr_hash() {
                     Dict::new()
                 } else {
-                    new.load_accounts()?.dict().clone()
+                    let accounts = Lazy::<ShardAccounts>::from_raw(new_accounts).load()?;
+                    let (accounts, _) = accounts.into_parts();
+                    accounts
                 }
             };
 
