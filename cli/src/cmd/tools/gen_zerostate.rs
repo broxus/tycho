@@ -179,6 +179,18 @@ impl ZerostateConfig {
             }
         }
 
+        match self.params.get::<ConfigParam19>()? {
+            None => {
+                self.params.set_global_id(self.global_id)?;
+            }
+            Some(existing) => {
+                anyhow::ensure!(
+                    existing == self.global_id,
+                    "global id mismatch in config parm 19"
+                );
+            }
+        }
+
         {
             let mut fundamental_addresses = self.params.get::<ConfigParam31>()?.unwrap_or_default();
 
@@ -581,6 +593,8 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
         mc_cell_price_ps: 500000,
     }])?;
 
+    // Param 19 will be added during state creation.
+
     // Param 20 (masterchain)
     params.set_gas_prices(true, &GasLimitsPrices {
         gas_price: 655360000,
@@ -747,6 +761,20 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
     // Param 31
     params.set_fundamental_addresses(&[HashBytes([0x00; 32]), HashBytes([0x33; 32])])?;
+
+    // Param 43
+    params.set_size_limits(&SizeLimitsConfig {
+        max_msg_bits: 1 << 21,
+        max_msg_cells: 1 << 13,
+        max_library_cells: 1000,
+        max_vm_data_depth: 512,
+        max_ext_msg_size: 65535,
+        max_ext_msg_depth: 512,
+        max_acc_state_cells: 1 << 16,
+        max_acc_state_bits: (1 << 16) * 1023,
+        max_acc_public_libraries: 256,
+        defer_out_queue_size_limit: 256,
+    })?;
 
     Ok(params)
 }
