@@ -183,14 +183,8 @@ where
         self.inner.state_subscriber.handle_state(&cx).await?;
         metrics::histogram!("tycho_core_subscriber_handle_state_time").record(started_at.elapsed());
 
-        // Mark block as applied
-        let applied = self
-            .inner
-            .storage
-            .block_handle_storage()
-            .set_block_applied(&prepared.handle);
-
-        if applied && self.inner.storage.config().archives_gc.is_some() {
+        // Save block to archive.
+        if self.inner.storage.config().archives_gc.is_some() {
             tracing::debug!(block_id = %prepared.handle.id(), "saving block into archive");
             self.inner
                 .storage
@@ -198,6 +192,12 @@ where
                 .move_into_archive(&prepared.handle, cx.mc_is_key_block)
                 .await?;
         }
+
+        // Mark block as applied.
+        self.inner
+            .storage
+            .block_handle_storage()
+            .set_block_applied(&prepared.handle);
 
         // Done
         Ok(())
