@@ -933,7 +933,7 @@ impl CollatorStdImpl {
         // prepare
         metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
             .set(execute_result.prepare_msg_groups_wu.total_wu as f64);
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_prepare", &labels)
+        metrics::gauge!("tycho_do_collate_wu_price_on_prepare", &labels)
             .set(execute_result.prepare_msg_groups_wu.total_wu_price());
         metrics::gauge!("tycho_do_collate_wu_on_prepare_read_ext_msgs", &labels)
             .set(execute_result.prepare_msg_groups_wu.read_ext_msgs_wu as f64);
@@ -987,32 +987,35 @@ impl CollatorStdImpl {
                 .add_msgs_to_groups_wu_price(),
         );
 
+        // execute
         metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
             .set(execute_result.execute_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_on_all", &labels).set(
-            execute_result.execute_groups_wu_total as f64
-                + finalize_wu_total as f64
-                + execute_result.prepare_msg_groups_wu.total_wu as f64,
-        );
-
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_execute", &labels).set(
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute", &labels).set(
             (execute_result.execute_msgs_total_elapsed.as_nanos() as f64
                 + execute_result.process_txs_total_elapsed.as_nanos() as f64)
                 / execute_result.execute_groups_wu_total as f64,
         );
-        metrics::gauge!("tycho_do_collate_execute_txs_to_wu", &labels).set(
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute_txs", &labels).set(
             execute_result.execute_msgs_total_elapsed.as_nanos() as f64
                 / execute_result.execute_groups_wu_vm_only as f64,
         );
-        metrics::gauge!("tycho_do_collate_process_txs_to_wu", &labels).set(
+        metrics::gauge!("tycho_do_collate_wu_price_on_process_txs", &labels).set(
             execute_result.process_txs_total_elapsed.as_nanos() as f64
                 / execute_result.process_txs_wu as f64,
         );
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_finalize", &labels)
+
+        // finalize
+        metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize", &labels)
             .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
 
-        metrics::gauge!("tycho_do_collate_wu_to_mcs_total", &labels).set(
+        // finalize
+        metrics::gauge!("tycho_do_collate_wu_total", &labels).set(
+            execute_result.execute_groups_wu_total as f64
+                + finalize_wu_total as f64
+                + execute_result.prepare_msg_groups_wu.total_wu as f64,
+        );
+        metrics::gauge!("tycho_do_collate_wu_price_total", &labels).set(
             total_elapsed.as_nanos() as f64
                 / (execute_result.execute_groups_wu_total
                     + finalize_wu_total

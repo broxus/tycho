@@ -1384,7 +1384,7 @@ def collator_wu_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_prepare",
+            "tycho_do_collate_wu_price_on_prepare",
             "Wu price on prepare",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
@@ -1439,19 +1439,19 @@ def collator_wu_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_execute",
+            "tycho_do_collate_wu_price_on_execute",
             "Wu price on execute total",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_execute_txs_to_wu",
+            "tycho_do_collate_wu_price_on_execute_txs",
             "Wu price on execute in vm",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_process_txs_to_wu",
+            "tycho_do_collate_wu_price_on_process_txs",
             "Wu price on process executed txs",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
@@ -1462,18 +1462,18 @@ def collator_wu_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_finalize",
+            "tycho_do_collate_wu_price_on_finalize",
             "Wu price on finalize",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_on_all",
+            "tycho_do_collate_wu_total",
             "Wu spent total on prepare, execute and finalize",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_to_mcs_total",
+            "tycho_do_collate_wu_price_total",
             "Wu price total",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
