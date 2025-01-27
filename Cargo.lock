@@ -3132,9 +3132,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "410fb3d256aefbb37aaa41ba321a2482530461205f5461d8216c50ccafa263cb"
+checksum = "d4e0d6f1ad91e0776280a494c5c5ed10922988b6c4475a11dd92c73c6838b381"
 dependencies = [
  "bytes",
  "digest",
@@ -3146,9 +3146,9 @@ dependencies = [
 
 [[package]]
 name = "tl-proto-proc"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5caf1121373f118fcedb01395b06418f94b3f70683c224f304dbe03ccfe1f6db"
+checksum = "4c1a51b272c6c86781e53fb392cc1e09aa857158ff8ef074ae13e926e1f5dd80"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3159,9 +3159,9 @@ dependencies = [
 
 [[package]]
 name = "tl-scheme"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50d4856ed9f895673dac121a045efb2fbf9679570d2c4b5e7ed0af3176e4e4b4"
+checksum = "1f0c39863b77e0997772c8e1f19ae9cef5d57d73bbc1fd1a211e0a91668b54d6"
 dependencies = [
  "crc",
  "pest",
@@ -3466,7 +3466,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tycho-block-util"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3481,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-cli"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3527,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-collator"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-consensus"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-control"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-core"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3663,7 +3663,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-gen-protos"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "prost-build",
@@ -3671,7 +3671,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-light-node"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3692,7 +3692,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-network"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3735,7 +3735,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulator"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3779,7 +3779,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3821,7 +3821,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
