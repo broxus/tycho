@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::serde_helpers;
+use tycho_util::{bc, serde_helpers};
 
 pub use self::cache::JrpcEndpointCache;
 use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
@@ -198,7 +198,7 @@ impl<'de> Deserialize<'de> for EmptyParams {
 
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
-    #[serde(with = "BocRepr")]
+    #[serde(with = "bc::ExtMsgRepr")]
     pub message: Box<OwnedMessage>,
 }
 

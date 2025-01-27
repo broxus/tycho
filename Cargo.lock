@@ -3830,6 +3830,7 @@ dependencies = [
  "castaway",
  "criterion",
  "dashmap",
+ "everscale-types",
  "futures-util",
  "getip",
  "humantime",
