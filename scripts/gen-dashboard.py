@@ -866,8 +866,14 @@ def storage() -> RowPanel:
                     legend_format="{{instance}}",
                 )
             ],
-            unit="Blocks",
-            title="GC lag",
+            unit="States",
+            title="States GC lag",
+        ),
+        create_gauge_panel(
+            "tycho_core_mc_blocks_gc_lag", "Blocks GC lag", unit_format="Blocks"
+        ),
+        create_gauge_panel(
+            "tycho_core_blocks_gc_tail_len", "GC diffs tail len"
         ),
         create_heatmap_panel(
             "tycho_storage_move_into_archive_time", "Time to move into archive"
