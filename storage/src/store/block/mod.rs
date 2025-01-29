@@ -46,6 +46,7 @@ pub struct BlockStorage {
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
+    split_block_tasks: tokio::sync::Mutex<Vec<SplitBlockTask>>,
 }
 
 impl BlockStorage {
@@ -80,6 +81,7 @@ impl BlockStorage {
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
             prev_archive_commit: Default::default(),
+            split_block_tasks: Default::default(),
         }
     }
 
@@ -151,7 +153,8 @@ impl BlockStorage {
                 None => return Err(BlockStorageError::BlockDataNotFound.into()),
             };
 
-            self.spawn_split_block_data(&block_id, &data).await??;
+            let mut task = self.spawn_split_block_data(&block_id, &data);
+            task.finish().await?;
         }
 
         tracing::info!(
@@ -340,11 +343,20 @@ impl BlockStorage {
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.has_data() {
-                self.add_data_ext(&archive_id, data)?;
+                self.add_data_ext(&archive_id, data).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
                 }
+            }
+        }
+
+        // Waiting for all split block tasks to be completed
+        // within one master block
+        if block_id.is_masterchain() {
+            let mut split_block_tasks = self.split_block_tasks.lock().await;
+            while let Some(mut task) = split_block_tasks.pop() {
+                task.finish().await?;
             }
         }
 
@@ -968,7 +980,7 @@ impl BlockStorage {
         self.db.package_entries.insert(id.to_vec(), data)
     }
 
-    fn add_data_ext(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
+    async fn add_data_ext(&self, id: &PackageEntryKey, data: &[u8]) -> Result<()> {
         let mut batch = rocksdb::WriteBatch::default();
 
         batch.put_cf(&self.db.package_entries.cf(), id.to_vec(), data);
@@ -983,7 +995,10 @@ impl BlockStorage {
         self.db.rocksdb().write(batch)?;
 
         // Start splitting block data
-        let _handle = self.spawn_split_block_data(&id.block_id, data);
+        let task = self.spawn_split_block_data(&id.block_id, data);
+
+        let mut tasks = self.split_block_tasks.lock().await;
+        tasks.push(task);
 
         Ok(())
     }
@@ -1209,11 +1224,7 @@ impl BlockStorage {
     }
 
     #[tracing::instrument(skip(self, data))]
-    fn spawn_split_block_data(
-        &self,
-        block_id: &PartialBlockId,
-        data: &[u8],
-    ) -> JoinHandle<Result<()>> {
+    fn spawn_split_block_data(&self, block_id: &PartialBlockId, data: &[u8]) -> SplitBlockTask {
         let db = self.db.clone();
         let chunk_size = self.block_data_chunk_size().get() as usize;
 
@@ -1251,7 +1262,10 @@ impl BlockStorage {
             }
         });
 
-        handle
+        SplitBlockTask {
+            block_id: *block_id,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -1291,6 +1305,46 @@ impl CommitArchiveTask {
 impl Drop for CommitArchiveTask {
     fn drop(&mut self) {
         self.cancelled.cancel();
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+struct SplitBlockTask {
+    block_id: PartialBlockId,
+    handle: Option<JoinHandle<Result<()>>>,
+}
+
+impl SplitBlockTask {
+    async fn finish(&mut self) -> Result<()> {
+        // NOTE: Await on reference to make sure that the task is cancel safe
+        if let Some(handle) = &mut self.handle {
+            if let Err(e) = handle
+                .await
+                .map_err(|e| {
+                    if e.is_panic() {
+                        std::panic::resume_unwind(e.into_panic());
+                    }
+                    anyhow::Error::from(e)
+                })
+                .and_then(std::convert::identity)
+            {
+                tracing::error!(
+                    block_id = ?self.block_id,
+                    "failed to split block: {e:?}"
+                );
+            }
+
+            self.handle = None;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for SplitBlockTask {
+    fn drop(&mut self) {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
