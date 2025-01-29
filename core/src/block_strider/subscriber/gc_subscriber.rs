@@ -262,6 +262,8 @@ impl GcSubscriber {
                         0
                     }) as u32;
 
+                    metrics::gauge!("tycho_core_blocks_gc_tail_len").set(tail_len);
+
                     tracing::info!(tail_len, "found longest diffs tail");
 
                     let safe_distance = [safe_distance, MIN_SAFE_DISTANCE, tail_len + 1]
@@ -322,6 +324,9 @@ impl GcSubscriber {
                     }
                 }
             };
+
+            metrics::gauge!("tycho_core_mc_blocks_gc_lag")
+                .set(tick.mc_block_id.seqno.saturating_sub(target_seqno));
 
             if let Err(e) = storage
                 .block_storage()
