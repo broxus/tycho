@@ -11,7 +11,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use parking_lot::RwLock;
 use tl_proto::TlWrite;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
     ArchiveData, ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
@@ -50,6 +50,7 @@ pub struct BlockStorage {
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
     archive_notifier: ArchiveNotifier,
     archive_chunk_size: NonZeroU32,
+    split_block_semaphore: Arc<Semaphore>,
 }
 
 impl BlockStorage {
@@ -57,7 +58,7 @@ impl BlockStorage {
 
     pub fn new(
         db: BaseDb,
-        config: BlocksCacheConfig,
+        config: BlockStorageConfig,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
         archive_chunk_size: ByteSize,
@@ -71,8 +72,8 @@ impl BlockStorage {
         }
 
         let blocks_cache = moka::sync::Cache::builder()
-            .time_to_live(config.ttl)
-            .max_capacity(config.size.as_u64())
+            .time_to_live(config.blocks_cache.ttl)
+            .max_capacity(config.blocks_cache.size.as_u64())
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
@@ -85,6 +86,8 @@ impl BlockStorage {
         let archive_chunk_size =
             NonZeroU32::new(archive_chunk_size.as_u64().clamp(1, u32::MAX as _) as _).unwrap();
 
+        let split_block_semaphore = Arc::new(Semaphore::new(config.split_block_tasks));
+
         Self {
             db,
             blocks_cache,
@@ -92,6 +95,7 @@ impl BlockStorage {
             block_connection_storage,
             archive_notifier,
             archive_chunk_size,
+            split_block_semaphore,
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
@@ -167,7 +171,9 @@ impl BlockStorage {
                 None => return Err(BlockStorageError::BlockDataNotFound.into()),
             };
 
-            self.spawn_split_block_data(&block_id, &data).await??;
+            let permit = self.split_block_semaphore.clone().acquire_owned().await?;
+            self.spawn_split_block_data(&block_id, &data, permit)
+                .await??;
         }
 
         tracing::info!(
@@ -359,7 +365,7 @@ impl BlockStorage {
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.has_data() {
-                self.add_data_ext(&archive_id, data)?;
+                self.add_block_data_and_split(&archive_id, data).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -1018,7 +1024,7 @@ impl BlockStorage {
         self.db.package_entries.insert(id.to_vec(), data)
     }
 
-    fn add_data_ext(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
+    async fn add_block_data_and_split(&self, id: &PackageEntryKey, data: &[u8]) -> Result<()> {
         let mut batch = rocksdb::WriteBatch::default();
 
         batch.put_cf(&self.db.package_entries.cf(), id.to_vec(), data);
@@ -1033,7 +1039,8 @@ impl BlockStorage {
         self.db.rocksdb().write(batch)?;
 
         // Start splitting block data
-        let _handle = self.spawn_split_block_data(&id.block_id, data);
+        let permit = self.split_block_semaphore.clone().acquire_owned().await?;
+        let _handle = self.spawn_split_block_data(&id.block_id, data, permit);
 
         Ok(())
     }
@@ -1263,6 +1270,7 @@ impl BlockStorage {
         &self,
         block_id: &PartialBlockId,
         data: &[u8],
+        permit: OwnedSemaphorePermit,
     ) -> JoinHandle<Result<()>> {
         let db = self.db.clone();
         let chunk_size = self.block_data_chunk_size().get() as usize;
@@ -1296,6 +1304,8 @@ impl BlockStorage {
                 };
                 db.block_data_entries
                     .insert(key.to_vec(), (compressed.len() as u32).to_le_bytes())?;
+
+                drop(permit);
 
                 Ok(())
             }
@@ -1646,6 +1656,12 @@ fn remove_blocks(
 
     // Done
     Ok(stats)
+}
+
+pub struct BlockStorageConfig {
+    pub archive_chunk_size: ByteSize,
+    pub blocks_cache: BlocksCacheConfig,
+    pub split_block_tasks: usize,
 }
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]

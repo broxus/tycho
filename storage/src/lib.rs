@@ -120,12 +120,16 @@ impl StorageBuilder {
 
         let temp_file_storage = TempFileStorage::new(&file_db)?;
 
-        let blocks_cache_config = self.config.blocks_cache;
+        let blocks_storage_config = BlockStorageConfig {
+            archive_chunk_size: self.config.archive_chunk_size,
+            blocks_cache: self.config.blocks_cache,
+            split_block_tasks: self.config.split_block_tasks,
+        };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
         let block_storage = Arc::new(BlockStorage::new(
             base_db.clone(),
-            blocks_cache_config,
+            blocks_storage_config,
             block_handle_storage.clone(),
             block_connection_storage.clone(),
             self.config.archive_chunk_size,
