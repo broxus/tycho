@@ -33,6 +33,11 @@ pub struct StorageConfig {
     /// Default: 1 MB.
     pub archive_chunk_size: ByteSize,
 
+    /// Number of concurrent running split block tasks.
+    ///
+    /// Default: 100.
+    pub split_block_tasks: usize,
+
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -61,6 +66,7 @@ impl StorageConfig {
             cells_cache_size: ByteSize::kb(1024),
             archive_chunk_size: ByteSize::kb(1024),
             rocksdb_enable_metrics: false,
+            split_block_tasks: 100,
             archives_gc: None,
             states_gc: None,
             blocks_gc: None,
@@ -112,6 +118,7 @@ impl Default for StorageConfig {
             root_dir: PathBuf::from("./db"),
             cells_cache_size,
             rocksdb_lru_capacity,
+            split_block_tasks: 100,
             rocksdb_enable_metrics: true,
             archive_chunk_size: ByteSize::kb(1024),
             archives_gc: Some(ArchivesGcConfig::default()),
