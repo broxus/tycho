@@ -33,6 +33,7 @@ impl Cmd {
                 SubCmd::SetParam(cmd) => cmd.run().await,
                 SubCmd::SetMasterKey(cmd) => cmd.run().await,
                 SubCmd::SetElectorCode(cmd) => cmd.run().await,
+                SubCmd::SetConfigCode(cmd) => cmd.run().await,
             }
         })
     }
@@ -44,6 +45,7 @@ enum SubCmd {
     SetParam(SetParamCmd),
     SetMasterKey(SetMasterKeyCmd),
     SetElectorCode(SetElectorCode),
+    SetConfigCode(SetConfigCode),
 }
 
 /// Get blockchain config parameter
@@ -164,6 +166,45 @@ impl SetElectorCode {
         send_config_action(
             &client,
             Action::UpdateElectorCode { code, params },
+            &self.sign,
+        )
+        .await
+    }
+}
+
+/// Set config contract code
+#[derive(clap::Parser)]
+pub struct SetConfigCode {
+    /// path to the config code BOC
+    code_path: PathBuf,
+
+    /// optional parameters for `after_code_upgrade`
+    #[clap(long)]
+    upgrade_args: Option<String>,
+
+    /// RPC url
+    rpc: Url,
+
+    #[clap(flatten)]
+    sign: KeyArgs,
+}
+
+impl SetConfigCode {
+    async fn run(self) -> Result<()> {
+        let client = JrpcClient::new(self.rpc)?;
+
+        let code = std::fs::read(&self.code_path).context("failed to read elector code file")?;
+        let code = Boc::decode(code).context("invalid elector code")?;
+
+        let params = self
+            .upgrade_args
+            .map(Boc::decode_base64)
+            .transpose()
+            .context("invalid upgrade params")?;
+
+        send_config_action(
+            &client,
+            Action::UpdateConfigCode { code, params },
             &self.sign,
         )
         .await
@@ -331,6 +372,10 @@ enum Action {
     /// First ref is elector code.
     /// Remaining data is passed to `after_code_upgrade`
     UpdateElectorCode { code: Cell, params: Option<Cell> },
+
+    /// First ref is config code.
+    /// Remaining data is passed to `after_code_upgrade`
+    UpdateConfigCode { code: Cell, params: Option<Cell> },
 }
 
 impl Action {
@@ -353,6 +398,13 @@ impl Action {
                     data.store_slice(params.as_slice()?)?;
                 }
                 (0x4e43ef05, data)
+            }
+            Self::UpdateConfigCode { code, params } => {
+                data.store_reference(code)?;
+                if let Some(params) = params {
+                    data.store_slice(params.as_slice()?)?;
+                }
+                (0x4e436f64, data)
             }
         })
     }
