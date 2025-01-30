@@ -74,6 +74,11 @@ impl ExtMsgRepr {
         // Decode BOC.
         let msg_root = Boc::decode(bytes)?;
 
+        // Cell must not contain any suspicious pruned branches not wrapped into merkle stuff.
+        if msg_root.level() != 0 {
+            return Err(InvalidExtMsg::TooBigLevel);
+        }
+
         // Apply limits to the cell depth.
         if msg_root.repr_depth() > Self::MAX_REPR_DEPTH {
             return Err(InvalidExtMsg::DepthExceeded);
@@ -167,6 +172,8 @@ pub enum InvalidExtMsg {
     BocSizeExceeded,
     #[error("invalid message BOC")]
     BocError(#[from] everscale_types::boc::de::Error),
+    #[error("too big root cell level")]
+    TooBigLevel,
     #[error("max cell repr depth exceeded")]
     DepthExceeded,
     #[error("invalid message")]

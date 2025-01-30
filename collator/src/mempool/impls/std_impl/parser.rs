@@ -5,6 +5,7 @@ use everscale_types::boc::Boc;
 use everscale_types::models::MsgInfo;
 use everscale_types::prelude::Load;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use tycho_util::bc::ExtMsgRepr;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::mempool::impls::std_impl::deduplicator::Deduplicator;
@@ -55,7 +56,10 @@ impl Parser {
 
         let all_bytes_blake = payloads
             .into_par_iter()
-            .map(|bytes| (<[u8; 32]>::from(blake3::hash(&bytes)), bytes))
+            .filter_map(|bytes| {
+                (bytes.len() <= ExtMsgRepr::MAX_BOC_SIZE)
+                    .then(|| (<[u8; 32]>::from(blake3::hash(&bytes)), bytes))
+            })
             .collect::<Vec<_>>();
 
         let uniq_bytes_blake = all_bytes_blake
@@ -102,46 +106,14 @@ impl Parser {
     }
 
     fn parse_message_bytes(message: &Bytes) -> Option<Arc<ExternalMessage>> {
-        let cell = match Boc::decode(message) {
-            Ok(cell) => cell,
-            Err(e) => {
-                // TODO: should handle errors properly?
-                tracing::error!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    "Failed to deserialize bytes into cell. Error: {e:?}"
-                );
-                return None;
-            }
-        };
+        let cell = Boc::decode(message).ok()?;
+        if cell.is_exotic() || cell.level() != 0 || cell.repr_depth() > ExtMsgRepr::MAX_REPR_DEPTH {
+            return None;
+        }
 
-        let mut slice = match cell.as_slice() {
-            Ok(slice) => slice,
-            Err(e) => {
-                tracing::error!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    "Failed to make slice from cell. Error: {e:?}"
-                );
-                return None;
-            }
-        };
-
-        let info = match MsgInfo::load_from(&mut slice) {
-            Ok(MsgInfo::ExtIn(message)) => message,
-            Ok(info) => {
-                tracing::error!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    ?info,
-                    "Bad message. Unexpected message variant"
-                );
-                return None;
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    "Bad cell. Failed to deserialize to ExtInMsgInfo. Err: {e:?}"
-                );
-                return None;
-            }
+        let mut cs = cell.as_slice_allow_pruned();
+        let MsgInfo::ExtIn(info) = MsgInfo::load_from(&mut cs).ok()? else {
+            return None;
         };
         Some(Arc::new(ExternalMessage { cell, info }))
     }
