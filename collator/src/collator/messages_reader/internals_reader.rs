@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
@@ -363,12 +363,11 @@ impl InternalsPartitionReader {
         last_range_reader_shards_and_offset_opt: Option<(
             BTreeMap<ShardIdent, ShardReaderState>,
             u32,
+            BlockSeqno,
         )>,
     ) -> Result<()> {
-        let reader = self.create_next_internals_range_reader(
-            last_range_reader_shards_and_offset_opt,
-            self.block_seqno,
-        )?;
+        let reader =
+            self.create_next_internals_range_reader(last_range_reader_shards_and_offset_opt)?;
         if self
             .range_readers
             .insert(self.block_seqno, reader)
@@ -389,10 +388,12 @@ impl InternalsPartitionReader {
         last_range_reader_shards_and_offset_opt: Option<(
             BTreeMap<ShardIdent, ShardReaderState>,
             u32,
+            BlockSeqno,
         )>,
-        seqno: BlockSeqno,
     ) -> Result<InternalsRangeReader> {
         let mut shard_reader_states = BTreeMap::new();
+
+        const MAX_RANGE_BLOCKS: u32 = 5;
 
         let all_end_lts = [(ShardIdent::MASTERCHAIN, self.mc_state_gen_lt)]
             .into_iter()
@@ -401,19 +402,39 @@ impl InternalsPartitionReader {
         let mut ranges = Vec::with_capacity(1 + self.mc_top_shards_end_lts.len());
 
         let mut fully_read = true;
+
+        let (last_to_lt_opt, processed_offset, last_range_block_seqno) =
+            last_range_reader_shards_and_offset_opt.unwrap_or_default();
+
+        let range_seqno = if self.block_seqno > last_range_block_seqno + MAX_RANGE_BLOCKS {
+            last_range_block_seqno + MAX_RANGE_BLOCKS
+        } else {
+            self.block_seqno
+        };
+
         for (shard_id, end_lt) in all_end_lts {
-            let last_to_lt_opt = last_range_reader_shards_and_offset_opt
-                .as_ref()
-                .and_then(|(s_r, _)| s_r.get(&shard_id).map(|s| s.to));
+            let last_to_lt_opt = last_to_lt_opt.get(&shard_id).map(|s| s.to);
             let shard_range_from =
                 last_to_lt_opt.map_or_else(|| QueueKey::min_for_lt(0), QueueKey::max_for_lt);
 
-            let to_lt = if shard_id == self.for_shard_id {
-                self.prev_state_gen_lt
+            let shard_range_to = if shard_id == self.for_shard_id {
+                if range_seqno != self.block_seqno {
+                    let diff = self
+                        .mq_adapter
+                        .get_diff(shard_id, range_seqno)
+                        .ok_or(anyhow!(
+                            "cannot get diff for block {}:{}",
+                            shard_id,
+                            range_seqno
+                        ))?;
+
+                    *diff.max_message()
+                } else {
+                    QueueKey::max_for_lt(self.prev_state_gen_lt)
+                }
             } else {
-                end_lt
+                QueueKey::max_for_lt(end_lt)
             };
-            let shard_range_to = QueueKey::max_for_lt(to_lt);
 
             if shard_range_from != shard_range_to {
                 fully_read = false;
@@ -432,10 +453,6 @@ impl InternalsPartitionReader {
             });
         }
 
-        let processed_offset = last_range_reader_shards_and_offset_opt
-            .map(|(_, processed_offset)| processed_offset)
-            .unwrap_or_default();
-
         let mut range_reader_state = InternalsRangeReaderState {
             buffer: Default::default(),
 
@@ -453,7 +470,7 @@ impl InternalsPartitionReader {
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,
             for_shard_id: self.for_shard_id,
-            seqno,
+            seqno: range_seqno,
             kind: InternalsRangeReaderKind::Next,
             buffer_limits: self.target_limits,
             reader_state: range_reader_state,
@@ -634,6 +651,7 @@ impl InternalsPartitionReader {
                                     Some((
                                         reader.reader_state.shards.clone(),
                                         reader.reader_state.processed_offset,
+                                        reader.seqno,
                                     ))
                                 })
                                 .unwrap_or_default();
@@ -740,13 +758,12 @@ impl InternalsPartitionReader {
                     Some((
                         reader.reader_state.shards.clone(),
                         reader.reader_state.processed_offset,
+                        reader.seqno,
                     ))
                 })
                 .unwrap_or_default();
-            let mut range_reader = self.create_next_internals_range_reader(
-                last_range_reader_shards_and_offset_opt,
-                self.block_seqno,
-            )?;
+            let mut range_reader =
+                self.create_next_internals_range_reader(last_range_reader_shards_and_offset_opt)?;
             if !range_reader.fully_read {
                 range_reader.init()?;
 
