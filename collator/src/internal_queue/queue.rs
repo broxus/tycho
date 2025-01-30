@@ -106,6 +106,8 @@ where
     ) -> Result<QueueStatistics>;
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
+    /// Get diff for the given blocks from committed and uncommitted state
+    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
 }
 
 // IMPLEMENTATION
@@ -484,5 +486,21 @@ where
         }
 
         result
+    }
+
+    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
+        if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
+            if let Some(diff) = shard_diffs.get(&seqno) {
+                return Some(diff.clone());
+            }
+        }
+
+        if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
+            if let Some(diff) = shard_diffs.get(&seqno) {
+                return Some(diff.clone());
+            }
+        }
+
+        None
     }
 }

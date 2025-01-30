@@ -74,7 +74,8 @@ where
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
-
+    /// Get diff for the given block from committed and uncommitted state
+    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
     /// Returns the number of diffs in cache for the given shard
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
 }
@@ -207,6 +208,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
         self.queue.get_diffs(blocks)
+    }
+
+    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
+        self.queue.get_diff(shard_ident, seqno)
     }
 
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
