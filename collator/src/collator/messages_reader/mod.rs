@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{btree_map, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,12 +55,13 @@ pub(super) struct MessagesReader {
 
     msgs_exec_params: Arc<MsgsExecutionParams>,
 
-    metrics: MessagesReaderMetrics,
+    /// Collect separate metrics by partitions
+    metrics_by_partitions: MessagesReaderMetricsByPartitions,
 
     new_messages: NewMessagesState<EnqueuedMessage>,
 
     externals_reader: ExternalsReader,
-    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
 
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
@@ -83,12 +84,31 @@ impl MessagesReader {
         cx: MessagesReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     ) -> Result<Self> {
+        let slots_fractions = cx.msgs_exec_params.group_slots_fractions()?;
+
+        // metrics: messages exec params
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
             .set(cx.msgs_exec_params.buffer_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit")
             .set(cx.msgs_exec_params.group_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
             .set(cx.msgs_exec_params.group_vert_size as f64);
+        for (par_id, par_fraction) in &slots_fractions {
+            let labels = [("par_id", par_id.to_string())];
+            metrics::gauge!(
+                "tycho_do_collate_msgs_exec_params_group_slots_fractions",
+                &labels
+            )
+            .set(*par_fraction as f64);
+        }
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_externals_expire_timeout")
+            .set(cx.msgs_exec_params.externals_expire_timeout as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_open_ranges_limit")
+            .set(cx.msgs_exec_params.open_ranges_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_ext_msgs_count_limit")
+            .set(cx.msgs_exec_params.par_0_ext_msgs_count_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_int_msgs_count_limit")
+            .set(cx.msgs_exec_params.par_0_int_msgs_count_limit as f64);
 
         // group limits by msgs kinds
         let msgs_buffer_max_count = cx.msgs_exec_params.buffer_limit as usize;
@@ -101,8 +121,6 @@ impl MessagesReader {
             BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
 
         // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
-
-        let slots_fractions = cx.msgs_exec_params.group_slots_fractions()?;
 
         // internals: normal partition 0: 80% of `group_limit`, but min 1
         let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
@@ -141,6 +159,26 @@ impl MessagesReader {
             });
         }
 
+        // metrics: buffer limits
+        for (par_id, buffer_limits) in &internals_buffer_limits_by_partitions {
+            let labels = [("par_id", par_id.to_string())];
+            metrics::gauge!("tycho_do_collate_int_buffer_limits_max_count", &labels)
+                .set(buffer_limits.max_count as f64);
+            metrics::gauge!("tycho_do_collate_int_buffer_limits_slots_count", &labels)
+                .set(buffer_limits.slots_count as f64);
+            metrics::gauge!("tycho_do_collate_int_buffer_limits_slot_vert_size", &labels)
+                .set(buffer_limits.slot_vert_size as f64);
+        }
+        for (par_id, buffer_limits) in &externals_buffer_limits_by_partitions {
+            let labels = [("par_id", par_id.to_string())];
+            metrics::gauge!("tycho_do_collate_ext_buffer_limits_max_count", &labels)
+                .set(buffer_limits.max_count as f64);
+            metrics::gauge!("tycho_do_collate_ext_buffer_limits_slots_count", &labels)
+                .set(buffer_limits.slots_count as f64);
+            metrics::gauge!("tycho_do_collate_ext_buffer_limits_slot_vert_size", &labels)
+                .set(buffer_limits.slot_vert_size as f64);
+        }
+
         // TODO: msgs-v3: remove if we do not need this field
         let _msg_group_max_limits = MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
@@ -167,7 +205,7 @@ impl MessagesReader {
 
             msgs_exec_params: cx.msgs_exec_params.clone(),
 
-            metrics: Default::default(),
+            metrics_by_partitions: Default::default(),
 
             new_messages: NewMessagesState::new(cx.for_shard_id),
 
@@ -198,7 +236,7 @@ impl MessagesReader {
             }
         };
         let par_reader_state = partition_reader_states.remove(&0).unwrap_or_default();
-        let par_reader = InternalsParitionReader::new(
+        let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
                 partition_id: 0,
                 for_shard_id: cx.for_shard_id,
@@ -227,7 +265,7 @@ impl MessagesReader {
             }
         };
         let par_reader_state = partition_reader_states.remove(&1).unwrap_or_default();
-        let par_reader = InternalsParitionReader::new(
+        let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
                 partition_id: 1,
                 for_shard_id: cx.for_shard_id,
@@ -271,7 +309,7 @@ impl MessagesReader {
 
     pub fn reset_read_state(&mut self) {
         // reset metrics
-        self.metrics = Default::default();
+        self.metrics_by_partitions = Default::default();
 
         // define the initial reader stage
         let all_read_externals_collected = self.externals_reader.all_ranges_read_and_collected();
@@ -399,6 +437,18 @@ impl MessagesReader {
             self.for_shard_id,
             diffs,
         )?;
+
+        // metrics: accounts count in isolated partitions
+        {
+            for (par_id, count) in queue_diff_with_msgs.partition_router.partitions_stats() {
+                let labels = [
+                    ("workchain", self.for_shard_id.workchain().to_string()),
+                    ("par_id", par_id.to_string()),
+                ];
+                metrics::gauge!("tycho_do_collate_accounts_count_in_partitions", &labels)
+                    .set(*count as f64);
+            }
+        }
 
         // remove moved accounts from partition 0 buffer
         let par_reader = self.internals_partition_readers.get_mut(&0).unwrap();
@@ -558,27 +608,33 @@ impl MessagesReader {
         self.externals_reader.last_read_to_anchor_chain_time()
     }
 
-    pub fn metrics(&self) -> &MessagesReaderMetrics {
-        &self.metrics
+    pub fn metrics_by_partitions(&self) -> &MessagesReaderMetricsByPartitions {
+        &self.metrics_by_partitions
     }
 
     pub fn add_new_messages(&mut self, messages: impl IntoIterator<Item = Arc<EnqueuedMessage>>) {
         self.new_messages.add_messages(messages);
     }
 
-    pub fn count_messages_in_buffers(&self) -> usize {
-        self.count_internals_in_buffers() + self.count_externals_in_buffers()
+    pub fn count_messages_in_buffers_by_partitions(&self) -> BTreeMap<QueuePartitionIdx, usize> {
+        let mut res: BTreeMap<_, _> = self
+            .internals_partition_readers
+            .iter()
+            .map(|(par_id, par)| (*par_id, par.count_messages_in_buffers()))
+            .collect();
+        for (par_id, ext_count) in self
+            .externals_reader
+            .count_messages_in_buffers_by_partitions()
+        {
+            res.entry(par_id)
+                .and_modify(|count| *count += ext_count)
+                .or_default();
+        }
+        res
     }
 
     pub fn has_messages_in_buffers(&self) -> bool {
         self.has_internals_in_buffers() || self.has_externals_in_buffers()
-    }
-
-    pub fn count_internals_in_buffers(&self) -> usize {
-        self.internals_partition_readers
-            .values()
-            .map(|v| v.count_messages_in_buffers())
-            .sum()
     }
 
     pub fn has_internals_in_buffers(&self) -> bool {
@@ -595,10 +651,6 @@ impl MessagesReader {
 
     pub fn has_pending_new_messages(&self) -> bool {
         self.new_messages.has_pending_messages()
-    }
-
-    pub fn count_externals_in_buffers(&self) -> usize {
-        self.externals_reader.count_messages_in_buffers()
     }
 
     pub fn has_externals_in_buffers(&self) -> bool {
@@ -692,9 +744,6 @@ impl MessagesReader {
 
         // TODO: msgs-v3: try to read all in parallel
 
-        // collect separate metrics by partitions
-        let mut metrics_by_partitions = BTreeMap::<QueuePartitionIdx, MessagesReaderMetrics>::new();
-
         // count how many times prev processed offset reached in readers
         let mut prev_processed_offset_reached_count = 0;
 
@@ -726,13 +775,12 @@ impl MessagesReader {
                 continue;
             }
 
-            // collect separate metrics by partitions
-            let metrics_of_partition = metrics_by_partitions.entry(*par_id).or_default();
-
             match par_reader_stage {
                 MessagesReaderStage::ExistingAndExternals => {
-                    let metrics = par_reader.read_existing_messages_into_buffers(read_mode)?;
-                    metrics_of_partition.append(metrics);
+                    let read_metrics = par_reader.read_existing_messages_into_buffers(read_mode)?;
+                    self.metrics_by_partitions
+                        .get_mut(*par_id)
+                        .append(&read_metrics);
                 }
                 MessagesReaderStage::FinishPreviousExternals
                 | MessagesReaderStage::FinishCurrentExternals => {
@@ -741,8 +789,9 @@ impl MessagesReader {
                 MessagesReaderStage::ExternalsAndNew => {
                     let read_new_messages_res = par_reader
                         .read_new_messages_into_buffers(&mut self.new_messages, current_next_lt)?;
-
-                    metrics_of_partition.append(read_new_messages_res.metrics);
+                    self.metrics_by_partitions
+                        .get_mut(*par_id)
+                        .append(&read_new_messages_res.metrics);
                 }
             }
         }
@@ -762,19 +811,31 @@ impl MessagesReader {
                 break 'read_externals;
             }
 
-            let metrics = self
+            let read_metrics = self
                 .externals_reader
                 .read_into_buffers(read_mode, self.new_messages.partition_router());
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "external messages read: ext={}",
-                metrics.read_ext_msgs_count,
-            );
-            self.metrics.append(metrics);
+            self.metrics_by_partitions.append(read_metrics);
         }
 
-        let labels = [("workchain", self.for_shard_id.workchain().to_string())];
-        metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
-            .set(self.count_messages_in_buffers() as f64);
+        // messages buffers metrics
+        {
+            let mut total_msgs_count_in_buffers = 0;
+            for (par_id, count) in self.count_messages_in_buffers_by_partitions() {
+                let labels = [
+                    ("workchain", self.for_shard_id.workchain().to_string()),
+                    ("par_id", par_id.to_string()),
+                ];
+                metrics::gauge!(
+                    "tycho_do_collate_msgs_exec_buffer_messages_count_by_partitions",
+                    &labels
+                )
+                .set(count as f64);
+                total_msgs_count_in_buffers += count;
+            }
+            let labels = [("workchain", self.for_shard_id.workchain().to_string())];
+            metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
+                .set(total_msgs_count_in_buffers as f64);
+        }
 
         //----------
         // collect messages after reading
@@ -796,9 +857,6 @@ impl MessagesReader {
                 continue;
             }
 
-            // collect separate metrics by partitions
-            let metrics_of_partition = metrics_by_partitions.entry(*par_id).or_default();
-
             // collect existing internals, externals and new internals
             let has_pending_new_messages_for_partition = self
                 .new_messages
@@ -815,9 +873,8 @@ impl MessagesReader {
                 &partitions_readers,
                 &msg_groups,
             )?;
-
             msg_groups.insert(*par_id, msg_group);
-            metrics_of_partition.append(metrics);
+            self.metrics_by_partitions.get_mut(*par_id).append(&metrics);
 
             // remove collected new messages
             self.new_messages
@@ -828,16 +885,15 @@ impl MessagesReader {
         // return partition readers to state
         self.internals_partition_readers = partitions_readers;
 
-        // aggregate metrics from partitions
-        for (par_id, metrics) in metrics_by_partitions {
+        // log metrics from partitions
+        for (par_id, par_metrics) in self.metrics_by_partitions.iter() {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "messages read from partition {}: existing={}, ext={}, new={}",
                 par_id,
-                metrics.read_int_msgs_from_iterator_count,
-                metrics.read_ext_msgs_count,
-                metrics.read_new_msgs_count,
+                par_metrics.read_existing_msgs_count,
+                par_metrics.read_ext_msgs_count,
+                par_metrics.read_new_msgs_count,
             );
-            self.metrics.append(metrics);
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -857,11 +913,12 @@ impl MessagesReader {
         );
 
         // aggregate message group
-        self.metrics.add_to_message_groups_timer.start();
+        let par_0_metrics = self.metrics_by_partitions.get_mut(0);
+        par_0_metrics.add_to_message_groups_timer.start();
         let msg_group = msg_groups
             .into_iter()
             .fold(MessageGroup::default(), |acc, (_, next)| acc.add(next));
-        self.metrics.add_to_message_groups_timer.stop();
+        par_0_metrics.add_to_message_groups_timer.stop();
 
         // check if prev processed offset reached
         // in all internals partition readers
@@ -874,7 +931,7 @@ impl MessagesReader {
             has_not_fully_read_internals_ranges = self.has_not_fully_read_internals_ranges(),
             ?read_mode,
             all_prev_processed_offset_reached,
-            add_to_message_groups_total_elapsed_ms = self.metrics.add_to_message_groups_timer.total_elapsed.as_millis(),
+            add_to_message_groups_total_elapsed_ms = self.metrics_by_partitions.add_to_message_groups_total_elapsed().as_millis(),
             "aggregated collected message group: {:?}",
             DebugMessageGroup(&msg_group),
         );
@@ -896,10 +953,10 @@ impl MessagesReader {
 
     fn collect_messages_for_partition(
         par_reader_stage: &mut MessagesReaderStage,
-        par_reader: &mut InternalsParitionReader,
+        par_reader: &mut InternalsPartitionReader,
         externals_reader: &mut ExternalsReader,
         has_pending_new_messages_for_partition: bool,
-        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();
@@ -923,7 +980,7 @@ impl MessagesReader {
                 prev_msg_groups,
             )?;
 
-            res.metrics.append(metrics);
+            res.metrics.append(&metrics);
         }
 
         // collect externals
@@ -936,7 +993,7 @@ impl MessagesReader {
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;
-            res.metrics.append(metrics);
+            res.metrics.append(&metrics);
         }
 
         // collect new internals
@@ -953,7 +1010,7 @@ impl MessagesReader {
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;
-            res.metrics.append(metrics);
+            res.metrics.append(&metrics);
             res.collected_queue_msgs_keys
                 .append(&mut collected_queue_msgs_keys);
 
@@ -1150,17 +1207,17 @@ pub(super) struct MessagesReaderMetrics {
     pub add_to_message_groups_timer: MetricsTimer,
 
     /// num of existing internal messages read
-    pub read_int_msgs_from_iterator_count: u64,
-    /// num of external messages read
-    pub read_ext_msgs_count: u64,
+    pub read_existing_msgs_count: u64,
     /// num of new internal messages read
     pub read_new_msgs_count: u64,
+    /// num of external messages read
+    pub read_ext_msgs_count: u64,
 
     pub add_to_msgs_groups_ops_count: u64,
 }
 
 impl MessagesReaderMetrics {
-    fn append(&mut self, other: Self) {
+    fn append(&mut self, other: &Self) {
         self.init_iterator_timer.total_elapsed += other.init_iterator_timer.total_elapsed;
 
         self.read_existing_messages_timer.total_elapsed +=
@@ -1170,12 +1227,57 @@ impl MessagesReaderMetrics {
         self.add_to_message_groups_timer.total_elapsed +=
             other.add_to_message_groups_timer.total_elapsed;
 
-        self.read_int_msgs_from_iterator_count += other.read_int_msgs_from_iterator_count;
-        self.read_ext_msgs_count += other.read_ext_msgs_count;
+        self.read_existing_msgs_count += other.read_existing_msgs_count;
         self.read_new_msgs_count += other.read_new_msgs_count;
+        self.read_ext_msgs_count += other.read_ext_msgs_count;
 
         self.add_to_msgs_groups_ops_count = self
             .add_to_msgs_groups_ops_count
             .saturating_add(other.add_to_msgs_groups_ops_count);
+    }
+}
+
+#[derive(Default)]
+pub(super) struct MessagesReaderMetricsByPartitions {
+    inner: BTreeMap<QueuePartitionIdx, MessagesReaderMetrics>,
+}
+
+impl MessagesReaderMetricsByPartitions {
+    pub fn get_mut(&mut self, par_id: QueuePartitionIdx) -> &mut MessagesReaderMetrics {
+        self.inner.entry(par_id).or_default()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartitionIdx, &MessagesReaderMetrics)> {
+        self.inner.iter()
+    }
+
+    pub fn add_to_message_groups_total_elapsed(&self) -> Duration {
+        self.inner
+            .iter()
+            .fold(Duration::default(), |acc, (_, curr)| {
+                acc.saturating_add(curr.add_to_message_groups_timer.total_elapsed)
+            })
+    }
+
+    pub fn append(&mut self, other: Self) {
+        for (par_id, metrics) in other.inner {
+            match self.inner.entry(par_id) {
+                btree_map::Entry::Occupied(mut occupied) => {
+                    occupied.get_mut().append(&metrics);
+                }
+                btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert(metrics);
+                }
+            }
+        }
+    }
+
+    pub fn get_total(&self) -> MessagesReaderMetrics {
+        self.inner
+            .values()
+            .fold(MessagesReaderMetrics::default(), |mut acc, curr| {
+                acc.append(curr);
+                acc
+            })
     }
 }

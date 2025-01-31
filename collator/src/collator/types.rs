@@ -21,7 +21,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
-use super::messages_reader::ReaderState;
+use super::messages_reader::{MessagesReaderMetrics, ReaderState};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, ProofFunds, TopShardBlockInfo};
@@ -313,11 +313,11 @@ impl BlockCollationDataBuilder {
             execute_count_new_int: 0,
             int_enqueue_count: 0,
             int_dequeue_count: 0,
-            read_ext_msgs_count: 0,
-            read_int_msgs_from_iterator_count: 0,
+            // read_ext_msgs_count: 0,
+            // read_int_msgs_from_iterator_count: 0,
             new_msgs_created_count: 0,
             inserted_new_msgs_count: 0,
-            read_new_msgs_count: 0,
+            // read_new_msgs_count: 0,
             in_msgs: Default::default(),
             out_msgs: Default::default(),
             mint_msg: None,
@@ -354,12 +354,11 @@ pub(super) struct BlockCollationData {
     pub int_enqueue_count: u64,
     pub int_dequeue_count: u64,
 
-    pub read_ext_msgs_count: u64,
-    pub read_int_msgs_from_iterator_count: u64,
+    // pub read_ext_msgs_count: u64,
+    // pub read_int_msgs_from_iterator_count: u64,
     pub new_msgs_created_count: u64,
     pub inserted_new_msgs_count: u64,
-    pub read_new_msgs_count: u64,
-
+    // pub read_new_msgs_count: u64,
     pub start_lt: u64,
     // Should be updated on each tx finalization from MessagesPreparer.max_lt
     // which is updating during tx execution
@@ -962,11 +961,10 @@ pub struct ExecuteResult {
     pub prepare_msg_groups_wu: PrepareMsgGroupsWu,
     pub execute_msgs_total_elapsed: Duration,
     pub process_txs_total_elapsed: Duration,
-    pub init_iterator_elapsed: Duration,
-    pub read_existing_messages_elapsed: Duration,
-    pub read_ext_messages_elapsed: Duration,
-    pub read_new_messages_elapsed: Duration,
-    pub add_to_message_groups_elapsed: Duration,
+
+    /// Accumulated messages reader metrics across all partitions
+    pub msgs_reader_metrics: MessagesReaderMetrics,
+
     // TODO: msgs-v3: take from ReaderState instead
     pub last_read_to_anchor_chain_time: Option<u64>,
 }

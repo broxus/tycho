@@ -18,7 +18,7 @@ use crate::types::ProcessedTo;
 pub struct PartitionRouter {
     src: FastHashMap<RouterAddr, QueuePartitionIdx>,
     dst: FastHashMap<RouterAddr, QueuePartitionIdx>,
-    partitions: FastHashSet<QueuePartitionIdx>,
+    partitions_stats: FastHashMap<QueuePartitionIdx, usize>,
 }
 
 impl PartitionRouter {
@@ -27,13 +27,16 @@ impl PartitionRouter {
     }
 
     pub fn with_partitions(src: &RouterPartitions, dst: &RouterPartitions) -> Self {
-        let mut unique_partitions = FastHashSet::default();
+        let mut partitions_stats = FastHashMap::default();
         let mut convert = |partitions: &RouterPartitions| {
             let mut result =
                 FastHashMap::with_capacity_and_hasher(partitions.len(), Default::default());
 
             for (partition, accounts) in partitions {
-                unique_partitions.insert(*partition);
+                partitions_stats
+                    .entry(*partition)
+                    .and_modify(|count| *count += accounts.len())
+                    .or_insert(accounts.len());
                 result.extend(accounts.iter().map(|account| (*account, *partition)));
             }
 
@@ -43,7 +46,7 @@ impl PartitionRouter {
         Self {
             src: convert(src),
             dst: convert(dst),
-            partitions: unique_partitions,
+            partitions_stats,
         }
     }
 
@@ -73,8 +76,12 @@ impl PartitionRouter {
         let Some(addr) = RouterAddr::from_int_addr(addr) else {
             anyhow::bail!("attempt to insert a VarAddr into a priority partition");
         };
-        self.src.insert(addr, partition);
-        self.partitions.insert(partition);
+        if self.src.insert(addr, partition).is_none() {
+            self.partitions_stats
+                .entry(partition)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
         Ok(())
     }
 
@@ -86,19 +93,17 @@ impl PartitionRouter {
         let Some(addr) = RouterAddr::from_int_addr(addr) else {
             anyhow::bail!("attempt to insert a VarAddr into a priority partition");
         };
-        self.dst.insert(addr, partition);
-        self.partitions.insert(partition);
+        if self.dst.insert(addr, partition).is_none() {
+            self.partitions_stats
+                .entry(partition)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
         Ok(())
     }
 
-    pub fn partitions(&self) -> &FastHashSet<QueuePartitionIdx> {
-        &self.partitions
-    }
-
-    pub fn clear(&mut self) {
-        self.src.clear();
-        self.dst.clear();
-        self.partitions.clear();
+    pub fn partitions_stats(&self) -> &FastHashMap<QueuePartitionIdx, usize> {
+        &self.partitions_stats
     }
 }
 
@@ -467,7 +472,9 @@ mod tests {
 
         {
             let expected_partitions = [1, 2, 10].into_iter().collect::<FastHashSet<_>>();
-            assert_eq!(partition_router.partitions(), &expected_partitions);
+            for (par_id, _count) in partition_router.partitions_stats() {
+                assert!(expected_partitions.contains(par_id))
+            }
         }
 
         {

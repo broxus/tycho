@@ -24,8 +24,7 @@ use crate::types::processed_upto::{BlockSeqno, Lt};
 // INTERNALS READER
 //=========
 
-// TODO: msgs-v3: rename to InternalsPartitionReader
-pub(super) struct InternalsParitionReader {
+pub(super) struct InternalsPartitionReader {
     pub(super) partition_id: QueuePartitionIdx,
     pub(super) for_shard_id: ShardIdent,
     pub(super) block_seqno: BlockSeqno,
@@ -63,7 +62,7 @@ pub(super) struct InternalsPartitionReaderContext {
     pub reader_state: InternalsPartitionReaderState,
 }
 
-impl InternalsParitionReader {
+impl InternalsPartitionReader {
     pub fn new(
         cx: InternalsPartitionReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
@@ -592,7 +591,7 @@ impl InternalsParitionReader {
                                 .saturating_add_assign(1);
                             metrics.add_to_message_groups_timer.stop();
 
-                            metrics.read_int_msgs_from_iterator_count += 1;
+                            metrics.read_existing_msgs_count += 1;
 
                             // update remaining messages statistics in iterator
                             if let Some(remaning_msgs_stats) =
@@ -769,7 +768,7 @@ impl InternalsParitionReader {
         &mut self,
         par_reader_stage: &MessagesReaderStage,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectInternalsResult> {
         let mut res = CollectInternalsResult::default();
@@ -899,7 +898,7 @@ impl InternalsRangeReader {
     fn collect_messages(
         &mut self,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
         prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> CollectMessagesFromRangeReaderResult {

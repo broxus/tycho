@@ -41,7 +41,7 @@ impl PrepareMsgGroupsWu {
             .read_ext_msgs_count
             .saturating_mul(read_ext_msgs as u64);
         let read_existing_int_msgs_wu = msgs_reader_metrics
-            .read_int_msgs_from_iterator_count
+            .read_existing_msgs_count
             .saturating_mul(read_int_msgs as u64);
         let read_new_int_msgs_wu = msgs_reader_metrics
             .read_new_msgs_count
@@ -87,7 +87,7 @@ impl PrepareMsgGroupsWu {
             res.total_wu, res.total_elapsed.as_nanos(), res.total_wu_price(),
             msgs_reader_metrics.read_ext_msgs_count, read_ext_msgs,
             res.read_ext_msgs_wu, res.read_ext_msgs_elapsed.as_nanos(), res.read_ext_msgs_wu_price(),
-            msgs_reader_metrics.read_int_msgs_from_iterator_count, read_int_msgs,
+            msgs_reader_metrics.read_existing_msgs_count, read_int_msgs,
             res.read_existing_int_msgs_wu, res.read_existing_int_msgs_elapsed.as_nanos(), res.read_existing_int_msgs_wu_price(),
             msgs_reader_metrics.read_new_msgs_count, read_new_msgs,
             res.read_new_int_msgs_wu, res.read_new_int_msgs_elapsed.as_nanos(), res.read_new_int_msgs_wu_price(),

@@ -7,7 +7,7 @@ use everscale_types::models::{MsgInfo, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
 use super::internals_reader::{
-    InternalsParitionReader, InternalsRangeReader, InternalsRangeReaderKind,
+    InternalsPartitionReader, InternalsRangeReader, InternalsRangeReaderKind,
 };
 use super::{
     DebugInternalsRangeReaderState, InternalsRangeReaderState, MessagesReaderMetrics,
@@ -132,7 +132,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     }
 }
 
-impl InternalsParitionReader {
+impl InternalsPartitionReader {
     pub fn get_new_messages_range_reader(
         &mut self,
         current_next_lt: u64,

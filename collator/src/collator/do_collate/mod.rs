@@ -151,7 +151,7 @@ impl CollatorStdImpl {
         let block_id = *finalized.block_candidate.block.id();
         let finalize_wu_total = finalized.finalize_wu_total;
 
-        self.collation_data_metrics(&finalized.collation_data);
+        self.report_collation_metrics(&finalized.collation_data);
 
         self.update_stats(&finalized.collation_data);
 
@@ -179,7 +179,7 @@ impl CollatorStdImpl {
         // metrics
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
 
-        self.wu_metrics(
+        self.report_wu_metrics(
             &execute_result,
             finalize_wu_total,
             final_result.finalize_block_elapsed,
@@ -320,15 +320,15 @@ impl CollatorStdImpl {
         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
 
         // report actual ranges count to metrics
-        for (partition_id, partition) in &processed_upto.partitions {
+        for (par_id, par) in &processed_upto.partitions {
             let labels = [
                 ("workchain", shard_id.workchain().to_string()),
-                ("partition", partition_id.to_string()),
+                ("par_id", par_id.to_string()),
             ];
             metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
-                .set(partition.externals.ranges.len() as f64);
+                .set(par.externals.ranges.len() as f64);
             metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
-                .set(partition.internals.ranges.len() as f64);
+                .set(par.internals.ranges.len() as f64);
         }
 
         // get min processed to for current shard from shard and mc_data
@@ -872,56 +872,18 @@ impl CollatorStdImpl {
         })
     }
 
-    fn collation_data_metrics(&self, collation_data: &BlockCollationData) {
+    fn report_collation_metrics(&self, collation_data: &BlockCollationData) {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-        metrics::counter!("tycho_do_collate_tx_total", &labels).increment(collation_data.tx_count);
-        metrics::gauge!("tycho_do_collate_tx_per_block", &labels)
-            .set(collation_data.tx_count as f64);
+
         metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
             .set(collation_data.accounts_count as f64);
-        metrics::counter!("tycho_do_collate_int_enqueue_count")
-            .increment(collation_data.int_enqueue_count);
-        metrics::counter!("tycho_do_collate_int_dequeue_count")
-            .increment(collation_data.int_dequeue_count);
-        metrics::gauge!("tycho_do_collate_int_msgs_queue_calc").increment(
-            (collation_data.int_enqueue_count as i64 - collation_data.int_dequeue_count as i64)
-                as f64,
-        );
-        metrics::counter!("tycho_do_collate_msgs_exec_count_all", &labels)
-            .increment(collation_data.execute_count_all);
-        // external messages
-        metrics::counter!("tycho_do_collate_msgs_read_count_ext", &labels)
-            .increment(collation_data.read_ext_msgs_count);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_ext", &labels)
-            .increment(collation_data.execute_count_ext);
-        metrics::counter!("tycho_do_collate_msgs_error_count_ext", &labels)
-            .increment(collation_data.ext_msgs_error_count);
-        metrics::counter!("tycho_do_collate_msgs_skipped_count_ext", &labels)
-            .increment(collation_data.ext_msgs_skipped_count);
-        // existing internals messages
-        metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
-            .increment(collation_data.read_int_msgs_from_iterator_count);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_int", &labels)
-            .increment(collation_data.execute_count_int);
-        // new internals messages
-        metrics::counter!("tycho_do_collate_new_msgs_created_count", &labels)
-            .increment(collation_data.new_msgs_created_count);
-        metrics::counter!(
-            "tycho_do_collate_new_msgs_inserted_to_iterator_count",
-            &labels
-        )
-        .increment(collation_data.inserted_new_msgs_count);
-        metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
-            .increment(collation_data.read_new_msgs_count);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
-            .increment(collation_data.execute_count_new_int);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
             .set(collation_data.block_id_short.seqno);
         metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
             .set(collation_data.diff_tail_len);
     }
 
-    fn wu_metrics(
+    fn report_wu_metrics(
         &self,
         execute_result: &ExecuteResult,
         finalize_wu_total: u64,
@@ -1037,10 +999,11 @@ impl CollatorStdImpl {
             start_lt={}, end_lt={}, exec_count={}, \
             exec_ext={}, ext_err={}, exec_int={}, exec_new_int={}, \
             enqueue_count={}, dequeue_count={}, \
-            new_msgs_created={}, queue_diff_messages_count={}, \
+            new_msgs_created={}, inserted_new_msgs={}, \
+            queue_diff_messages_count={}, \
             in_msgs={}, out_msgs={}, \
-            read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_unprocessed_messages={}, \
+            read_ext_msgs={}, read_int_msgs={}, read_new_msgs={}, \
+            has_unprocessed_messages={}, \
             total_execute_msgs_time_mc={}, \
             diffs_tail_len: {}",
             block_id,
@@ -1048,10 +1011,13 @@ impl CollatorStdImpl {
             collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
             collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created_count, final_result.queue_diff_messages_count,
+            collation_data.new_msgs_created_count, collation_data.inserted_new_msgs_count,
+            final_result.queue_diff_messages_count,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
-            collation_data.read_ext_msgs_count, collation_data.read_int_msgs_from_iterator_count,
-            collation_data.read_new_msgs_count, collation_data.inserted_new_msgs_count, final_result.has_unprocessed_messages,
+            execute_result.msgs_reader_metrics.read_ext_msgs_count,
+            execute_result.msgs_reader_metrics.read_existing_msgs_count,
+            execute_result.msgs_reader_metrics.read_new_msgs_count,
+            final_result.has_unprocessed_messages,
             collation_data.total_execute_msgs_time_mc,
             collation_data.diff_tail_len,
         );
@@ -1064,11 +1030,11 @@ impl CollatorStdImpl {
             execute_total = %format_duration(final_result.execute_elapsed),
 
             fill_msgs_total = %format_duration(execute_result.prepare_msg_groups_wu.total_elapsed),
-            init_iterator = %format_duration(execute_result.init_iterator_elapsed),
-            read_existing = %format_duration(execute_result.read_existing_messages_elapsed),
-            read_ext = %format_duration(execute_result.read_ext_messages_elapsed),
-            read_new = %format_duration(execute_result.read_new_messages_elapsed),
-            add_to_groups = %format_duration(execute_result.add_to_message_groups_elapsed),
+            init_iterator = %format_duration(execute_result.msgs_reader_metrics.init_iterator_timer.total_elapsed),
+            read_ext = %format_duration(execute_result.msgs_reader_metrics.read_ext_messages_timer.total_elapsed),
+            read_existing = %format_duration(execute_result.msgs_reader_metrics.read_existing_messages_timer.total_elapsed),
+            read_new = %format_duration(execute_result.msgs_reader_metrics.read_new_messages_timer.total_elapsed),
+            add_to_groups = %format_duration(execute_result.msgs_reader_metrics.add_to_message_groups_timer.total_elapsed),
 
             exec_msgs_total = %format_duration(execute_result.execute_msgs_total_elapsed),
             process_txs_total = %format_duration(execute_result.process_txs_total_elapsed),
@@ -1095,9 +1061,8 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, time_diff={}, \
             collation_time={}, elapsed_from_prev_block={}, overhead={}",
-                        block_id, block_time_diff,
-            total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis()
-
+            block_id, block_time_diff, total_elapsed.as_millis(),
+            elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
         );
 
         tracing::debug!(
