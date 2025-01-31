@@ -8,7 +8,8 @@ use tycho_block_util::queue::QueuePartitionIdx;
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
     ExternalsRangeReaderStateByPartition, ExternalsReaderRange, ExternalsReaderState,
-    GetNextMessageGroupMode, InternalsParitionReader, MessagesReaderMetrics,
+    GetNextMessageGroupMode, InternalsPartitionReader, MessagesReaderMetrics,
+    MessagesReaderMetricsByPartitions,
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
@@ -168,19 +169,6 @@ impl ExternalsReader {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
-    }
-
-    pub fn count_messages_in_buffers(&self) -> usize {
-        self.range_readers
-            .values()
-            .map(|v| {
-                v.reader_state
-                    .by_partitions
-                    .values()
-                    .map(|par| par.buffer.msgs_count())
-                    .sum::<usize>()
-            })
-            .sum()
     }
 
     pub fn count_messages_in_buffers_by_partitions(&self) -> BTreeMap<QueuePartitionIdx, usize> {
@@ -443,12 +431,12 @@ impl ExternalsReader {
         &mut self,
         read_mode: GetNextMessageGroupMode,
         partition_router: &PartitionRouter,
-    ) -> MessagesReaderMetrics {
-        let mut metrics = MessagesReaderMetrics::default();
+    ) -> MessagesReaderMetricsByPartitions {
+        let mut metrics_by_partitions = MessagesReaderMetricsByPartitions::default();
 
         // skip if all open ranges fully read
         if self.all_ranges_fully_read {
-            return metrics;
+            return metrics_by_partitions;
         }
 
         let processed_to_by_partitions: BTreeMap<_, _> = self
@@ -501,7 +489,7 @@ impl ExternalsReader {
                     &processed_to_by_partitions,
                 );
 
-                metrics.append(std::mem::take(&mut read_res.metrics));
+                metrics_by_partitions.append(std::mem::take(&mut read_res.metrics_by_partitions));
 
                 // if range was not fully read then buffer is full
                 // and we should continue to read current range
@@ -584,14 +572,14 @@ impl ExternalsReader {
             }
         }
 
-        metrics
+        metrics_by_partitions
     }
 
     pub fn collect_messages(
         &mut self,
         par_id: QueuePartitionIdx,
         msg_group: &mut MessageGroup,
-        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsParitionReader>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectExternalsResult> {
         let mut res = CollectExternalsResult::default();
@@ -782,8 +770,11 @@ impl ExternalsRangeReader {
             "read externals",
         );
 
-        let mut metrics = MessagesReaderMetrics::default();
-        metrics.read_ext_messages_timer.start();
+        let mut metrics_by_partitions = MessagesReaderMetricsByPartitions::default();
+        metrics_by_partitions
+            .get_mut(0)
+            .read_ext_messages_timer
+            .start();
 
         let was_read_to = self.reader_state.range.current_position;
         let prev_to = self.reader_state.range.to;
@@ -951,9 +942,9 @@ impl ExternalsRangeReader {
 
                     if self.for_shard_id.contains_address(&ext_msg.info.dst) {
                         // detect target partition and add message to buffer
-                        metrics.add_to_message_groups_timer.start();
                         let target_partition =
                             partition_router.get_partition(None, &ext_msg.info.dst);
+                        let par_metrics = metrics_by_partitions.get_mut(target_partition);
                         // we use one anchors cache for all partitions
                         // and read externals into all partitions at once
                         // so we add message to buffer only when it is above processed_to for partition
@@ -975,13 +966,13 @@ impl ExternalsRangeReader {
                                     block_seqno: None,
                                     from_same_shard: None,
                                 }));
-                            metrics
+                            par_metrics
                                 .add_to_msgs_groups_ops_count
                                 .saturating_add_assign(1);
                         }
-                        metrics.add_to_message_groups_timer.stop();
+                        par_metrics.add_to_message_groups_timer.stop();
 
-                        metrics.read_ext_msgs_count += 1;
+                        par_metrics.read_ext_msgs_count += 1;
 
                         total_msgs_collected += 1;
                         msgs_collected_from_last_anchor += 1;
@@ -1090,15 +1081,24 @@ impl ExternalsRangeReader {
             has_pending_externals,
         );
 
-        metrics.read_ext_messages_timer.stop();
-        metrics.read_ext_messages_timer.total_elapsed -=
-            metrics.add_to_message_groups_timer.total_elapsed;
+        // accumulate time metrics
+        {
+            metrics_by_partitions
+                .get_mut(0)
+                .read_ext_messages_timer
+                .stop();
+            let add_to_msgs_groups_total_elapsed =
+                metrics_by_partitions.add_to_message_groups_total_elapsed();
+            let par_0_metrics = metrics_by_partitions.get_mut(0);
+            par_0_metrics.read_ext_messages_timer.stop();
+            par_0_metrics.read_ext_messages_timer.total_elapsed -= add_to_msgs_groups_total_elapsed;
+        }
 
         ReadExternalsRangeResult {
             has_pending_externals,
             last_read_to_anchor_chain_time,
             max_fill_state_by_slots,
-            metrics,
+            metrics_by_partitions,
         }
     }
 }
@@ -1121,5 +1121,5 @@ struct ReadExternalsRangeResult {
     /// Shows if we can fill all slots in message group from almost one buffer
     max_fill_state_by_slots: BufferFillStateBySlots,
 
-    metrics: MessagesReaderMetrics,
+    metrics_by_partitions: MessagesReaderMetricsByPartitions,
 }

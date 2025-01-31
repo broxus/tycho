@@ -332,7 +332,7 @@ where
 
                         // Add all partitions from the router to the partitions set
                         // use it in commit and gc
-                        for partition in shard_diff.router().partitions() {
+                        for partition in shard_diff.router().partitions_stats().keys() {
                             partitions.insert(*partition);
                         }
 

@@ -829,9 +829,6 @@ def storage() -> RowPanel:
             "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
         ),
         create_heatmap_panel(
-            "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
-        ),
-        create_heatmap_panel(
             "tycho_storage_batch_write_time", "Time to write merge in write batch"
         ),
         create_heatmap_quantile_panel(
@@ -1047,7 +1044,58 @@ def collator_params_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_msgs_exec_params_group_vert_size",
-            "Params: group vertical size" "Params: group vertical size limit",
+            "Params: group vertical size",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_group_slots_fractions",
+            "Params: group slots fractions (by partitions)",
+            labels=['par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_externals_expire_timeout",
+            "Params: externals expire timeout",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_open_ranges_limit",
+            "Params: open reader ranges limit",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_par_0_int_msgs_count_limit",
+            "Params: partition 0 internal messages count limit",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_par_0_ext_msgs_count_limit",
+            "Params: partition 0 external messages count limit",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_int_buffer_limits_max_count",
+            "Params: internals buffers max messages count",
+            labels=['par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_ext_buffer_limits_max_count",
+            "Params: externals buffers max messages count",
+            labels=['par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_int_buffer_limits_slots_count",
+            "Params: internals buffers slots count",
+            labels=['par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_ext_buffer_limits_slots_count",
+            "Params: externals buffers slots count",
+            labels=['par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_int_buffer_limits_slot_vert_size",
+            "Params: internals buffers slots vertical size",
+            labels=['par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_ext_buffer_limits_slot_vert_size",
+            "Params: externals buffers slots vertical size",
+            labels=['par_id=~"$partition"'],
         ),
     ]
     return create_row("collator: Parameters", metrics)
@@ -1109,7 +1157,7 @@ def collation_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_collator_anchor_import_skipped_count",
             "Number of anchor import skipped",
-            labels_selectors=['workchain=~"$workchain"']
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_block_diff_tail_len",
@@ -1164,13 +1212,23 @@ def collator_execution_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_processed_upto_ext_ranges",
-            "Externals ProcessedUpto ranges count",
-            labels=['workchain=~"$workchain"'],
+            "Externals ProcessedUpto ranges count (by partitions)",
+            labels=['workchain=~"$workchain"', 'par_id=~"$partition"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_processed_upto_int_ranges",
-            "Internals ProcessedUpto ranges count",
-            labels=['workchain=~"$workchain"'],
+            "Internals ProcessedUpto ranges count (by partitions)",
+            labels=['workchain=~"$workchain"', 'par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_buffer_messages_count_by_partitions",
+            "Messages count in exec buffer (by partitions)",
+            labels=['workchain=~"$workchain"', 'par_id=~"$partition"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_accounts_count_in_partitions",
+            "Accounts count in isolated partitions",
+            labels=['workchain=~"$workchain"', 'par_id=~"$partition"'],
         ),
     ]
     return create_row("collator: Execution Metrics", metrics)
@@ -1204,6 +1262,12 @@ def collator_message_metrics() -> RowPanel:
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
+            "tycho_do_collate_msgs_read_count_ext_by_partitions",
+            "Read Ext msgs count (by partitions)",
+            labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
+            by_labels=['instance', 'par_id'],
+        ),
+        create_counter_panel(
             "tycho_do_collate_msgs_exec_count_ext",
             "Executed Ext msgs count",
             labels_selectors=['workchain=~"$workchain"'],
@@ -1219,9 +1283,19 @@ def collator_message_metrics() -> RowPanel:
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
+            "tycho_do_collate_placeholder",
+            "placeholder",
+        ),
+        create_counter_panel(
             "tycho_do_collate_msgs_read_count_int",
             "Read Int msgs count",
             labels_selectors=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_msgs_read_count_int_by_partitions",
+            "Read Int msgs count (by partitions)",
+            labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
+            by_labels=['instance', 'par_id'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_int",
@@ -1229,19 +1303,29 @@ def collator_message_metrics() -> RowPanel:
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
+            "tycho_do_collate_placeholder",
+            "placeholder",
+        ),
+        create_counter_panel(
             "tycho_do_collate_new_msgs_created_count",
             "Created NewInt msgs count",
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_new_msgs_inserted_to_iterator_count",
-            "Inserted to iterator NewInt msgs count",
+            "tycho_do_collate_new_msgs_inserted_count",
+            "Inserted NewInt msgs count",
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_read_count_new_int",
             "Read NewInt msgs count",
             labels_selectors=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_msgs_read_count_new_int_by_partitions",
+            "Read NewInt msgs count (by partitions)",
+            labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
+            by_labels=['instance', 'par_id'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_new_int",
@@ -2206,6 +2290,16 @@ def templates() -> Templating:
             template(
                 name="workchain",
                 query="label_values(tycho_do_collate_block_time_diff,workchain)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
+                name="partition",
+                query="label_values(tycho_do_collate_processed_upto_int_ranges,par_id)",
                 data_source="${source}",
                 hide=0,
                 regex=None,
