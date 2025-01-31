@@ -113,7 +113,10 @@ struct ArchiveHandlerInner {}
 
 impl ArchiveHandlerInner {
     fn handle(cx: &ArchiveSubscriberContext<'_>) -> Result<()> {
-        let iterator = cx.archive_iterator();
+        let mut iterator = cx
+            .storage
+            .block_storage()
+            .archive_chunks_iterator(cx.archive_id);
 
         let mut zstd_decoder = ZstdDecompressStream::new(BLOCK_DATA_CHUNK_SIZE)?;
 
@@ -124,7 +127,10 @@ impl ArchiveHandlerInner {
 
         let mut archive_bytes = BytesMut::new();
 
-        for (key, chunk) in iterator {
+        while iterator.valid() {
+            let key = iterator.key().expect("shouldn't happen");
+            let chunk = iterator.value().expect("shouldn't happen");
+
             let id = u32::from_be_bytes(key[..4].try_into()?);
             assert_eq!(id, cx.archive_id);
 
@@ -134,6 +140,9 @@ impl ArchiveHandlerInner {
             verifier.write_verify(decompressed_chunk.as_ref())?;
 
             archive_bytes.extend_from_slice(decompressed_chunk.as_ref());
+
+            // Next key
+            iterator.next();
         }
 
         verifier.final_check()?;

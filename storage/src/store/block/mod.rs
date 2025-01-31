@@ -862,10 +862,7 @@ impl BlockStorage {
         self.archive_notifier.tx.subscribe()
     }
 
-    pub fn archive_chunks_iterator(
-        &self,
-        archive_id: u32,
-    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+    pub fn archive_chunks_iterator(&self, archive_id: u32) -> rocksdb::DBRawIterator<'_> {
         let mut from = [0u8; tables::Archives::KEY_LEN];
         from[..4].copy_from_slice(&archive_id.to_be_bytes());
 
@@ -882,7 +879,7 @@ impl BlockStorage {
         let mut raw_iterator = rocksdb.raw_iterator_cf_opt(&archives_cf, read_opts);
         raw_iterator.seek(from);
 
-        ArchiveIterator { raw_iterator }
+        raw_iterator
     }
 
     // === GC stuff ===
@@ -1712,23 +1709,6 @@ struct PreparedArchiveId {
 
 struct ArchiveNotifier {
     tx: broadcast::Sender<u32>,
-}
-
-struct ArchiveIterator<'a> {
-    raw_iterator: rocksdb::DBRawIterator<'a>,
-}
-
-impl Iterator for ArchiveIterator<'_> {
-    type Item = (Vec<u8>, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = self
-            .raw_iterator
-            .item()
-            .map(|(k, v)| (k.to_vec(), v.to_vec()));
-        self.raw_iterator.next();
-        result
-    }
 }
 
 type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
