@@ -198,14 +198,6 @@ pub struct ArchiveSubscriberContext<'a> {
     pub storage: &'a tycho_storage::Storage,
 }
 
-impl ArchiveSubscriberContext<'_> {
-    pub fn archive_iterator(&self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
-        self.storage
-            .block_storage()
-            .archive_chunks_iterator(self.archive_id)
-    }
-}
-
 pub trait ArchiveSubscriber: Send + Sync + 'static {
     type HandleArchiveFut<'a>: Future<Output = Result<()>> + Send + 'a;
 
