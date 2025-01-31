@@ -9,7 +9,7 @@ use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr
 use tycho_block_util::queue::{
     QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions,
 };
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 
 use super::state::state_iterator::MessageExt;
 use crate::types::ProcessedTo;
@@ -440,6 +440,8 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use tycho_util::FastHashSet;
+
     use super::*;
 
     #[test]
@@ -472,8 +474,8 @@ mod tests {
 
         {
             let expected_partitions = [1, 2, 10].into_iter().collect::<FastHashSet<_>>();
-            for (par_id, _count) in partition_router.partitions_stats() {
-                assert!(expected_partitions.contains(par_id))
+            for par_id in partition_router.partitions_stats().keys() {
+                assert!(expected_partitions.contains(par_id));
             }
         }
 
