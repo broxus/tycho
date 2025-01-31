@@ -360,40 +360,41 @@ impl InternalsPartitionReader {
 
     fn create_append_next_range_reader(
         &mut self,
-        last_range_reader_shards_and_offset_opt: Option<(
+        last_range_reader_info_opt: Option<(
             BTreeMap<ShardIdent, ShardReaderState>,
             u32,
             BlockSeqno,
         )>,
-    ) -> Result<()> {
-        let reader =
-            self.create_next_internals_range_reader(last_range_reader_shards_and_offset_opt)?;
-        if self
-            .range_readers
-            .insert(self.block_seqno, reader)
-            .is_some()
-        {
+    ) -> Result<BlockSeqno> {
+        const RANGE_MAX_BLOCKS: u32 = 3;
+        let reader = self.create_next_internals_range_reader(
+            last_range_reader_info_opt,
+            Some(RANGE_MAX_BLOCKS),
+        )?;
+        let reader_seqno = reader.seqno;
+        // we should add created range reader using calculated reader seqno instead of current block seqno
+        // otherwise the next range will exeed the max blocks limit
+        if self.range_readers.insert(reader_seqno, reader).is_some() {
             panic!(
                 "internals range reader should not already exist (for_shard_id: {}, seqno: {})",
                 self.for_shard_id, self.block_seqno,
             )
         };
         self.all_ranges_fully_read = false;
-        Ok(())
+        Ok(reader_seqno)
     }
 
     #[tracing::instrument(skip_all)]
     fn create_next_internals_range_reader(
         &self,
-        last_range_reader_shards_and_offset_opt: Option<(
+        last_range_reader_info_opt: Option<(
             BTreeMap<ShardIdent, ShardReaderState>,
             u32,
             BlockSeqno,
         )>,
+        range_max_blocks: Option<u32>,
     ) -> Result<InternalsRangeReader> {
         let mut shard_reader_states = BTreeMap::new();
-
-        const MAX_RANGE_BLOCKS: u32 = 5;
 
         let all_end_lts = [(ShardIdent::MASTERCHAIN, self.mc_state_gen_lt)]
             .into_iter()
@@ -403,17 +404,18 @@ impl InternalsPartitionReader {
 
         let mut fully_read = true;
 
-        let (last_to_lt_opt, processed_offset, last_range_block_seqno) =
-            last_range_reader_shards_and_offset_opt.unwrap_or_default();
+        let (last_to_lts, processed_offset, last_range_block_seqno) =
+            last_range_reader_info_opt.unwrap_or_default();
 
-        let range_seqno = if self.block_seqno > last_range_block_seqno + MAX_RANGE_BLOCKS {
-            last_range_block_seqno + MAX_RANGE_BLOCKS
-        } else {
-            self.block_seqno
+        let range_seqno = match range_max_blocks {
+            Some(max) if self.block_seqno > last_range_block_seqno + max => {
+                last_range_block_seqno + max
+            }
+            _ => self.block_seqno,
         };
 
         for (shard_id, end_lt) in all_end_lts {
-            let last_to_lt_opt = last_to_lt_opt.get(&shard_id).map(|s| s.to);
+            let last_to_lt_opt = last_to_lts.get(&shard_id).map(|s| s.to);
             let shard_range_from =
                 last_to_lt_opt.map_or_else(|| QueueKey::min_for_lt(0), QueueKey::max_for_lt);
 
@@ -645,7 +647,7 @@ impl InternalsPartitionReader {
                     // if open ranges limit not reached
                     if !self.open_ranges_limit_reached() {
                         if read_mode == GetNextMessageGroupMode::Continue {
-                            let last_range_reader_shards_and_offset_opt = self
+                            let last_range_reader_info_opt = self
                                 .get_last_range_reader()
                                 .map(|(_, reader)| {
                                     Some((
@@ -655,10 +657,9 @@ impl InternalsPartitionReader {
                                     ))
                                 })
                                 .unwrap_or_default();
-                            self.create_append_next_range_reader(
-                                last_range_reader_shards_and_offset_opt,
-                            )?;
-                            ranges_seqno.push_back(self.block_seqno);
+                            let range_seqno =
+                                self.create_append_next_range_reader(last_range_reader_info_opt)?;
+                            ranges_seqno.push_back(range_seqno);
                         } else {
                             // do not create next range reader on refill
                             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -752,7 +753,7 @@ impl InternalsPartitionReader {
 
         // if last range is not from current block then create and check next range
         if last_seqno < self.block_seqno {
-            let last_range_reader_shards_and_offset_opt = self
+            let last_range_reader_info_opt = self
                 .get_last_range_reader()
                 .map(|(_, reader)| {
                     Some((
@@ -762,8 +763,10 @@ impl InternalsPartitionReader {
                     ))
                 })
                 .unwrap_or_default();
+            // we should look thru the whole range to check for pending messages
+            // so we do not pass `range_max_blocks` to force use the prev block end lt
             let mut range_reader =
-                self.create_next_internals_range_reader(last_range_reader_shards_and_offset_opt)?;
+                self.create_next_internals_range_reader(last_range_reader_info_opt, None)?;
             if !range_reader.fully_read {
                 range_reader.init()?;
 
