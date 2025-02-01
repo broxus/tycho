@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
-use tycho_storage::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
+use tycho_storage::model::{QueueRange, ShardsInternalMessagesKey, StatKey, Statistics};
 use tycho_storage::{InternalQueueSnapshot, InternalQueueTransaction, Storage};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashSet;
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{
@@ -93,10 +93,11 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
     /// Load statistics for given partition and ranges
     fn load_statistics(
         &self,
-        result: &mut FastHashMap<IntAddr, u64>,
+        result: &mut Statistics,
         snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<()>;
 }
 
@@ -180,10 +181,11 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
 
     fn load_statistics(
         &self,
-        result: &mut FastHashMap<IntAddr, u64>,
+        result: &mut Statistics,
         snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<()> {
         let _histogram =
             HistogramGuard::begin("tycho_internal_queue_uncommitted_statistics_load_time");
@@ -194,6 +196,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
                 partition,
                 &range.from,
                 &range.to,
+                shards,
                 result,
             )?;
         }

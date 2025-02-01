@@ -8,6 +8,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_storage::model::Statistics;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
@@ -103,6 +104,7 @@ where
         &self,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<QueueStatistics>;
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
@@ -447,21 +449,30 @@ where
         &self,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<QueueStatistics> {
         let snapshot = self.committed_state.snapshot();
-        let mut statistics = FastHashMap::default();
+        let mut statistics = Statistics::default();
 
         // load from committed state
-        self.committed_state
-            .load_statistics(&mut statistics, &snapshot, partition, ranges)?;
+        self.committed_state.load_statistics(
+            &mut statistics,
+            &snapshot,
+            partition,
+            ranges,
+            shards,
+        )?;
 
         // load from uncommitted state and add to the statistics
-        self.uncommitted_state
-            .load_statistics(&mut statistics, &snapshot, partition, ranges)?;
+        self.uncommitted_state.load_statistics(
+            &mut statistics,
+            &snapshot,
+            partition,
+            ranges,
+            shards,
+        )?;
 
-        let statistics = QueueStatistics::with_statistics(statistics);
-
-        Ok(statistics)
+        Ok(statistics.into())
     }
 
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
