@@ -4,7 +4,7 @@ use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl, ShortQueueDiff};
@@ -39,6 +39,7 @@ where
         &self,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<QueueStatistics>;
 
     /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
@@ -117,10 +118,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<QueueStatistics> {
         let time_start = std::time::Instant::now();
 
-        let stats = self.queue.load_statistics(partition, ranges)?;
+        let stats = self.queue.load_statistics(partition, ranges, shards)?;
 
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,

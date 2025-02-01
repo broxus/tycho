@@ -1,10 +1,10 @@
 use anyhow::Result;
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueuePartitionIdx;
-use tycho_storage::model::ShardsInternalMessagesKey;
+use tycho_storage::model::{ShardsInternalMessagesKey, Statistics};
 use tycho_storage::{InternalQueueSnapshot, Storage};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
+use tycho_util::FastHashSet;
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
@@ -75,10 +75,11 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
     /// Load statistics for given partition and ranges
     fn load_statistics(
         &self,
-        result: &mut FastHashMap<IntAddr, u64>,
+        result: &mut Statistics,
         snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
         range: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<()>;
 }
 
@@ -138,20 +139,22 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
 
     fn load_statistics(
         &self,
-        result: &mut FastHashMap<IntAddr, u64>,
+        result: &mut Statistics,
         snapshot: &InternalQueueSnapshot,
         partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
+        range: &[QueueShardRange],
+        shards: &FastHashSet<ShardIdent>,
     ) -> Result<()> {
         let _histogram =
             HistogramGuard::begin("tycho_internal_queue_committed_statistics_load_time");
 
-        for range in ranges {
+        for range in range {
             snapshot.collect_committed_stats_in_range(
                 range.shard_ident,
                 partition,
                 &range.from,
                 &range.to,
+                shards,
                 result,
             )?;
         }
