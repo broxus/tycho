@@ -413,12 +413,10 @@ impl InternalsPartitionReader {
         let range_seqno = match range_max_messages {
             None => self.block_seqno,
             Some(max_messages) => {
-                let mut current_block_seqno = last_range_block_seqno;
+                let mut current_block_seqno = last_range_block_seqno + 1;
                 let mut messages_count = 0;
 
                 while current_block_seqno < self.block_seqno {
-                    current_block_seqno += 1;
-
                     let diff = self
                         .mq_adapter
                         .get_diff(self.for_shard_id, current_block_seqno)
@@ -435,6 +433,8 @@ impl InternalsPartitionReader {
                     if messages_count > max_messages as u64 {
                         break;
                     }
+
+                    current_block_seqno += 1;
                 }
                 current_block_seqno
             }
