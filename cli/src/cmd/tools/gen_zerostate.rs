@@ -701,7 +701,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
             par_0_int_msgs_count_limit: 50_000,
             par_0_ext_msgs_count_limit: 5_000,
             group_slots_fractions,
-            range_messages_limit: 0,
+            range_messages_limit: 10_000,
         },
 
         wu_used_to_import_next_anchor: 1_200_000_000,

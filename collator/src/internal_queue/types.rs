@@ -395,9 +395,9 @@ impl DiffStatistics {
         self.inner.statistics.get(&partition)
     }
 
-    pub fn get_messages_amount_by_shard(&self, shard_ident: &ShardIdent) -> u64 {
+    pub fn get_messages_count_by_shard(&self, shard_ident: &ShardIdent) -> u64 {
         self.inner
-            .shards_messages
+            .shards_messages_count
             .get(shard_ident)
             .copied()
             .unwrap_or_default()
@@ -409,7 +409,7 @@ struct DiffStatisticsInner {
     min_message: QueueKey,
     max_message: QueueKey,
     statistics: FastHashMap<QueuePartitionIdx, FastHashMap<IntAddr, u64>>,
-    shards_messages: FastHashMap<ShardIdent, u64>,
+    shards_messages_count: FastHashMap<ShardIdent, u64>,
 }
 
 impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
@@ -417,7 +417,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
         let (diff, shard_ident) = value;
         let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
         let max_message = diff.messages.keys().last().cloned().unwrap_or_default();
-        let mut shards_messages = FastHashMap::default();
+        let mut shards_messages_count = FastHashMap::default();
 
         let mut statistics = FastHashMap::default();
 
@@ -441,7 +441,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
                 ShardIdent::new_full(0)
             };
 
-            shards_messages
+            shards_messages_count
                 .entry(dest_shard)
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
@@ -453,7 +453,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
                 min_message,
                 max_message,
                 statistics,
-                shards_messages,
+                shards_messages_count,
             }),
         }
     }
@@ -463,8 +463,9 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::*;
+    use tycho_util::FastHashSet;
 
+    use super::*;
     #[test]
     fn test_partition_router_from_btreemap() {
         let addr1 = RouterAddr {
