@@ -440,13 +440,19 @@ impl MessagesReader {
 
         // metrics: accounts count in isolated partitions
         {
-            for (par_id, count) in queue_diff_with_msgs.partition_router.partitions_stats() {
+            let partitions_stats = queue_diff_with_msgs.partition_router.partitions_stats();
+            for par_id in self
+                .internals_partition_readers
+                .keys()
+                .filter(|&&par_id| par_id > 0)
+            {
+                let count = partitions_stats.get(par_id).copied().unwrap_or_default();
                 let labels = [
                     ("workchain", self.for_shard_id.workchain().to_string()),
                     ("par_id", par_id.to_string()),
                 ];
                 metrics::gauge!("tycho_do_collate_accounts_count_in_partitions", &labels)
-                    .set(*count as f64);
+                    .set(count as f64);
             }
         }
 
