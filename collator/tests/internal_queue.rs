@@ -106,6 +106,7 @@ fn test_statistics_check_statistics(
     dest_3_normal_priority: RouterAddr,
 ) -> anyhow::Result<()> {
     // check two diff statistics
+    // there are 30000 messages in low partition, 2000 message in normal partition
     let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
@@ -149,7 +150,7 @@ fn test_statistics_check_statistics(
         .unwrap();
     assert_eq!(*addr_3_stat, 2000);
 
-    // check first diff
+    // check first diff, there are 15000 messages in low partition
     let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
@@ -174,7 +175,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_1_stat, 10000);
     assert_eq!(*addr_2_stat, 5000);
 
-    // check second diff, we have 0.,35000 lt in low partition
+    // check second diff, there are 15000 messages in low partition
     let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
@@ -964,7 +965,6 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let addr2 = RouterAddr::from(StdAddr::new(0, HashBytes::ZERO));
     let addr3 = RouterAddr::from(StdAddr::new(0, HashBytes::ZERO));
 
-    // И теперь можно создать QueueDiff:
     let diff = QueueDiff {
         hash: HashBytes::ZERO,
         prev_hash: HashBytes::from([0x33; 32]),
