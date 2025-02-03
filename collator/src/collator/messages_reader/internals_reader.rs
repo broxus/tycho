@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_util::FastHashSet;
 
 use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
@@ -336,9 +335,7 @@ impl InternalsPartitionReader {
         fully_read: bool,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
-        let msgs_stats =
-            self.mq_adapter
-                .get_statistics(self.partition_id, ranges, &FastHashSet::default())?;
+        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
         let remaning_msgs_stats = match fully_read {
             true => QueueStatistics::default(),
             false => {
