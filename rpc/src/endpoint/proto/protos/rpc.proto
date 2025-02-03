@@ -67,9 +67,11 @@ message Response {
 
   message GetTimings {
     uint32  last_mc_block_seqno = 1;
-    uint32  last_mc_utime = 2;
-    int64   mc_time_diff = 3;
-    optional uint64  smallest_known_lt = 4;
+    reserved 2; // DEPRECATED: last_shard_client_mc_block_seqno
+    uint32  last_mc_utime = 3;
+    int64   mc_time_diff = 4;
+    reserved 5; // DEPRECATED: shard_client_time_diff
+    optional uint64  smallest_known_lt = 6;
   }
 
   message GetStatus {
