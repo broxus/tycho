@@ -100,11 +100,11 @@ pub mod response {
     pub struct GetTimings {
         #[prost(uint32, tag = "1")]
         pub last_mc_block_seqno: u32,
-        #[prost(uint32, tag = "2")]
+        #[prost(uint32, tag = "3")]
         pub last_mc_utime: u32,
-        #[prost(int64, tag = "3")]
+        #[prost(int64, tag = "4")]
         pub mc_time_diff: i64,
-        #[prost(uint64, optional, tag = "4")]
+        #[prost(uint64, optional, tag = "6")]
         pub smallest_known_lt: ::core::option::Option<u64>,
     }
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]

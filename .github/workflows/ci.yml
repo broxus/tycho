@@ -38,6 +38,8 @@ jobs:
               - '**.rs'
             shell:
               - '**.sh'
+            proto:
+              - '**.proto'
   rustfmt:
     name: Rustfmt
     needs: changes
@@ -151,9 +153,8 @@ jobs:
 
   check-protos:
     name: Check protos
-    if: |
-      contains(github.event.pull_request.files.*.path, '.proto') ||
-      (github.event_name == 'push' && contains(join(github.event.commits.*.added, github.event.commits.*.modified), '.proto'))
+    needs: [changes]
+    if: ${{ needs.changes.outputs.proto == 'true' }}
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
