@@ -1,7 +1,6 @@
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
-use tycho_util::FastHashMap;
 
 use crate::util::{StoredValue, StoredValueBuffer};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -210,10 +209,4 @@ impl StoredValue for QueuePartitionIdx {
 
         partition
     }
-}
-
-#[derive(Default)]
-pub struct Statistics {
-    pub statistics: FastHashMap<IntAddr, u64>,
-    pub shards_messages_amount: FastHashMap<ShardIdent, u64>,
 }

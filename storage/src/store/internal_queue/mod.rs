@@ -3,12 +3,12 @@ use std::fs::File;
 use anyhow::Result;
 use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, WriteBatch};
 use weedb::{BoundedCfHandle, ColumnFamily, OwnedRawIterator, OwnedSnapshot, Table};
 
 use crate::db::*;
-use crate::model::{QueueRange, ShardsInternalMessagesKey, StatKey, Statistics};
+use crate::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
 use crate::util::StoredValue;
 use crate::QueueStateReader;
 
@@ -458,8 +458,7 @@ impl InternalQueueSnapshot {
         partition: QueuePartitionIdx,
         from: &QueueKey,
         to: &QueueKey,
-        shards: &FastHashSet<ShardIdent>,
-        result: &mut Statistics,
+        result: &mut FastHashMap<IntAddr, u64>,
     ) -> Result<()> {
         let mut read_config = self.db.internal_message_stats.new_read_config();
         read_config.set_snapshot(&self.snapshot);
@@ -467,15 +466,7 @@ impl InternalQueueSnapshot {
         let cf = self.db.internal_message_stats.cf();
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
-        Self::collect_dest_counts_in_range(
-            &mut iter,
-            shard_ident,
-            partition,
-            *from,
-            *to,
-            shards,
-            result,
-        )
+        Self::collect_dest_counts_in_range(&mut iter, shard_ident, partition, *from, *to, result)
     }
 
     pub fn collect_uncommitted_stats_in_range(
@@ -484,8 +475,7 @@ impl InternalQueueSnapshot {
         partition: QueuePartitionIdx,
         from: &QueueKey,
         to: &QueueKey,
-        shards: &FastHashSet<ShardIdent>,
-        result: &mut Statistics,
+        result: &mut FastHashMap<IntAddr, u64>,
     ) -> Result<()> {
         let mut read_config = self.db.internal_message_stats_uncommitted.new_read_config();
         read_config.set_snapshot(&self.snapshot);
@@ -493,15 +483,7 @@ impl InternalQueueSnapshot {
         let cf = self.db.internal_message_stats_uncommitted.cf();
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
 
-        Self::collect_dest_counts_in_range(
-            &mut iter,
-            shard_ident,
-            partition,
-            *from,
-            *to,
-            shards,
-            result,
-        )
+        Self::collect_dest_counts_in_range(&mut iter, shard_ident, partition, *from, *to, result)
     }
 
     fn collect_dest_counts_in_range(
@@ -510,8 +492,7 @@ impl InternalQueueSnapshot {
         partition: QueuePartitionIdx,
         from: QueueKey,
         to: QueueKey,
-        shards: &FastHashSet<ShardIdent>,
-        result: &mut Statistics,
+        result: &mut FastHashMap<IntAddr, u64>,
     ) -> Result<()> {
         let from_key = StatKey {
             shard_ident,
@@ -541,18 +522,8 @@ impl InternalQueueSnapshot {
             }
 
             let count = u64::from_le_bytes(value.try_into().unwrap());
-            let entry = result
-                .statistics
-                .entry(current_key.dest.to_int_addr())
-                .or_insert(0);
+            let entry = result.entry(current_key.dest.to_int_addr()).or_insert(0);
             *entry += count;
-
-            for shard in shards {
-                if shard.contains_address(&current_key.dest.to_int_addr()) {
-                    let entry = result.shards_messages_amount.entry(*shard).or_insert(0);
-                    *entry += count;
-                }
-            }
 
             iter.next();
         }

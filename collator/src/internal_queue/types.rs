@@ -9,8 +9,7 @@ use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr
 use tycho_block_util::queue::{
     QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions,
 };
-use tycho_storage::model::Statistics;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::state::state_iterator::MessageExt;
 use crate::types::ProcessedTo;
@@ -311,10 +310,13 @@ pub struct QueueRange {
 #[derive(Debug, Default, Clone)]
 pub struct QueueStatistics {
     statistics: FastHashMap<IntAddr, u64>,
-    shards_messages_amount: FastHashMap<ShardIdent, u64>,
 }
 
 impl QueueStatistics {
+    pub fn with_statistics(statistics: FastHashMap<IntAddr, u64>) -> Self {
+        Self { statistics }
+    }
+
     pub fn statistics(&self) -> &FastHashMap<IntAddr, u64> {
         &self.statistics
     }
@@ -346,22 +348,6 @@ impl QueueStatistics {
                     .and_modify(|count| *count += msgs_count)
                     .or_insert(msgs_count);
             }
-        }
-    }
-
-    pub fn get_messages_amount_by_shard(&self, shard_ident: &ShardIdent) -> u64 {
-        self.shards_messages_amount
-            .get(shard_ident)
-            .copied()
-            .unwrap_or_default()
-    }
-}
-
-impl From<Statistics> for QueueStatistics {
-    fn from(value: Statistics) -> Self {
-        Self {
-            statistics: value.statistics,
-            shards_messages_amount: value.shards_messages_amount,
         }
     }
 }
@@ -453,8 +439,6 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-
-    use tycho_util::FastHashSet;
 
     use super::*;
 
