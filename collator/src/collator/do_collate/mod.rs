@@ -357,6 +357,8 @@ impl CollatorStdImpl {
         };
         let diff_tail_len = mq_adapter.get_diffs_count_by_shard(&shard_id) as u32 + 1;
 
+        println!("tail len: {}", diff_tail_len);
+
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
             || {
