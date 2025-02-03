@@ -174,7 +174,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_1_stat, 10000);
     assert_eq!(*addr_2_stat, 5000);
 
-    // check second diff
+    // check second diff, we have 0.,35000 lt in low partition
     let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
         shard_ident: ShardIdent::new_full(0),
         from: QueueKey {
