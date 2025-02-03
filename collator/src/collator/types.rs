@@ -7,10 +7,10 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits, BlockRef,
-    CollationConfig, CurrencyCollection, GlobalVersion, HashUpdate, ImportFees, InMsg, Lazy,
-    LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount,
-    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
-    ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr, MsgInfo,
+    MsgsExecutionParams, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts,
+    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tl_proto::TlWrite;
 use ton_executor::{AccountMeta, ExecutedTransaction};
@@ -203,7 +203,6 @@ pub(super) struct BlockCollationDataBuilder {
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
-    pub global_version: GlobalVersion,
     pub top_shard_blocks: Vec<TopShardBlockInfo>,
 
     /// Mempool config override for a new genesis
@@ -218,7 +217,6 @@ impl BlockCollationDataBuilder {
         min_ref_mc_seqno: u32,
         next_chain_time: u64,
         created_by: HashBytes,
-        global_version: GlobalVersion,
         mempool_config_override: Option<MempoolGlobalConfig>,
     ) -> Self {
         let gen_utime = (next_chain_time / 1000) as u32;
@@ -235,7 +233,6 @@ impl BlockCollationDataBuilder {
             #[cfg(feature = "block-creator-stats")]
             block_create_count: Default::default(),
             created_by,
-            global_version,
             shards: None,
             top_shard_blocks: vec![],
             mempool_config_override,
@@ -294,7 +291,6 @@ impl BlockCollationDataBuilder {
             min_ref_mc_seqno: self.min_ref_mc_seqno,
             rand_seed: self.rand_seed,
             created_by: self.created_by,
-            global_version: self.global_version,
             shards: self.shards,
             top_shard_blocks: self.top_shard_blocks,
             shard_fees: self.shard_fees,
@@ -385,8 +381,6 @@ pub(super) struct BlockCollationData {
     pub rand_seed: HashBytes,
 
     pub created_by: HashBytes,
-
-    pub global_version: GlobalVersion,
 
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,

@@ -13,10 +13,8 @@ use crate::collator::types::AnchorsCache;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::CollatorConfig;
 
 pub struct PrepareState {
-    config: Arc<CollatorConfig>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     reader_state: ReaderState,
     anchors_cache: AnchorsCache,
@@ -26,7 +24,6 @@ impl PhaseState for PrepareState {}
 
 impl Phase<PrepareState> {
     pub fn new(
-        config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: ReaderState,
         anchors_cache: AnchorsCache,
@@ -35,7 +32,6 @@ impl Phase<PrepareState> {
         Self {
             state,
             extra: PrepareState {
-                config,
                 mq_adapter,
                 reader_state,
                 anchors_cache,
@@ -51,13 +47,15 @@ impl Phase<PrepareState> {
         );
 
         // init executor
+        let preloaded_bc_config = Arc::new(PreloadedBlockchainConfig::with_config(
+            self.state.mc_data.config.clone(),
+            self.state.mc_data.global_id,
+        )?);
+        let block_version = preloaded_bc_config.global_version().version;
         let executor = MessagesExecutor::new(
             self.state.shard_id,
             self.state.collation_data.next_lt,
-            Arc::new(PreloadedBlockchainConfig::with_config(
-                self.state.mc_data.config.clone(),
-                self.state.mc_data.global_id,
-            )?),
+            preloaded_bc_config,
             Arc::new(ExecuteParams {
                 state_libs: self.state.mc_data.libraries.clone(),
                 // generated unix time
@@ -66,7 +64,7 @@ impl Phase<PrepareState> {
                 block_lt: self.state.collation_data.start_lt,
                 // block random seed
                 seed_block: self.state.collation_data.rand_seed,
-                block_version: self.extra.config.supported_block_version,
+                block_version,
                 ..ExecuteParams::default()
             }),
             self.state.prev_shard_data.observable_accounts().clone(),
