@@ -242,13 +242,8 @@ impl CollatorStdImpl {
         let histogram_prepare =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
-        let prepare_phase = Phase::<PrepareState>::new(
-            collator_config.clone(),
-            mq_adapter.clone(),
-            reader_state,
-            anchors_cache,
-            state,
-        );
+        let prepare_phase =
+            Phase::<PrepareState>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
 
         let mut execute_phase = prepare_phase.run()?;
 
@@ -732,10 +727,6 @@ impl CollatorStdImpl {
             mc_data.block_id.seqno,
             next_chain_time,
             created_by,
-            GlobalVersion {
-                version: self.config.supported_block_version,
-                capabilities: self.config.supported_capabilities,
-            },
             self.mempool_config_override.clone(),
         );
 

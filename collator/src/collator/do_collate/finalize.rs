@@ -396,9 +396,12 @@ impl Phase<FinalizeState> {
         // info.want_split = false;
         // info.want_merge = false;
 
-        let capabilities = self.state.mc_data.config.get_global_version()?.capabilities;
-        if capabilities.contains(GlobalCapability::CapReportVersion) {
-            new_block_info.set_gen_software(Some(self.state.collation_data.global_version));
+        let bc_global_version = self.state.mc_data.config.get_global_version()?;
+        if bc_global_version
+            .capabilities
+            .contains(GlobalCapability::CapReportVersion)
+        {
+            new_block_info.set_gen_software(Some(bc_global_version));
         }
 
         let build_state_update_elapsed;

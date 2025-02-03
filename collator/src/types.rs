@@ -21,8 +21,7 @@ use crate::utils::block::detect_top_processed_to_anchor;
 
 pub mod processed_upto;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct CollatorConfig {
     pub supported_block_version: u32,
     pub supported_capabilities: GlobalCapabilities,
@@ -34,12 +33,49 @@ pub struct CollatorConfig {
 impl Default for CollatorConfig {
     fn default() -> Self {
         Self {
-            supported_block_version: 50,
+            supported_block_version: 100,
             supported_capabilities: supported_capabilities(),
             min_mc_block_delta_from_bc_to_sync: 3,
             check_value_flow: false,
             validate_config: true,
         }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PartialCollatorConfig {
+    min_mc_block_delta_from_bc_to_sync: u32,
+    check_value_flow: bool,
+    validate_config: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for CollatorConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let partial = PartialCollatorConfig::deserialize(deserializer)?;
+
+        Ok(Self {
+            min_mc_block_delta_from_bc_to_sync: partial.min_mc_block_delta_from_bc_to_sync,
+            check_value_flow: partial.check_value_flow,
+            validate_config: partial.validate_config,
+            ..Default::default()
+        })
+    }
+}
+
+impl serde::Serialize for CollatorConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        PartialCollatorConfig {
+            min_mc_block_delta_from_bc_to_sync: self.min_mc_block_delta_from_bc_to_sync,
+            check_value_flow: self.check_value_flow,
+            validate_config: self.validate_config,
+        }
+        .serialize(serializer)
     }
 }
 
