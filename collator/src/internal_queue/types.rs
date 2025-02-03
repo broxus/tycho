@@ -9,7 +9,7 @@ use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr
 use tycho_block_util::queue::{
     QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions,
 };
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 
 use super::state::state_iterator::MessageExt;
 use crate::types::ProcessedTo;
@@ -394,6 +394,14 @@ impl DiffStatistics {
     pub fn partition(&self, partition: QueuePartitionIdx) -> Option<&FastHashMap<IntAddr, u64>> {
         self.inner.statistics.get(&partition)
     }
+
+    pub fn get_messages_amount_by_shard(&self, shard_ident: &ShardIdent) -> u64 {
+        self.inner
+            .shards_messages
+            .get(shard_ident)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 #[derive(Debug, Clone)]
 struct DiffStatisticsInner {
@@ -401,6 +409,7 @@ struct DiffStatisticsInner {
     min_message: QueueKey,
     max_message: QueueKey,
     statistics: FastHashMap<QueuePartitionIdx, FastHashMap<IntAddr, u64>>,
+    shards_messages: FastHashMap<ShardIdent, u64>,
 }
 
 impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
@@ -408,6 +417,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
         let (diff, shard_ident) = value;
         let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
         let max_message = diff.messages.keys().last().cloned().unwrap_or_default();
+        let mut shards_messages = FastHashMap::default();
 
         let mut statistics = FastHashMap::default();
 
@@ -423,6 +433,18 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
                 .or_insert(FastHashMap::default())
                 .entry(destination.clone())
                 .or_insert(0) += 1;
+
+            // TODO after split/merge implementation we should use detailed counter for 256 shards
+            let dest_shard = if message.destination().is_masterchain() {
+                ShardIdent::MASTERCHAIN
+            } else {
+                ShardIdent::new_full(0)
+            };
+
+            shards_messages
+                .entry(dest_shard)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
         }
 
         Self {
@@ -431,6 +453,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
                 min_message,
                 max_message,
                 statistics,
+                shards_messages,
             }),
         }
     }

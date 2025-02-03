@@ -367,9 +367,11 @@ impl InternalsPartitionReader {
         )>,
     ) -> Result<BlockSeqno> {
         const RANGE_MAX_BLOCKS: u32 = 3;
+        const RANGE_MAX_MESSAGES: u32 = 100_000;
         let reader = self.create_next_internals_range_reader(
             last_range_reader_info_opt,
             Some(RANGE_MAX_BLOCKS),
+            Some(RANGE_MAX_MESSAGES),
         )?;
         let reader_seqno = reader.seqno;
         // we should add created range reader using calculated reader seqno instead of current block seqno
@@ -392,7 +394,8 @@ impl InternalsPartitionReader {
             u32,
             BlockSeqno,
         )>,
-        range_max_blocks: Option<u32>,
+        _range_max_blocks: Option<u32>,
+        range_max_messages: Option<u32>,
     ) -> Result<InternalsRangeReader> {
         let mut shard_reader_states = BTreeMap::new();
 
@@ -407,12 +410,42 @@ impl InternalsPartitionReader {
         let (last_to_lts, processed_offset, last_range_block_seqno) =
             last_range_reader_info_opt.unwrap_or_default();
 
-        let range_seqno = match range_max_blocks {
-            Some(max) if self.block_seqno > last_range_block_seqno + max => {
-                last_range_block_seqno + max
+        let range_seqno = match range_max_messages {
+            None => self.block_seqno,
+            Some(max_messages) => {
+                let mut current_block_seqno = last_range_block_seqno;
+                let mut messages_count = 0;
+
+                while current_block_seqno < self.block_seqno {
+                    current_block_seqno += 1;
+
+                    let diff = self
+                        .mq_adapter
+                        .get_diff(self.for_shard_id, current_block_seqno)
+                        .ok_or(anyhow!(
+                            "cannot get diff for block {}:{}",
+                            self.for_shard_id,
+                            current_block_seqno
+                        ))?;
+
+                    messages_count += diff
+                        .statistics()
+                        .get_messages_amount_by_shard(&self.for_shard_id);
+
+                    if messages_count > max_messages as u64 {
+                        break;
+                    }
+                }
+                current_block_seqno
             }
-            _ => self.block_seqno,
         };
+
+        // let range_seqno = match range_max_blocks {
+        //     Some(max) if self.block_seqno > last_range_block_seqno + max => {
+        //         last_range_block_seqno + max
+        //     }
+        //     _ => self.block_seqno,
+        // };
 
         for (shard_id, end_lt) in all_end_lts {
             let last_to_lt_opt = last_to_lts.get(&shard_id).map(|s| s.to);
@@ -766,7 +799,7 @@ impl InternalsPartitionReader {
             // we should look thru the whole range to check for pending messages
             // so we do not pass `range_max_blocks` to force use the prev block end lt
             let mut range_reader =
-                self.create_next_internals_range_reader(last_range_reader_info_opt, None)?;
+                self.create_next_internals_range_reader(last_range_reader_info_opt, None, None)?;
             if !range_reader.fully_read {
                 range_reader.init()?;
 
