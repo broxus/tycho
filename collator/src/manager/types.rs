@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
@@ -39,7 +40,13 @@ pub(super) struct CollationSyncState {
     pub mc_block_latest_chain_time: u64,
     /// Master block collation is forced for all shards anyway
     pub mc_collation_forced_for_all: bool,
+    /// Collation states by shards. Stores collation status and
+    /// additional info for manager to detect next collation step of every shard.
     pub states: FastHashMap<ShardIdent, CollationState>,
+    /// If we have running sync then stores the target mc block seqno and cancellation token
+    pub active_sync_to_applied: Option<ActiveSync>,
+    /// Seqno of last received master block which may be not saved to cache yet
+    pub last_received_mc_block_seqno: Option<BlockSeqno>,
 }
 
 #[derive(Debug)]
@@ -72,9 +79,15 @@ pub(super) enum NextCollationStep {
     CollateMaster(u64),
 }
 
+pub(super) struct ActiveSync {
+    pub target_mc_block_seqno: BlockSeqno,
+    pub cancelled: CancellationToken,
+}
+
 pub(super) struct BlockCacheStoreResult {
     pub received_and_collated: bool,
     pub block_mismatch: bool,
+    /// We need this to manage queue recovery on sync
     pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
 }
