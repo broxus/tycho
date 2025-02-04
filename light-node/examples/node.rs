@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         tycho_light_node::NodeConfig::from_file(args.node.config.as_ref().context("no config")?)?;
 
     let mut node = args.node.create(config).await?;
-    let init_block_id = node.init(import_zerostate).await?;
+    let init_block_id = node.init(import_zerostate, false).await?;
     node.update_validator_set(&init_block_id).await?;
     node.run(PrintSubscriber).await?;
 

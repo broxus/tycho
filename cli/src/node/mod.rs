@@ -236,7 +236,7 @@ impl Node {
                     self.zerostate,
                     self.starter_config.clone(),
                 )
-                .cold_boot(zerostates.map(FileZerostateProvider))
+                .cold_boot(zerostates.map(FileZerostateProvider), false)
                 .await?
             }
         };
