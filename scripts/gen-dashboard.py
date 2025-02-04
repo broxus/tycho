@@ -856,9 +856,6 @@ def storage() -> RowPanel:
             "0.999",
         ),
         create_heatmap_panel(
-            "tycho_storage_batch_write_time", "Time to write merge in write batch"
-        ),
-        create_heatmap_panel(
             "tycho_storage_state_store_time", "Time to store state with cell traversal"
         ),
         create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),
@@ -1174,6 +1171,11 @@ def collation_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_block_diff_tail_len",
             "Diff tail length",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_blocks_count_in_collation_manager_cache",
+            "Blocks count in collation manager cache",
             labels=['workchain=~"$workchain"'],
         ),
     ]

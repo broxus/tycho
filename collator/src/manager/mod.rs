@@ -10,6 +10,7 @@ use everscale_types::models::{
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
@@ -17,7 +18,7 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
-    ActiveCollator, BlockCacheEntry, BlockCacheEntryData, BlockSeqno, CollationStatus,
+    ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockSeqno, CollationStatus,
     CollatorState, McBlockSubgraph, NextCollationStep,
 };
 
@@ -106,10 +107,17 @@ where
     collators_to_stop: FastDashMap<CollationSessionId, ActiveCollator<Arc<CF::Collator>>>,
 
     blocks_cache: BlocksCache,
+
+    /// Used to preserve the order of processing blocks from bc
+    ready_to_handle_next_block_from_bc: Arc<Notify>,
+
+    /// Used to sync tasks that may cause `sync_to_applied_mc_block`
     ready_to_sync: Arc<Notify>,
-    /// id of last master block processed to refresh collation sessions
+
+    /// block id for last processed master state (after collation or on sync)
     last_processed_mc_block_id: Mutex<Option<BlockId>>,
 
+    /// state to sync collation between master and shard chains
     collation_sync_state: Arc<Mutex<CollationSyncState>>,
 
     /// Cache for validator sets from config
@@ -172,7 +180,7 @@ where
         metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state = state.clone();
-        self.enqueue_task(method_to_async_closure!(handle_block_from_bc, state))
+        self.enqueue_task(method_to_async_closure!(route_handle_block_from_bc, state))
             .await?;
 
         Ok(())
@@ -296,6 +304,9 @@ where
 
         let validator = Arc::new(validator);
 
+        let ready_to_handle_next_block_from_bc = Arc::new(Notify::new());
+        ready_to_handle_next_block_from_bc.notify_one();
+
         let ready_to_sync = Arc::new(Notify::new());
         ready_to_sync.notify_one();
 
@@ -314,8 +325,11 @@ where
             active_collators: Default::default(),
             collators_to_stop: Default::default(),
 
-            blocks_cache: BlocksCache::default(),
+            blocks_cache: BlocksCache::new(),
+
+            ready_to_handle_next_block_from_bc,
             ready_to_sync,
+
             last_processed_mc_block_id: Default::default(),
 
             collation_sync_state: Default::default(),
@@ -456,12 +470,13 @@ where
     fn apply_block_queue_diff_from_entry_stuff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_entry: &BlockCacheEntry,
-        min_processed_to: &Option<QueueKey>,
+        min_processed_to: Option<&QueueKey>,
     ) -> Result<()> {
         if block_entry.block_id.seqno == 0 {
             return Ok(());
         }
 
+        // skip already applied diff
         if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id()) {
             return Ok(());
         }
@@ -473,14 +488,14 @@ where
             BlockCacheEntryData::Received { queue_diff, .. } => queue_diff,
         };
 
-        // skip diff if it's not needed
+        // skip diff below min processed to
         if let Some(min_pt) = min_processed_to {
             if queue_diff.as_ref().max_message <= *min_pt {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     "Skipping diff for block {}: max_message {} <= min_processed_to {}",
                     block_entry.block_id.as_short_id(),
                     queue_diff.as_ref().max_message,
-                    min_pt
+                    min_pt,
                 );
                 return Ok(());
             }
@@ -497,7 +512,6 @@ where
                 .load_extra()?
                 .out_msg_description
                 .load()?,
-
             BlockCacheEntryData::Received { out_msgs, .. } => &out_msgs.load()?,
         };
 
@@ -814,7 +828,24 @@ where
         let collation_cancelled = collator_cancelled || store_res.block_mismatch;
 
         // check if should sync to last applied mc block
-        let should_sync_to_last_applied_mc_block = {
+        let should_sync_to_last_applied_mc_block = 'check_should_sync: {
+            // do not sync to last applied mc block if newer already received
+            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+                let last_received_mc_block_seqno = self.get_last_received_mc_block_seqno();
+                if matches!(
+                    last_received_mc_block_seqno,
+                    Some(last_received_seqno) if last_received_seqno.saturating_sub(applied_range_end) > 1
+                ) {
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                        last_received_mc_block_seqno,
+                        applied_range_end,
+                        "check_should_sync: should not sync to last applied mc block \
+                        because a newer one already received",
+                    );
+                    break 'check_should_sync false;
+                }
+            }
+
             if collation_cancelled {
                 true
             } else if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
@@ -938,8 +969,13 @@ where
             // when candidate is master
 
             // execute master state update processing routines
-            self.process_mc_state_update(collation_result.mc_data.unwrap(), false)
-                .await?;
+            self.process_mc_state_update(
+                collation_result.mc_data.unwrap(),
+                ProcessMcStateUpdateMode::StartCollation {
+                    reset_collators: false,
+                },
+            )
+            .await?;
         } else {
             // when candidate is shard
 
@@ -961,13 +997,55 @@ where
         Ok(())
     }
 
-    /// Process new block from blockchain:
-    /// 1. Save block to cache with status Synced
-    /// 2. Stop block validation if needed
-    /// 3. Notify mempool about new master block
-    /// 4. Refresh collation sessions according to master block
+    /// Finish active sync if it is not finished yet
+    /// and run the next task to handle received block
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    pub async fn handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
+    pub async fn route_handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
+        // TODO: Needs to redesign the task management logic.
+        //      Current implementation with strange semaphores
+        //      is unclear and may be confusing.
+
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+            "cancel sync: route_handle_block_from_bc: started",
+        );
+
+        self.update_last_received_mc_block_seqno(state.block_id());
+
+        // we can handle next block
+        // when last block handle task finished without sync
+        // or when sync started (will finish just started task)
+        self.ready_to_handle_next_block_from_bc.notified().await;
+
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+            "cancel sync: route_handle_block_from_bc: ready_to_handle_next_block_from_bc notified",
+        );
+
+        // try finish active sync
+        let should_notify_ready_to_handle_next_block =
+            self.finish_active_sync_to_applied(state.block_id());
+
+        // run next task to handle block from bc
+        self.dispatcher
+            .spawn_task(method_to_async_closure!(
+                handle_block_from_bc,
+                state,
+                should_notify_ready_to_handle_next_block
+            ))
+            .await
+    }
+
+    /// Process new block from blockchain:
+    /// 1. Save block to cache
+    /// 2. Stop block validation if needed
+    /// 3. Commit block if it was collated first
+    /// 4. Notify mempool about new master block
+    /// 5. Sync to received block if it is far ahead last collated
+    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
+    pub async fn handle_block_from_bc(
+        &self,
+        state: ShardStateStuff,
+        notify_ready_to_handle_on_start: bool,
+    ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
         );
@@ -975,6 +1053,41 @@ where
         let block_id = *state.block_id();
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
+
+        // allow to handle next block on start if requested, otherwise on finish
+        // current task can finish without sync
+        // if we run sync we notify on sync start and do not notify on finish
+        if notify_ready_to_handle_on_start {
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                "cancel sync: handle_block_from_bc: notify ready_to_handle_next_block_from_bc on start",
+            );
+            self.ready_to_handle_next_block_from_bc.notify_one();
+        }
+        let mut notify_ready_to_handle = scopeguard::guard(
+            !notify_ready_to_handle_on_start,
+            |should_notify| {
+                if should_notify {
+                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                        "cancel sync: handle_block_from_bc: notify ready_to_handle_next_block_from_bc on finish",
+                    );
+                    self.ready_to_handle_next_block_from_bc.notify_one();
+                } else {
+                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                        "cancel sync: handle_block_from_bc: will not notify ready_to_handle_next_block_from_bc on finish",
+                    );
+                }
+            },
+        );
+
+        // can allow to handle next block if we processing a shard block
+        // right now because shard block will not cause sync anyway
+        if !block_id.is_masterchain() {
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                "cancel sync: handle_block_from_bc: notify ready_to_handle_next_block_from_bc at the beginning",
+            );
+            self.ready_to_handle_next_block_from_bc.notify_one();
+            *notify_ready_to_handle = false;
+        }
 
         // sync cache and collator state access
         self.ready_to_sync.notified().await;
@@ -1033,11 +1146,25 @@ where
         self.validator.cancel_validation(&block_id.as_short_id())?;
 
         // check if should sync to last applied mc block right now
-        let should_sync_to_last_applied_mc_block = {
-            let last_processed_mc_block_id_opt = self.get_last_processed_mc_block_id();
-            if store_res.last_collated_mc_block_id.is_some()
-                || last_processed_mc_block_id_opt.is_some()
-            {
+        let should_sync_to_last_applied_mc_block = 'check_should_sync: {
+            // do not sync to last applied mc block if newer already received
+            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+                let last_received_mc_block_seqno = self.get_last_received_mc_block_seqno();
+                if matches!(
+                    last_received_mc_block_seqno,
+                    Some(last_received_seqno) if last_received_seqno.saturating_sub(applied_range_end) > 1
+                ) {
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                        last_received_mc_block_seqno,
+                        applied_range_end,
+                        "check_should_sync: should not sync to last applied mc block \
+                        because a newer one already received",
+                    );
+                    break 'check_should_sync false;
+                }
+            }
+
+            if let Some(last_processed_mc_block_id) = self.get_last_processed_mc_block_id() {
                 // Should wait for next collated mc block when collators are active
                 // but when all were cancelled or waiting, we can process last received mc block.
                 // Also can process last received mc block when no active collators
@@ -1048,43 +1175,32 @@ where
                 if !has_active {
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                        last_processed_mc_block_id = ?last_processed_mc_block_id_opt.map(|id| id.as_short_id().to_string()),
+                        last_processed_mc_block_id = %last_processed_mc_block_id.as_short_id(),
                         "check_should_sync: should sync to last applied mc block \
                         when all collators were cancelled, or waiting, or there are no collators",
                     );
                     true
                 } else if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
-                    let should_sync = match store_res.last_collated_mc_block_id {
-                        None => {
+                    let should_sync = {
+                        let applied_range_end_delta =
+                            applied_range_end.saturating_sub(last_processed_mc_block_id.seqno);
+                        if applied_range_end_delta < self.config.min_mc_block_delta_from_bc_to_sync
+                        {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                "check_should_sync: should wait for next collated own mc block: \
+                                last applied ({}) ahead last processed ({}) on {} < {}",
+                                applied_range_end, last_processed_mc_block_id.seqno,
+                                applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
+                            );
+                            false
+                        } else {
                             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                                 "check_should_sync: should sync to last applied mc block from bc: \
-                                last applied ({}) and last collated not exist",
-                                applied_range_end,
+                                last applied ({}) ahead last processed ({}) on {} >= {}",
+                                applied_range_end, last_processed_mc_block_id.seqno,
+                                applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
                             );
                             true
-                        }
-                        Some(last_collated_mc_block_id) => {
-                            let applied_range_end_delta =
-                                applied_range_end.saturating_sub(last_collated_mc_block_id.seqno);
-                            if applied_range_end_delta
-                                < self.config.min_mc_block_delta_from_bc_to_sync
-                            {
-                                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                                    "check_should_sync: should wait for next collated own mc block: \
-                                    last applied ({}) ahead last collated ({}) on {} < {}",
-                                    applied_range_end, last_collated_mc_block_id.seqno,
-                                    applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
-                                );
-                                false
-                            } else {
-                                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                                    "check_should_sync: should sync to last applied mc block from bc: \
-                                    last applied ({}) ahead last collated ({}) on {} >= {}",
-                                    applied_range_end, last_collated_mc_block_id.seqno,
-                                    applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
-                                );
-                                true
-                            }
                         }
                     };
 
@@ -1124,6 +1240,7 @@ where
                 store_res.applied_mc_queue_range.as_ref(),
             )
             .await?;
+            *notify_ready_to_handle = false;
         } else {
             // try to commit block if it was collated first
             if store_res.received_and_collated {
@@ -1180,6 +1297,12 @@ where
         Ok(())
     }
 
+    /// Restores internals queue state,
+    /// processes last applied mc state
+    /// to run next blocks collation.
+    ///
+    /// Returns `false` if unable to
+    /// load diff to restore queue state
     #[tracing::instrument(skip_all, fields(applied_range = ?applied_range))]
     async fn sync_to_applied_mc_block(
         &self,
@@ -1201,6 +1324,29 @@ where
             shard: ShardIdent::MASTERCHAIN,
             seqno: applied_range.1,
         };
+
+        // store active sync info with cancellation token
+        let cancelled = self.set_active_sync_info(last_applied_mc_block_key.seqno)?;
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+            "cancel sync: sync_to_applied_mc_block: set_active_sync_info for seqno={}",
+            last_applied_mc_block_key.seqno,
+        );
+        scopeguard::defer!({
+            self.clean_active_sync_info();
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                "cancel sync: sync_to_applied_mc_block: active_sync_info cleaned",
+            );
+        });
+
+        // gc blocks from cache when sync finished
+        scopeguard::defer!(self.blocks_cache.gc_prev_blocks());
+
+        // when we started sync we are ready to handle next block from bc
+        // which may cancel current sync
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+            "cancel sync: sync_to_applied_mc_block: notify ready_to_handle_next_block_from_bc",
+        );
+        self.ready_to_handle_next_block_from_bc.notify_one();
 
         // we need to drop uncommitted internal messages from the queue
         // when mempool config override has genesis higher then in the last consensus info
@@ -1229,8 +1375,8 @@ where
         let mut min_processed_to_by_shards = ProcessedTo::default();
 
         // find min processed to by shards for trim tail
-        for min_processed_upto in processed_to_by_shards.values() {
-            for (shard_id, to_key) in min_processed_upto.clone() {
+        for min_processed_to in processed_to_by_shards.values() {
+            for (shard_id, to_key) in min_processed_to.clone() {
                 min_processed_to_by_shards
                     .entry(shard_id)
                     .and_modify(|min| *min = std::cmp::min(*min, to_key))
@@ -1277,6 +1423,11 @@ where
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
 
             while let Some(prev_block_id) = prev_block_ids.pop_front() {
+                // stop collecting prev diffs for apply when sync cancelled
+                if cancelled.is_cancelled() {
+                    break;
+                }
+
                 if prev_block_id.seqno == 0 {
                     continue;
                 }
@@ -1352,6 +1503,11 @@ where
 
         // apply required previous queue diffs
         while let Some((diff, diff_hash, block_id, max_message)) = prev_queue_diffs.pop() {
+            // stop appling prev diffs when sync cancelled
+            if cancelled.is_cancelled() {
+                break;
+            }
+
             let statistics = (&diff, block_id.shard).into();
             self.mq_adapter.apply_diff(
                 diff,
@@ -1361,6 +1517,7 @@ where
                 max_message,
             )?;
         }
+
         // trim diffs tails for all shards
         for (shard_id, min_processed_to) in &min_processed_to_by_shards {
             self.mq_adapter.trim_diffs(shard_id, min_processed_to)?;
@@ -1384,45 +1541,48 @@ where
                 }
             };
 
-            // apply queue diffs
-            for sc_block_entry in subgraph.shard_blocks.iter() {
-                let min_pt = &min_processed_to_by_shards
-                    .get(&sc_block_entry.block_id.shard)
-                    .cloned();
+            let mc_block_entry = &subgraph.master_block;
 
-                if let Some(top_collated_block) =
-                    top_collated_blocks.get(&sc_block_entry.block_id.shard)
+            // apply queue diffs from blocks above 0
+            // skip cached diffs below min_processed_to
+            if subgraph.master_block.block_id.seqno != 0 {
+                for block_entry in [mc_block_entry]
+                    .into_iter()
+                    .chain(subgraph.shard_blocks.iter())
                 {
-                    if sc_block_entry.block_id.seqno <= *top_collated_block {
+                    // do not apply diff if sync cancelled
+                    if cancelled.is_cancelled() {
                         continue;
                     }
-                }
 
-                Self::apply_block_queue_diff_from_entry_stuff(
-                    self.mq_adapter.clone(),
-                    sc_block_entry,
-                    min_pt,
-                )?;
-            }
-            let mc_block_entry = &subgraph.master_block;
-            let min_pt = &min_processed_to_by_shards
-                .get(&mc_block_entry.block_id.shard)
-                .cloned();
+                    // do not apply diff if block was collated
+                    if let Some(border) = top_collated_blocks.get(&block_entry.block_id.shard) {
+                        if block_entry.block_id.seqno <= *border {
+                            continue;
+                        }
+                    }
 
-            if let Some(top_collated_block) =
-                top_collated_blocks.get(&mc_block_entry.block_id.shard)
-            {
-                if mc_block_entry.block_id.seqno <= *top_collated_block {
-                    continue;
+                    let min_processed_to =
+                        min_processed_to_by_shards.get(&block_entry.block_id.shard);
+
+                    Self::apply_block_queue_diff_from_entry_stuff(
+                        self.mq_adapter.clone(),
+                        block_entry,
+                        min_processed_to,
+                    )?;
                 }
             }
-            Self::apply_block_queue_diff_from_entry_stuff(
-                self.mq_adapter.clone(),
-                mc_block_entry,
-                min_pt,
-            )?;
 
-            // if it is last one then commit diffs, notify mempool and refresh collation sessions
+            // we can gc to current master block when diffs were applied
+            let mut to_blocks_keys = vec![mc_block_entry.key()];
+            to_blocks_keys.extend(
+                mc_block_entry
+                    .iter_top_block_ids()
+                    .map(|id| id.as_short_id()),
+            );
+            self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
+
+            // on sync finish we commit diffs, notify mempool and refresh collation sessions
             if is_last {
                 self.commit_block_queue_diff(
                     &mc_block_entry.block_id,
@@ -1447,32 +1607,25 @@ where
 
                 Self::reset_collation_sync_status(&mut self.collation_sync_state.lock());
 
-                // TODO: refactor this logic
-                // replace last collated block id with last applied
-                self.blocks_cache
-                    .update_last_collated_mc_block_id(*state.block_id());
-
                 // reset top shard blocks info
                 // because next we will start to collate new shard blocks after the sync
                 self.blocks_cache.reset_top_shard_blocks_additional_info();
 
                 let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
 
-                // remove all previous blocks from cache
-                let mut to_block_keys = vec![mc_block_entry.key()];
-                to_block_keys.extend(
-                    mc_block_entry
-                        .iter_top_block_ids()
-                        .map(|id| id.as_short_id()),
-                );
-
                 self.blocks_cache
-                    .remove_prev_blocks_from_cache(&to_block_keys);
+                    .remove_next_collated_blocks_from_cache(&to_blocks_keys);
 
-                self.blocks_cache
-                    .remove_next_collated_blocks_from_cache(&to_block_keys);
+                // when sync cancelled we do not exist sync but skip collation
+                let process_state_update_mode = match cancelled.is_cancelled() {
+                    true => ProcessMcStateUpdateMode::SkipCollation,
+                    false => ProcessMcStateUpdateMode::StartCollation {
+                        reset_collators: true,
+                    },
+                };
 
-                self.process_mc_state_update(mc_data.clone(), true).await?;
+                self.process_mc_state_update(mc_data.clone(), process_state_update_mode)
+                    .await?;
 
                 // handle top processed to anchor in mempool
                 self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
@@ -1572,18 +1725,28 @@ where
     async fn process_mc_state_update(
         &self,
         mc_data: Arc<McData>,
-        reset_collators: bool,
+        mode: ProcessMcStateUpdateMode,
     ) -> Result<()> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            reset_collators,
+            ?mode,
             "Will notify mempool and refresh collation sessions",
         );
 
         self.notify_mc_state_update_to_mempool(mc_data.clone())
             .await?;
 
-        self.refresh_collation_sessions(mc_data, reset_collators)
-            .await
+        // do not re-process this master block if it is lower then last processed or equal to it
+        // but process a new version of block with the same seqno
+        if !self.check_should_process_and_update_last_processed_mc_block(&mc_data.block_id) {
+            return Ok(());
+        }
+
+        if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
+            self.refresh_collation_sessions(mc_data, reset_collators)
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn notify_mc_state_update_to_mempool(&self, mc_data: Arc<McData>) -> Result<()> {
@@ -1628,12 +1791,6 @@ where
         );
 
         let _histogram = HistogramGuard::begin("tycho_collator_refresh_collation_sessions_time");
-
-        // do not re-process this master block if it is lower then last processed or equal to it
-        // but process a new version of block with the same seqno
-        if !self.check_should_process_and_update_last_processed_mc_block(&mc_data.block_id) {
-            return Ok(());
-        }
 
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "mc_data: {:?}", mc_data);
 
@@ -1980,6 +2137,92 @@ where
         }
     }
 
+    fn set_active_sync_info(&self, target_mc_block_seqno: BlockSeqno) -> Result<CancellationToken> {
+        let mut guard = self.collation_sync_state.lock();
+        if let Some(active_sync) = &guard.active_sync_to_applied {
+            bail!(
+                "previous sync_to_applied_mc_block should be finished \
+                before: previous seqno={}, target seqno={}",
+                active_sync.target_mc_block_seqno,
+                target_mc_block_seqno,
+            )
+        }
+
+        let cancelled = CancellationToken::new();
+        guard.active_sync_to_applied = Some(ActiveSync {
+            target_mc_block_seqno,
+            cancelled: cancelled.clone(),
+        });
+
+        Ok(cancelled)
+    }
+
+    fn clean_active_sync_info(&self) {
+        let mut guard = self.collation_sync_state.lock();
+        guard.active_sync_to_applied = None;
+    }
+
+    fn update_last_received_mc_block_seqno(&self, received_block_id: &BlockId) {
+        if !received_block_id.is_masterchain() {
+            return;
+        }
+
+        let mut guard = self.collation_sync_state.lock();
+        guard.last_received_mc_block_seqno = Some(received_block_id.seqno);
+    }
+
+    fn get_last_received_mc_block_seqno(&self) -> Option<BlockSeqno> {
+        let guard = self.collation_sync_state.lock();
+        guard.last_received_mc_block_seqno
+    }
+
+    /// Returns `true` if we can handle next new block from bc just when previous process started
+    fn finish_active_sync_to_applied(&self, received_block_id: &BlockId) -> bool {
+        // can finish active sync only if new master block received
+        if !received_block_id.is_masterchain() {
+            return false;
+        }
+
+        let guard = self.collation_sync_state.lock();
+
+        // call to finish active sync if it exists and received block is newer
+        if let Some(active_sync_info) = &guard.active_sync_to_applied {
+            // call to finish active sync if new block is far ahead
+            if received_block_id
+                .seqno
+                .saturating_sub(active_sync_info.target_mc_block_seqno)
+                >= self.config.min_mc_block_delta_from_bc_to_sync
+            {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    prev_target_block_id = %BlockIdShort {
+                        shard: ShardIdent::MASTERCHAIN,
+                        seqno: active_sync_info.target_mc_block_seqno,
+                    },
+                    "cancel sync: will force finish previous sync \
+                    to applied master block if not started to process state update",
+                );
+                active_sync_info.cancelled.cancel();
+            } else {
+                // otherwise allow to handle newer block from bc when previous process started
+                tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                    prev_target_block_id = %BlockIdShort {
+                        shard: ShardIdent::MASTERCHAIN,
+                        seqno: active_sync_info.target_mc_block_seqno,
+                    },
+                    "cancel sync: will not force finish previous sync \
+                    to applied master block, because new block is not far ahead",
+                );
+                return true;
+            }
+        } else {
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                "cancel sync: route_handle_block_from_bc: no active sync to cancel",
+            );
+        }
+
+        false
+    }
+
     /// Set master block latest chain time to calc next interval for master block collation.
     /// Prune all cached chain times for all shards upto current
     fn renew_mc_block_latest_chain_time(guard: &mut CollationSyncState, chain_time: u64) {
@@ -2005,7 +2248,7 @@ where
     /// Use this method before resuming collation after sync to avoid ambiguous situations.
     /// If any shard has collation status `WaitForMasterStatus` and sync was executed,
     /// when master collation check was finished first then it will enqueue one more resume for shard,
-    /// so we will have two parallel collations for shard that will cause panic futher.
+    /// so we will have two parallel collations for shard that will cause panic further.
     fn reset_collation_sync_status(guard: &mut CollationSyncState) {
         for (_, collation_state) in guard.states.iter_mut() {
             if collation_state.status == CollationStatus::WaitForMasterStatus {
@@ -2337,7 +2580,7 @@ where
         // extract master block with all shard blocks if valid, and process them
         match self
             .blocks_cache
-            .extract_mc_block_subgraph_for_sync(block_id)?
+            .extract_mc_block_subgraph_for_sync(block_id)
         {
             McBlockSubgraphExtract::Extracted(McBlockSubgraph {
                 master_block,
@@ -2475,4 +2718,10 @@ where
         }
         Ok(result)
     }
+}
+
+#[derive(Debug)]
+enum ProcessMcStateUpdateMode {
+    StartCollation { reset_collators: bool },
+    SkipCollation,
 }
