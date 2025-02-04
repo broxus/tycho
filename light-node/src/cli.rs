@@ -22,7 +22,6 @@ use tycho_network::{
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
-use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::resolve_public_ip;
 
 use crate::config::{NodeConfig, NodeKeys};
@@ -69,8 +68,6 @@ impl CmdRun {
         S: StateSubscriber,
         C: Clone,
     {
-        init_logger(&node_config.logger_config, self.logger_config.clone())?;
-
         if let Some(metrics) = &node_config.metrics {
             tycho_util::cli::metrics::init_metrics(metrics)?;
         }
