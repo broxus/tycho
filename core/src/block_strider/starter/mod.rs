@@ -59,16 +59,19 @@ impl Starter {
     /// Returns the last masterchain key block id.
     pub async fn cold_boot<P>(
         &self,
+        boot_type: ColdBootType,
         zerostate_provider: Option<P>,
-        sync_from_genesis: bool,
     ) -> Result<BlockId>
     where
         P: ZerostateProvider,
     {
-        self.inner
-            .cold_boot(zerostate_provider, sync_from_genesis)
-            .await
+        self.inner.cold_boot(boot_type, zerostate_provider).await
     }
+}
+
+pub enum ColdBootType {
+    Genesis,
+    LatestPersistent,
 }
 
 struct StarterInner {

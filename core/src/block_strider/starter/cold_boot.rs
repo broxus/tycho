@@ -21,7 +21,7 @@ use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
-use super::{StarterInner, ZerostateProvider};
+use super::{ColdBootType, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
@@ -31,21 +31,21 @@ impl StarterInner {
     #[tracing::instrument(skip_all)]
     pub async fn cold_boot<P>(
         &self,
+        boot_type: ColdBootType,
         zerostates: Option<P>,
-        sync_from_genesis: bool,
     ) -> Result<BlockId>
     where
         P: ZerostateProvider,
     {
         tracing::info!("started");
 
-        let last_mc_block_id = match sync_from_genesis {
-            true => {
+        let last_mc_block_id = match boot_type {
+            ColdBootType::Genesis => {
                 let zerostates = zerostates.context("zerostate should be present")?;
-                let (handle, _) = self.import_zerostates(zerostates).await?;
-                *handle.id()
+                let (genersis_handle, _) = self.import_zerostates(zerostates).await?;
+                *genersis_handle.id()
             }
-            false => {
+            ColdBootType::LatestPersistent => {
                 // Find the last known key block (or zerostate)
                 // from which we can start downloading other key blocks
                 let init_block = self.prepare_init_block(zerostates).await?;
