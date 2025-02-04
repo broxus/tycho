@@ -48,7 +48,7 @@ pub struct BlockStorage {
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
-    archive_notifier: ArchiveNotifier,
+    archive_ids_tx: ArchiveIdsTx,
     archive_chunk_size: NonZeroU32,
     split_block_semaphore: Arc<Semaphore>,
 }
@@ -77,11 +77,7 @@ impl BlockStorage {
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
-        let (archive_notifier_tx, _) = broadcast::channel(4);
-
-        let archive_notifier = ArchiveNotifier {
-            tx: archive_notifier_tx,
-        };
+        let (archive_ids_tx, _) = broadcast::channel(4);
 
         let archive_chunk_size =
             NonZeroU32::new(archive_chunk_size.as_u64().clamp(1, u32::MAX as _) as _).unwrap();
@@ -93,7 +89,7 @@ impl BlockStorage {
             blocks_cache,
             block_handle_storage,
             block_connection_storage,
-            archive_notifier,
+            archive_ids_tx,
             archive_chunk_size,
             split_block_semaphore,
             archive_ids: Default::default(),
@@ -297,7 +293,7 @@ impl BlockStorage {
             task.finish().await?;
 
             // Notify archive subscribers
-            self.archive_notifier.tx.send(task.archive_id).ok();
+            self.archive_ids_tx.send(task.archive_id).ok();
         }
 
         Ok(())
@@ -750,7 +746,7 @@ impl BlockStorage {
                 task.finish().await?;
 
                 // Notify archive subscribers
-                self.archive_notifier.tx.send(task.archive_id).ok();
+                self.archive_ids_tx.send(task.archive_id).ok();
             }
             *prev_archive_commit = Some(self.spawn_commit_archive(to_commit));
         }
@@ -858,8 +854,8 @@ impl BlockStorage {
         }))
     }
 
-    pub fn subscribe_to_archive(&self) -> broadcast::Receiver<u32> {
-        self.archive_notifier.tx.subscribe()
+    pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
+        self.archive_ids_tx.subscribe()
     }
 
     pub fn archive_chunks_iterator(&self, archive_id: u32) -> rocksdb::DBRawIterator<'_> {
@@ -868,7 +864,7 @@ impl BlockStorage {
 
         let mut to = [0u8; tables::Archives::KEY_LEN];
         to[..4].copy_from_slice(&archive_id.to_be_bytes());
-        to[4..].copy_from_slice(&(ARCHIVE_STARTED_MAGIC - 1).to_be_bytes());
+        to[4..].copy_from_slice(&ARCHIVE_MAGIC_MIN.to_be_bytes());
 
         let mut read_opts = self.db.archives.new_read_config();
         read_opts.set_iterate_upper_bound(to.as_slice());
@@ -1692,6 +1688,8 @@ const ARCHIVE_OVERRIDE_NEXT_MAGIC: u64 = u64::MAX - 2;
 // Reserved key in which we store the fact that archive was started
 const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 3;
 
+const ARCHIVE_MAGIC_MIN: u64 = u64::MAX & !0xff;
+
 const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1MB
 
 // Reserved key in which the compressed block size is stored
@@ -1707,10 +1705,7 @@ struct PreparedArchiveId {
     to_commit: Option<u32>,
 }
 
-struct ArchiveNotifier {
-    tx: broadcast::Sender<u32>,
-}
-
+type ArchiveIdsTx = broadcast::Sender<u32>;
 type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
 
 #[derive(thiserror::Error, Debug)]

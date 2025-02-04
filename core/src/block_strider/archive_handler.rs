@@ -21,7 +21,7 @@ where
     S: ArchiveSubscriber,
 {
     pub fn new(storage: Storage, archive_subscriber: S) -> Result<Self> {
-        let rx = storage.block_storage().subscribe_to_archive();
+        let rx = storage.block_storage().subscribe_to_archive_ids();
 
         Ok(Self {
             inner: Arc::new(Inner {

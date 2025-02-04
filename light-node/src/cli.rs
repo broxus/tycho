@@ -80,17 +80,13 @@ impl CmdRun {
             keys
         };
 
-        let node = {
-            let global_config = GlobalConfig::from_file(self.global_config.unwrap())
-                .context("failed to load global config")?;
+        let global_config = GlobalConfig::from_file(self.global_config.unwrap())
+            .context("failed to load global config")?;
 
-            let public_ip = resolve_public_ip(node_config.public_ip).await?;
-            let socket_addr = SocketAddr::new(public_ip, node_config.port);
+        let public_ip = resolve_public_ip(node_config.public_ip).await?;
+        let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
-            Node::new(socket_addr, keys, node_config, global_config).await?
-        };
-
-        Ok(node)
+        Node::new(socket_addr, keys, node_config, global_config).await
     }
 }
 
