@@ -29,34 +29,50 @@ use crate::proto::blockchain::KeyBlockProof;
 
 impl StarterInner {
     #[tracing::instrument(skip_all)]
-    pub async fn cold_boot<P>(&self, zerostates: Option<P>) -> Result<BlockId>
+    pub async fn cold_boot<P>(
+        &self,
+        zerostates: Option<P>,
+        sync_from_genesis: bool,
+    ) -> Result<BlockId>
     where
         P: ZerostateProvider,
     {
         tracing::info!("started");
 
-        // Find the last known key block (or zerostate)
-        // from which we can start downloading other key blocks
-        let init_block = self.prepare_init_block(zerostates).await?;
+        let last_mc_block_id = match sync_from_genesis {
+            true => {
+                let zerostates = zerostates.context("zerostate should be present")?;
+                let (handle, _) = self.import_zerostates(zerostates).await?;
+                *handle.id()
+            }
+            false => {
+                // Find the last known key block (or zerostate)
+                // from which we can start downloading other key blocks
+                let init_block = self.prepare_init_block(zerostates).await?;
 
-        // Ensure that all key blocks until now (with some offset) are downloaded
-        self.download_key_blocks(init_block).await?;
+                // Ensure that all key blocks until now (with some offset) are downloaded
+                self.download_key_blocks(init_block).await?;
 
-        // Choose the latest key block with persistent state
-        let last_key_block = self.choose_key_block()?;
+                // Choose the latest key block with persistent state
+                let last_key_block = self.choose_key_block()?;
 
-        if last_key_block.id().seqno != 0 {
-            // If the last suitable key block is not zerostate, we must download all blocks
-            // with their states from shards for that
-            self.download_start_blocks_and_states(last_key_block.id())
-                .await?;
-        }
+                if last_key_block.id().seqno != 0 {
+                    // If the last suitable key block is not zerostate, we must download all blocks
+                    // with their states from shards for that
+                    self.download_start_blocks_and_states(last_key_block.id())
+                        .await?;
+                }
+
+                *last_key_block.id()
+            }
+        };
 
         self.storage
             .node_state()
-            .store_last_mc_block_id(last_key_block.id());
-        tracing::info!(last_mc_block_id = %last_key_block.id(), "finished");
-        Ok(*last_key_block.id())
+            .store_last_mc_block_id(&last_mc_block_id);
+        tracing::info!(last_mc_block_id = %last_mc_block_id, "finished");
+
+        Ok(last_mc_block_id)
     }
 
     // === Sync steps ===

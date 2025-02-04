@@ -57,11 +57,17 @@ impl Starter {
     /// Boot type when the node has not yet started syncing
     ///
     /// Returns the last masterchain key block id.
-    pub async fn cold_boot<P>(&self, zerostate_provider: Option<P>) -> Result<BlockId>
+    pub async fn cold_boot<P>(
+        &self,
+        zerostate_provider: Option<P>,
+        sync_from_genesis: bool,
+    ) -> Result<BlockId>
     where
         P: ZerostateProvider,
     {
-        self.inner.cold_boot(zerostate_provider).await
+        self.inner
+            .cold_boot(zerostate_provider, sync_from_genesis)
+            .await
     }
 }
 

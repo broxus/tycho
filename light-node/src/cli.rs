@@ -234,11 +234,15 @@ impl<C> Node<C> {
         })
     }
 
-    pub async fn init(&self, import_zerostate: Option<Vec<PathBuf>>) -> Result<BlockId> {
+    pub async fn init(
+        &self,
+        import_zerostate: Option<Vec<PathBuf>>,
+        sync_from_genesis: bool,
+    ) -> Result<BlockId> {
         self.wait_for_neighbours().await;
 
         let init_block_id = self
-            .boot(import_zerostate)
+            .boot(import_zerostate, sync_from_genesis)
             .await
             .context("failed to init node")?;
 
@@ -259,7 +263,11 @@ impl<C> Node<C> {
     }
 
     /// Initialize the node and return the init block id.
-    async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
+    async fn boot(
+        &self,
+        zerostates: Option<Vec<PathBuf>>,
+        sync_from_genesis: bool,
+    ) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
@@ -271,7 +279,7 @@ impl<C> Node<C> {
                     self.zerostate,
                     self.starter_config.clone(),
                 )
-                .cold_boot(zerostates.map(FileZerostateProvider))
+                .cold_boot(zerostates.map(FileZerostateProvider), sync_from_genesis)
                 .await?
             }
         };
