@@ -7,10 +7,9 @@ use clap::Args;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProviderExt, BlockStrider,
-    BlockSubscriber, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
+    BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, ColdBootType,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState, Starter,
-    StarterConfig, StorageBlockProvider,
+    StarterConfig,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -100,8 +99,6 @@ pub struct Node<C> {
     blockchain_rpc_client: BlockchainRpcClient,
 
     rpc_config: Option<RpcConfig>,
-    blockchain_block_provider_config: BlockchainBlockProviderConfig,
-    archive_block_provider_config: ArchiveBlockProviderConfig,
     starter_config: StarterConfig,
 
     run_handle: Option<tokio::task::JoinHandle<()>>,
@@ -227,8 +224,6 @@ impl<C> Node<C> {
             blockchain_rpc_client,
             config,
             rpc_config: node_config.rpc,
-            blockchain_block_provider_config: node_config.blockchain_block_provider,
-            archive_block_provider_config: node_config.archive_block_provider,
             starter_config: node_config.starter,
             run_handle: None,
         })
@@ -236,13 +231,13 @@ impl<C> Node<C> {
 
     pub async fn init(
         &self,
+        boot_type: ColdBootType,
         import_zerostate: Option<Vec<PathBuf>>,
-        sync_from_genesis: bool,
     ) -> Result<BlockId> {
         self.wait_for_neighbours().await;
 
         let init_block_id = self
-            .boot(import_zerostate, sync_from_genesis)
+            .boot(boot_type, import_zerostate)
             .await
             .context("failed to init node")?;
 
@@ -265,8 +260,8 @@ impl<C> Node<C> {
     /// Initialize the node and return the init block id.
     async fn boot(
         &self,
+        boot_type: ColdBootType,
         zerostates: Option<Vec<PathBuf>>,
-        sync_from_genesis: bool,
     ) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
@@ -279,7 +274,7 @@ impl<C> Node<C> {
                     self.zerostate,
                     self.starter_config.clone(),
                 )
-                .cold_boot(zerostates.map(FileZerostateProvider), sync_from_genesis)
+                .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
                 .await?
             }
         };
@@ -292,35 +287,18 @@ impl<C> Node<C> {
         Ok(last_mc_block_id)
     }
 
-    pub async fn run<S>(&mut self, subscriber: S) -> Result<()>
+    pub async fn run<P, S>(&mut self, provider: P, subscriber: S) -> Result<()>
     where
+        P: BlockProvider,
         S: BlockSubscriber,
     {
-        // Create block strider
-        let archive_block_provider = ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.archive_block_provider_config.clone(),
-        );
-
-        let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
-
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
-
-        let blockchain_block_provider = BlockchainBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.blockchain_block_provider_config.clone(),
-        )
-        .with_fallback(archive_block_provider.clone());
 
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
 
         let block_strider = BlockStrider::builder()
-            .with_provider(
-                archive_block_provider.chain((blockchain_block_provider, storage_block_provider)),
-            )
+            .with_provider(provider)
             .with_state(strider_state)
             .with_block_subscriber((subscriber, MetricsSubscriber).chain(gc_subscriber))
             .build();

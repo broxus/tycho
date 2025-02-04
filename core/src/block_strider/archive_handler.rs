@@ -93,8 +93,6 @@ where
     }
 }
 
-pub struct ArchiveHandlerPrepared {}
-
 struct Inner<S> {
     storage: Storage,
     archive_subscriber: S,

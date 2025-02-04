@@ -25,7 +25,7 @@ use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, Control
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
+    ColdBootType, FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
     PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StarterConfig,
     StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
@@ -236,7 +236,10 @@ impl Node {
                     self.zerostate,
                     self.starter_config.clone(),
                 )
-                .cold_boot(zerostates.map(FileZerostateProvider), false)
+                .cold_boot(
+                    ColdBootType::LatestPersistent,
+                    zerostates.map(FileZerostateProvider),
+                )
                 .await?
             }
         };
