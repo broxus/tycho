@@ -38,8 +38,6 @@ impl BlocksCache {
     pub fn get_top_shard_blocks_info_for_mc_block(
         &self,
         next_mc_block_id_short: BlockIdShort,
-        _next_mc_block_chain_time: u64,
-        _trigger_shard_block_id_opt: Option<BlockId>,
     ) -> Result<Vec<TopBlockDescription>> {
         let mut result = vec![];
         for mut shard_cache in self.shards.iter_mut() {
@@ -71,6 +69,28 @@ impl BlocksCache {
         }
 
         Ok(result)
+    }
+
+    pub fn get_top_shard_blocks(
+        &self,
+        next_mc_block_id_short: BlockIdShort,
+    ) -> Option<FastHashMap<ShardIdent, BlockSeqno>> {
+        if let Some(master) = self
+            .masters
+            .lock()
+            .blocks
+            .get(&next_mc_block_id_short.seqno)
+        {
+            return Some(
+                master
+                    .top_shard_blocks_info
+                    .iter()
+                    .map(|(block_id, _)| (block_id.shard, block_id.seqno))
+                    .collect(),
+            );
+        }
+
+        None
     }
 
     pub fn get_consensus_info_for_mc_block(
