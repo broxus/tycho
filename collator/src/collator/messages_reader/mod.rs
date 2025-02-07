@@ -739,6 +739,12 @@ impl MessagesReader {
         read_mode: GetNextMessageGroupMode,
         current_next_lt: u64,
     ) -> Result<Option<MessageGroup>> {
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            ?read_mode,
+            current_next_lt,
+            "start collecting next message group",
+        );
+
         // we collect separate messages groups by partitions them merge them into one
         let mut msg_groups = BTreeMap::<QueuePartitionIdx, MessageGroup>::new();
 
