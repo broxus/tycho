@@ -6,6 +6,26 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::*;
 
+pub fn compute_gas_price_factor(is_masterchain: bool, gas_price: u64) -> Result<u64> {
+    const fn base_gas_price(is_masterchain: bool) -> u64 {
+        if is_masterchain {
+            10_000 << 16
+        } else {
+            1_000 << 16
+        }
+    }
+
+    let base_gas_price = base_gas_price(is_masterchain);
+    Ok(gas_price.checked_shl(16).context("gas price is too big")? / base_gas_price)
+}
+
+pub const fn apply_price_factor(mut value: u128, price_factor: u64) -> u128 {
+    value = value.saturating_mul(price_factor as u128);
+
+    let r = value & 0xffff != 0;
+    (value >> 16) + r as u128
+}
+
 pub fn build_elections_data_to_sign(
     election_id: u32,
     stake_factor: u32,

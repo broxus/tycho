@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
-use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
+use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
@@ -464,7 +464,13 @@ impl CollatorStdImpl {
                     collation_data.value_flow.recovered = CurrencyCollection::default();
                 }
                 Ok(_addr) => {
-                    if collation_data.value_flow.recovered.tokens < Tokens::new(1_000_000_000) {
+                    const RECOVER_BASE_THRESHOLD: u128 = 1_000_000_000;
+
+                    let gas_price = config.get_gas_prices(true)?.gas_price;
+                    let gas_price_factor = compute_gas_price_factor(true, gas_price)?;
+                    let threshold = apply_price_factor(RECOVER_BASE_THRESHOLD, gas_price_factor);
+
+                    if collation_data.value_flow.recovered.tokens.into_inner() < threshold {
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             "fee recovery skipped ({:?})", collation_data.value_flow.recovered,
                         );

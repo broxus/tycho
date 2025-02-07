@@ -17,7 +17,9 @@ use everscale_types::prelude::*;
 use rand::Rng;
 use reqwest::Url;
 use serde::Serialize;
-use tycho_block_util::config::build_elections_data_to_sign;
+use tycho_block_util::config::{
+    apply_price_factor, build_elections_data_to_sign, compute_gas_price_factor,
+};
 use tycho_control::ControlClient;
 use tycho_network::PeerId;
 use tycho_util::cli::logger::init_logger_simple;
@@ -392,7 +394,7 @@ impl CmdOnce {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
-            let fee_factor = config.compute_fee_factor()?;
+            let price_factor = config.compute_price_factor(true)?;
             let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             config.check_stake(*stake)?;
@@ -436,11 +438,11 @@ impl CmdOnce {
                     election_id: elections.elect_at,
                     stake: stake_diff,
                     stake_factor,
-                    fee_factor,
+                    price_factor,
                     signature_id: config.signature_id,
                 });
                 wallet
-                    .transfer(internal, self.transfer.into_params(fee_factor))
+                    .transfer(internal, self.transfer.into_params(price_factor))
                     .await
                     .map(Some)?
             } else {
@@ -501,7 +503,7 @@ impl CmdRecover {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
-            let fee_factor = config.compute_fee_factor()?;
+            let price_factor = config.compute_price_factor(true)?;
             let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             // Find reward
@@ -511,9 +513,9 @@ impl CmdRecover {
             };
 
             // Send recover message
-            let internal = ElectionsContext::make_recover_msg(&config.elector_addr, fee_factor);
+            let internal = ElectionsContext::make_recover_msg(&config.elector_addr, price_factor);
             let message = wallet
-                .transfer(internal, self.transfer.into_params(fee_factor))
+                .transfer(internal, self.transfer.into_params(price_factor))
                 .await?;
 
             // Done
@@ -586,7 +588,7 @@ impl CmdWithdraw {
         // Use client
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
-            let fee_factor = config.compute_fee_factor()?;
+            let price_factor = config.compute_price_factor(true)?;
             let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
 
             let amount = match self.amount {
@@ -601,7 +603,7 @@ impl CmdWithdraw {
                 payload,
             };
             let message = wallet
-                .transfer(internal, self.transfer.into_params(fee_factor))
+                .transfer(internal, self.transfer.into_params(price_factor))
                 .await?;
 
             print_json(serde_json::json!({
@@ -647,7 +649,7 @@ struct ElectorMessage<'a> {
     election_id: u32,
     stake: u128,
     stake_factor: u32,
-    fee_factor: u64,
+    price_factor: u64,
     signature_id: Option<i32>,
 }
 
@@ -660,7 +662,7 @@ impl ElectionsContext<'_> {
             election_id,
             stake,
             stake_factor,
-            fee_factor,
+            price_factor,
             signature_id,
         } = ctx;
 
@@ -699,13 +701,13 @@ impl ElectionsContext<'_> {
         // Final message
         InternalMessage {
             to: elector_addr.clone(),
-            amount: Amount::Exact(stake + apply_fee_factor(ONE_CC, fee_factor)),
+            amount: Amount::Exact(stake + apply_price_factor(ONE_CC, price_factor)),
             bounce: true,
             payload,
         }
     }
 
-    fn make_recover_msg(elector_addr: &StdAddr, fee_factor: u64) -> InternalMessage {
+    fn make_recover_msg(elector_addr: &StdAddr, price_factor: u64) -> InternalMessage {
         let payload = elector::methods::recover_stake()
             .encode_internal_input(&[now_millis().into_abi().named("query_id")])
             .unwrap()
@@ -714,7 +716,7 @@ impl ElectionsContext<'_> {
 
         InternalMessage {
             to: elector_addr.clone(),
-            amount: Amount::Exact(apply_fee_factor(ONE_CC, fee_factor)),
+            amount: Amount::Exact(apply_price_factor(ONE_CC, price_factor)),
             bounce: true,
             payload,
         }
@@ -731,7 +733,7 @@ struct SimpleValidatorParams {
 impl SimpleValidatorParams {
     async fn elect(self, ctx: ElectionsContext<'_>) -> Result<()> {
         ctx.config.check_stake(*self.stake_per_round)?;
-        let fee_factor = ctx.config.compute_fee_factor()?;
+        let price_factor = ctx.config.compute_price_factor(true)?;
         let stake_factor = ctx.config.compute_stake_factor(self.stake_factor)?;
         let wallet = Wallet::new(ctx.client, &self.wallet_secret, ctx.config.signature_id);
 
@@ -742,9 +744,9 @@ impl SimpleValidatorParams {
 
                 tracing::info!(%stake, "recovering stake");
                 let message =
-                    ElectionsContext::make_recover_msg(&ctx.config.elector_addr, fee_factor);
+                    ElectionsContext::make_recover_msg(&ctx.config.elector_addr, price_factor);
                 wallet
-                    .transfer(message, TransferParams::reliable(fee_factor))
+                    .transfer(message, TransferParams::reliable(price_factor))
                     .await
                     .context("failed to recover stake")?;
             }
@@ -779,11 +781,11 @@ impl SimpleValidatorParams {
             election_id: ctx.current.elect_at,
             stake: *self.stake_per_round,
             stake_factor,
-            fee_factor,
+            price_factor,
             signature_id: ctx.config.signature_id,
         });
         wallet
-            .transfer(message, TransferParams::reliable(fee_factor))
+            .transfer(message, TransferParams::reliable(price_factor))
             .await
             .context("failed to send stake")?;
 
@@ -811,10 +813,10 @@ struct TransferArgs {
 }
 
 impl TransferArgs {
-    fn into_params(self, fee_factor: u64) -> TransferParams {
+    fn into_params(self, price_factor: u64) -> TransferParams {
         TransferParams {
             reserve: if self.wait_balance {
-                apply_fee_factor(TransferParams::DEFAULT_RESERVE, fee_factor)
+                apply_price_factor(TransferParams::DEFAULT_RESERVE, price_factor)
             } else {
                 0
             },
@@ -999,21 +1001,14 @@ impl TransferParams {
     const DEFAULT_RESERVE: u128 = ONE_CC / 2;
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(40);
 
-    fn reliable(fee_factor: u64) -> Self {
+    fn reliable(price_factor: u64) -> Self {
         Self {
-            reserve: apply_fee_factor(Self::DEFAULT_RESERVE, fee_factor),
+            reserve: apply_price_factor(Self::DEFAULT_RESERVE, price_factor),
             timeout: Self::DEFAULT_TIMEOUT,
             wait_for_balance: true,
             wait_for_delivery: true,
         }
     }
-}
-
-const fn apply_fee_factor(mut value: u128, fee_factor: u64) -> u128 {
-    value = value.saturating_mul(fee_factor as u128);
-
-    let r = value & 0xffff != 0;
-    (value >> 16) + r as u128
 }
 
 #[derive(Debug, Clone)]
@@ -1272,12 +1267,9 @@ impl ParsedBlockchainConfig {
         Ok(stake_factor)
     }
 
-    fn compute_fee_factor(&self) -> Result<u64> {
-        const BASE_GAS_PRICE: u64 = 10_000 << 16;
-
-        let gas_price = self.config.get_gas_prices(true)?.gas_price;
-        let value = gas_price.checked_shl(16).context("gas price is too big")? / BASE_GAS_PRICE;
-        Ok(value)
+    fn compute_price_factor(&self, is_masterchain: bool) -> Result<u64> {
+        let gas_price = self.config.get_gas_prices(is_masterchain)?.gas_price;
+        compute_gas_price_factor(is_masterchain, gas_price)
     }
 
     fn compute_elections_timeline(&self, now: u32) -> Result<Timeline> {
@@ -1328,31 +1320,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fee_factor() {
+    fn price_factor() {
         const BASE_GAS_PRICE: u64 = 10_000 << 16;
 
-        fn compute_fee_factor(new_gas_price: u64) -> u64 {
+        fn compute_price_factor(new_gas_price: u64) -> u64 {
             new_gas_price.checked_shl(16).unwrap() / BASE_GAS_PRICE
         }
 
         // Base fee.
-        let fee_factor = compute_fee_factor(BASE_GAS_PRICE);
-        assert_eq!(fee_factor, 1 << 16);
-        assert_eq!(apply_fee_factor(ONE_CC, fee_factor), ONE_CC);
+        let price_factor = compute_price_factor(BASE_GAS_PRICE);
+        assert_eq!(price_factor, 1 << 16);
+        assert_eq!(apply_price_factor(ONE_CC, price_factor), ONE_CC);
 
         // Increased fee.
-        let fee_factor = compute_fee_factor(60 * BASE_GAS_PRICE);
-        assert_eq!(apply_fee_factor(ONE_CC, fee_factor), ONE_CC * 60);
+        let price_factor = compute_price_factor(60 * BASE_GAS_PRICE);
+        assert_eq!(apply_price_factor(ONE_CC, price_factor), ONE_CC * 60);
 
         // Increased fee (with decimals).
-        let fee_factor = compute_fee_factor((30.5f64 * BASE_GAS_PRICE as f64) as u64);
+        let price_factor = compute_price_factor((30.5f64 * BASE_GAS_PRICE as f64) as u64);
         assert_eq!(
-            apply_fee_factor(ONE_CC, fee_factor),
+            apply_price_factor(ONE_CC, price_factor),
             (ONE_CC as f64 * 30.5f64) as u128
         );
 
         // Decreased fee (with decimals).
-        let fee_factor = compute_fee_factor(BASE_GAS_PRICE / 2);
-        assert_eq!(apply_fee_factor(ONE_CC, fee_factor), ONE_CC / 2);
+        let price_factor = compute_price_factor(BASE_GAS_PRICE / 2);
+        assert_eq!(apply_price_factor(ONE_CC, price_factor), ONE_CC / 2);
     }
 }
