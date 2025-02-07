@@ -75,7 +75,8 @@ impl Phase<ExecuteState> {
                 let group_result = self.extra.executor.executor.execute_group(msg_group)?;
                 execute_msgs_total_elapsed += timer.elapsed();
                 executed_groups_count += 1;
-                self.state.collation_data.tx_count += group_result.items.len() as u64;
+                let group_tx_count = group_result.items.len();
+                self.state.collation_data.tx_count += group_tx_count as u64;
                 self.state.collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                 self.state.collation_data.ext_msgs_skipped_count += group_result.ext_msgs_skipped;
                 execute_groups_wu_vm_only = execute_groups_wu_vm_only
@@ -92,15 +93,26 @@ impl Phase<ExecuteState> {
 
                 // Process transactions
                 timer = std::time::Instant::now();
+                let mut new_messages_created_count = 0;
                 for item in group_result.items {
                     let new_messages = self.extra.executor.process_transaction(
                         item.executed,
                         Some(item.in_message),
                         &mut self.state.collation_data,
                     )?;
+                    new_messages_created_count += new_messages.len();
                     self.extra.messages_reader.add_new_messages(new_messages);
                 }
                 process_txs_total_elapsed += timer.elapsed();
+
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    executed_groups_count,
+                    group_tx_count,
+                    ext_msgs_error_count = group_result.ext_msgs_error_count,
+                    ext_msgs_skipped_count = group_result.ext_msgs_skipped,
+                    new_messages_created_count,
+                    "message group executed",
+                );
 
                 if self
                     .state
