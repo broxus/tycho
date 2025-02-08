@@ -78,6 +78,8 @@ where
     fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
     /// Returns the number of diffs in cache for the given shard
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
+    /// Check if diff exists in the cache
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -216,5 +218,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
         self.queue.get_diffs_count_by_shard(shard_ident)
+    }
+
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
+        self.queue.is_diff_exists(block_id_short)
     }
 }
