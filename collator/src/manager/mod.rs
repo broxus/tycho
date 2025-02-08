@@ -460,21 +460,32 @@ where
             return Ok(());
         }
 
-        // if block was collated then queue diff can be already applied
-        // but if shard block or containing master were incorrect
-        // then applied diff from collation was already removed
-        // so we need to apply diff from bc anyway
-        let BlockCacheEntryData::Received {
-            queue_diff,
-            out_msgs,
-            ..
-        } = &block_entry.data
-        else {
+        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id()) {
             return Ok(());
+        }
+
+        let (queue_diff, out_msgs) = match &block_entry.data {
+            BlockCacheEntryData::Collated {
+                candidate_stuff, ..
+            } => (
+                &candidate_stuff.candidate.queue_diff_aug.data,
+                candidate_stuff
+                    .candidate
+                    .block
+                    .data
+                    .load_extra()?
+                    .out_msg_description
+                    .load()?,
+            ),
+
+            BlockCacheEntryData::Received {
+                queue_diff,
+                out_msgs,
+                ..
+            } => (queue_diff, out_msgs.load()?),
         };
 
-        let queue_diff_with_msgs =
-            QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs.load()?)?;
+        let queue_diff_with_msgs = QueueDiffWithMessages::from_queue_diff(queue_diff, &out_msgs)?;
 
         let statistics = (&queue_diff_with_msgs, queue_diff.block_id().shard).into();
 

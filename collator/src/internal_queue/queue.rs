@@ -108,6 +108,8 @@ where
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
     /// Get diff for the given blocks from committed and uncommitted state
     fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
+    /// Check if diff exists in the cache
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
 }
 
 // IMPLEMENTATION
@@ -502,5 +504,15 @@ where
         }
 
         None
+    }
+
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
+        self.uncommitted_diffs
+            .get(&block_id_short.shard)
+            .is_some_and(|diffs| diffs.contains_key(&block_id_short.seqno))
+            || self
+                .committed_diffs
+                .get(&block_id_short.shard)
+                .is_some_and(|diffs| diffs.contains_key(&block_id_short.seqno))
     }
 }
