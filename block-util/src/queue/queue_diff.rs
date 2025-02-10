@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::cell::Lazy;
 use everscale_types::error::Error;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -247,7 +248,7 @@ impl Iterator for QueueDiffMessagesIter {
                 let ref_count = out_msg.descriptor().reference_count();
                 if ref_count > 0 {
                     if let Some(cell) = out_msg.reference_cloned(ref_count - 1) {
-                        return Some(Ok(Lazy::from_raw(cell)));
+                        return Some(Lazy::from_raw(cell));
                     }
                 }
 
@@ -282,7 +283,7 @@ mod tests {
     fn queue_diff_messages_iter() -> Result<()> {
         let mut out_messages = Dict::<HashBytes, (CurrencyCollection, OutMsg)>::new();
 
-        let dummy_tx = Lazy::from_raw(Cell::default());
+        let dummy_tx = Lazy::from_raw(Cell::default())?;
 
         // Fill with external messages
         for i in 0..10 {

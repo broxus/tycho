@@ -956,7 +956,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=adada6e6539abd798dbbc5a7fc1d17cc31fa7eff#adada6e6539abd798dbbc5a7fc1d17cc31fa7eff"
+source = "git+https://github.com/broxus/everscale-types.git?rev=245c7f05d7a737c8ebaad7224e7a8641f0b48f68#245c7f05d7a737c8ebaad7224e7a8641f0b48f68"
 dependencies = [
  "ahash",
  "anyhow",
@@ -985,7 +985,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=adada6e6539abd798dbbc5a7fc1d17cc31fa7eff#adada6e6539abd798dbbc5a7fc1d17cc31fa7eff"
+source = "git+https://github.com/broxus/everscale-types.git?rev=245c7f05d7a737c8ebaad7224e7a8641f0b48f68#245c7f05d7a737c8ebaad7224e7a8641f0b48f68"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3260,20 +3260,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ton_executor"
-version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?rev=de566312176aa524d4afc26a04c931f97079b77f#de566312176aa524d4afc26a04c931f97079b77f"
-dependencies = [
- "ahash",
- "anyhow",
- "everscale-types",
- "num-bigint",
- "thiserror 2.0.11",
- "tracing",
- "tycho-vm",
-]
-
-[[package]]
 name = "tower"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3566,7 +3552,6 @@ dependencies = [
  "tl-proto",
  "tokio",
  "tokio-util",
- "ton_executor",
  "tracing",
  "tracing-subscriber",
  "trait-variant",
@@ -3574,6 +3559,7 @@ dependencies = [
  "tycho-collator",
  "tycho-consensus",
  "tycho-core",
+ "tycho-executor",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
@@ -3671,6 +3657,19 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+]
+
+[[package]]
+name = "tycho-executor"
+version = "0.1.0"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=916189b6f0966a36c725705e32d5734b11414627#916189b6f0966a36c725705e32d5734b11414627"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "everscale-types",
+ "num-bigint",
+ "thiserror 2.0.11",
+ "tycho-vm",
 ]
 
 [[package]]
@@ -3868,7 +3867,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#2660562fd78d310e5aa4bae3b6aefbe90295e219"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=916189b6f0966a36c725705e32d5734b11414627#916189b6f0966a36c725705e32d5734b11414627"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3889,7 +3888,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#2660562fd78d310e5aa4bae3b6aefbe90295e219"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=916189b6f0966a36c725705e32d5734b11414627#916189b6f0966a36c725705e32d5734b11414627"
 dependencies = [
  "darling",
  "proc-macro2",

@@ -41,9 +41,6 @@ pub fn compute_storage_used(account: &Account) -> Result<StorageUsed> {
         storage.store_u64(account.last_trans_lt)?;
         account.balance.store_into(&mut storage, cx)?;
         account.state.store_into(&mut storage, cx)?;
-        if account.init_code_hash.is_some() {
-            account.init_code_hash.store_into(&mut storage, cx)?;
-        }
         storage.build_ext(cx)?
     };
 

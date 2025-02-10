@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
+use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_block_util::block::BlockStuff;
@@ -616,7 +617,7 @@ impl RpcStorage {
                 if old_accounts.repr_hash() == new_accounts.repr_hash() {
                     Dict::new()
                 } else {
-                    let accounts = Lazy::<ShardAccounts>::from_raw(new_accounts).load()?;
+                    let accounts = Lazy::<ShardAccounts>::from_raw(new_accounts)?.load()?;
                     let (accounts, _) = accounts.into_parts();
                     accounts
                 }
