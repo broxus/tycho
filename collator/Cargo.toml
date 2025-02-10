@@ -36,7 +36,6 @@ thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
-ton_executor = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 trait-variant = { workspace = true }
@@ -45,6 +44,7 @@ trait-variant = { workspace = true }
 tycho-block-util = { workspace = true }
 tycho-consensus = { workspace = true }
 tycho-core = { workspace = true }
+tycho-executor = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }

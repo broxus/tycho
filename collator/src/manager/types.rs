@@ -2,7 +2,8 @@ use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
+use everscale_types::cell::Lazy;
+use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ShardIdent};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tycho_block_util::queue::QueueDiffStuff;

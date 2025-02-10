@@ -38,6 +38,7 @@ impl BlockStuff {
 
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(shard: ShardIdent, seqno: u32) -> Self {
+        use everscale_types::cell::Lazy;
         use everscale_types::merkle::MerkleUpdate;
 
         const DATA_SIZE: usize = 1024; // ~1 KB of data for an empty block.

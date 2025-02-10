@@ -7,10 +7,9 @@ use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use everscale_crypto::ed25519;
-use everscale_types::cell::Load;
+use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    AccountState, DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
-    StdAddr,
+    AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
 };
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
