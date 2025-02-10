@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use everscale_crypto::ed25519;
+use everscale_types::abi::extend_signature_with_id;
 use everscale_types::cell::Load;
 use everscale_types::models::{
     AccountState, DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
@@ -723,10 +724,11 @@ impl proto::ControlServer for ControlServer {
             &req.address,
             &req.adnl_addr,
         );
+        let data = extend_signature_with_id(&data, req.signature_id);
         let signature = keypair.sign_raw(&data);
 
         Ok(proto::ElectionsPayloadResponse {
-            data: data.into(),
+            data: data.into_owned().into(),
             public_key: HashBytes(keypair.public_key.to_bytes()),
             signature: Box::new(signature),
         })

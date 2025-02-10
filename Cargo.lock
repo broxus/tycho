@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=69c344eac4e1f95d66b045ae90db904ad8afdfaf#69c344eac4e1f95d66b045ae90db904ad8afdfaf"
+source = "git+https://github.com/broxus/everscale-types.git?rev=adada6e6539abd798dbbc5a7fc1d17cc31fa7eff#adada6e6539abd798dbbc5a7fc1d17cc31fa7eff"
 dependencies = [
  "ahash",
  "anyhow",
@@ -976,7 +976,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=69c344eac4e1f95d66b045ae90db904ad8afdfaf#69c344eac4e1f95d66b045ae90db904ad8afdfaf"
+source = "git+https://github.com/broxus/everscale-types.git?rev=adada6e6539abd798dbbc5a7fc1d17cc31fa7eff#adada6e6539abd798dbbc5a7fc1d17cc31fa7eff"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3253,7 +3253,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?rev=3393084c7e903d59ce950334bb34035c24ecc8ff#3393084c7e903d59ce950334bb34035c24ecc8ff"
+source = "git+https://github.com/broxus/ton-labs-executor.git?rev=de566312176aa524d4afc26a04c931f97079b77f#de566312176aa524d4afc26a04c931f97079b77f"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3857,7 +3857,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#bcb9ff6b10d7b4a8df6a5add9408b3bb53e78f46"
+source = "git+https://github.com/broxus/tycho-vm.git#9bd83c7e990ea0c3f28fd1979a35256983338346"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3871,13 +3871,14 @@ dependencies = [
  "num-traits",
  "sha2",
  "thiserror 2.0.11",
+ "tl-proto",
  "tycho-vm-proc",
 ]
 
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#bcb9ff6b10d7b4a8df6a5add9408b3bb53e78f46"
+source = "git+https://github.com/broxus/tycho-vm.git#9bd83c7e990ea0c3f28fd1979a35256983338346"
 dependencies = [
  "darling",
  "proc-macro2",

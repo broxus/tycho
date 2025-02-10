@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
+use everscale_types::abi::extend_signature_with_id;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, CellBuilder, CellSliceRange};
 use everscale_types::models::{
@@ -331,18 +332,8 @@ fn create_message(
     builder.store_builder(&data)?; // action data
 
     let hash = *builder.clone().build()?.repr_hash();
-
-    let data = match signature_id {
-        Some(signature_id) => {
-            let mut result = Vec::with_capacity(4 + 32);
-            result.extend_from_slice(&signature_id.to_be_bytes());
-            result.extend_from_slice(hash.as_slice());
-            std::borrow::Cow::<[u8]>::Owned(result)
-        }
-        None => std::borrow::Cow::<[u8]>::Borrowed(hash.as_slice()),
-    };
-
-    let signature = keypair.sign_raw(data.as_ref());
+    let data = extend_signature_with_id(hash.as_slice(), signature_id);
+    let signature = keypair.sign_raw(&data);
     builder.prepend_raw(&signature, 512)?;
 
     let body = builder.build()?;

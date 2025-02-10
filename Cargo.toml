@@ -2,7 +2,7 @@
 version = "0.2.2"
 edition = "2021"
 authors = ["Broxus Team"]
-rust-version = "1.81.0"
+rust-version = "1.83.0"
 repository = "https://github.com/broxus/tycho"
 license = "MIT OR Apache-2.0"
 
@@ -123,7 +123,7 @@ zstd-safe = "7.2"
 zstd-sys = "2.0"
 
 # TODO: RIIR
-ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = "3393084c7e903d59ce950334bb34035c24ecc8ff" }
+ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = "de566312176aa524d4afc26a04c931f97079b77f" }
 tycho-vm = { git = "https://github.com/broxus/tycho-vm.git" }
 
 # local deps
@@ -138,7 +138,7 @@ tycho-storage = { path = "./storage", version = "0.2.2" }
 tycho-util = { path = "./util", version = "0.2.2" }
 
 [patch.crates-io]
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "69c344eac4e1f95d66b045ae90db904ad8afdfaf" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "adada6e6539abd798dbbc5a7fc1d17cc31fa7eff" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

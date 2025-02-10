@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::models::GlobalCapability;
 use ton_executor::{ExecuteParams, PreloadedBlockchainConfig};
 
 use super::execute::ExecuteState;
@@ -52,6 +53,15 @@ impl Phase<PrepareState> {
             self.state.mc_data.global_id,
         )?);
         let block_version = preloaded_bc_config.global_version().version;
+        let signature_with_id = if preloaded_bc_config
+            .global_version()
+            .capabilities
+            .contains(GlobalCapability::CapSignatureWithId)
+        {
+            Some(self.state.mc_data.global_id)
+        } else {
+            None
+        };
         let executor = MessagesExecutor::new(
             self.state.shard_id,
             self.state.collation_data.next_lt,
@@ -65,7 +75,11 @@ impl Phase<PrepareState> {
                 // block random seed
                 seed_block: self.state.collation_data.rand_seed,
                 block_version,
-                ..ExecuteParams::default()
+                behavior_modifiers: Some(tycho_vm::BehaviourModifiers {
+                    signature_with_id,
+                    ..Default::default()
+                }),
+                debug: false,
             }),
             self.state.prev_shard_data.observable_accounts().clone(),
             self.state
