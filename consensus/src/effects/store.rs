@@ -490,9 +490,7 @@ impl MempoolStoreImpl for MempoolStorage {
             .points_status
             .iterator(IteratorMode::End)
             .next()
-            .ok_or(anyhow::anyhow!(
-                "db is empty, at least last genesis must be provided"
-            ))??;
+            .context("db is empty, at least last genesis must be provided")??;
 
         let mut bytes = [0_u8; 4];
         bytes.copy_from_slice(&last_key[..4]);

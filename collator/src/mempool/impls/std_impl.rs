@@ -6,7 +6,7 @@ mod parser;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -89,7 +89,7 @@ impl MempoolAdapterStdImpl {
         let last_state_update = config_guard
             .state_update_ctx
             .as_ref()
-            .ok_or(anyhow!("last state update context is not set"))?;
+            .context("last state update context is not set")?;
         let mempool_config = config_guard.builder.build()?;
 
         // TODO support config change; payload size is bound to mempool rounds

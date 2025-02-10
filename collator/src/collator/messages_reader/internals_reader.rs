@@ -360,11 +360,7 @@ impl InternalsPartitionReader {
 
     fn create_append_next_range_reader(
         &mut self,
-        last_range_reader_info_opt: Option<(
-            BTreeMap<ShardIdent, ShardReaderState>,
-            u32,
-            BlockSeqno,
-        )>,
+        last_range_reader_info_opt: Option<InternalsRangeReaderInfo>,
     ) -> Result<BlockSeqno> {
         let range_max_messages = if self.msgs_exec_params.range_messages_limit == 0 {
             10_000
@@ -392,11 +388,7 @@ impl InternalsPartitionReader {
     #[tracing::instrument(skip_all)]
     fn create_next_internals_range_reader(
         &self,
-        last_range_reader_info_opt: Option<(
-            BTreeMap<ShardIdent, ShardReaderState>,
-            u32,
-            BlockSeqno,
-        )>,
+        last_range_reader_info_opt: Option<InternalsRangeReaderInfo>,
         range_max_messages: Option<u32>,
     ) -> Result<InternalsRangeReader> {
         let mut shard_reader_states = BTreeMap::new();
@@ -409,8 +401,11 @@ impl InternalsPartitionReader {
 
         let mut fully_read = true;
 
-        let (last_to_lts, processed_offset, last_range_block_seqno) =
-            last_range_reader_info_opt.unwrap_or_default();
+        let InternalsRangeReaderInfo {
+            last_to_lts,
+            processed_offset,
+            last_range_block_seqno,
+        } = last_range_reader_info_opt.unwrap_or_default();
 
         let range_seqno = match range_max_messages {
             None => self.block_seqno,
@@ -422,11 +417,13 @@ impl InternalsPartitionReader {
                     let diff = self
                         .mq_adapter
                         .get_diff(self.for_shard_id, current_block_seqno)
-                        .ok_or(anyhow!(
-                            "cannot get diff for block {}:{}",
-                            self.for_shard_id,
-                            current_block_seqno
-                        ))?;
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "cannot get diff for block {}:{}",
+                                self.for_shard_id,
+                                current_block_seqno
+                            )
+                        })?;
 
                     messages_count += diff
                         .statistics()
@@ -449,14 +446,12 @@ impl InternalsPartitionReader {
 
             let shard_range_to = if shard_id == self.for_shard_id {
                 if range_seqno != self.block_seqno {
-                    let diff = self
-                        .mq_adapter
-                        .get_diff(shard_id, range_seqno)
-                        .ok_or(anyhow!(
-                            "cannot get diff for block {}:{}",
-                            shard_id,
-                            range_seqno
-                        ))?;
+                    let diff =
+                        self.mq_adapter
+                            .get_diff(shard_id, range_seqno)
+                            .ok_or_else(|| {
+                                anyhow!("cannot get diff for block {shard_id}:{range_seqno}")
+                            })?;
 
                     *diff.max_message()
                 } else {
@@ -678,11 +673,11 @@ impl InternalsPartitionReader {
                             let last_range_reader_info_opt = self
                                 .get_last_range_reader()
                                 .map(|(_, reader)| {
-                                    Some((
-                                        reader.reader_state.shards.clone(),
-                                        reader.reader_state.processed_offset,
-                                        reader.seqno,
-                                    ))
+                                    Some(InternalsRangeReaderInfo {
+                                        last_to_lts: reader.reader_state.shards.clone(),
+                                        processed_offset: reader.reader_state.processed_offset,
+                                        last_range_block_seqno: reader.seqno,
+                                    })
                                 })
                                 .unwrap_or_default();
                             let range_seqno =
@@ -784,11 +779,11 @@ impl InternalsPartitionReader {
             let last_range_reader_info_opt = self
                 .get_last_range_reader()
                 .map(|(_, reader)| {
-                    Some((
-                        reader.reader_state.shards.clone(),
-                        reader.reader_state.processed_offset,
-                        reader.seqno,
-                    ))
+                    Some(InternalsRangeReaderInfo {
+                        last_to_lts: reader.reader_state.shards.clone(),
+                        processed_offset: reader.reader_state.processed_offset,
+                        last_range_block_seqno: reader.seqno,
+                    })
                 })
                 .unwrap_or_default();
             // we should look thru the whole range to check for pending messages
@@ -879,6 +874,13 @@ impl InternalsPartitionReader {
 
         Ok(res)
     }
+}
+
+#[derive(Debug, Default)]
+struct InternalsRangeReaderInfo {
+    last_to_lts: BTreeMap<ShardIdent, ShardReaderState>,
+    processed_offset: u32,
+    last_range_block_seqno: BlockSeqno,
 }
 
 #[derive(Default)]
