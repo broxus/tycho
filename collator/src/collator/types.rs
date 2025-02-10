@@ -3,20 +3,21 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
+use everscale_types::cell::{Cell, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits, BlockRef,
-    CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr, MsgInfo,
-    MsgsExecutionParams, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts,
-    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit,
-    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, LibDescr, MsgInfo,
+    MsgsExecutionParams, OptionalAccount, OutMsg, OwnedMessage, PrevBlockRef, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, StdAddr, Transaction, ValueFlow,
 };
+use everscale_types::num::Tokens;
 use tl_proto::TlWrite;
-use ton_executor::{AccountMeta, ExecutedTransaction};
 use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
+use tycho_executor::AccountMeta;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
@@ -554,6 +555,7 @@ pub(super) type AccountId = HashBytes;
 
 #[derive(Clone)]
 pub(super) struct ShardAccountStuff {
+    pub workchain_id: i8,
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
     pub special: SpecialFlags,
@@ -566,7 +568,11 @@ pub(super) struct ShardAccountStuff {
 }
 
 impl ShardAccountStuff {
-    pub fn new(account_addr: &AccountId, shard_account: ShardAccount) -> Result<Self> {
+    pub fn new(
+        workchain_id: i8,
+        account_addr: &AccountId,
+        shard_account: ShardAccount,
+    ) -> Result<Self> {
         let initial_state_hash = *shard_account.account.inner().repr_hash();
 
         let mut libraries = Dict::new();
@@ -592,6 +598,7 @@ impl ShardAccountStuff {
         }
 
         Ok(Self {
+            workchain_id,
             account_addr: *account_addr,
             shard_account,
             special,
@@ -604,7 +611,7 @@ impl ShardAccountStuff {
         })
     }
 
-    pub fn new_empty(account_addr: &AccountId) -> Self {
+    pub fn new_empty(workchain_id: i8, account_addr: &AccountId) -> Self {
         static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 
         let shard_account = EMPTY_SHARD_ACCOUNT
@@ -618,6 +625,7 @@ impl ShardAccountStuff {
         let initial_state_hash = *shard_account.account.inner().repr_hash();
 
         Self {
+            workchain_id,
             account_addr: *account_addr,
             shard_account,
             special: Default::default(),
@@ -634,6 +642,10 @@ impl ShardAccountStuff {
         Ok(self.shard_account.load_account()?.is_none())
     }
 
+    pub fn make_std_addr(&self) -> StdAddr {
+        StdAddr::new(self.workchain_id, self.account_addr)
+    }
+
     pub fn build_hash_update(&self) -> Lazy<HashUpdate> {
         Lazy::new(&HashUpdate {
             old: self.initial_state_hash,
@@ -645,12 +657,11 @@ impl ShardAccountStuff {
     pub fn apply_transaction(
         &mut self,
         lt: u64,
-        total_fees: CurrencyCollection,
+        total_fees: Tokens,
         account_meta: AccountMeta,
-        tx: &ExecutedTransaction,
+        tx: Lazy<Transaction>,
     ) {
-        self.transactions
-            .insert(lt, (total_fees, tx.transaction.clone()));
+        self.transactions.insert(lt, (total_fees.into(), tx));
         self.balance = account_meta.balance;
         self.libraries = account_meta.libraries;
         self.exists = account_meta.exists;
@@ -818,10 +829,16 @@ impl ShardDescriptionExt for ShardDescription {
             split_merge_at: None, // TODO: check if we really should not use it here
             fees_collected: value_flow.fees_collected.clone(),
             funds_created: value_flow.created.clone(),
-            copyleft_rewards: Default::default(),
-            proof_chain: None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutedTransaction {
+    pub transaction: Lazy<Transaction>,
+    pub out_msgs: Vec<Lazy<OwnedMessage>>,
+    pub gas_used: u64,
+    pub next_lt: u64,
 }
 
 pub struct ParsedMessage {

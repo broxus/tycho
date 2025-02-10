@@ -2,8 +2,9 @@ use std::collections::{btree_map, BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Result};
+use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    BlockId, BlockIdShort, ConsensusInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
+    BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
