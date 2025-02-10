@@ -1,7 +1,7 @@
 use std::num::NonZeroU16;
 use std::sync::OnceLock;
 
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{ensure, Context, Result};
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use everscale_types::models::{ConsensusConfig, GenesisInfo};
 use serde::{Deserialize, Serialize};
@@ -118,17 +118,15 @@ impl MempoolConfigBuilder {
         let genesis_data = *self
             .genesis_info
             .as_ref()
-            .ok_or(anyhow!("mempool genesis data for config is not known"))?;
+            .context("mempool genesis data for config is not known")?;
         let consensus_config = self
             .consensus_config
-            .as_ref()
-            .ok_or(anyhow!("mempool consensus config is not known"))?
-            .clone();
+            .clone()
+            .context("mempool consensus config is not known")?;
         let node_config = self
             .node_config
-            .as_ref()
-            .ok_or(anyhow!("mempool node config is not known"))?
-            .clone();
+            .clone()
+            .context("mempool node config is not known")?;
 
         let point_max_bytes = Point::max_byte_size(consensus_config.payload_batch_bytes as usize);
 

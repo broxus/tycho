@@ -1631,7 +1631,7 @@ where
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
                     .compute_mc_subset(current_session_seqno, collation_config.shuffle_mc_validators)
-                    .ok_or(anyhow!(
+                    .ok_or_else(|| anyhow!(
                         "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
                         ShardIdent::MASTERCHAIN,
                         current_session_seqno,
