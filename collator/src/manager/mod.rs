@@ -1423,11 +1423,6 @@ where
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
 
             while let Some(prev_block_id) = prev_block_ids.pop_front() {
-                // stop collecting prev diffs for apply when sync cancelled
-                if cancelled.is_cancelled() {
-                    break;
-                }
-
                 if prev_block_id.seqno == 0 {
                     continue;
                 }
@@ -1503,11 +1498,6 @@ where
 
         // apply required previous queue diffs
         while let Some((diff, diff_hash, block_id, max_message)) = prev_queue_diffs.pop() {
-            // stop appling prev diffs when sync cancelled
-            if cancelled.is_cancelled() {
-                break;
-            }
-
             let statistics = (&diff, block_id.shard).into();
             self.mq_adapter.apply_diff(
                 diff,
@@ -1550,11 +1540,6 @@ where
                     .into_iter()
                     .chain(subgraph.shard_blocks.iter())
                 {
-                    // do not apply diff if sync cancelled
-                    if cancelled.is_cancelled() {
-                        continue;
-                    }
-
                     // do not apply diff if block was collated
                     if let Some(border) = top_collated_blocks.get(&block_entry.block_id.shard) {
                         if block_entry.block_id.seqno <= *border {
