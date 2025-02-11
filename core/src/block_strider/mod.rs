@@ -240,7 +240,11 @@ where
     ) -> Result<Vec<BlockStuffAug>> {
         const MAX_DEPTH: u32 = 32;
 
-        tracing::debug!(%top_block_id, "downloading shard blocks");
+        tracing::debug!(
+            mc_block_id = %mc_block_id.as_short_id(),
+            %top_block_id,
+            "downloading shard blocks"
+        );
 
         let mut depth = 0;
         let mut result = Vec::new();
@@ -252,7 +256,11 @@ where
                 let block = self
                     .fetch_block(&top_block_id.relative_to(mc_block_id))
                     .await?;
-                tracing::debug!(block_id = %top_block_id, "fetched shard block");
+                tracing::debug!(
+                    mc_block_id = %mc_block_id.as_short_id(),
+                    block_id = %top_block_id,
+                    "fetched shard block",
+                );
                 debug_assert_eq!(block.id(), &top_block_id);
 
                 block

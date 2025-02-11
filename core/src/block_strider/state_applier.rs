@@ -39,7 +39,11 @@ where
     ) -> Result<ShardApplierPrepared> {
         let _histogram = HistogramGuard::begin("tycho_core_state_applier_prepare_block_time");
 
-        tracing::info!(id = %cx.block.id(), "preparing block");
+        tracing::info!(
+            mc_block_id = %cx.mc_block_id.as_short_id(),
+            id = %cx.block.id(),
+            "preparing block",
+        );
 
         let state_storage = self.inner.storage.shard_state_storage();
 
@@ -152,7 +156,11 @@ where
     ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_core_state_applier_handle_block_time");
 
-        tracing::info!(id = %cx.block.id(), "handling block");
+        tracing::info!(
+            mc_block_id = %cx.mc_block_id.as_short_id(),
+            id = %cx.block.id(),
+            "handling block",
+        );
 
         // Update metrics
         let gen_utime = prepared.handle.gen_utime() as f64;
