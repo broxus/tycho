@@ -58,10 +58,13 @@ mod utils;
 #[path = "tests/manager_tests.rs"]
 pub(super) mod tests;
 
+const BLOCKS_FROM_BC_QUEUE_LIMIT: usize = 1000;
+
 pub struct RunningCollationManager<CF, V>
 where
     CF: CollatorFactory,
 {
+    cancel_async_tasks: CancellationToken,
     dispatcher: AsyncDispatcher<CollationManager<CF, V>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
@@ -83,6 +86,12 @@ impl<CF: CollatorFactory, V> RunningCollationManager<CF, V> {
 
     pub fn mq_adapter(&self) -> &Arc<dyn MessageQueueAdapter<EnqueuedMessage>> {
         &self.mq_adapter
+    }
+}
+
+impl<CF: CollatorFactory, V> Drop for RunningCollationManager<CF, V> {
+    fn drop(&mut self) {
+        self.cancel_async_tasks.cancel();
     }
 }
 
@@ -108,8 +117,8 @@ where
 
     blocks_cache: BlocksCache,
 
-    /// Used to preserve the order of processing blocks from bc
-    ready_to_handle_next_block_from_bc: Arc<Notify>,
+    /// Queue of received blocks from bc
+    blocks_from_bc_queue_sender: tokio::sync::mpsc::Sender<ShardStateStuff>,
 
     /// Used to sync tasks that may cause `sync_to_applied_mc_block`
     ready_to_sync: Arc<Notify>,
@@ -180,8 +189,11 @@ where
         metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state = state.clone();
-        self.enqueue_task(method_to_async_closure!(route_handle_block_from_bc, state))
-            .await?;
+        self.enqueue_task(method_to_async_closure!(
+            enqueue_handle_block_from_bc,
+            state
+        ))
+        .await?;
 
         Ok(())
     }
@@ -304,13 +316,13 @@ where
 
         let validator = Arc::new(validator);
 
-        let ready_to_handle_next_block_from_bc = Arc::new(Notify::new());
-        ready_to_handle_next_block_from_bc.notify_one();
+        let (blocks_from_bc_queue_sender, blocks_from_bc_queue_receiver) =
+            tokio::sync::mpsc::channel::<ShardStateStuff>(BLOCKS_FROM_BC_QUEUE_LIMIT);
 
         let ready_to_sync = Arc::new(Notify::new());
         ready_to_sync.notify_one();
 
-        let processor = Self {
+        let collation_manager = Self {
             keypair,
             config: Arc::new(config),
             dispatcher: arc_dispatcher.clone(),
@@ -327,7 +339,8 @@ where
 
             blocks_cache: BlocksCache::new(),
 
-            ready_to_handle_next_block_from_bc,
+            blocks_from_bc_queue_sender,
+
             ready_to_sync,
 
             last_processed_mc_block_id: Default::default(),
@@ -338,12 +351,28 @@ where
 
             mempool_config_override,
         };
-        arc_dispatcher.run(Arc::new(processor), tasks_receiver);
+        let collation_manager = Arc::new(collation_manager);
+
+        let cancel_async_tasks = CancellationToken::new();
+
+        // start additional async tasks
+        tokio::spawn(
+            collation_manager
+                .clone()
+                .process_handle_block_from_bc_queue(
+                    blocks_from_bc_queue_receiver,
+                    cancel_async_tasks.clone(),
+                ),
+        );
+
+        // start tasks dispatcher
+        arc_dispatcher.run(collation_manager, tasks_receiver);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");
 
         RunningCollationManager {
+            cancel_async_tasks,
             dispatcher,
             state_node_adapter,
             mpool_adapter,
@@ -998,40 +1027,89 @@ where
     }
 
     /// Finish active sync if it is not finished yet
-    /// and run the next task to handle received block
+    /// and enqueue received block
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    pub async fn route_handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
+    pub async fn enqueue_handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
         // TODO: Needs to redesign the task management logic.
         //      Current implementation with strange semaphores
         //      is unclear and may be confusing.
 
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-            "cancel sync: route_handle_block_from_bc: started",
+            "cancel sync: enqueue_handle_block_from_bc: started",
         );
 
         self.update_last_received_mc_block_seqno(state.block_id());
 
-        // we can handle next block
-        // when last block handle task finished without sync
-        // or when sync started (will finish just started task)
-        self.ready_to_handle_next_block_from_bc.notified().await;
+        // try to finish active sync
+        self.finish_active_sync_to_applied(state.block_id());
 
-        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-            "cancel sync: route_handle_block_from_bc: ready_to_handle_next_block_from_bc notified",
+        // enqueue received block from processing
+        self.blocks_from_bc_queue_sender.send(state).await?;
+
+        Ok(())
+    }
+
+    /// Process the queue of received blocks from bc
+    #[tracing::instrument(skip_all)]
+    async fn process_handle_block_from_bc_queue(
+        self: Arc<Self>,
+        mut blocks_from_bc_queue_receiver: tokio::sync::mpsc::Receiver<ShardStateStuff>,
+        cancel_task: CancellationToken,
+    ) -> Result<()> {
+        const BATCH_SIZE: usize = 300;
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "started",
         );
 
-        // try finish active sync
-        let should_notify_ready_to_handle_next_block =
-            self.finish_active_sync_to_applied(state.block_id());
+        loop {
+            let mut batch = Vec::with_capacity(BATCH_SIZE);
+            tokio::select! {
+                received_count = blocks_from_bc_queue_receiver.recv_many(&mut batch, BATCH_SIZE) => {
+                    if received_count == 0 {
+                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                            "channel closed",
+                        );
+                        break;
+                    }
 
-        // run next task to handle block from bc
-        self.dispatcher
-            .spawn_task(method_to_async_closure!(
-                handle_block_from_bc,
-                state,
-                should_notify_ready_to_handle_next_block
-            ))
-            .await
+                    // find last master block in buffer
+                    // will skip sync for all master blocks before it
+                    let mut last_mc_block_id_opt = None;
+                    for state in batch.iter().rev() {
+                        if state.block_id().is_masterchain() {
+                            last_mc_block_id_opt = Some(*state.block_id());
+                        }
+                    }
+
+                    for state in batch {
+                        let skip_sync = matches!(
+                            last_mc_block_id_opt, Some(last_mc_block_id) if state.block_id() != &last_mc_block_id
+                        );
+
+                        // handle block from bc
+                        self.handle_block_from_bc(state, skip_sync).await.map_err(|err| {
+                            tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+                                "error handling block from bc: {err:?}",
+                            );
+                            err
+                        })?;
+                    }
+                },
+                _ = cancel_task.cancelled() => {
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                        "cancelled",
+                    );
+                    break;
+                }
+            }
+        }
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "finished",
+        );
+
+        Ok(())
     }
 
     /// Process new block from blockchain:
@@ -1039,13 +1117,9 @@ where
     /// 2. Stop block validation if needed
     /// 3. Commit block if it was collated first
     /// 4. Notify mempool about new master block
-    /// 5. Sync to received block if it is far ahead last collated
+    /// 5. Sync to received block if it is far ahead last processed
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    pub async fn handle_block_from_bc(
-        &self,
-        state: ShardStateStuff,
-        notify_ready_to_handle_on_start: bool,
-    ) -> Result<()> {
+    async fn handle_block_from_bc(&self, state: ShardStateStuff, skip_sync: bool) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
         );
@@ -1053,41 +1127,6 @@ where
         let block_id = *state.block_id();
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
-
-        // allow to handle next block on start if requested, otherwise on finish
-        // current task can finish without sync
-        // if we run sync we notify on sync start and do not notify on finish
-        if notify_ready_to_handle_on_start {
-            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-                "cancel sync: handle_block_from_bc: notify ready_to_handle_next_block_from_bc on start",
-            );
-            self.ready_to_handle_next_block_from_bc.notify_one();
-        }
-        let mut notify_ready_to_handle = scopeguard::guard(
-            !notify_ready_to_handle_on_start,
-            |should_notify| {
-                if should_notify {
-                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-                        "cancel sync: handle_block_from_bc: notify ready_to_handle_next_block_from_bc on finish",
-                    );
-                    self.ready_to_handle_next_block_from_bc.notify_one();
-                } else {
-                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-                        "cancel sync: handle_block_from_bc: will not notify ready_to_handle_next_block_from_bc on finish",
-                    );
-                }
-            },
-        );
-
-        // can allow to handle next block if we processing a shard block
-        // right now because shard block will not cause sync anyway
-        if !block_id.is_masterchain() {
-            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-                "cancel sync: handle_block_from_bc: notify ready_to_handle_next_block_from_bc at the beginning",
-            );
-            self.ready_to_handle_next_block_from_bc.notify_one();
-            *notify_ready_to_handle = false;
-        }
 
         // sync cache and collator state access
         self.ready_to_sync.notified().await;
@@ -1147,6 +1186,11 @@ where
 
         // check if should sync to last applied mc block right now
         let should_sync_to_last_applied_mc_block = 'check_should_sync: {
+            // do not sync if requested to skip
+            if skip_sync {
+                break 'check_should_sync false;
+            }
+
             // do not sync to last applied mc block if newer already received
             if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
                 let last_received_mc_block_seqno = self.get_last_received_mc_block_seqno();
@@ -1240,7 +1284,6 @@ where
                 store_res.applied_mc_queue_range.as_ref(),
             )
             .await?;
-            *notify_ready_to_handle = false;
         } else {
             // try to commit block if it was collated first
             if store_res.received_and_collated {
@@ -1340,13 +1383,6 @@ where
 
         // gc blocks from cache when sync finished
         scopeguard::defer!(self.blocks_cache.gc_prev_blocks());
-
-        // when we started sync we are ready to handle next block from bc
-        // which may cancel current sync
-        tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-            "cancel sync: sync_to_applied_mc_block: notify ready_to_handle_next_block_from_bc",
-        );
-        self.ready_to_handle_next_block_from_bc.notify_one();
 
         // we need to drop uncommitted internal messages from the queue
         // when mempool config override has genesis higher then in the last consensus info
@@ -2161,7 +2197,7 @@ where
         guard.last_received_mc_block_seqno
     }
 
-    /// Returns `true` if we can handle next new block from bc just when previous process started
+    /// Returns `true` if active sync was cancelled
     fn finish_active_sync_to_applied(&self, received_block_id: &BlockId) -> bool {
         // can finish active sync only if new master block received
         if !received_block_id.is_masterchain() {
@@ -2187,6 +2223,7 @@ where
                     to applied master block if not started to process state update",
                 );
                 active_sync_info.cancelled.cancel();
+                return true;
             } else {
                 // otherwise allow to handle newer block from bc when previous process started
                 tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
@@ -2197,7 +2234,6 @@ where
                     "cancel sync: will not force finish previous sync \
                     to applied master block, because new block is not far ahead",
                 );
-                return true;
             }
         } else {
             tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
