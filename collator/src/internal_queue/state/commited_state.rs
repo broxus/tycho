@@ -1,5 +1,5 @@
 use anyhow::Result;
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_storage::model::ShardsInternalMessagesKey;
 use tycho_storage::{InternalQueueSnapshot, Storage};
@@ -80,6 +80,9 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
         partition: QueuePartitionIdx,
         range: &[QueueShardRange],
     ) -> Result<()>;
+
+    /// Get last applied mc block id
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
 }
 
 // IMPLEMENTATION
@@ -157,5 +160,11 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         }
 
         Ok(())
+    }
+
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+        self.storage
+            .internal_queue_storage()
+            .get_last_applied_mc_block_id()
     }
 }
