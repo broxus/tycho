@@ -1,6 +1,6 @@
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
@@ -52,7 +52,7 @@ where
 
     /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
+    fn commit_diff(&self, mc_top_blocks: Vec<(BlockId, bool)>) -> Result<()>;
 
     /// Add new messages to the iterator
     fn add_message_to_iterator(
@@ -77,6 +77,8 @@ where
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
+    /// Get last applied mc block id from committed state
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -154,7 +156,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
+    fn commit_diff(&self, mc_top_blocks: Vec<(BlockId, bool)>) -> Result<()> {
         let time = std::time::Instant::now();
 
         self.queue.commit_diff(&mc_top_blocks)?;
@@ -215,5 +217,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
         self.queue.is_diff_exists(block_id_short)
+    }
+
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+        self.queue.get_last_applied_mc_block_id()
     }
 }
