@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
 use tycho_storage::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
 use tycho_storage::{InternalQueueSnapshot, InternalQueueTransaction, Storage};
@@ -77,6 +77,7 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         &self,
         partitions: FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
+        mc_block_id: &BlockId,
     ) -> Result<()>;
 
     /// Delete all uncommitted messages and statistics
@@ -143,6 +144,7 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         &self,
         partitions: FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
+        mc_block_id: &BlockId,
     ) -> Result<()> {
         let ranges = partitions.iter().flat_map(|&partition| {
             ranges.iter().map(move |range| QueueRange {
@@ -152,8 +154,13 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
                 to: range.to,
             })
         });
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let mut tx = self.storage.internal_queue_storage().begin_transaction();
 
-        self.storage.internal_queue_storage().commit(ranges)
+        tx.commit_messages(&snapshot, ranges)?;
+        tx.set_last_applied_mc_block_id(mc_block_id);
+
+        tx.write()
     }
 
     fn truncate(&self) -> Result<()> {

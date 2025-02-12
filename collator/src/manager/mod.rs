@@ -473,9 +473,9 @@ where
 
         let mut top_blocks: Vec<_> = top_shard_blocks_info
             .iter()
-            .map(|(id, updated)| (id.as_short_id(), *updated))
+            .map(|(id, updated)| (*id, *updated))
             .collect();
-        top_blocks.push((block_id.as_short_id(), true));
+        top_blocks.push((*block_id, true));
 
         if let Err(err) = self.mq_adapter.commit_diff(top_blocks) {
             bail!(
@@ -1442,7 +1442,7 @@ where
 
         // collect top blocks queue diffs already applied to
         let queue_diffs_applied_to_top_blocks = if let Some(applied_to_mc_block_id) =
-            self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)
+            self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
         {
             self.get_top_blocks_seqno(&applied_to_mc_block_id).await?
         } else {
@@ -1702,18 +1702,18 @@ where
     fn get_queue_diffs_applied_to_mc_block_id(
         &self,
         last_collated_mc_block_id: Option<BlockId>,
-    ) -> Option<BlockId> {
+    ) -> Result<Option<BlockId>> {
         let last_processed_mc_block_id = *self.last_processed_mc_block_id.lock();
         match (last_processed_mc_block_id, last_collated_mc_block_id) {
             (Some(last_processed), Some(last_collated)) => {
                 if last_processed.seqno > last_collated.seqno {
-                    Some(last_processed)
+                    Ok(Some(last_processed))
                 } else {
-                    Some(last_collated)
+                    Ok(Some(last_collated))
                 }
             }
-            (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Some(mc_block_id),
-            _ => None,
+            (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Ok(Some(mc_block_id)),
+            _ => self.mq_adapter.get_last_applied_mc_block_id(),
         }
     }
 

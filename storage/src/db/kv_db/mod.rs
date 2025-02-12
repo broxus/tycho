@@ -136,6 +136,7 @@ weedb::tables! {
         pub shard_internal_messages_uncommitted: tables::ShardInternalMessagesUncommited,
         pub internal_message_stats: tables::InternalMessageStats,
         pub internal_message_stats_uncommitted: tables::InternalMessageStatsUncommited,
+        pub internal_message_var: tables::InternalMessageVar,
     }
 }
 
