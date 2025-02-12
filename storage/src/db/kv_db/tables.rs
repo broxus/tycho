@@ -503,6 +503,21 @@ impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommited {
     }
 }
 
+pub struct InternalMessageVar;
+impl ColumnFamily for InternalMessageVar {
+    const NAME: &'static str = "int_msg_var";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for InternalMessageVar {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,

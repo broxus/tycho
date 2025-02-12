@@ -1,7 +1,7 @@
 use std::fs::File;
 
 use anyhow::Result;
-use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
+use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, WriteBatch};
@@ -18,6 +18,8 @@ pub mod model;
 pub struct InternalQueueStorage {
     db: BaseDb,
 }
+// Constant for the last applied mc block id key
+const INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY: &[u8] = b"last_applied_mc_block_id";
 
 impl InternalQueueStorage {
     pub fn new(db: BaseDb) -> Self {
@@ -41,9 +43,9 @@ impl InternalQueueStorage {
 
     pub async fn import_from_file(
         &self,
-        shard_ident: ShardIdent,
         top_update: &OutMsgQueueUpdates,
         file: File,
+        block_id: BlockId,
     ) -> Result<()> {
         use everscale_types::boc::ser::BocHeader;
 
@@ -69,6 +71,7 @@ impl InternalQueueStorage {
 
             let messages_cf = this.db.shard_internal_messages.cf();
             let stats_cf = this.db.internal_message_stats.cf();
+            let var_cf = this.db.internal_message_var.cf();
 
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
@@ -108,7 +111,7 @@ impl InternalQueueStorage {
 
                     let key = ShardsInternalMessagesKey {
                         partition,
-                        shard_ident,
+                        shard_ident: block_id.shard,
                         internal_message_key: QueueKey {
                             lt: int_msg_info.created_lt,
                             hash: *msg_hash,
@@ -126,10 +129,17 @@ impl InternalQueueStorage {
                 }
 
                 let queue_diff = part.queue_diff();
+
+                batch.put_cf(
+                    &var_cf,
+                    INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
+                    block_id.to_vec(),
+                );
+
                 for (partition, statistics) in statistics.drain() {
                     for (dest, count) in statistics.iter() {
                         let key = StatKey {
-                            shard_ident,
+                            shard_ident: block_id.shard,
                             partition,
                             min_message: queue_diff.min_message,
                             max_message: queue_diff.max_message,
@@ -147,112 +157,6 @@ impl InternalQueueStorage {
             Ok(())
         })
         .await?
-    }
-
-    pub fn commit<I: IntoIterator<Item = QueueRange>>(&self, ranges: I) -> Result<()> {
-        let snapshot = self.db.rocksdb().snapshot();
-
-        let db = self.db.rocksdb().as_ref();
-        let mut batch = WriteBatch::default();
-
-        let mut commit_range = |source_iter: &mut DBRawIterator<'_>,
-                                from_key: &[u8],
-                                to_key: &[u8],
-                                source_cf: &BoundedCfHandle<'_>,
-                                target_cf: &BoundedCfHandle<'_>| {
-            source_iter.seek(from_key);
-
-            loop {
-                let (key, value) = match source_iter.item() {
-                    Some(item) => item,
-                    None => return source_iter.status(),
-                };
-
-                if key > to_key {
-                    break;
-                }
-
-                batch.delete_cf(source_cf, key);
-                batch.put_cf(target_cf, key, value);
-
-                source_iter.next();
-            }
-
-            Ok(())
-        };
-
-        let messages = &self.db.shard_internal_messages;
-        let messages_cf = &messages.cf();
-
-        let uncommited_messages = &self.db.shard_internal_messages_uncommitted;
-        let uncommited_messages_cf = &uncommited_messages.cf();
-
-        let mut uncommited_messages_iter = {
-            let mut readopts = uncommited_messages.new_read_config();
-            readopts.set_snapshot(&snapshot);
-            db.raw_iterator_cf_opt(uncommited_messages_cf, readopts)
-        };
-
-        let stats = &self.db.internal_message_stats;
-        let stats_cf = &stats.cf();
-
-        let uncommited_stats = &self.db.internal_message_stats_uncommitted;
-        let uncommited_stats_cf = &uncommited_stats.cf();
-
-        let mut uncommited_stats_iter = {
-            let mut readopts = uncommited_stats.new_read_config();
-            readopts.set_snapshot(&snapshot);
-            db.raw_iterator_cf_opt(uncommited_stats_cf, readopts)
-        };
-
-        for range in ranges {
-            // Commit messages for one range
-            let from_message_key = ShardsInternalMessagesKey {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                internal_message_key: range.from,
-            };
-            let to_message_key = ShardsInternalMessagesKey {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                internal_message_key: range.to,
-            };
-
-            commit_range(
-                &mut uncommited_messages_iter,
-                &from_message_key.to_vec(),
-                &to_message_key.to_vec(),
-                uncommited_messages_cf,
-                messages_cf,
-            )?;
-
-            // Commit stats for one range
-            let from_stat_key = StatKey {
-                shard_ident: range.shard_ident,
-                partition: range.partition,
-                min_message: range.from,
-                max_message: QueueKey::MIN,
-                dest: RouterAddr::MIN,
-            };
-            let to_stat_key = StatKey {
-                shard_ident: range.shard_ident,
-                partition: range.partition,
-                min_message: range.to,
-                max_message: QueueKey::MAX,
-                dest: RouterAddr::MAX,
-            };
-
-            commit_range(
-                &mut uncommited_stats_iter,
-                &from_stat_key.to_vec(),
-                &to_stat_key.to_vec(),
-                uncommited_stats_cf,
-                stats_cf,
-            )?;
-        }
-
-        // Apply batch
-        self.db.rocksdb().write(batch).map_err(Into::into)
     }
 
     pub fn delete<I: IntoIterator<Item = QueueRange>>(&self, ranges: I) -> Result<()> {
@@ -368,6 +272,20 @@ impl InternalQueueStorage {
         db.compact_range_cf(stats_cf, None::<[u8; 0]>, None::<[u8; 0]>);
         Ok(())
     }
+
+    /// Retrieves the queue version from the `internal_message_version` column family under the key `mc_version`
+    pub fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+        let cf = self.db.internal_message_var.cf();
+        let data = self
+            .db
+            .rocksdb()
+            .get_cf(&cf, INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY)?;
+        if let Some(bytes) = data {
+            return Ok(Some(BlockId::from_slice(&bytes)));
+        }
+
+        Ok(None)
+    }
 }
 
 pub struct InternalQueueTransaction {
@@ -405,6 +323,124 @@ impl InternalQueueTransaction {
         self.buffer.extend_from_slice(value);
 
         self.batch.put_cf(&cf, key.to_vec(), self.buffer.as_slice());
+    }
+
+    pub fn commit_messages<I: IntoIterator<Item = QueueRange>>(
+        &mut self,
+        snapshot: &InternalQueueSnapshot,
+        ranges: I,
+    ) -> Result<()> {
+        let db = self.db.rocksdb().as_ref();
+
+        let mut commit_range = |source_iter: &mut DBRawIterator<'_>,
+                                from_key: &[u8],
+                                to_key: &[u8],
+                                source_cf: &BoundedCfHandle<'_>,
+                                target_cf: &BoundedCfHandle<'_>| {
+            source_iter.seek(from_key);
+
+            loop {
+                let (key, value) = match source_iter.item() {
+                    Some(item) => item,
+                    None => return source_iter.status(),
+                };
+
+                if key > to_key {
+                    break;
+                }
+
+                self.batch.delete_cf(source_cf, key);
+                self.batch.put_cf(target_cf, key, value);
+
+                source_iter.next();
+            }
+
+            Ok(())
+        };
+
+        let messages = &self.db.shard_internal_messages;
+        let messages_cf = &messages.cf();
+
+        let uncommited_messages = &self.db.shard_internal_messages_uncommitted;
+        let uncommited_messages_cf = &uncommited_messages.cf();
+
+        let mut uncommited_messages_iter = {
+            let mut readopts = uncommited_messages.new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(uncommited_messages_cf, readopts)
+        };
+
+        let stats = &self.db.internal_message_stats;
+        let stats_cf = &stats.cf();
+
+        let uncommited_stats = &self.db.internal_message_stats_uncommitted;
+        let uncommited_stats_cf = &uncommited_stats.cf();
+
+        let mut uncommited_stats_iter = {
+            let mut readopts = uncommited_stats.new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(uncommited_stats_cf, readopts)
+        };
+
+        for range in ranges {
+            // Commit messages for one range
+            let from_message_key = ShardsInternalMessagesKey {
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.from,
+            };
+            let to_message_key = ShardsInternalMessagesKey {
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.to,
+            };
+
+            commit_range(
+                &mut uncommited_messages_iter,
+                &from_message_key.to_vec(),
+                &to_message_key.to_vec(),
+                uncommited_messages_cf,
+                messages_cf,
+            )?;
+
+            // Commit stats for one range
+            let from_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.from,
+                max_message: QueueKey::MIN,
+                dest: RouterAddr::MIN,
+            };
+            let to_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.to,
+                max_message: QueueKey::MAX,
+                dest: RouterAddr::MAX,
+            };
+
+            commit_range(
+                &mut uncommited_stats_iter,
+                &from_stat_key.to_vec(),
+                &to_stat_key.to_vec(),
+                uncommited_stats_cf,
+                stats_cf,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Stores the queue version in the `internal_message_version` column family under the key `mc_version`
+    pub fn set_last_applied_mc_block_id(&mut self, mc_block_id: &BlockId) {
+        // Retrieve the column family handle for "internal_message_version"
+        let cf = self.db.internal_message_var.cf();
+        // Convert the version into a little-endian byte array and store it
+        self.batch.put_cf(
+            &cf,
+            INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
+            mc_block_id.to_vec(),
+        );
     }
 }
 
