@@ -481,9 +481,9 @@ where
 
         let mut top_blocks: Vec<_> = top_shard_blocks_info
             .iter()
-            .map(|(id, updated)| (id.as_short_id(), *updated))
+            .map(|(id, updated)| (*id, *updated))
             .collect();
-        top_blocks.push((block_id.as_short_id(), true));
+        top_blocks.push((*block_id, true));
 
         if let Err(err) = self.mq_adapter.commit_diff(top_blocks) {
             bail!(
@@ -1830,7 +1830,7 @@ where
                 }
             }
             (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Some(mc_block_id),
-            _ => None,
+            _ => self.mq_adapter.get_last_applied_mc_block_id(),
         }
     }
 
