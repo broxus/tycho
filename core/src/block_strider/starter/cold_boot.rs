@@ -780,7 +780,7 @@ impl StarterInner {
             };
 
             internal_queue
-                .import_from_file(block_id.shard, top_update, file)
+                .import_from_file(top_update, file, *block_id)
                 .await?;
 
             remove_state_file.await;

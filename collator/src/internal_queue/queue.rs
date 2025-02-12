@@ -3,9 +3,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
@@ -91,7 +91,7 @@ where
         max_message: QueueKey,
     ) -> Result<()>;
     /// Move messages from uncommitted state to committed state and update gc ranges
-    fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()>;
+    fn commit_diff(&self, mc_top_blocks: &[(BlockId, bool)]) -> Result<()>;
     /// remove all data in uncommitted state storage
     fn clear_uncommitted_state(&self) -> Result<()>;
     /// Returns the number of diffs in cache for the given shard
@@ -108,6 +108,8 @@ where
     fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
+    /// Get last applied mc block id from committed state
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
 }
 
 // IMPLEMENTATION
@@ -307,29 +309,33 @@ where
         Ok(())
     }
 
-    fn commit_diff(&self, mc_top_blocks: &[(BlockIdShort, bool)]) -> Result<()> {
+    fn commit_diff(&self, mc_top_blocks: &[(BlockId, bool)]) -> Result<()> {
+        let mc_block_id = mc_top_blocks
+            .iter()
+            .find(|(block_id, _)| block_id.is_masterchain())
+            .map(|(block_id, _)| block_id)
+            .ok_or_else(|| anyhow!("Masterchain block not found in commit_diff"))?;
+
         let mut partitions = FastHashSet::default();
         // insert default partition  because we doesn't store it in router
         partitions.insert(QueuePartitionIdx::default());
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();
 
-        for (block_id_short, top_shard_block_changed) in mc_top_blocks {
+        for (block_id, top_shard_block_changed) in mc_top_blocks {
             let mut diffs_to_commit = vec![];
 
             // find all uncommited diffs for the given shard top block
-            let prev_shard_uncommitted_diffs =
-                self.uncommitted_diffs.get_mut(&block_id_short.shard);
+            let prev_shard_uncommitted_diffs = self.uncommitted_diffs.get_mut(&block_id.shard);
 
             if let Some(mut shard_uncommitted_diffs) = prev_shard_uncommitted_diffs {
                 // iterate over all uncommitted diffs for the given shard until the top block seqno
-                shard_uncommitted_diffs
-                    .range(..=block_id_short.seqno)
-                    .for_each(|(block_seqno, shard_diff)| {
+                shard_uncommitted_diffs.range(..=block_id.seqno).for_each(
+                    |(block_seqno, shard_diff)| {
                         diffs_to_commit.push(*block_seqno);
 
                         let current_last_key = shards_to_commit
-                            .entry(block_id_short.shard)
+                            .entry(block_id.shard)
                             .or_insert_with(|| *shard_diff.max_message());
 
                         // Add all partitions from the router to the partitions set
@@ -344,7 +350,7 @@ where
                         }
 
                         // find min processed_to for each shard for GC
-                        if *block_seqno == block_id_short.seqno && *top_shard_block_changed {
+                        if *block_seqno == block_id.seqno && *top_shard_block_changed {
                             for (shard_ident, processed_to_key) in shard_diff.processed_to().iter()
                             {
                                 let last_key = gc_ranges
@@ -356,16 +362,15 @@ where
                                 }
                             }
                         }
-                    });
+                    },
+                );
 
                 // remove all diffs from uncommitted state that are going to be committed
                 for seqno in diffs_to_commit {
                     if let Some(diff) = shard_uncommitted_diffs.remove(&seqno) {
                         // Move the diff to committed_diffs
-                        let mut shard_committed_diffs = self
-                            .committed_diffs
-                            .entry(block_id_short.shard)
-                            .or_default();
+                        let mut shard_committed_diffs =
+                            self.committed_diffs.entry(block_id.shard).or_default();
                         shard_committed_diffs.insert(seqno, diff);
                     }
                 }
@@ -383,7 +388,7 @@ where
 
         // move all uncommitted diffs messages to committed state
         self.uncommitted_state
-            .commit(partitions.clone(), &commit_ranges)?;
+            .commit(partitions.clone(), &commit_ranges, mc_block_id)?;
 
         let uncommitted_diffs_count: usize =
             self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
@@ -488,5 +493,9 @@ where
                 .committed_diffs
                 .get(&block_id_short.shard)
                 .is_some_and(|diffs| diffs.contains_key(&block_id_short.seqno))
+    }
+
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+        self.committed_state.get_last_applied_mc_block_id()
     }
 }
