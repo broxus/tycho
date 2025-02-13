@@ -301,7 +301,7 @@ where
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
         // create dispatcher for own tasks
-        let (dispatcher, tasks_receiver) = AsyncDispatcher::new(
+        let (dispatcher, dispatcher_ctx) = AsyncDispatcher::new(
             "collation_manager_async_dispatcher",
             STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE,
         );
@@ -366,7 +366,7 @@ where
         );
 
         // start tasks dispatcher
-        arc_dispatcher.run(collation_manager, tasks_receiver);
+        arc_dispatcher.run(collation_manager, dispatcher_ctx);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");

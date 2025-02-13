@@ -17,10 +17,16 @@ pub enum AsyncTask<W> {
     Enqueue(TaskFunc<W>),
 }
 
+pub struct AsyncDispatcherContext<W> {
+    pub spawned_tasks_receiver: mpsc::Receiver<TaskFunc<W>>,
+    pub queued_tasks_receiver: mpsc::Receiver<TaskFunc<W>>,
+}
+
 pub struct AsyncDispatcher<W> {
     descr: String,
     queue_buffer_size: usize,
-    tasks_sender: mpsc::Sender<AsyncTask<W>>,
+    spawned_tasks_sender: mpsc::Sender<TaskFunc<W>>,
+    queued_tasks_sender: mpsc::Sender<TaskFunc<W>>,
 }
 
 impl<W> Clone for AsyncDispatcher<W> {
@@ -28,7 +34,8 @@ impl<W> Clone for AsyncDispatcher<W> {
         Self {
             descr: self.descr.clone(),
             queue_buffer_size: self.queue_buffer_size,
-            tasks_sender: self.tasks_sender.clone(),
+            spawned_tasks_sender: self.queued_tasks_sender.clone(),
+            queued_tasks_sender: self.queued_tasks_sender.clone(),
         }
     }
 }
@@ -37,24 +44,34 @@ impl<W> AsyncDispatcher<W>
 where
     W: Send + Sync + 'static,
 {
-    pub fn new(descr: &str, queue_buffer_size: usize) -> (Self, mpsc::Receiver<AsyncTask<W>>) {
-        let (tasks_sender, tasks_receiver) = mpsc::channel::<AsyncTask<W>>(queue_buffer_size);
+    pub fn new(descr: &str, queue_buffer_size: usize) -> (Self, AsyncDispatcherContext<W>) {
+        let (spawned_tasks_sender, spawned_tasks_receiver) =
+            mpsc::channel::<TaskFunc<W>>(queue_buffer_size);
+        let (queued_tasks_sender, queued_tasks_receiver) =
+            mpsc::channel::<TaskFunc<W>>(queue_buffer_size);
         let dispatcher = Self {
             descr: descr.to_owned(),
             queue_buffer_size,
-            tasks_sender,
+            spawned_tasks_sender,
+            queued_tasks_sender,
         };
-        (dispatcher, tasks_receiver)
+        (dispatcher, AsyncDispatcherContext {
+            spawned_tasks_receiver,
+            queued_tasks_receiver,
+        })
     }
 
-    pub fn run(&self, worker: Arc<W>, mut tasks_receiver: mpsc::Receiver<AsyncTask<W>>) {
+    pub fn run(&self, worker: Arc<W>, ctx: AsyncDispatcherContext<W>) {
+        let AsyncDispatcherContext {
+            mut spawned_tasks_receiver,
+            mut queued_tasks_receiver,
+        } = ctx;
+
         // queued tasks
-        let (tasks_queue_sender, mut tasks_queue_receiver) =
-            mpsc::channel::<TaskFunc<W>>(self.queue_buffer_size);
         let dispatcher_descr = self.descr.clone();
         let queue_worker = worker.clone();
         tokio::spawn(async move {
-            while let Some(func) = tasks_queue_receiver.recv().await {
+            while let Some(func) = queued_tasks_receiver.recv().await {
                 let task_res = func(queue_worker.clone()).await;
                 if let Err(err) = task_res {
                     panic!(
@@ -71,18 +88,10 @@ where
             let mut futures = FuturesUnordered::new();
             loop {
                 tokio::select! {
-                    task_opt = tasks_receiver.recv() => match task_opt {
-                        Some(AsyncTask::Spawn(func)) => {
+                    task_opt = spawned_tasks_receiver.recv() => match task_opt {
+                        Some(func) => {
                             let join_task = tycho_util::futures::JoinTask::new(func(worker.clone()));
                             futures.push(join_task);
-                        }
-                        Some(AsyncTask::Enqueue(func)) => {
-                            tasks_queue_sender.send(func).await.map_err(|err| {
-                                anyhow!(
-                                    "async dispatcher: {}: queued tasks receiver dropped {:?}",
-                                    dispatcher_descr, err,
-                                )
-                            }).unwrap();
                         }
                         None => {
                             panic!("async dispatcher: {}: tasks channel closed!", dispatcher_descr)
@@ -107,45 +116,62 @@ where
         });
     }
 
-    async fn send_task(&self, task: AsyncTask<W>) -> Result<()> {
-        self.tasks_sender.send(task).await.map_err(|err| {
-            anyhow!(
-                "async dispatcher: {}: tasks receiver dropped {err:?}",
-                self.descr,
-            )
-        })?;
-        Ok(())
-    }
-
-    fn send_task_blocking(&self, task: AsyncTask<W>) -> Result<()> {
-        self.tasks_sender.blocking_send(task).map_err(|err| {
-            anyhow!(
-                "async dispatcher: {}: tasks receiver dropped {err:?}",
-                self.descr,
-            )
-        })?;
-        Ok(())
-    }
-
     pub async fn spawn_task<F>(&self, func: F) -> Result<()>
     where
         F: FnOnce(Arc<W>) -> Fut + Send + 'static,
     {
-        self.send_task(AsyncTask::Spawn(Box::new(func))).await
+        self.spawned_tasks_sender
+            .send(Box::new(func))
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "async dispatcher: {}: spawned tasks receiver dropped {err:?}",
+                    self.descr,
+                )
+            })
     }
 
     pub fn spawn_task_blocking<F>(&self, func: F) -> Result<()>
     where
         F: FnOnce(Arc<W>) -> Fut + Send + 'static,
     {
-        self.send_task_blocking(AsyncTask::Spawn(Box::new(func)))
+        self.spawned_tasks_sender
+            .blocking_send(Box::new(func))
+            .map_err(|err| {
+                anyhow!(
+                    "async dispatcher: {}: spawned tasks receiver dropped {err:?}",
+                    self.descr,
+                )
+            })
     }
 
     pub async fn enqueue_task<F>(&self, func: F) -> Result<()>
     where
         F: FnOnce(Arc<W>) -> Fut + Send + 'static,
     {
-        self.send_task(AsyncTask::Enqueue(Box::new(func))).await
+        self.queued_tasks_sender
+            .send(Box::new(func))
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "async dispatcher: {}: queued tasks receiver dropped {err:?}",
+                    self.descr,
+                )
+            })
+    }
+
+    pub fn enqueue_task_blocking<F>(&self, func: F) -> Result<()>
+    where
+        F: FnOnce(Arc<W>) -> Fut + Send + 'static,
+    {
+        self.queued_tasks_sender
+            .blocking_send(Box::new(func))
+            .map_err(|err| {
+                anyhow!(
+                    "async dispatcher: {}: queued tasks receiver dropped {err:?}",
+                    self.descr,
+                )
+            })
     }
 }
 
