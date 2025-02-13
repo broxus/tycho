@@ -503,6 +503,10 @@ where
 
         // skip already applied diff
         if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id()) {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                queue_diff_block_id = %block_entry.block_id.as_short_id(),
+                "queue diff apply skipped because it is already applied",
+            );
             return Ok(());
         }
 
@@ -1037,6 +1041,12 @@ where
             "cancel sync: enqueue_handle_block_from_bc: started",
         );
 
+        let labels = [
+            ("workchain", state.block_id().shard.workchain().to_string()),
+            ("src", "01_received".to_string()),
+        ];
+        metrics::gauge!("tycho_last_block_seqno", &labels).set(state.block_id().seqno);
+
         self.update_last_received_mc_block_seqno(state.block_id());
 
         // try to finish active sync
@@ -1451,6 +1461,12 @@ where
                 }).collect::<Vec<_>>().as_slice(),
         );
 
+        // metrics - sync is running
+        for shard in before_tail_block_ids.keys() {
+            let labels = [("workchain", shard.workchain().to_string())];
+            metrics::gauge!("tycho_collator_sync_is_running", &labels).set(1);
+        }
+
         // collect top blocks queue diffs already applied to
         let queue_diffs_applied_to_top_blocks = if let Some(applied_to_mc_block_id) =
             self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)
@@ -1475,6 +1491,11 @@ where
 
                 if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id) {
                     if prev_block_id.seqno <= *border {
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            prev_block_id = %prev_block_id.as_short_id(),
+                            top_applied_seqno = border,
+                            "previous queue diff skipped because it below top applied",
+                        );
                         continue;
                     }
                 }
@@ -1484,6 +1505,11 @@ where
                 if let Some(init_mc_block_id) = init_mc_block_id {
                     if prev_block_id.is_masterchain() {
                         if prev_block_id.seqno <= init_mc_block_id.seqno {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                prev_block_id = %prev_block_id.as_short_id(),
+                                init_mc_block_id = %init_mc_block_id.as_short_id(),
+                                "queue diff apply skipped because it is below init block from persistent state",
+                            );
                             continue;
                         }
                     } else {
@@ -1492,7 +1518,14 @@ where
                             .load_block_handle(&prev_block_id)
                             .await?
                             .unwrap();
-                        if prev_shard_block_handle.ref_by_mc_seqno() <= init_mc_block_id.seqno {
+                        let prev_ref_by_mc_seqno = prev_shard_block_handle.ref_by_mc_seqno();
+                        if prev_ref_by_mc_seqno <= init_mc_block_id.seqno {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                prev_block_id = %prev_block_id.as_short_id(),
+                                prev_ref_by_mc_seqno,
+                                init_mc_block_id = %init_mc_block_id.as_short_id(),
+                                "queue diff apply skipped because it is below init block from persistent state",
+                            );
                             continue;
                         }
                     }
@@ -1505,6 +1538,13 @@ where
                         prev_block_id = %prev_block_id,
                         "unable to load prev diff to sync queue state, cancel sync",
                     );
+
+                    // metrics - sync finished
+                    for shard in before_tail_block_ids.keys() {
+                        let labels = [("workchain", shard.workchain().to_string())];
+                        metrics::gauge!("tycho_collator_sync_is_running", &labels).set(0);
+                    }
+
                     return Ok(false);
                 };
                 let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
@@ -1591,6 +1631,11 @@ where
                         queue_diffs_applied_to_top_blocks.get(&block_entry.block_id.shard)
                     {
                         if block_entry.block_id.seqno <= *border {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                received_block_id = %block_entry.block_id.as_short_id(),
+                                top_applied_seqno = border,
+                                "queue diff apply skipped because it is below top applied",
+                            );
                             continue;
                         }
                     }
@@ -1640,7 +1685,7 @@ where
 
                 Self::reset_collation_sync_status(&mut self.collation_sync_state.lock());
 
-                // update last `synced_to` info
+                // update last "synced to" info
                 self.update_last_synced_to_mc_block_id(*state.block_id());
 
                 // reset top shard blocks info
@@ -1665,6 +1710,19 @@ where
 
                 // handle top processed to anchor in mempool
                 self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
+
+                // report last "synced to" blocks to metrics
+                for synced_to_block_id in to_blocks_keys {
+                    let labels = [
+                        (
+                            "workchain",
+                            synced_to_block_id.shard.workchain().to_string(),
+                        ),
+                        ("src", "02_synced_to".to_string()),
+                    ];
+                    metrics::gauge!("tycho_last_block_seqno", &labels)
+                        .set(synced_to_block_id.seqno);
+                }
 
                 break;
             }
@@ -1721,8 +1779,8 @@ where
         // TODO: should check for block id of top committed queue diff if top collated or synced_to undefined
     }
 
-    /// Return last collated if it is ahead of last received and `synced_to`.
-    /// Or last received and `synce_to` if it is ahead of last correct collated.
+    /// Return last collated if it is ahead of last received and "synced to".
+    /// Or last received and "synced to" if it is ahead of last correct collated.
     /// Last collated may be incorrect but we don not know this until we receive block from bc.
     /// We use this to detect the lag from last received to check if we need to run next sync.
     fn get_top_mc_block_id_for_next_collation(
