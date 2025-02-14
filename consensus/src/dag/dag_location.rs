@@ -466,7 +466,8 @@ impl Debug for AltFmt<'_, DagLocation> {
             write!(f, "#{}-", digest.alt())?;
             match promise.clone().now_or_never() {
                 None => write!(f, "None, ")?,
-                Some(point) => write!(f, "{}, ", point.alt())?,
+                Some(Ok(point)) => write!(f, "{}, ", point.alt())?,
+                Some(Err(e)) => write!(f, "{e}, ")?,
             };
         }
         Ok(())

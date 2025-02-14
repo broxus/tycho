@@ -13,7 +13,7 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
-use crate::effects::{Ctx, MempoolStore, RoundCtx, ValidateCtx};
+use crate::effects::{Ctx, EngineCtx, MempoolStore, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
@@ -22,11 +22,10 @@ use crate::models::{
     Signature, Through, UnixTime,
 };
 
-pub fn make_dag_parts<const PEER_COUNT: usize>(
+pub fn make_engine_parts<const PEER_COUNT: usize>(
     peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
     local_keys: &Arc<KeyPair>,
-    genesis: &Point,
-) -> (PeerSchedule, Downloader) {
+) -> (PeerSchedule, Downloader, Point, EngineCtx) {
     let network = Network::builder()
         .with_random_private_key()
         .build("0.0.0.0:0", Router::builder().build())
@@ -37,8 +36,17 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
+    let task_tracker = TaskTracker::default();
+
+    let (conf, genesis) = {
+        let merged_conf = crate::test_utils::default_test_config();
+        (merged_conf.conf, merged_conf.genesis)
+    };
+    let engine_ctx = EngineCtx::new(conf.genesis_round, &conf, &task_tracker);
+
     // any peer id will be ok, network is not used
-    let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay, genesis);
+    let peer_schedule =
+        PeerSchedule::new(local_keys.clone(), private_overlay, &genesis, &task_tracker);
     peer_schedule.set_next_subset(
         &[],
         genesis.round().next(),
@@ -50,7 +58,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let stub_downloader =
         Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
 
-    (peer_schedule, stub_downloader)
+    (peer_schedule, stub_downloader, genesis, engine_ctx)
 }
 
 #[allow(clippy::too_many_arguments, reason = "ok in test")]
@@ -71,6 +79,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
+                .map(|p| p.expect("shutdown"))
                 .map(|p| p.valid().expect("must be valid").info().clone())
                 .next()
         })
@@ -141,7 +150,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         )
         .await;
         assert!(
-            matches!(validated, ValidateResult::Valid { .. }),
+            matches!(validated, Ok(ValidateResult::Valid { .. })),
             "expected valid point, got {validated:?}"
         );
     }
@@ -149,7 +158,8 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     for point in points.values() {
         dag_round
             .add_local(point, Some(local_keys), store, round_ctx)
-            .await;
+            .await
+            .expect("cancelled");
     }
 }
 

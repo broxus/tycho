@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
-use futures_util::future::FutureExt;
+use futures_util::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
@@ -132,14 +132,12 @@ fn make_network(
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
             .spawn(move || {
+                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(cli.workers_per_node.get())
-                    .thread_name_fn(move || {
-                        static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-                        let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                        format!("{id}-tokio-{peer_id:.4}")
-                    })
+                    .thread_name_fn(move || format!("{id}-tokio-{peer_id:.4}"))
                     .build()
                     .expect("new tokio runtime")
                     .block_on(async move {
@@ -167,7 +165,7 @@ fn make_network(
                         }
                         let (mock_storage, _tmp_dir) =
                             Storage::new_temp().await.expect("new storage");
-                        let engine = Engine::new(
+                        let engine = Engine::create(
                             key_pair,
                             dht_client.network(),
                             &peer_resolver,
@@ -190,7 +188,7 @@ fn make_network(
                         started.add_permits(1);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(
-                            engine.run().map(|_| Err::<(), ()>(())),
+                            engine.run().0.into_engine_run().map(|_| Err::<(), ()>(())),
                             run_guard.until_any_dropped()
                         )
                         .ok();

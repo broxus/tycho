@@ -46,8 +46,15 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
             let round = match commit_result {
                 MempoolOutput::Running | MempoolOutput::Paused => continue,
-                MempoolOutput::NewStartAfterGap(round) => round,
-                MempoolOutput::NextAnchor(anchor_data) => anchor_data.anchor.round(),
+                MempoolOutput::NewStartAfterGap(round) => {
+                    tracing::warn!("gap in anchor chain, next to commit: {}", round.0);
+                    round
+                }
+                MempoolOutput::NextAnchor(anchor_data) => {
+                    let round = anchor_data.anchor.round();
+                    tracing::info!("committed anchor {}", round.0);
+                    round
+                }
             };
             self.top_known_anchor.set_max(round);
             self.commit_round.set_max(round);
