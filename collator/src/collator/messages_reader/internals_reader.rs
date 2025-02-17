@@ -247,7 +247,7 @@ impl InternalsPartitionReader {
         Ok(())
     }
 
-    pub fn set_skip_offset_to_current(&mut self) -> Result<()> {
+    pub fn set_skip_processed_offset_to_current(&mut self) -> Result<()> {
         let curr_processed_offset = self.reader_state.curr_processed_offset;
 
         let last_range_reader = self.get_last_range_reader_mut()?;

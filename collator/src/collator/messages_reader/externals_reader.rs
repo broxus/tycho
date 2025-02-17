@@ -289,7 +289,10 @@ impl ExternalsReader {
         Ok(())
     }
 
-    pub fn set_skip_offset_to_current(&mut self, par_id: QueuePartitionIdx) -> Result<()> {
+    pub fn set_skip_processed_offset_to_current(
+        &mut self,
+        par_id: QueuePartitionIdx,
+    ) -> Result<()> {
         let curr_processed_offset = self
             .reader_state
             .get_state_by_partition(par_id)?

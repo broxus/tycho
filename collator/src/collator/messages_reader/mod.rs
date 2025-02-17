@@ -852,7 +852,7 @@ impl MessagesReader {
         //----------
         // collect messages after reading
         let mut partitions_readers = BTreeMap::new();
-
+        let mut can_drop_processing_offset_in_all_partitions = true;
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             // extract partition reader from state to use partition 0 buffer
             // to check for account skip on collecting messages from partition 1
@@ -866,6 +866,7 @@ impl MessagesReader {
                 && par_reader.last_range_offset_reached()
             {
                 partitions_readers.insert(*par_id, par_reader);
+                can_drop_processing_offset_in_all_partitions = false;
                 continue;
             }
 
@@ -877,6 +878,7 @@ impl MessagesReader {
                 metrics,
                 msg_group,
                 collected_queue_msgs_keys,
+                can_drop_processing_offset,
             } = Self::collect_messages_for_partition(
                 par_reader_stage,
                 &mut par_reader,
@@ -888,6 +890,11 @@ impl MessagesReader {
             msg_groups.insert(*par_id, msg_group);
             self.metrics_by_partitions.get_mut(*par_id).append(&metrics);
 
+            // detect if can drop procssing offset in all partitions
+            if !can_drop_processing_offset {
+                can_drop_processing_offset_in_all_partitions = false;
+            }
+
             // remove collected new messages
             self.new_messages
                 .remove_collected_messages(&collected_queue_msgs_keys);
@@ -896,6 +903,18 @@ impl MessagesReader {
         }
         // return partition readers to state
         self.internals_partition_readers = partitions_readers;
+
+        //----------
+        // drop processing offsets in all partitions if can do this
+        if can_drop_processing_offset_in_all_partitions {
+            for (par_id, par_reader) in self.internals_partition_readers.iter_mut() {
+                // drop processing offset for internals
+                par_reader.drop_processing_offset(true)?;
+                // and drop processing offset for externals
+                self.externals_reader
+                    .drop_processing_offset(*par_id, true)?;
+            }
+        }
 
         // log metrics from partitions
         for (par_id, par_metrics) in self.metrics_by_partitions.iter() {
@@ -1026,9 +1045,9 @@ impl MessagesReader {
             res.collected_queue_msgs_keys
                 .append(&mut collected_queue_msgs_keys);
 
-            // set skip offset to current offset
+            // set skip and processed offset to current offset
             // because we will not save collected new messages to the queue
-            par_reader.set_skip_offset_to_current()?;
+            par_reader.set_skip_processed_offset_to_current()?;
         }
 
         // switch to the next reader stage if required
@@ -1046,12 +1065,14 @@ impl MessagesReader {
                     // mark all read messages processed
                     externals_reader.set_processed_to_current_position(par_id)?;
                     // set skip offset to current offset
-                    externals_reader.set_skip_offset_to_current(par_id)?;
+                    externals_reader.set_skip_processed_offset_to_current(par_id)?;
                 }
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
                 externals_reader.set_from_to_current_position_in_last_range_reader()?;
                 // drop last read to anchor chain time when no pending externals in cache
+                // it used to calc externals time diff, but it does not update when there are no messages,
+                // so time diff will grow endlessly, so we drop the last chain time to drop time diff
                 if !externals_reader.has_pending_externals() {
                     externals_reader.drop_last_read_to_anchor_chain_time();
                 }
@@ -1124,10 +1145,16 @@ impl MessagesReader {
             par_reader.retain_only_last_range_reader()?;
             // mark all read messages processed
             par_reader.set_processed_to_current_position()?;
-            // drop processing offset for existing internals
-            par_reader.drop_processing_offset(true)?;
-            // and drop processing offset for externals
-            externals_reader.drop_processing_offset(par_reader.partition_id, true)?;
+
+            // NOTE: we can drop processing offset only when all read exiting messages
+            //      collected in all partitions, otherwise skip offset could differ in partitions
+            //      that may cause incorrect messages buffers refill after sync
+
+            // mark that current partition can drop processed offset
+            res.can_drop_processing_offset = true;
+
+            // set skip and processed offset to current offset
+            par_reader.set_skip_processed_offset_to_current()?;
 
             // switch to the "new messages processing" stage
             // if all existing messages read (last range reader was created in current block)
@@ -1148,11 +1175,14 @@ impl MessagesReader {
             // mark all read messages processed
             par_reader.set_processed_to_current_position()?;
 
+            // NOTE: we can drop processing offset only when all read exiting messages
+            //      collected in all partitions, otherwise skip offset could differ in partitions
+            //      that may cause incorrect messages buffers refill after sync
+
             // if all read externals collected
-            // drop processed offset both for externals and new message
+            // mark that current partition can drop processed offset
             if all_read_externals_collected {
-                par_reader.drop_processing_offset(true)?;
-                externals_reader.drop_processing_offset(par_reader.partition_id, true)?;
+                res.can_drop_processing_offset = true;
             }
 
             // log only first time
@@ -1176,6 +1206,7 @@ struct CollectMessageForPartitionResult {
     metrics: MessagesReaderMetrics,
     msg_group: MessageGroup,
     collected_queue_msgs_keys: Vec<QueueKey>,
+    can_drop_processing_offset: bool,
 }
 
 #[derive(Default)]
