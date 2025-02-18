@@ -184,7 +184,7 @@ impl InternalsPartitionReader {
         let (last_seqno, last_range_reader) = self
             .range_readers
             .pop_last()
-            .context("partition reader should have at least one range reader")?;
+            .context("partition reader should have at least one range reader when retain_only_last_range_reader() called")?;
 
         if last_seqno < self.block_seqno {
             // set that not all ranges fully read
@@ -358,20 +358,14 @@ impl InternalsPartitionReader {
         Ok(())
     }
 
-    fn create_append_next_range_reader(
-        &mut self,
-        last_range_reader_info_opt: Option<InternalsRangeReaderInfo>,
-    ) -> Result<BlockSeqno> {
+    fn create_append_next_range_reader(&mut self) -> Result<BlockSeqno> {
         let range_max_messages = if self.msgs_exec_params.range_messages_limit == 0 {
             10_000
         } else {
             self.msgs_exec_params.range_messages_limit
         };
 
-        let reader = self.create_next_internals_range_reader(
-            last_range_reader_info_opt,
-            Some(range_max_messages),
-        )?;
+        let reader = self.create_next_internals_range_reader(Some(range_max_messages))?;
         let reader_seqno = reader.seqno;
         // we should add created range reader using calculated reader seqno instead of current block seqno
         // otherwise the next range will exeed the max blocks limit
@@ -388,9 +382,19 @@ impl InternalsPartitionReader {
     #[tracing::instrument(skip_all)]
     fn create_next_internals_range_reader(
         &self,
-        last_range_reader_info_opt: Option<InternalsRangeReaderInfo>,
         range_max_messages: Option<u32>,
     ) -> Result<InternalsRangeReader> {
+        let last_range_reader_info_opt = self
+            .get_last_range_reader()
+            .map(|(_, reader)| {
+                Some(InternalsRangeReaderInfo {
+                    last_to_lts: reader.reader_state.shards.clone(),
+                    processed_offset: reader.reader_state.processed_offset,
+                    last_range_block_seqno: reader.seqno,
+                })
+            })
+            .unwrap_or_default();
+
         let mut shard_reader_states = BTreeMap::new();
 
         let all_end_lts = [(ShardIdent::MASTERCHAIN, self.mc_state_gen_lt)]
@@ -670,18 +674,7 @@ impl InternalsPartitionReader {
                     // if open ranges limit not reached
                     if !self.open_ranges_limit_reached() {
                         if read_mode == GetNextMessageGroupMode::Continue {
-                            let last_range_reader_info_opt = self
-                                .get_last_range_reader()
-                                .map(|(_, reader)| {
-                                    Some(InternalsRangeReaderInfo {
-                                        last_to_lts: reader.reader_state.shards.clone(),
-                                        processed_offset: reader.reader_state.processed_offset,
-                                        last_range_block_seqno: reader.seqno,
-                                    })
-                                })
-                                .unwrap_or_default();
-                            let range_seqno =
-                                self.create_append_next_range_reader(last_range_reader_info_opt)?;
+                            let range_seqno = self.create_append_next_range_reader()?;
                             ranges_seqno.push_back(range_seqno);
                         } else {
                             // do not create next range reader on refill
@@ -776,20 +769,9 @@ impl InternalsPartitionReader {
 
         // if last range is not from current block then create and check next range
         if last_seqno < self.block_seqno {
-            let last_range_reader_info_opt = self
-                .get_last_range_reader()
-                .map(|(_, reader)| {
-                    Some(InternalsRangeReaderInfo {
-                        last_to_lts: reader.reader_state.shards.clone(),
-                        processed_offset: reader.reader_state.processed_offset,
-                        last_range_block_seqno: reader.seqno,
-                    })
-                })
-                .unwrap_or_default();
             // we should look thru the whole range to check for pending messages
             // so we do not pass `range_max_messages` to force use the prev block end lt
-            let mut range_reader =
-                self.create_next_internals_range_reader(last_range_reader_info_opt, None)?;
+            let mut range_reader = self.create_next_internals_range_reader(None)?;
             if !range_reader.fully_read {
                 range_reader.init()?;
 
