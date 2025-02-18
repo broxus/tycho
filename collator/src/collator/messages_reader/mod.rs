@@ -370,7 +370,7 @@ impl MessagesReader {
 
         // collect internals partition readers states
         let mut internals_reader_state = InternalsReaderState::default();
-        for (par_id, par_reader) in self.internals_partition_readers.iter_mut() {
+        for (_par_id, par_reader) in self.internals_partition_readers.iter_mut() {
             // collect aggregated messages stats
             for range_reader in par_reader.range_readers().values() {
                 if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
@@ -386,27 +386,31 @@ impl MessagesReader {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
             }
 
-            // handle last new messages range reader
-            if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
-                if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
-                    // if skip offset in new messages reader and last externals range reader are same
-                    // then we can drop processed offset both in internals and externals readers
-                    let last_ext_range_reader = self
-                        .externals_reader
-                        .get_last_range_reader()?
-                        .1
-                        .reader_state()
-                        .get_state_by_partition(*par_id)?;
+            // TODO: we should consider all partitions for this logic
+            //      otherwise if we drop processing offset only in one partition
+            //      when messages from other partitions are not collected
+            //      then it will cause incorrect messages refill after sync
+            // // handle last new messages range reader
+            // if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
+            //     if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
+            //         // if skip offset in new messages reader and last externals range reader are same
+            //         // then we can drop processed offset both in internals and externals readers
+            //         let last_ext_range_reader = self
+            //             .externals_reader
+            //             .get_last_range_reader()?
+            //             .1
+            //             .reader_state()
+            //             .get_state_by_partition(*par_id)?;
 
-                    if last_int_range_reader.reader_state.skip_offset
-                        == last_ext_range_reader.skip_offset
-                    {
-                        par_reader.drop_processing_offset(true)?;
-                        self.externals_reader
-                            .drop_processing_offset(*par_id, true)?;
-                    }
-                }
-            }
+            //         if last_int_range_reader.reader_state.skip_offset
+            //             == last_ext_range_reader.skip_offset
+            //         {
+            //             par_reader.drop_processing_offset(true)?;
+            //             self.externals_reader
+            //                 .drop_processing_offset(*par_id, true)?;
+            //         }
+            //     }
+            // }
         }
 
         // build queue diff
@@ -982,10 +986,6 @@ impl MessagesReader {
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();
 
-        // update processed offset anyway
-        par_reader.increment_curr_processed_offset();
-        externals_reader.increment_curr_processed_offset(&par_reader.partition_id)?;
-
         // remember if all internals or externals were collected before to reduce spam in logs further
         let mut all_internals_collected_before = false;
         let all_read_externals_collected_before;
@@ -993,6 +993,9 @@ impl MessagesReader {
         // collect existing internals
         if *par_reader_stage == MessagesReaderStage::ExistingAndExternals {
             all_internals_collected_before = par_reader.all_read_existing_messages_collected();
+
+            // update processed offset
+            par_reader.increment_curr_processed_offset();
 
             let CollectInternalsResult { metrics, .. } = par_reader.collect_messages(
                 par_reader_stage,
@@ -1008,6 +1011,9 @@ impl MessagesReader {
         {
             all_read_externals_collected_before = !externals_reader.has_messages_in_buffers();
 
+            // update processed offset
+            externals_reader.increment_curr_processed_offset(&par_reader.partition_id)?;
+
             let CollectExternalsResult { metrics } = externals_reader.collect_messages(
                 par_reader.partition_id,
                 &mut res.msg_group,
@@ -1021,6 +1027,9 @@ impl MessagesReader {
         if *par_reader_stage == MessagesReaderStage::ExternalsAndNew {
             all_internals_collected_before =
                 par_reader.all_new_messages_collected(has_pending_new_messages_for_partition);
+
+            // update processed offset
+            par_reader.increment_curr_processed_offset();
 
             let CollectInternalsResult {
                 metrics,
