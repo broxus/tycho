@@ -379,7 +379,7 @@ impl MessagesReader {
 
         // collect internals partition readers states
         let mut internals_reader_state = InternalsReaderState::default();
-        for (par_id, par_reader) in self.internals_partition_readers.iter_mut() {
+        for (_par_id, par_reader) in self.internals_partition_readers.iter_mut() {
             // collect aggregated messages stats
             for range_reader in par_reader.range_readers().values() {
                 if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
@@ -395,27 +395,31 @@ impl MessagesReader {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
             }
 
-            // handle last new messages range reader
-            if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
-                if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
-                    // if skip offset in new messages reader and last externals range reader are same
-                    // then we can drop processed offset both in internals and externals readers
-                    let last_ext_range_reader = self
-                        .externals_reader
-                        .get_last_range_reader()?
-                        .1
-                        .reader_state()
-                        .get_state_by_partition(*par_id)?;
+            // TODO: we should consider all partitions for this logic
+            //      otherwise if we drop processing offset only in one partition
+            //      when messages from other partitions are not collected
+            //      then it will cause incorrect messages refill after sync
+            // // handle last new messages range reader
+            // if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
+            //     if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
+            //         // if skip offset in new messages reader and last externals range reader are same
+            //         // then we can drop processed offset both in internals and externals readers
+            //         let last_ext_range_reader = self
+            //             .externals_reader
+            //             .get_last_range_reader()?
+            //             .1
+            //             .reader_state()
+            //             .get_state_by_partition(*par_id)?;
 
-                    if last_int_range_reader.reader_state.skip_offset
-                        == last_ext_range_reader.skip_offset
-                    {
-                        par_reader.drop_processing_offset(true)?;
-                        self.externals_reader
-                            .drop_processing_offset(*par_id, true)?;
-                    }
-                }
-            }
+            //         if last_int_range_reader.reader_state.skip_offset
+            //             == last_ext_range_reader.skip_offset
+            //         {
+            //             par_reader.drop_processing_offset(true)?;
+            //             self.externals_reader
+            //                 .drop_processing_offset(*par_id, true)?;
+            //         }
+            //     }
+            // }
         }
 
         // build queue diff
