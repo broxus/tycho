@@ -215,12 +215,9 @@ impl MessagesReader {
             readers_stages: Default::default(),
         };
 
-        // define the initial reader stage
-        let all_read_externals_collected = res.externals_reader.all_ranges_read_and_collected();
-        let initial_reader_stage = match all_read_externals_collected {
-            true => MessagesReaderStage::ExistingAndExternals,
-            false => MessagesReaderStage::FinishPreviousExternals,
-        };
+        // we always start from reading previous externals from buffer
+        // even if buffers are empty, we need this for correct messages refill
+        let initial_reader_stage = MessagesReaderStage::FinishPreviousExternals;
 
         // create internals readers by partitions
         let mut partition_reader_states = cx.reader_state.internals.partitions;
@@ -311,16 +308,10 @@ impl MessagesReader {
         // reset metrics
         self.metrics_by_partitions = Default::default();
 
-        // define the initial reader stage
-        let all_read_externals_collected = self.externals_reader.all_ranges_read_and_collected();
-        let initial_reader_stage = match all_read_externals_collected {
-            true => MessagesReaderStage::ExistingAndExternals,
-            false => MessagesReaderStage::FinishPreviousExternals,
-        };
-
-        // reset internals reader stages
+        // always reset reader stage to reading previous externals
+        // because every new block collation starts from it
         for (_, par_reader_stage) in self.readers_stages.iter_mut() {
-            *par_reader_stage = initial_reader_stage;
+            *par_reader_stage = MessagesReaderStage::FinishPreviousExternals;
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
