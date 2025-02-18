@@ -73,7 +73,13 @@ impl ExternalsReader {
             all_ranges_fully_read: false,
         };
 
+        // create existing range readers
         reader.create_existing_range_readers();
+
+        // if no range readers create the first one right now
+        if reader.range_readers.is_empty() {
+            reader.create_append_next_range_reader();
+        }
 
         reader
     }
@@ -212,7 +218,7 @@ impl ExternalsReader {
 
     pub fn retain_only_last_range_reader(&mut self) -> Result<()> {
         let (last_seqno, last_range_reader) = self.range_readers.pop_last().context(
-            "externals reader should have at least one range reader after reading into buffer",
+            "externals reader should have at least one range reader when retain_only_last_range_reader() called",
         )?;
 
         if last_seqno < self.block_seqno {
@@ -245,9 +251,9 @@ impl ExternalsReader {
     }
 
     pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &ExternalsRangeReader)> {
-        self.range_readers.last_key_value().context(
-            "externals reader should have at least one range reader after reading into buffer",
-        )
+        self.range_readers
+            .last_key_value()
+            .context("externals reader should have at least one range reader")
     }
 
     pub fn get_last_range_reader_mut(&mut self) -> Result<&mut ExternalsRangeReader> {
