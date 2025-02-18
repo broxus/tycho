@@ -160,6 +160,42 @@ impl ExternalsReader {
         })
     }
 
+    pub fn last_range_offset_reached(&self, par_id: &QueuePartitionIdx) -> bool {
+        self.reader_state
+            .by_partitions
+            .get(par_id)
+            .map(|state_by_partition| {
+                self.get_last_range_reader().map(|(_, r)| {
+                    r.reader_state
+                        .by_partitions
+                        .get(par_id)
+                        .map(|range_state_by_partition| {
+                            range_state_by_partition.processed_offset
+                                <= state_by_partition.curr_processed_offset
+                        })
+                })
+            })
+            .and_then(|res| res.ok())
+            .and_then(|res| res)
+            .unwrap_or(true)
+    }
+
+    pub fn last_range_offsets_reached_in_all_partitions(&self) -> bool {
+        self.get_last_range_reader()
+            .map(|(_, r)| {
+                r.reader_state.by_partitions.iter().all(|(par_id, par)| {
+                    par.processed_offset
+                        <= self
+                            .reader_state
+                            .by_partitions
+                            .get(par_id)
+                            .unwrap()
+                            .curr_processed_offset
+                })
+            })
+            .unwrap_or(true)
+    }
+
     pub fn get_last_range_reader_offsets_by_partitions(&self) -> Vec<(QueuePartitionIdx, u32)> {
         self.get_last_range_reader()
             .map(|(_, r)| {
