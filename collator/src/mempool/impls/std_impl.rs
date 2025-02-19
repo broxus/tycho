@@ -254,12 +254,31 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        ConfigAdapter::apply_prev_vset(engine.handle(), &new_cx)?;
-        ConfigAdapter::apply_curr_vset(engine.handle(), &new_cx)?;
-        ConfigAdapter::apply_next_vset(engine.handle(), &new_cx);
-        self.top_known_anchor
-            .set_max_raw(new_cx.top_processed_to_anchor_id);
+        // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
+        if engine.handle().merged_conf().genesis_info() == new_cx.consensus_info.genesis_info {
+            ConfigAdapter::apply_prev_vset(engine.handle(), &new_cx)?;
+            ConfigAdapter::apply_curr_vset(engine.handle(), &new_cx)?;
+            ConfigAdapter::apply_next_vset(engine.handle(), &new_cx);
+            self.top_known_anchor
+                .set_max_raw(new_cx.top_processed_to_anchor_id);
+            config_guard.state_update_ctx = Some(new_cx);
+            return Ok(());
+        }
+
+        // Genesis is changed at runtime - restart immediately:
+        // block is signed by majority, so old mempool session and its anchors are not needed
+
+        let engine = (config_guard.engine_running.take())
+            .context("cannot happen: engine must be started")?;
+        self.cache.reset();
+        engine.stop().await;
+
+        // a new genesis is created even when overlay-related part of config stays the same
+        (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
+        // so config simultaneously changes with genesis via mempool restart
+        (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
         config_guard.state_update_ctx = Some(new_cx);
+        config_guard.engine_running = Some(self.run(&config_guard)?);
 
         Ok(())
     }
