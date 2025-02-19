@@ -1,4 +1,4 @@
-use anyhow::bail;
+use anyhow::Context;
 use everscale_types::models::{BlockId, ValidatorSet};
 use tycho_consensus::prelude::{EngineHandle, EngineRunning, MempoolConfigBuilder};
 use tycho_network::PeerId;
@@ -13,92 +13,86 @@ pub struct ConfigAdapter {
 }
 
 impl ConfigAdapter {
-    pub fn apply_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) -> anyhow::Result<()> {
-        let round = new_cx.consensus_info.vset_switch_round;
-        let whole_set = (new_cx.current_validator_set.1.list.iter())
+    pub fn apply_next_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) {
+        let Some((_, next_set)) = &new_cx.next_validator_set else {
+            return;
+        };
+        // NOTE: do not try to calculate subset from next set
+        //  because it is impossible without known future session_update_round
+        let whole_set = (next_set.list.iter())
             .map(|descr| PeerId(descr.public_key.0))
             .collect::<Vec<_>>();
-        let subset = Self::compute_peers_subset(
-            &new_cx.current_validator_set.1,
-            &new_cx.mc_block_id,
-            round,
-            new_cx.shuffle_validators,
-        )?;
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            len = subset.len(),
             vset_len = whole_set.len(),
-            %round,
-            "New current validator subset"
+            "Apply next validator set"
         );
-        engine.set_next_peers(&whole_set, Some((round, &subset)));
-        Ok(())
+        engine.set_next_peers(&whole_set, None);
     }
 
-    pub fn apply_next_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) {
-        if let Some((_, next)) = &new_cx.next_validator_set {
-            // NOTE: do not try to calculate subset from next set
-            //  because it is impossible without known future session_update_round
-            let whole_set = (next.list.iter())
-                .map(|descr| PeerId(descr.public_key.0))
-                .collect::<Vec<_>>();
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                vset_len = whole_set.len(),
-                "New net validator set"
-            );
-            engine.set_next_peers(&whole_set, None);
-        }
+    pub fn apply_curr_vset(
+        engine: &EngineHandle,
+        new_cx: &StateUpdateContext,
+    ) -> anyhow::Result<()> {
+        let (_, curr_set) = &new_cx.current_validator_set;
+        Self::compute_apply_subset(
+            engine,
+            &new_cx.mc_block_id,
+            curr_set,
+            new_cx.consensus_info.vset_switch_round,
+            new_cx.shuffle_validators,
+            "Apply current validator subset",
+        )
     }
 
     pub fn apply_prev_vset(
         engine: &EngineHandle,
         new_cx: &StateUpdateContext,
     ) -> anyhow::Result<()> {
-        if let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() {
-            let round = new_cx.consensus_info.prev_vset_switch_round;
-            let whole_set = prev_set
-                .list
-                .iter()
-                .map(|descr| PeerId(descr.public_key.0))
-                .collect::<Vec<_>>();
-            let subset = Self::compute_peers_subset(
-                prev_set,
-                &new_cx.mc_block_id,
-                round,
-                new_cx.consensus_info.prev_shuffle_mc_validators,
-            )?;
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                len = subset.len(),
-                vset_len = whole_set.len(),
-                %round,
-                "New prev validator subset"
-            );
-            engine.set_next_peers(&whole_set, Some((round, &subset)));
-        }
-
-        Ok(())
+        let Some((_, prev_set)) = new_cx.prev_validator_set.as_ref() else {
+            return Ok(());
+        };
+        Self::compute_apply_subset(
+            engine,
+            &new_cx.mc_block_id,
+            prev_set,
+            new_cx.consensus_info.prev_vset_switch_round,
+            new_cx.consensus_info.prev_shuffle_mc_validators,
+            "Apply prev validator subset",
+        )
     }
 
-    fn compute_peers_subset(
-        validator_set: &ValidatorSet,
+    fn compute_apply_subset(
+        engine: &EngineHandle,
         mc_block_id: &BlockId,
-        session_update_round: u32,
+        validator_set: &ValidatorSet,
+        session_start_round: u32,
         shuffle_validators: bool,
-    ) -> anyhow::Result<Vec<PeerId>> {
-        let Some((list, _)) =
-            validator_set.compute_mc_subset(session_update_round, shuffle_validators)
-        else {
-            bail!(
-                "Mempool peer set is empty after shuffle, mc_block_id: {}",
-                mc_block_id,
-            )
-        };
-        let result = list
-            .into_iter()
+        message: &'static str,
+    ) -> anyhow::Result<()> {
+        let whole_set = (validator_set.list.iter())
+            .map(|descr| PeerId(descr.public_key.0))
+            .collect::<Vec<_>>();
+
+        let (validator_sub_list, _) = validator_set
+            .compute_mc_subset(session_start_round, shuffle_validators)
+            .with_context(|| {
+                format!("{message}: subset is empty after shuffle, mc_block_id: {mc_block_id}")
+            })?;
+
+        let subset = (validator_sub_list.into_iter())
             .map(|x| PeerId(x.public_key.0))
             .collect::<Vec<_>>();
-        Ok(result)
+
+        tracing::info!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            message, // field name "message" is used by macros to display a nameless value
+            len = subset.len(),
+            vset_len = whole_set.len(),
+            %session_start_round,
+        );
+
+        engine.set_next_peers(&whole_set, Some((session_start_round, &subset)));
+        Ok(())
     }
 }
