@@ -10,11 +10,15 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::mempool::impls::std_impl::deduplicator::Deduplicator;
 use crate::mempool::{ExternalMessage, MempoolAnchorId};
-use crate::tracing_targets;
 
 pub struct Parser {
     blake: Deduplicator,
     sha: Deduplicator,
+}
+
+pub struct ParserOutput {
+    pub unique_messages: Vec<Arc<ExternalMessage>>,
+    pub unique_payload_bytes: usize,
 }
 
 impl Parser {
@@ -25,34 +29,17 @@ impl Parser {
         }
     }
 
-    pub fn clean(self, anchor_id: MempoolAnchorId) -> Self {
-        let mut blake = self.blake;
-        let mut sha = self.sha;
-
-        let (blake, sha) = rayon::join(
-            move || {
-                blake.clean(anchor_id);
-                blake
-            },
-            move || {
-                sha.clean(anchor_id);
-                sha
-            },
-        );
-        Self { blake, sha }
+    pub fn clean(&mut self, anchor_id: MempoolAnchorId) {
+        let Self { blake, sha } = self;
+        rayon::join(|| blake.clean(anchor_id), || sha.clean(anchor_id));
     }
 
     pub fn parse_unique(
         &mut self,
         anchor_id: MempoolAnchorId,
-        chain_time: u64,
-        is_executable: bool,
         payloads: Vec<Bytes>,
-    ) -> Vec<Arc<ExternalMessage>> {
+    ) -> ParserOutput {
         let _guard = HistogramGuard::begin("tycho_mempool_adapter_parse_anchor_history_time");
-
-        let total_messages = payloads.len();
-        let total_bytes: usize = payloads.iter().fold(0, |acc, bytes| acc + bytes.len());
 
         let all_bytes_blake = payloads
             .into_par_iter()
@@ -73,36 +60,22 @@ impl Parser {
             .filter_map(|bytes| Self::parse_message_bytes(&bytes).map(|cell| (cell, bytes.len())))
             .collect::<Vec<_>>();
 
-        let mut unique_messages_bytes = 0;
+        let mut unique_payload_bytes = 0;
         let unique_messages = uniq_messages_blake
             .into_iter()
             .filter(|(message, _)| {
                 (self.sha).check_unique(anchor_id, message.cell.repr_hash().as_array())
             })
-            .map(|(message, byte_len)| {
-                unique_messages_bytes += byte_len;
+            .map(|(message, bytes_len)| {
+                unique_payload_bytes += bytes_len;
                 message
             })
             .collect::<Vec<_>>();
 
-        metrics::counter!("tycho_mempool_msgs_unique_count").increment(unique_messages.len() as _);
-        metrics::counter!("tycho_mempool_msgs_unique_bytes").increment(unique_messages_bytes as _);
-
-        metrics::counter!("tycho_mempool_msgs_duplicates_count")
-            .increment((total_messages - unique_messages.len()) as _);
-        metrics::counter!("tycho_mempool_msgs_duplicates_bytes")
-            .increment((total_bytes - unique_messages_bytes) as _);
-
-        tracing::info!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            id = anchor_id,
-            %is_executable,
-            time = chain_time,
-            externals_unique = unique_messages.len(),
-            externals_skipped = total_messages - unique_messages.len(),
-            "new anchor"
-        );
-        unique_messages
+        ParserOutput {
+            unique_messages,
+            unique_payload_bytes,
+        }
     }
 
     fn parse_message_bytes(message: &Bytes) -> Option<Arc<ExternalMessage>> {
