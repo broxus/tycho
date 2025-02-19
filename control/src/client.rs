@@ -91,7 +91,7 @@ impl ControlClient {
             )));
         }
 
-        let message = BocRepr::encode_rayon(message)
+        let message = BocRepr::encode(message)
             .map_err(|e| ClientError::ClientFailed(e.into()))?
             .into();
 
@@ -102,7 +102,7 @@ impl ControlClient {
     }
 
     pub async fn broadcast_external_message_raw(&self, message: &DynCell) -> ClientResult<()> {
-        let message = Boc::encode_rayon(message).into();
+        let message = Boc::encode(message).into();
         self.inner
             .broadcast_external_message(current_context(), BroadcastExtMsgRequest { message })
             .await?

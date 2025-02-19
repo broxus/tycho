@@ -16,8 +16,8 @@ license.workspace = true
 anyhow = { workspace = true }
 arc-swap = { workspace = true, optional = true }
 async-trait = { workspace = true }
-bytes = { workspace = true }
-everscale-crypto = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+everscale-crypto = { workspace = true, optional = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true, optional = true }
@@ -38,10 +38,11 @@ tycho-util = { workspace = true }
 full = ["client", "server"]
 client = []
 server = [
+    "dep:arc-swap",
+    "dep:everscale-crypto",
+    "dep:parking_lot",
     "dep:tycho-block-util",
     "dep:tycho-core",
     "dep:tycho-network",
     "dep:tycho-storage",
-    "dep:arc-swap",
-    "dep:parking_lot",
 ]
