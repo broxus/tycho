@@ -65,6 +65,16 @@ pub struct MempoolGlobalConfig {
     /// millis must be set not less than last applied mc block time, or better use actual time
     #[serde(flatten)]
     pub genesis_info: GenesisInfo,
+    /// To restart a stale consensus with a new config, the majority of nodes has to provide
+    /// new common genesis and settings in a global config file.
+    /// Then an external message must be sent to update blockchain config contract ASAP in order to
+    /// issue a key block with updated consensus config and persist it in blockchain state.
+    /// Until then "mempool" part of the global config file must contain all the same data.
+    ///
+    /// It's because a block can include any settings only when config contract is called,
+    /// otherwise contract state will not match.
+    /// Quite the opposite is a recovery genesis info: it is immediately included
+    /// into the first master chain block as an "extra" part, and makes it a key block.
     #[serde(flatten)]
     pub consensus_config: Option<ConsensusConfig>,
 }

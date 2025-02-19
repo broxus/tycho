@@ -61,11 +61,11 @@ impl Cache {
         let mut data = self.data.write();
         let old = data.anchors.insert(anchor.id, anchor);
         if let Some(old) = old {
-            tracing::error!(
+            tracing::warn!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = old.id,
                 is_paused = data.is_paused.then_some(true),
-                "received same anchor more than once"
+                "received same anchor twice, it's ok only after mempool restart"
             );
         }
         self.anchor_added.notify_waiters();
