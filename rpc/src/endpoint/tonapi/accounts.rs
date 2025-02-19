@@ -3,9 +3,8 @@ use axum::routing::get;
 use axum::Json;
 use everscale_types::models::StdAddr;
 
-use super::error::Error;
 use super::responses::{status_to_string, GetAccountResponse};
-use crate::endpoint::tonapi::error::Result;
+use crate::endpoint::error::{Error, Result};
 use crate::state::LoadedAccountState;
 use crate::RpcState;
 

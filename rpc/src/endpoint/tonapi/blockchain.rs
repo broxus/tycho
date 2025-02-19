@@ -12,7 +12,6 @@ use everscale_types::models::{
 use num_bigint::BigInt;
 use tycho_vm::{GasParams, NaN, OwnedCellSlice, RcStackValue, SmcInfoBase, VmState};
 
-use super::error::Error;
 use super::requests::{ExecMethodArgs, Pagination, SendMessageRequest};
 use super::responses::{
     bounce_phase_to_string, status_to_string, AccountResponse, ExecGetMethodResponse,
@@ -20,7 +19,7 @@ use super::responses::{
     TvmStackRecord,
 };
 use super::utils::crc_16;
-use crate::endpoint::tonapi::error::Result;
+use crate::endpoint::error::{Error, Result};
 use crate::state::LoadedAccountState;
 use crate::RpcState;
 
