@@ -64,7 +64,7 @@ impl Cache {
             tracing::error!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = old.id,
-                is_paused = Some(data.is_paused).filter(|x| *x),
+                is_paused = data.is_paused.then_some(true),
                 "received same anchor more than once"
             );
         }
@@ -90,7 +90,7 @@ impl Cache {
                         tracing::info!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
-                            is_paused = Some(data.is_paused).filter(|x| *x),
+                            is_paused = data.is_paused.then_some(true),
                             "Anchor cache is empty, waiting"
                         );
                     }
@@ -100,7 +100,7 @@ impl Cache {
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
                             %first_id,
-                            is_paused = Some(data.is_paused).filter(|x| *x),
+                            is_paused = data.is_paused.then_some(true),
                             "Requested anchor is too old"
                         );
                         return None;
@@ -143,7 +143,7 @@ impl Cache {
                         tracing::info!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %prev_anchor_id,
-                            is_paused = Some(data.is_paused).filter(|x| *x),
+                            is_paused = data.is_paused.then_some(true),
                             "Anchor cache is empty, waiting"
                         );
                     }
@@ -170,7 +170,7 @@ impl Cache {
                                     %prev_anchor_id,
                                     %first_id,
                                     first_prev_id = first.prev_id,
-                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    is_paused = data.is_paused.then_some(true),
                                     "Requested anchor is too old"
 
                                 );
@@ -215,7 +215,7 @@ impl Cache {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
-                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    is_paused = data.is_paused.then_some(true),
                                     "Next anchor is unknown, waiting"
                                 );
                             }
@@ -227,7 +227,7 @@ impl Cache {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
-                                    is_paused = Some(data.is_paused).filter(|x| *x),
+                                    is_paused = data.is_paused.then_some(true),
                                     "Prev anchor is unknown, waiting"
                                 );
                             }
@@ -246,16 +246,22 @@ impl Cache {
         data.anchors
             .retain(|anchor_id, _| anchor_id >= &before_anchor_id);
 
-        let len = data.anchors.len();
-        if data.anchors.capacity() > len.saturating_mul(4) {
-            data.anchors.shrink_to(len.saturating_mul(2));
-        }
+        data.shrink();
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             %before_anchor_id,
-            is_paused = Some(data.is_paused).filter(|x| *x),
+            is_paused = data.is_paused.then_some(true),
             "anchors cache was cleared",
         );
+    }
+}
+
+impl CacheData {
+    fn shrink(&mut self) {
+        let len = self.anchors.len();
+        if self.anchors.capacity() > len.saturating_mul(4) {
+            self.anchors.shrink_to(len.saturating_mul(2));
+        }
     }
 }

@@ -1,28 +1,26 @@
+mod anchor_handler;
 mod cache;
 mod config;
 mod deduplicator;
 mod parser;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::ConsensusConfig;
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::MempoolStorage;
-use tycho_util::time::now_millis;
 
+use crate::mempool::impls::std_impl::anchor_handler::AnchorHandler;
 use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::config::ConfigAdapter;
-use crate::mempool::impls::std_impl::parser::Parser;
 use crate::mempool::{
-    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor,
+    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory,
     MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
@@ -115,11 +113,11 @@ impl MempoolAdapterStdImpl {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
             }
-            ConfigAdapter::apply_vset(engine.handle(), last_state_update)?;
+            ConfigAdapter::apply_curr_vset(engine.handle(), last_state_update)?;
             ConfigAdapter::apply_next_vset(engine.handle(), last_state_update);
         } else if estimated_sync_bottom >= last_state_update.consensus_info.prev_vset_switch_round {
             ConfigAdapter::apply_prev_vset(engine.handle(), last_state_update)?;
-            ConfigAdapter::apply_vset(engine.handle(), last_state_update)?;
+            ConfigAdapter::apply_curr_vset(engine.handle(), last_state_update)?;
             if last_state_update.next_validator_set.is_some() {
                 tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, "cannot use next vset");
             }
@@ -139,13 +137,9 @@ impl MempoolAdapterStdImpl {
         let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
         let engine = engine.run(engine_stop_tx);
 
-        let mut anchor_task = Self::handle_anchors_task(
-            self.cache.clone(),
-            self.store.clone(),
-            mempool_config.consensus().clone(),
-            anchor_rx,
-        )
-        .boxed();
+        let mut anchor_task = AnchorHandler::new(mempool_config.consensus(), anchor_rx)
+            .run(self.cache.clone(), self.store.clone())
+            .boxed();
 
         tokio::spawn(async move {
             tokio::select! {
@@ -170,88 +164,6 @@ impl MempoolAdapterStdImpl {
 
     pub fn send_external(&self, message: Bytes) {
         self.input_buffer.push(message);
-    }
-
-    async fn handle_anchors_task(
-        cache: Arc<Cache>,
-        store: MempoolAdapterStore,
-        config: ConsensusConfig,
-        mut anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,
-    ) {
-        scopeguard::defer!(tracing::warn!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            "handle anchors task stopped"
-        ));
-        let mut parser = Parser::new(config.deduplicate_rounds);
-        let mut first_after_gap = None;
-        while let Some(commit) = anchor_rx.recv().await {
-            let committed = match commit {
-                MempoolOutput::NextAnchor(committed) => committed,
-                MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
-                    cache.reset();
-                    parser = Parser::new(config.deduplicate_rounds);
-                    let first_to_execute =
-                        (anchors_full_bottom.0).saturating_add(config.deduplicate_rounds as u32);
-                    store.report_new_start(first_to_execute);
-                    first_after_gap = Some(first_to_execute);
-                    tracing::info!(
-                        target: tracing_targets::MEMPOOL_ADAPTER,
-                        new_bottom = anchors_full_bottom.0,
-                        first_after_gap = first_to_execute,
-                        "externals cache dropped",
-                    );
-                    continue;
-                }
-                MempoolOutput::Running => {
-                    cache.set_paused(false);
-                    continue;
-                }
-                MempoolOutput::Paused => {
-                    cache.set_paused(true);
-                    continue;
-                }
-            };
-
-            let task = tokio::task::spawn_blocking({
-                let anchors = cache.clone();
-                let store = store.clone();
-
-                move || {
-                    let author = committed.anchor.data().author;
-                    let chain_time = committed.anchor.data().time.millis();
-                    let anchor_id: MempoolAnchorId = committed.anchor.round().0;
-                    metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
-
-                    let payloads =
-                        store.expand_anchor_history(&committed.anchor, &committed.history);
-
-                    let is_executable = first_after_gap
-                        .as_ref()
-                        .is_none_or(|first_id| anchor_id >= *first_id);
-
-                    let unique_messages =
-                        parser.parse_unique(anchor_id, chain_time, is_executable, payloads);
-
-                    if is_executable {
-                        anchors.push(Arc::new(MempoolAnchor {
-                            id: anchor_id,
-                            prev_id: committed.prev_anchor.map(|round| round.0),
-                            chain_time,
-                            author,
-                            externals: unique_messages,
-                        }));
-                    }
-
-                    metrics::histogram!("tycho_mempool_commit_anchor_latency_time").record(
-                        Duration::from_millis(now_millis().max(chain_time) - chain_time)
-                            .as_secs_f64(),
-                    );
-
-                    parser.clean(anchor_id)
-                }
-            });
-            parser = task.await.expect("expand anchor history task failed");
-        }
     }
 }
 
@@ -286,7 +198,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 "Will start mempool with state update from mc block"
             );
 
-            if let Some(new_genesis) = (config_guard.builder.get_genesis())
+            if let Some(genesis_override) = (config_guard.builder.get_genesis())
                 .filter(|genesis| genesis.overrides(&new_cx.consensus_info.genesis_info))
             {
                 // Note: assume that global config is applied to mempool adapter
@@ -295,9 +207,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 // genesis does not have externals, so only strictly greater time and round
                 // will be saved into next block, so genesis can have values GEQ than in prev block
                 anyhow::ensure!(
-                    new_genesis.start_round >= new_cx.top_processed_to_anchor_id
-                        && new_genesis.genesis_millis >= new_cx.mc_block_chain_time,
-                    "new {new_genesis:?} should be >= \
+                    genesis_override.start_round >= new_cx.top_processed_to_anchor_id
+                        && genesis_override.genesis_millis >= new_cx.mc_block_chain_time,
+                    "new {genesis_override:?} should be >= \
                     top processed_to_anchor_id {} and block gen chain_time {}",
                     new_cx.top_processed_to_anchor_id,
                     new_cx.mc_block_chain_time,
@@ -305,30 +217,21 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
-                    ?new_genesis,
+                    value = ?genesis_override,
                     "Using genesis override from global config"
                 );
-                match config_guard.builder.get_consensus_config() {
+                let message = match config_guard.builder.get_consensus_config() {
                     Some(cc) if cc == &new_cx.consensus_config => {
-                        tracing::warn!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "consensus config from global config is the same as in mc block"
-                        );
+                        "consensus config from global config is the same as in mc block"
                     }
-                    Some(_) => {
-                        tracing::warn!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "consensus config from global config overrides one from mc block"
-                        );
-                    }
+                    Some(_) => "consensus config from global config overrides one from mc block",
                     None => {
                         (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
-                        tracing::warn!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "no consensus config in global config, using one from mc block"
-                        );
+                        "no consensus config in global config, using one from mc block"
                     }
-                }
+                };
+                // "message" is a reserved field in macro
+                tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, message);
             } else {
                 (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
                 (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
@@ -351,7 +254,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        ConfigAdapter::apply_vset(engine.handle(), &new_cx)?;
+        ConfigAdapter::apply_curr_vset(engine.handle(), &new_cx)?;
         ConfigAdapter::apply_next_vset(engine.handle(), &new_cx);
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
