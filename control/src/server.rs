@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -6,7 +7,6 @@ use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use everscale_crypto::ed25519;
-use everscale_types::abi::extend_signature_with_id;
 use everscale_types::cell::Load;
 use everscale_types::models::{
     AccountState, DepthBalanceInfo, Lazy, Message, OptionalAccount, ShardAccount, ShardIdent,
@@ -873,4 +873,16 @@ fn empty_shard_account() -> &'static ShardAccount {
         last_trans_hash: HashBytes::ZERO,
         last_trans_lt: 0,
     })
+}
+
+fn extend_signature_with_id(data: &[u8], signature_id: Option<i32>) -> Cow<'_, [u8]> {
+    match signature_id {
+        Some(signature_id) => {
+            let mut result = Vec::with_capacity(4 + data.len());
+            result.extend_from_slice(&signature_id.to_be_bytes());
+            result.extend_from_slice(data);
+            Cow::Owned(result)
+        }
+        None => Cow::Borrowed(data),
+    }
 }
