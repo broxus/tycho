@@ -21,17 +21,21 @@ use tycho_util::FastHashMap;
 use super::phase::{Phase, PhaseState};
 use super::PrevData;
 use crate::collator::debug_info::BlockDebugInfo;
+use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
     PreparedInMsg, PreparedOutMsg,
 };
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
-use crate::types::{BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardHashesExt};
+use crate::types::{
+    BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardDescriptionExt,
+    ShardHashesExt,
+};
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizeState {
@@ -56,10 +60,13 @@ impl Phase<FinalizeState> {
         &mut self,
         messages_reader: MessagesReader<EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Result<(
-        FinalizeMessagesReaderResult,
-        impl FnOnce() -> Result<Duration>,
-    )> {
+    ) -> Result<
+        (
+            FinalizeMessagesReaderResult,
+            impl FnOnce() -> Result<Duration>,
+        ),
+        CollatorError,
+    > {
         let labels = [("workchain", self.state.shard_id.workchain().to_string())];
 
         let prev_hash = self
@@ -76,10 +83,10 @@ impl Phase<FinalizeState> {
                 .collation_data
                 .top_shard_blocks
                 .iter()
-                .map(|b| (b.block_id.shard, b.block_id.seqno))
+                .map(|b| b.block_id)
                 .collect()
         } else {
-            let mut top_blocks: FastHashMap<ShardIdent, u32> = self
+            let mut top_blocks: Vec<BlockId> = self
                 .state
                 .mc_data
                 .shards
@@ -87,22 +94,50 @@ impl Phase<FinalizeState> {
                 .filter(|(shard, descr)| {
                     descr.top_sc_block_updated && shard != &self.state.shard_id
                 })
-                .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
+                .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
                 .collect();
 
-            top_blocks.insert(
-                self.state.mc_data.block_id.shard,
-                self.state.mc_data.block_id.seqno,
-            );
+            top_blocks.push(self.state.mc_data.block_id);
 
             top_blocks
         };
 
-        let mut diffs = FastHashMap::default();
-        for (shard, seqno) in &top_shard_blocks {
-            if let Some(diff) = mq_adapter.get_diff(shard, *seqno) {
-                diffs.insert(*shard, diff);
+        // load top blocks diffs
+        let mut diffs_info = FastHashMap::default();
+
+        for top_shard_block in top_shard_blocks.iter() {
+            if top_shard_block.seqno == 0 {
+                continue;
             }
+
+            let diff_info = mq_adapter
+                .get_diff_info(
+                    &top_shard_block.shard,
+                    top_shard_block.seqno,
+                    DiffZone::Both,
+                )?
+                // TODO: now we cancel collation if diff was not found
+                //      but this may hide an issue with diff saving in the regular work
+                //      so it is better to cancel all active collations when we
+                //      clean uncommitted queue state on block mismatch
+                .ok_or_else(|| {
+                    tracing::warn!(target: tracing_targets::COLLATOR,
+                        "finalize_messages_reader: cannot get diff with stats from queue for block {}",
+                        top_shard_block.as_short_id(),
+                    );
+                    CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
+                        top_shard_block.as_short_id(),
+                    ))
+                })?;
+
+            diffs_info.insert(
+                top_shard_block.shard,
+                mq_adapter.get_router_and_statistics(
+                    &top_shard_block.as_short_id(),
+                    diff_info,
+                    0,
+                )?,
+            );
         }
 
         // get queue diff and check for pending internals
@@ -118,7 +153,7 @@ impl Phase<FinalizeState> {
                 &labels,
             );
             let finalize_message_reader_res =
-                messages_reader.finalize(self.extra.executor.min_next_lt(), diffs)?;
+                messages_reader.finalize(self.extra.executor.min_next_lt(), &diffs_info)?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };
@@ -165,7 +200,12 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
-                let statistics = (&queue_diff_with_msgs, block_id_short.shard).into();
+                let statistics = DiffStatistics::from_diff(
+                    &queue_diff_with_msgs,
+                    block_id_short.shard,
+                    min_message,
+                    max_message,
+                );
 
                 histogram.finish();
 
@@ -175,13 +215,16 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
-                mq_adapter.apply_diff(
-                    queue_diff_with_msgs,
-                    block_id_short,
-                    &queue_diff_hash,
-                    statistics,
-                    max_message,
-                )?;
+                // TODO should check sequence only if previous diff is required or check only uncommitted zone
+                mq_adapter
+                    .apply_diff(
+                        queue_diff_with_msgs,
+                        block_id_short,
+                        &queue_diff_hash,
+                        statistics,
+                        Some(DiffZone::Uncommitted),
+                    )
+                    .context("finalize")?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
                 Ok(apply_queue_diff_elapsed)
@@ -667,7 +710,7 @@ impl Phase<FinalizeState> {
                     validator_info: extra.validator_info,
                     consensus_info: extra.consensus_info,
 
-                    processed_upto,
+                    processed_upto: processed_upto.clone(),
                     top_processed_to_anchor,
                     ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
                     shards_processed_to,
@@ -702,6 +745,7 @@ impl Phase<FinalizeState> {
                 || self.state.mc_data.consensus_info,
                 |mcd| mcd.consensus_info,
             ),
+            processed_upto,
         });
 
         let total_elapsed = histogram.finish();

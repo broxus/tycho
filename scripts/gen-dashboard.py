@@ -1383,9 +1383,7 @@ def collator_queue_metrics() -> RowPanel:
             "Queue clean until",
             legend_format=legend_format,
         ),
-        create_counter_panel(
-            "tycho_internal_queue_uncommitted_diffs_count", "Uncommited diffs"
-        ),
+
         create_heatmap_panel(
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
@@ -1398,16 +1396,7 @@ def collator_queue_metrics() -> RowPanel:
             "Commited iterator init time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_uncommited_state_iterator_create_time",
-            "Uncommitted iterator init time",
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_uncommitted_statistics_load_time",
-            "Uncommited statistics load time",
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_committed_statistics_load_time",
-            "Committed statistics load time",
+            "tycho_internal_queue_statistics_load_time", "Committed statistics load time"
         ),
         create_heatmap_panel(
             "tycho_internal_queue_apply_diff_add_statistics_time",
@@ -1427,8 +1416,7 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_create_iterator_time", "Create iterator time"
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_add_messages_with_statistics_write_time",
-            "Write uncommited data time",
+            "tycho_internal_queue_write_diff_time", "Write uncommited data time"
         ),
         create_counter_panel(
             "tycho_collator_queue_adapter_iterators_count", "Iterators count"

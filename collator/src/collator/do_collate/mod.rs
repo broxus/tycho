@@ -114,6 +114,7 @@ impl CollatorStdImpl {
         )?;
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
+
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
