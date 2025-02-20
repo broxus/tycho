@@ -389,11 +389,10 @@ impl CollatorStdImpl {
             ));
         }
 
-        // trim outdated diffs and calc queue diffs tail lenght
-        if let Some(value) = min_processed_to {
-            mq_adapter.trim_diffs(&shard_id, &value)?;
-        };
-        let diff_tail_len = mq_adapter.get_diffs_count_by_shard(&shard_id) as u32 + 1;
+        let diff_tail_len = mq_adapter.get_diffs_tail_len(
+            &shard_id,
+            &min_processed_to.unwrap_or_default().next_value(),
+        ) + 1;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
