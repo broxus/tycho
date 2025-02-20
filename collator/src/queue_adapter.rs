@@ -70,18 +70,16 @@ where
     ) -> Result<()>;
 
     fn clear_uncommitted_state(&self) -> Result<()>;
-    /// Removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
-    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
     /// Get diff for the given block from committed and uncommitted state
     fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
-    /// Returns the number of diffs in cache for the given shard
-    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
     /// Get last applied mc block id from committed state
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Get diffs tail len from uncommitted state and committed state
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -200,16 +198,6 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.clear_uncommitted_state()
     }
 
-    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-            source_shard = ?source_shard,
-            inclusive_until = ?inclusive_until,
-            "Trimming diffs"
-        );
-        self.queue.trim_diffs(source_shard, inclusive_until)
-    }
-
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
         self.queue.get_diffs(blocks)
     }
@@ -218,15 +206,15 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.get_diff(shard_ident, seqno)
     }
 
-    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
-        self.queue.get_diffs_count_by_shard(shard_ident)
-    }
-
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
         self.queue.is_diff_exists(block_id_short)
     }
 
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
         self.queue.get_last_applied_mc_block_id()
+    }
+
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
+        self.queue.get_diffs_tail_len(shard_ident, max_message_from)
     }
 }

@@ -932,7 +932,7 @@ impl MasterBlocksCacheData {
 
     fn remove_last_collated_block_ids_from(&mut self, from_block_seqno: &BlockSeqno) {
         self.last_collated_mc_block_ids
-            .retain(|seqno, _| seqno <= from_block_seqno);
+            .retain(|seqno, _| seqno < from_block_seqno);
     }
 
     fn remove_last_collated_block_ids_before(&mut self, before_block_seqno: &BlockSeqno) {
