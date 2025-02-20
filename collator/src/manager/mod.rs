@@ -1624,11 +1624,6 @@ where
             )?;
         }
 
-        // trim diffs tails for all shards
-        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
-            self.mq_adapter.trim_diffs(shard_id, min_processed_to)?;
-        }
-
         // sync all applied blocks
         // and refresh collation session by the last one
         // with re-init of collators state
