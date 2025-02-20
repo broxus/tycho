@@ -63,7 +63,7 @@ impl TasksStream {
                     std::panic::resume_unwind(e.into_panic());
                 }
                 // Task cancelled, loop once more with the next task
-                Err(_) => continue,
+                Err(_) => {}
             }
         }
     }

@@ -161,7 +161,7 @@ impl GcSubscriber {
                         let time_to_wait = compute_offset(pss_handle.gen_utime());
                         tokio::select! {
                             _ = tokio::time::sleep(time_to_wait) => break pss_handle.id().seqno,
-                            _ = &mut new_state_found => continue,
+                            _ = &mut new_state_found => {},
                         }
                     }
                 };

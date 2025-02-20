@@ -100,22 +100,22 @@ impl RoundTaskReady {
         mut collector_signal_rx: watch::Receiver<CollectorSignal>,
         round_ctx: &RoundCtx,
     ) -> BoxFuture<'static, Option<Point>> {
-        let allowed_to_produce =
-            self.last_own_point.as_ref().is_none_or(|prev_own| {
-                match prev_own.round.cmp(&head.prev().round()) {
-                    cmp::Ordering::Less => true,
-                    cmp::Ordering::Equal => {
-                        prev_own.evidence.len() >= prev_own.signers.majority_of_others()
-                    }
-                    cmp::Ordering::Greater => panic!(
-                        "already produced point at {:?} and gathered {}/{} evidence, \
-                     trying to produce point at {:?}",
-                        prev_own.round,
-                        prev_own.evidence.len(),
-                        prev_own.signers.majority_of_others(),
-                        head.current().round()
-                    ),
+        let allowed_to_produce = self
+            .last_own_point
+            .as_ref()
+            .is_none_or(|prev_own| match prev_own.round.cmp(&head.prev().round()) {
+                cmp::Ordering::Less => true,
+                cmp::Ordering::Equal => {
+                    prev_own.evidence.len() >= prev_own.signers.majority_of_others()
                 }
+                cmp::Ordering::Greater => panic!(
+                    "already produced point at {:?} and gathered {}/{} evidence, \
+                     trying to produce point at {:?}",
+                    prev_own.round,
+                    prev_own.evidence.len(),
+                    prev_own.signers.majority_of_others(),
+                    head.current().round()
+                ),
             });
 
         if !allowed_to_produce {
@@ -141,7 +141,7 @@ impl RoundTaskReady {
                         }
                         match *collector_signal_rx.borrow_and_update() {
                             CollectorSignal::Retry {ready: true} => break false,
-                            CollectorSignal::Retry {ready: false} => continue,
+                            CollectorSignal::Retry {ready: false} => {},
                         }
                     }
                 );

@@ -228,7 +228,6 @@ impl Inner {
                         %peer_id,
                         "failed to ping neighbour: {e}",
                     );
-                    continue;
                 }
             }
         }

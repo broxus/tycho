@@ -388,10 +388,9 @@ impl StateNodeAdapterStdImpl {
                     Ok(received_block_id) if block_id == received_block_id => {
                         break;
                     }
-                    Ok(_) => continue,
+                    Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(target: tracing_targets::STATE_NODE_ADAPTER, "Broadcast channel lagged: {}", count);
-                        continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Broadcast channel closed");

@@ -412,7 +412,7 @@ impl BlockchainRpcClient {
                         neighbour,
                     });
                 }
-                PersistentStateInfo::NotFound => continue,
+                PersistentStateInfo::NotFound => {}
             }
         }
 
@@ -525,11 +525,9 @@ impl BlockchainRpcClient {
                         new_archive_count += 1;
 
                         handle.accept();
-                        continue;
                     }
                     ArchiveInfo::NotFound => {
                         handle.accept();
-                        continue;
                     }
                 }
             }

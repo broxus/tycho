@@ -680,7 +680,7 @@ impl ShardAccountStuff {
                 (None, Some(old)) if old.public => {
                     self.remove_public_library(key, global_libraries)?;
                 }
-                _ => continue,
+                _ => {}
             }
         }
         Ok(())
