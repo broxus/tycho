@@ -446,10 +446,7 @@ impl StoreValue<()> {
             body: request_body.clone(),
         });
 
-        let res = match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
-            Ok(res) => Some(res),
-            Err(_) => None,
-        };
+        let res = (tokio::time::timeout(REQUEST_TIMEOUT, req).await).ok();
 
         (node, res)
     }

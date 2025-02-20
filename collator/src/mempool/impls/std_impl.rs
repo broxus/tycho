@@ -223,7 +223,7 @@ impl MempoolAdapterStdImpl {
 
                     let is_executable = first_after_gap
                         .as_ref()
-                        .map_or(true, |first_id| anchor_id >= *first_id);
+                        .is_none_or(|first_id| anchor_id >= *first_id);
 
                     let unique_messages =
                         parser.parse_unique(anchor_id, chain_time, is_executable, payloads);

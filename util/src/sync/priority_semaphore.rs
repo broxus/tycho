@@ -313,7 +313,7 @@ impl PrioritySemaphore {
             // Do we need to register the new waker?
             if waker
                 .as_ref()
-                .map_or(true, |waker| !waker.will_wake(cx.waker()))
+                .is_none_or(|waker| !waker.will_wake(cx.waker()))
             {
                 old_waker = std::mem::replace(waker, Some(cx.waker().clone()));
             }

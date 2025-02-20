@@ -101,7 +101,7 @@ impl RoundTaskReady {
         round_ctx: &RoundCtx,
     ) -> BoxFuture<'static, Option<Point>> {
         let allowed_to_produce =
-            self.last_own_point.as_ref().map_or(true, |prev_own| {
+            self.last_own_point.as_ref().is_none_or(|prev_own| {
                 match prev_own.round.cmp(&head.prev().round()) {
                     cmp::Ordering::Less => true,
                     cmp::Ordering::Equal => {
