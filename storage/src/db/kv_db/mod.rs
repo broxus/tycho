@@ -137,6 +137,8 @@ weedb::tables! {
         pub internal_message_stats: tables::InternalMessageStats,
         pub internal_message_stats_uncommitted: tables::InternalMessageStatsUncommited,
         pub internal_message_var: tables::InternalMessageVar,
+        pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
+        pub internal_message_diffs_tail_uncommitted: tables::InternalMessageDiffsTailUncommitted,
     }
 }
 
