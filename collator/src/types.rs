@@ -225,6 +225,7 @@ pub struct BlockCandidate {
     pub created_by: HashBytes,
     pub queue_diff_aug: QueueDiffStuffAug,
     pub consensus_info: ConsensusInfo,
+    pub processed_upto: ProcessedUptoInfoStuff,
 }
 
 #[derive(Default, Clone)]

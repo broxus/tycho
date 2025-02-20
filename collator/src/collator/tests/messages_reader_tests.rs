@@ -520,7 +520,7 @@ where
             queue_diff_with_msgs,
             reader_state,
             anchors_cache,
-        } = primary_messages_reader.finalize(self.curr_lt, other_shards_top_block_diffs)?;
+        } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
 
         // create diff and compute hash
         let (min_message, max_message) = {
@@ -545,7 +545,12 @@ where
         let queue_diff_hash = *queue_diff.hash();
 
         // update messages queue
-        let statistics = DiffStatistics::from((&queue_diff_with_msgs, self.shard_id));
+        let statistics = DiffStatistics::from_diff(
+            &queue_diff_with_msgs,
+            self.shard_id,
+            min_message,
+            max_message,
+        );
         self.primary_mq_adapter.apply_diff(
             queue_diff_with_msgs.clone(),
             BlockIdShort {
@@ -554,7 +559,6 @@ where
             },
             &queue_diff_hash,
             statistics.clone(),
-            max_message,
         )?;
         self.secondary_mq_adapter.apply_diff(
             queue_diff_with_msgs,
@@ -564,7 +568,6 @@ where
             },
             &queue_diff_hash,
             statistics,
-            max_message,
         )?;
 
         // update working state

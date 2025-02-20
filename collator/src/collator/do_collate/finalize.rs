@@ -26,11 +26,16 @@ use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
     PreparedInMsg, PreparedOutMsg,
 };
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{
+    DiffStatistics, EnqueuedMessage, PartitionRouter, QueueShardRange,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
-use crate::types::{BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardHashesExt};
+use crate::types::{
+    BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardDescriptionExt,
+    ShardHashesExt,
+};
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizeState {
@@ -75,10 +80,10 @@ impl Phase<FinalizeState> {
                 .collation_data
                 .top_shard_blocks
                 .iter()
-                .map(|b| (b.block_id.shard, b.block_id.seqno))
+                .map(|b| b.block_id)
                 .collect()
         } else {
-            let mut top_blocks: FastHashMap<ShardIdent, u32> = self
+            let mut top_blocks: Vec<BlockId> = self
                 .state
                 .mc_data
                 .shards
@@ -86,22 +91,59 @@ impl Phase<FinalizeState> {
                 .filter(|(shard, descr)| {
                     descr.top_sc_block_updated && shard != &self.state.shard_id
                 })
-                .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
+                .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
                 .collect();
 
-            top_blocks.insert(
-                self.state.mc_data.block_id.shard,
-                self.state.mc_data.block_id.seqno,
-            );
+            top_blocks.push(self.state.mc_data.block_id);
 
             top_blocks
         };
 
-        let mut diffs = FastHashMap::default();
-        for (shard, seqno) in &top_shard_blocks {
-            if let Some(diff) = mq_adapter.get_diff(shard, *seqno) {
-                diffs.insert(*shard, diff);
+        // load top blocks diffs
+        let mut diffs_info = FastHashMap::default();
+
+        for top_shard_block in top_shard_blocks.iter() {
+            if top_shard_block.seqno == 0 {
+                continue;
             }
+
+            let diff = mq_adapter
+                .get_diff(&top_shard_block.shard, top_shard_block.seqno)?
+                .ok_or_else(|| anyhow!("Diff for block {} not found", top_shard_block))?;
+
+            let partition_router = PartitionRouter::with_partitions(
+                &diff.router_partitions_src,
+                &diff.router_partitions_dst,
+            );
+
+            // TODO use dynamic shards
+            let range_mc = QueueShardRange {
+                shard_ident: ShardIdent::MASTERCHAIN,
+                from: diff.min_message,
+                to: diff.max_message,
+            };
+
+            let range_shard = QueueShardRange {
+                shard_ident: ShardIdent::new_full(0),
+                from: diff.min_message,
+                to: diff.max_message,
+            };
+
+            let ranges = vec![range_mc, range_shard];
+            let queue_statistic = mq_adapter.get_statistics(0, &ranges)?;
+
+            let mut diff_statistics = FastHashMap::default();
+            diff_statistics.insert(0, queue_statistic.statistics().clone());
+
+            let diff_statistic = DiffStatistics::new(
+                top_shard_block.shard,
+                diff.min_message,
+                diff.max_message,
+                diff_statistics,
+                queue_statistic.shard_messages_count(),
+            );
+
+            diffs_info.insert(top_shard_block.shard, (partition_router, diff_statistic));
         }
 
         // get queue diff and check for pending internals
@@ -117,7 +159,7 @@ impl Phase<FinalizeState> {
                 &labels,
             );
             let finalize_message_reader_res =
-                messages_reader.finalize(self.extra.executor.min_next_lt(), diffs)?;
+                messages_reader.finalize(self.extra.executor.min_next_lt(), &diffs_info)?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };
@@ -164,7 +206,12 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
-                let statistics = (&queue_diff_with_msgs, block_id_short.shard).into();
+                let statistics = DiffStatistics::from_diff(
+                    &queue_diff_with_msgs,
+                    block_id_short.shard,
+                    min_message,
+                    max_message,
+                );
 
                 histogram.finish();
 
@@ -179,7 +226,6 @@ impl Phase<FinalizeState> {
                     block_id_short,
                     &queue_diff_hash,
                     statistics,
-                    max_message,
                 )?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
@@ -374,9 +420,15 @@ impl Phase<FinalizeState> {
             (None, Some(self.state.mc_data.make_block_ref()))
         };
 
+        let version = if self.state.collation_data.block_id_short.seqno % 3 == 0 {
+            0
+        } else {
+            1
+        };
+
         // build block info
         let mut new_block_info = BlockInfo {
-            version: 0,
+            version,
             key_block: matches!(&mc_state_extra, Some(extra) if extra.after_key_block),
             shard: self.state.collation_data.block_id_short.shard,
             seqno: self.state.collation_data.block_id_short.seqno,
@@ -674,7 +726,7 @@ impl Phase<FinalizeState> {
                     validator_info: extra.validator_info,
                     consensus_info: extra.consensus_info,
 
-                    processed_upto,
+                    processed_upto: processed_upto.clone(),
                     top_processed_to_anchor,
                     ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
                     shards_processed_to,
@@ -708,6 +760,7 @@ impl Phase<FinalizeState> {
                 || self.state.mc_data.consensus_info,
                 |mcd| mcd.consensus_info,
             ),
+            processed_upto,
         });
 
         let total_elapsed = histogram.finish();

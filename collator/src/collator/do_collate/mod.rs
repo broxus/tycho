@@ -113,6 +113,9 @@ impl CollatorStdImpl {
         )?;
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
+
+        let mq_adapter = self.mq_adapter.clone();
+
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
@@ -126,7 +129,7 @@ impl CollatorStdImpl {
         let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
-            let mq_adapter = self.mq_adapter.clone();
+
             let span = tracing::Span::current();
             move || {
                 let _span = span.enter();

@@ -17,6 +17,7 @@ use super::types::{
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
+use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
     BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, ProofFunds,
     TopBlockDescription,
@@ -57,9 +58,7 @@ impl BlocksCache {
                         .map(|(shard, queue_key)| (*shard, *queue_key))
                         .collect();
 
-                    if let Some(additional_info) =
-                        entry.data.get_additional_shard_block_cache_info()?
-                    {
+                    if let Some(additional_info) = entry.data.additional_shard_block_cache_info()? {
                         result.push(TopBlockDescription {
                             block_id: entry.block_id,
                             block_info: additional_info.block_info,
@@ -343,10 +342,12 @@ impl BlocksCache {
         &self,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         state: ShardStateStuff,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Option<BlockCacheStoreResult>> {
         let block_id = *state.block_id();
 
-        let ctx = ReceivedBlockContext::load(state_node_adapter.as_ref(), state).await?;
+        let ctx =
+            ReceivedBlockContext::load(state_node_adapter.as_ref(), state, processed_upto).await?;
 
         let received_and_collated;
         let last_collated_mc_block_id;
@@ -849,6 +850,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                         ctx.queue_diff,
                         ctx.out_msgs,
                         ctx.ref_by_mc_seqno,
+                        ctx.processed_upto,
                     )?;
 
                     self.data.on_insert_received(&new_entry)?;
@@ -877,6 +879,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     ctx.queue_diff,
                     ctx.out_msgs,
                     ctx.ref_by_mc_seqno,
+                    ctx.processed_upto,
                 )?);
 
                 metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").increment(1);
@@ -1051,6 +1054,7 @@ struct ReceivedBlockContext {
     queue_diff: QueueDiffStuff,
     out_msgs: Lazy<OutMsgDescr>,
     ref_by_mc_seqno: u32,
+    processed_upto: ProcessedUptoInfoStuff,
     // NOTE: `BlockStuff` can also be added here if needed since it's already loaded
 }
 
@@ -1058,6 +1062,7 @@ impl ReceivedBlockContext {
     async fn load(
         state_node_adapter: &dyn StateNodeAdapter,
         state: ShardStateStuff,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Self> {
         static EMPTY_OUT_MSGS: OnceLock<Lazy<OutMsgDescr>> = OnceLock::new();
 
@@ -1073,6 +1078,7 @@ impl ReceivedBlockContext {
                     .get_or_init(|| Lazy::new(&OutMsgDescr::new()).unwrap())
                     .clone(),
                 ref_by_mc_seqno: 0,
+                processed_upto: Default::default(),
             });
         }
 
@@ -1104,6 +1110,7 @@ impl ReceivedBlockContext {
             queue_diff,
             out_msgs,
             ref_by_mc_seqno,
+            processed_upto,
         })
     }
 }

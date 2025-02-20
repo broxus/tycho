@@ -548,6 +548,36 @@ impl ColumnFamilyOptions<Caches> for InternalMessageDiffsTail {
     }
 }
 
+pub struct InternalMessageDiffInfo;
+impl ColumnFamily for InternalMessageDiffInfo {
+    const NAME: &'static str = "int_msg_diff_info";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for InternalMessageDiffInfo {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
+pub struct InternalMessageDiffInfoUncommitted;
+impl ColumnFamily for InternalMessageDiffInfoUncommitted {
+    const NAME: &'static str = "int_msg_diff_info_uncommitted";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for InternalMessageDiffInfoUncommitted {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,

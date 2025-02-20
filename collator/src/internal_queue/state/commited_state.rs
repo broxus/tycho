@@ -1,7 +1,7 @@
 use anyhow::Result;
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_storage::model::{DiffTailKey, ShardsInternalMessagesKey};
+use tycho_storage::model::{DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey};
 use tycho_storage::{InternalQueueSnapshot, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -84,6 +84,8 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
     /// Get last applied mc block id
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
+    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
+    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
 }
 
 // IMPLEMENTATION
@@ -175,5 +177,25 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
             shard_ident: *shard_ident,
             max_message: *from,
         })
+    }
+
+    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let diff_info_bytes = snapshot.get_diff_info_committed(&DiffInfoKey {
+            shard_ident: *shard_ident,
+            seqno,
+        })?;
+
+        if let Some(diff_info_bytes) = diff_info_bytes {
+            let diff_info = tl_proto::deserialize(&diff_info_bytes)?;
+            Ok(Some(diff_info))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        snapshot.get_last_applied_block_seqno_committed(shard_ident)
     }
 }

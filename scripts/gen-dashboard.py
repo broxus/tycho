@@ -1418,7 +1418,7 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_create_iterator_time", "Create iterator time"
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_add_messages_with_statistics_write_time", "Write uncommited data time"
+            "tycho_internal_queue_write_diff_write_time", "Write uncommited data time"
         ),
         create_counter_panel(
             "tycho_collator_queue_adapter_iterators_count", "Iterators count"
