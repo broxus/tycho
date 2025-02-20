@@ -24,9 +24,8 @@ use super::{
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
-use crate::internal_queue::state::commited_state::CommittedStateImplFactory;
-use crate::internal_queue::state::uncommitted_state::UncommittedStateImplFactory;
-use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::state::storage::QueueStateImplFactory;
+use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue};
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use crate::test_utils::try_init_test_tracing;
@@ -520,7 +519,7 @@ where
             queue_diff_with_msgs,
             reader_state,
             anchors_cache,
-        } = primary_messages_reader.finalize(self.curr_lt, other_shards_top_block_diffs)?;
+        } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
 
         // create diff and compute hash
         let (min_message, max_message) = {
@@ -545,7 +544,12 @@ where
         let queue_diff_hash = *queue_diff.hash();
 
         // update messages queue
-        let statistics = DiffStatistics::from((&queue_diff_with_msgs, self.shard_id));
+        let statistics = DiffStatistics::from_diff(
+            &queue_diff_with_msgs,
+            self.shard_id,
+            min_message,
+            max_message,
+        );
         self.primary_mq_adapter.apply_diff(
             queue_diff_with_msgs.clone(),
             BlockIdShort {
@@ -554,7 +558,7 @@ where
             },
             &queue_diff_hash,
             statistics.clone(),
-            max_message,
+            Some(DiffZone::Both),
         )?;
         self.secondary_mq_adapter.apply_diff(
             queue_diff_with_msgs,
@@ -564,7 +568,7 @@ where
             },
             &queue_diff_hash,
             statistics,
-            max_message,
+            Some(DiffZone::Both),
         )?;
 
         // update working state
@@ -1481,11 +1485,9 @@ impl std::fmt::Debug for TestInternalMessageType {
 async fn create_test_queue_adapter<V: InternalMessageValue>(
 ) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp().await?;
-    let uncommitted_state_factory = UncommittedStateImplFactory::new(storage.clone());
-    let committed_state_factory = CommittedStateImplFactory::new(storage.clone());
+    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory,
-        committed_state_factory,
+        state: queue_state_factory,
         config: Default::default(),
     };
     let queue = queue_factory.create();

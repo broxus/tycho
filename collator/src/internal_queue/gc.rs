@@ -8,7 +8,7 @@ use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::internal_queue::state::commited_state::CommittedState;
+use crate::internal_queue::state::storage::QueueState;
 use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
 use crate::tracing_targets;
 
@@ -19,7 +19,7 @@ pub struct GcManager {
 
 impl GcManager {
     pub fn start<V: InternalMessageValue>(
-        committed_state: Arc<dyn CommittedState<V>>,
+        committed_state: Arc<dyn QueueState<V>>,
         execution_interval: Duration,
     ) -> Self {
         let delete_until = Arc::new(Mutex::new(GcRange::new()));
@@ -77,7 +77,7 @@ impl Drop for GcManager {
 
 fn gc_task<V: InternalMessageValue>(
     gc_state: Arc<Mutex<GcRange>>,
-    committed_state: Arc<dyn CommittedState<V>>,
+    committed_state: Arc<dyn QueueState<V>>,
     delete_until: GcRange,
 ) {
     let _histogram = HistogramGuard::begin("tycho_internal_queue_gc_execute_task_time");
