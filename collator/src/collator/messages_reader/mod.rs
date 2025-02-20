@@ -860,6 +860,7 @@ impl MessagesReader {
                 && self.externals_reader.last_range_offset_reached(par_id)
             {
                 partitions_readers.insert(*par_id, par_reader);
+                can_drop_processing_offset_in_all_partitions = false;
                 continue;
             }
 
