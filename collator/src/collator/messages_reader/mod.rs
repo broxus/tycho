@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use self::externals_reader::*;
 use self::internals_reader::*;
@@ -15,9 +15,8 @@ pub(super) use self::reader_state::*;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
-use crate::internal_queue::queue::ShortQueueDiff;
 use crate::internal_queue::types::{
-    EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    DiffStatistics, EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -367,7 +366,7 @@ impl MessagesReader {
     pub fn finalize(
         mut self,
         current_next_lt: u64,
-        diffs: Vec<(ShardIdent, ShortQueueDiff)>,
+        diffs_info: &FastHashMap<ShardIdent, (PartitionRouter, DiffStatistics)>,
     ) -> Result<FinalizedMessagesReader> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
@@ -435,7 +434,7 @@ impl MessagesReader {
             &mut queue_diff_with_msgs.partition_router,
             aggregated_stats,
             self.for_shard_id,
-            diffs,
+            diffs_info,
         )?;
 
         // metrics: accounts count in isolated partitions
@@ -498,7 +497,7 @@ impl MessagesReader {
         partition_router: &mut PartitionRouter,
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
-        top_block_diffs: Vec<(ShardIdent, ShortQueueDiff)>,
+        diffs_info: &FastHashMap<ShardIdent, (PartitionRouter, DiffStatistics)>,
     ) -> Result<FastHashSet<HashBytes>> {
         let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
@@ -531,7 +530,7 @@ impl MessagesReader {
                     dest_int_address,
                 );
                 // if we have account for another shard then take info from that shard
-                let acc_shard_diff_info = top_block_diffs
+                let acc_shard_diff_info = diffs_info
                     .iter()
                     .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
                     .map(|(_, diff)| diff);
@@ -546,14 +545,13 @@ impl MessagesReader {
                         );
                         msgs_count
                     }
-                    Some(diff) => {
+                    Some((router, statistics)) => {
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             "use diff for address {} because we have diff",
                             dest_int_address,
                         );
                         // getting remote shard partition from diff
-                        let remote_shard_partition =
-                            diff.router().get_partition(None, &dest_int_address);
+                        let remote_shard_partition = router.get_partition(None, &dest_int_address);
 
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             "remote shard partition for address {} is {}",
@@ -571,7 +569,7 @@ impl MessagesReader {
                         }
 
                         // if remote partition == 0 then we need to check statistics
-                        let remote_msgs_count = match diff.statistics().partition(0) {
+                        let remote_msgs_count = match statistics.partition(0) {
                             None => {
                                 tracing::trace!(target: tracing_targets::COLLATOR,
                                     "use aggregated stats for address {} because we do not have partition 0 stats in diff",

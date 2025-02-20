@@ -502,7 +502,7 @@ where
         }
 
         // skip already applied diff
-        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id()) {
+        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id())? {
             return Ok(());
         }
 

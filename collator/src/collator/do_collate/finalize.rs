@@ -26,11 +26,16 @@ use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
     PreparedInMsg, PreparedOutMsg,
 };
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{
+    EnqueuedMessage
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
-use crate::types::{BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardHashesExt};
+use crate::types::{
+    BlockCandidate, CollationSessionInfo, CollatorConfig, McData,
+    ShardHashesExt,
+};
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizeState {
@@ -69,36 +74,6 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
-        // getting top shard blocks
-        let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
-            self.state
-                .collation_data
-                .top_shard_blocks
-                .iter()
-                .map(|b| (b.block_id.shard, b.block_id.seqno))
-                .collect()
-        } else {
-            let mut top_blocks: FastHashMap<ShardIdent, u32> = self
-                .state
-                .mc_data
-                .shards
-                .iter()
-                .filter(|(shard, descr)| {
-                    descr.top_sc_block_updated && shard != &self.state.shard_id
-                })
-                .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
-                .collect();
-
-            top_blocks.insert(
-                self.state.mc_data.block_id.shard,
-                self.state.mc_data.block_id.seqno,
-            );
-
-            top_blocks
-        };
-
-        let diffs = mq_adapter.get_diffs(top_shard_blocks);
-
         // get queue diff and check for pending internals
         let create_queue_diff_elapsed;
         let FinalizedMessagesReader {
@@ -111,8 +86,8 @@ impl Phase<FinalizeState> {
                 "tycho_do_collate_create_queue_diff_time",
                 &labels,
             );
-            let finalize_message_reader_res =
-                messages_reader.finalize(self.extra.executor.min_next_lt(), diffs)?;
+            let finalize_message_reader_res = messages_reader
+                .finalize(self.extra.executor.min_next_lt(), &self.state.diffs_info)?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };

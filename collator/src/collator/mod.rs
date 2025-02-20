@@ -45,6 +45,7 @@ mod messages_reader;
 mod types;
 
 pub use error::CollationCancelReason;
+use tycho_util::FastHashMap;
 pub use types::ForceMasterCollation;
 
 #[cfg(test)]
@@ -1315,7 +1316,7 @@ impl CollatorStdImpl {
             mut reader_state, ..
         } = messages_reader.finalize(
             0, // can pass 0 because new messages reader was not initialized in this case
-            vec![],
+            &FastHashMap::default(),
         )?;
         std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 

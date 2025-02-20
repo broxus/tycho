@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
@@ -23,8 +25,8 @@ use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
     QueueStatistics,
 };
-use crate::tracing_targets;
 use crate::types::ProcessedTo;
+use crate::{internal_queue, tracing_targets};
 
 // FACTORY
 
@@ -105,9 +107,9 @@ where
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
     /// Get diff for the given blocks from committed and uncommitted state
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
     /// Check if diff exists in the cache
-    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
     /// Get last applied mc block id from committed state
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
 }
@@ -252,22 +254,36 @@ where
             .or_default();
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
-        let shard_diff = shard_diffs.get(&block_id_short.seqno);
+        // let shard_diff = shard_diffs.get(&block_id_short.seqno);
+
+        let shard_diff = internal_queue::queue::Queue::get_diff(
+            self,
+            &block_id_short.shard,
+            block_id_short.seqno,
+        )?;
 
         // Check if the diff is already applied
         // return if hash is the same
         if let Some(shard_diff) = shard_diff {
             // Check if the diff is already applied with different hash
-            if shard_diff.hash() != hash {
+            if shard_diff.hash != *hash {
                 bail!(
                     "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
-                    block_id_short, shard_diff.hash(),  hash,
+                    block_id_short, shard_diff.hash,  hash,
                 )
             }
             return Ok(());
         }
 
-        let last_applied_seqno = shard_diffs.keys().last().cloned();
+        let last_applied_seqno_uncommitted = self
+            .uncommitted_state
+            .get_last_applied_block_seqno(&block_id_short.shard)?;
+
+        let last_applied_seqno_committed = self
+            .committed_state
+            .get_last_applied_block_seqno(&block_id_short.shard)?;
+
+        let last_applied_seqno = max(last_applied_seqno_uncommitted, last_applied_seqno_committed);
 
         if let Some(last_applied_seqno) = last_applied_seqno {
             // Check if the diff is already applied
@@ -286,15 +302,14 @@ where
         }
 
         // Add messages to uncommitted_state if there are any
-        if !diff.messages.is_empty() {
-            self.uncommitted_state.add_messages_with_statistics(
-                &block_id_short,
-                &diff.partition_router,
-                &diff.messages,
-                &statistics,
-                &max_message,
-            )?;
-        }
+        self.uncommitted_state.add_messages_with_statistics(
+            &block_id_short,
+            &diff.partition_router,
+            &diff.messages,
+            &statistics,
+            &max_message,
+            *hash,
+        )?;
 
         let short_diff = ShortQueueDiff::new(
             diff.processed_to,
@@ -409,14 +424,9 @@ where
 
     fn clear_uncommitted_state(&self) -> Result<()> {
         self.uncommitted_state.truncate()?;
-        let diffs_before_clear: usize =
-            self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
         self.uncommitted_diffs.clear();
-        let diffs_after_clear: usize = self.uncommitted_diffs.iter().map(|r| r.value().len()).sum();
         tracing::info!(
             target: tracing_targets::MQ,
-            diffs_before_clear,
-            diffs_after_clear,
              "Cleared uncommitted diffs.",
         );
         Ok(())
@@ -467,20 +477,16 @@ where
         result
     }
 
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
-        if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
-            if let Some(diff) = shard_diffs.get(&seqno) {
-                return Some(diff.clone());
-            }
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
+        if let Some(diff) = self.uncommitted_state.get_diff_info(&shard_ident, seqno)? {
+            return Ok(Some(diff));
         }
 
-        if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
-            if let Some(diff) = shard_diffs.get(&seqno) {
-                return Some(diff.clone());
-            }
+        if let Some(diff) = self.committed_state.get_diff_info(&shard_ident, seqno)? {
+            return Ok(Some(diff));
         }
 
-        None
+        Ok(None)
     }
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
@@ -493,7 +499,8 @@ where
             .get_diffs_tail_len(shard_ident, max_message_from);
 
         tracing::info!(
-            target: tracing_targets::MQ,
+            // target: tracing_targets::MQ,
+            target: "local_debug",
             shard_ident = ?shard_ident,
             uncommitted_tail_len,
             committed_tail_len,
@@ -503,14 +510,13 @@ where
         uncommitted_tail_len + committed_tail_len
     }
 
-    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
-        self.uncommitted_diffs
-            .get(&block_id_short.shard)
-            .is_some_and(|diffs| diffs.contains_key(&block_id_short.seqno))
-            || self
-                .committed_diffs
-                .get(&block_id_short.shard)
-                .is_some_and(|diffs| diffs.contains_key(&block_id_short.seqno))
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool> {
+        Ok(internal_queue::queue::Queue::get_diff(
+            self,
+            &block_id_short.shard,
+            block_id_short.seqno,
+        )?
+        .is_some())
     }
 
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {

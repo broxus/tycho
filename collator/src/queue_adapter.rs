@@ -3,6 +3,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
@@ -73,9 +74,9 @@ where
     /// Get diffs for the given blocks from committed and uncommitted state
     fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
     /// Get diff for the given block from committed and uncommitted state
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
     /// Check if diff exists in the cache
-    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
     /// Get last applied mc block id from committed state
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get diffs tail len from uncommitted state and committed state
@@ -148,7 +149,14 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue
             .apply_diff(diff, block_id_short, diff_hash, statistics, max_message)?;
 
-        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+        // tracing::info!(target: tracing_targets::MQ_ADAPTER,
+        //     new_messages_len = len,
+        //     elapsed = ?time.elapsed(),
+        //     processed_to = ?processed_to,
+        //     "Diff applied",
+        // );
+
+        tracing::info!(target: "local_debug",
             new_messages_len = len,
             elapsed = ?time.elapsed(),
             processed_to = ?processed_to,
@@ -202,11 +210,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.get_diffs(blocks)
     }
 
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
         self.queue.get_diff(shard_ident, seqno)
     }
 
-    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
+    fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool> {
         self.queue.is_diff_exists(block_id_short)
     }
 

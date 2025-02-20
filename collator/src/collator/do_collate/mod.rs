@@ -9,7 +9,7 @@ use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
@@ -26,13 +26,16 @@ use super::types::{
 use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::types::RandSeed;
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{
+    DiffStatistics, EnqueuedMessage, PartitionRouter, QueueShardRange,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
-    TopBlockDescription, TopShardBlockInfo,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo,
+    ShardDescriptionExt as OtherShardDescriptionExt, ShardDescriptionShort, TopBlockDescription,
+    TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -110,12 +113,82 @@ impl CollatorStdImpl {
         )?;
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
+
+        let mq_adapter = self.mq_adapter.clone();
+        let state_node_adapter = self.state_node_adapter.clone();
+
+        // getting top shard blocks
+        let top_shard_blocks = if collation_data.block_id_short.is_masterchain() {
+            collation_data
+                .top_shard_blocks
+                .iter()
+                .map(|b| b.block_id)
+                .collect()
+        } else {
+            let mut top_blocks: Vec<BlockId> = mc_data
+                .shards
+                .iter()
+                .filter(|(shard, descr)| descr.top_sc_block_updated && shard != &self.shard_id)
+                .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
+                .collect();
+
+            top_blocks.push(mc_data.block_id);
+
+            top_blocks
+        };
+
+        let mut diffs_info = FastHashMap::default();
+
+        for top_shard_block in top_shard_blocks.iter() {
+            if top_shard_block.seqno == 0 {
+                continue;
+            }
+            let diff: QueueDiffStuff = state_node_adapter
+                .load_diff(&top_shard_block)
+                .await?
+                .ok_or_else(|| anyhow!("Top shard block diff not found. block{top_shard_block:?}"))?;
+            let partition_router = PartitionRouter::with_partitions(
+                &diff.diff().router_partitions_src,
+                &diff.diff().router_partitions_dst,
+            );
+
+            // TODO use dynamic shards
+            let range_mc = QueueShardRange {
+                shard_ident: ShardIdent::MASTERCHAIN,
+                from: diff.diff().min_message,
+                to: diff.diff().max_message,
+            };
+
+            let range_shard = QueueShardRange {
+                shard_ident: ShardIdent::new_full(0),
+                from: diff.diff().min_message,
+                to: diff.diff().max_message,
+            };
+
+            let ranges = vec![range_mc, range_shard];
+            let queue_statistic = mq_adapter.get_statistics(0, &ranges)?;
+
+            let mut diff_statistics = FastHashMap::default();
+            diff_statistics.insert(0, queue_statistic.statistics().clone());
+
+            let diff_statistic = DiffStatistics::new(
+                top_shard_block.shard,
+                diff.diff().min_message,
+                diff.diff().max_message,
+                diff_statistics,
+                queue_statistic.shard_messages_count(),
+            );
+
+            diffs_info.insert(top_shard_block.shard, (partition_router, diff_statistic));
+        }
+
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
             mc_data,
             prev_shard_data,
             shard_id: self.shard_id,
+            diffs_info,
         });
 
         let CollationResult {
@@ -127,7 +200,7 @@ impl CollatorStdImpl {
         } = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
-            let mq_adapter = self.mq_adapter.clone();
+
             let span = tracing::Span::current();
             move || {
                 let _span = span.enter();
@@ -238,6 +311,7 @@ impl CollatorStdImpl {
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
 
+        let block_id = state.collation_data.block_id_short.clone();
         // prepare execution
         let histogram_prepare =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
@@ -350,6 +424,15 @@ impl CollatorStdImpl {
             &shard_id,
             &min_processed_to.unwrap_or_default().next_value(),
         ) + 1;
+
+        tracing::info!(target: "local_debug",
+            "block tail len {:?} {} {:?}",
+            block_id,
+            diff_tail_len,
+            min_processed_to
+        );
+
+        // let diff_tail_len = 1;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(

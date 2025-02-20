@@ -1049,7 +1049,7 @@ fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
     .unwrap()
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_queue_tail() -> anyhow::Result<()> {
+async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
@@ -1067,14 +1067,14 @@ async fn test_queue_tail() -> anyhow::Result<()> {
 
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
-        seqno: 0,
+        seqno: 1,
         root_hash: Default::default(),
         file_hash: Default::default(),
     };
 
     let block_mc2 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
-        seqno: 1,
+        seqno: 2,
         root_hash: Default::default(),
         file_hash: Default::default(),
     };
@@ -1137,29 +1137,69 @@ async fn test_queue_tail() -> anyhow::Result<()> {
         max_message,
     )?;
 
+    // -- test case 1
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
-
     // length 2 in uncommitted state
     assert_eq!(diff_len_mc, 2);
 
+    // first diff has only one message with lt=1
+    let diff_info_mc1 = queue
+        .get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno)?
+        .unwrap();
+    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(1));
+
+    // second diff has three messages with lt=2,3,4
+    let diff_info_mc2 = queue
+        .get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?
+        .unwrap();
+    assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
+
+    // -- test case 2
     // commit first diff
     queue.commit_diff(&[(block_mc1, true)])?;
+
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
     // one diff moved to committed state. one diff left in uncommitted state
     // uncommitted: 1; committed: 1
     assert_eq!(diff_len_mc, 2);
 
+    // first diff has only one message with lt=1
+    let diff_info_mc1 = queue
+        .get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno)?
+        .unwrap();
+
+    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(1));
+
+    // second diff has three messages with lt=2,3,4
+    let diff_info_mc2 = queue
+        .get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?
+        .unwrap();
+    assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
+
+    // -- test case 3
     // exclude committed diff by range
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
     // uncommitted: 1; committed: 0 (1)
     assert_eq!(diff_len_mc, 1);
 
+    // -- test case 4
     // clear uncommitted state with second diff
     queue.clear_uncommitted_state()?;
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
     // uncommitted: 0; committed: 1
     assert_eq!(diff_len_mc, 1);
 
+    // first diff has only one message with lt=1
+    let diff_info_mc1 = queue
+        .get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno)?
+        .unwrap();
+    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(1));
+
+    // second diff removed because it was located in uncommitted state
+    let diff_info_mc2 = queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?;
+    assert!(diff_info_mc2.is_none());
+
+    // -- test case 5
     // exclude committed diff by range
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
     // uncommitted: 0; committed: 0 (1)
