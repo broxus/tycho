@@ -1145,24 +1145,32 @@ async fn test_queue_tail() -> anyhow::Result<()> {
         max_message,
     )?;
 
-    let diff_len_mc = queue.get_diffs_count_by_shard(&ShardIdent::MASTERCHAIN);
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
 
+    // length 2 in uncommitted state
     assert_eq!(diff_len_mc, 2);
 
     // commit first diff
     queue.commit_diff(&[(block_mc1, true)])?;
-    let diff_len_mc = queue.get_diffs_count_by_shard(&ShardIdent::MASTERCHAIN);
-
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
+    // one diff moved to committed state. one diff left in uncommitted state
+    // uncommitted: 1; committed: 1
     assert_eq!(diff_len_mc, 2);
 
-    // trim first diff
-    queue.trim_diffs(&ShardIdent::MASTERCHAIN, &end_key_mc1)?;
-    let diff_len_mc = queue.get_diffs_count_by_shard(&ShardIdent::MASTERCHAIN);
+    // exclude committed diff by range
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
+    // uncommitted: 1; committed: 0 (1)
     assert_eq!(diff_len_mc, 1);
 
     // clear uncommitted state with second diff
     queue.clear_uncommitted_state()?;
-    let diff_len_mc = queue.get_diffs_count_by_shard(&ShardIdent::MASTERCHAIN);
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
+    // uncommitted: 0; committed: 1
+    assert_eq!(diff_len_mc, 1);
+
+    // exclude committed diff by range
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
+    // uncommitted: 0; committed: 0 (1)
     assert_eq!(diff_len_mc, 0);
 
     Ok(())

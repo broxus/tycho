@@ -1,7 +1,7 @@
 use anyhow::Result;
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
-use tycho_block_util::queue::QueuePartitionIdx;
-use tycho_storage::model::ShardsInternalMessagesKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_storage::model::{DiffTailKey, ShardsInternalMessagesKey};
 use tycho_storage::{InternalQueueSnapshot, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -83,6 +83,7 @@ pub trait CommittedState<V: InternalMessageValue>: Send + Sync {
 
     /// Get last applied mc block id
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
 }
 
 // IMPLEMENTATION
@@ -166,5 +167,13 @@ impl<V: InternalMessageValue> CommittedState<V> for CommittedStateStdImpl {
         self.storage
             .internal_queue_storage()
             .get_last_applied_mc_block_id()
+    }
+
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        snapshot.calc_diffs_tail_committed(&DiffTailKey {
+            shard_ident: *shard_ident,
+            max_message: *from,
+        })
     }
 }

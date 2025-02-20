@@ -79,6 +79,8 @@ where
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
     /// Get last applied mc block id from committed state
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Get diffs tail len from uncommitted state and committed state
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -211,15 +213,15 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.get_diff(shard_ident, seqno)
     }
 
-    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
-        self.queue.get_diffs_count_by_shard(shard_ident)
-    }
-
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
         self.queue.is_diff_exists(block_id_short)
     }
 
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
         self.queue.get_last_applied_mc_block_id()
+    }
+
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
+        self.queue.get_diffs_tail_len(shard_ident, max_message_from)
     }
 }

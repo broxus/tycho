@@ -144,6 +144,21 @@ impl StatKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DiffTailKey {
+    pub shard_ident: ShardIdent,
+    pub max_message: QueueKey,
+}
+
+impl DiffTailKey {
+    pub fn new(shard_ident: ShardIdent, max_message: QueueKey) -> Self {
+        Self {
+            shard_ident,
+            max_message,
+        }
+    }
+}
+
 impl StoredValue for StatKey {
     const SIZE_HINT: usize = ShardIdent::SIZE_HINT
         + QueuePartitionIdx::SIZE_HINT
@@ -177,6 +192,33 @@ impl StoredValue for StatKey {
             min_message,
             max_message,
             dest,
+        }
+    }
+}
+
+impl StoredValue for DiffTailKey {
+    const SIZE_HINT: usize = ShardIdent::SIZE_HINT + QueueKey::SIZE_HINT;
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        self.shard_ident.serialize(buffer);
+        self.max_message.serialize(buffer);
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self
+    where
+        Self: Sized,
+    {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let shard_ident = ShardIdent::deserialize(reader);
+        let max_message = QueueKey::deserialize(reader);
+
+        Self {
+            shard_ident,
+            max_message,
         }
     }
 }

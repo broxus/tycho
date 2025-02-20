@@ -94,10 +94,8 @@ where
     fn commit_diff(&self, mc_top_blocks: &[(BlockId, bool)]) -> Result<()>;
     /// remove all data in uncommitted state storage
     fn clear_uncommitted_state(&self) -> Result<()>;
-    /// Returns the number of diffs in cache for the given shard
-    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
-    /// Removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
-    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
+    /// Returns the diffs tail len for the given shard
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
     fn load_statistics(
         &self,
@@ -288,10 +286,11 @@ where
         // Add messages to uncommitted_state if there are any
         if !diff.messages.is_empty() {
             self.uncommitted_state.add_messages_with_statistics(
-                block_id_short.shard,
+                &block_id_short,
                 &diff.partition_router,
                 &diff.messages,
                 &statistics,
+                &max_message,
             )?;
         }
 
@@ -421,33 +420,6 @@ where
         Ok(())
     }
 
-    fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize {
-        let uncommitted_count = self
-            .uncommitted_diffs
-            .get(shard_ident)
-            .map_or(0, |diffs| diffs.len());
-        let committed_count = self
-            .committed_diffs
-            .get(shard_ident)
-            .map_or(0, |diffs| diffs.len());
-
-        uncommitted_count + committed_count
-    }
-
-    fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()> {
-        if let Some(mut shard_diffs) = self.uncommitted_diffs.get_mut(source_shard) {
-            shard_diffs
-                .value_mut()
-                .retain(|_, diff| diff.max_message() > inclusive_until);
-        }
-        if let Some(mut shard_diffs) = self.committed_diffs.get_mut(source_shard) {
-            shard_diffs
-                .value_mut()
-                .retain(|_, diff| diff.max_message() > inclusive_until);
-        }
-        Ok(())
-    }
-
     fn load_statistics(
         &self,
         partition: QueuePartitionIdx,
@@ -483,6 +455,26 @@ where
         }
 
         None
+    }
+
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
+        let uncommitted_tail_len = self
+            .uncommitted_state
+            .get_diffs_tail_len(shard_ident, max_message_from);
+
+        let committed_tail_len = self
+            .committed_state
+            .get_diffs_tail_len(shard_ident, max_message_from);
+
+        tracing::info!(
+            target: tracing_targets::MQ,
+            shard_ident = ?shard_ident,
+            uncommitted_tail_len,
+            committed_tail_len,
+            "Get diffs tail len",
+        );
+
+        uncommitted_tail_len + committed_tail_len
     }
 
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool {
