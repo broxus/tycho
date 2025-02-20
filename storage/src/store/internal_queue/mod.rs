@@ -8,7 +8,7 @@ use weedb::rocksdb::{DBRawIterator, WriteBatch};
 use weedb::{BoundedCfHandle, ColumnFamily, OwnedRawIterator, OwnedSnapshot, Table};
 
 use crate::db::*;
-use crate::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
+use crate::model::{DiffTailKey, QueueRange, ShardsInternalMessagesKey, StatKey};
 use crate::util::StoredValue;
 use crate::QueueStateReader;
 
@@ -72,6 +72,7 @@ impl InternalQueueStorage {
             let messages_cf = this.db.shard_internal_messages.cf();
             let stats_cf = this.db.internal_message_stats.cf();
             let var_cf = this.db.internal_message_var.cf();
+            let diffs_tail_cf = this.db.internal_message_diffs_tail.cf();
 
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
@@ -130,6 +131,19 @@ impl InternalQueueStorage {
 
                 let queue_diff = part.queue_diff();
 
+                // insert diff tail
+                let diff_tail_key = DiffTailKey {
+                    shard_ident: block_id.shard,
+                    max_message: queue_diff.max_message,
+                };
+
+                batch.put_cf(
+                    &diffs_tail_cf,
+                    diff_tail_key.to_vec(),
+                    block_id.seqno.to_le_bytes().as_slice(),
+                );
+
+                // insert last applied diff
                 batch.put_cf(
                     &var_cf,
                     INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
@@ -182,9 +196,11 @@ impl InternalQueueStorage {
 
         let mut msgs_to_compact = Vec::new();
         let mut stats_to_compact = Vec::new();
+        let mut diffs_tail_to_compact = Vec::new();
 
         let messages_cf = &self.db.shard_internal_messages.cf();
         let stats_cf = &self.db.internal_message_stats.cf();
+        let diffs_tail_cf = &self.db.internal_message_diffs_tail.cf();
 
         for range in ranges {
             // Delete messages in one range
@@ -228,6 +244,26 @@ impl InternalQueueStorage {
                 &bump,
                 &mut stats_to_compact,
             );
+
+            // Delete diffs tail in one range
+            let start_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.from,
+            };
+
+            let end_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.to,
+            };
+
+            delete_range(
+                &mut batch,
+                diffs_tail_cf,
+                &start_diff_tail_key.to_vec(),
+                &end_diff_tail_key.to_vec(),
+                &bump,
+                &mut diffs_tail_to_compact,
+            );
         }
 
         let db = self.db.rocksdb().as_ref();
@@ -238,6 +274,9 @@ impl InternalQueueStorage {
         }
         for (start_key, end_key) in stats_to_compact {
             db.compact_range_cf(stats_cf, Some(start_key), Some(end_key));
+        }
+        for (start_key, end_key) in diffs_tail_to_compact {
+            db.compact_range_cf(diffs_tail_cf, Some(start_key), Some(end_key));
         }
 
         Ok(())
@@ -265,11 +304,19 @@ impl InternalQueueStorage {
             &[0xff; StatKey::SIZE_HINT],
         );
 
+        let diffs_tail_cf = &self.db.internal_message_diffs_tail_uncommitted.cf();
+        clear_table(
+            diffs_tail_cf,
+            &[0x00; StatKey::SIZE_HINT],
+            &[0xff; StatKey::SIZE_HINT],
+        );
+
         let db = self.db.rocksdb().as_ref();
         db.write(batch)?;
 
         db.compact_range_cf(messages_cf, None::<[u8; 0]>, None::<[u8; 0]>);
         db.compact_range_cf(stats_cf, None::<[u8; 0]>, None::<[u8; 0]>);
+        db.compact_range_cf(diffs_tail_cf, None::<[u8; 0]>, None::<[u8; 0]>);
         Ok(())
     }
 
@@ -305,6 +352,11 @@ impl InternalQueueTransaction {
     pub fn insert_statistics_uncommitted(&mut self, key: &StatKey, count: u64) {
         let cf = self.db.internal_message_stats_uncommitted.cf();
         self.batch.put_cf(&cf, key.to_vec(), count.to_le_bytes());
+    }
+
+    pub fn insert_diff_tail_uncommitted(&mut self, key: &DiffTailKey, value: &[u8]) {
+        let cf = self.db.internal_message_diffs_tail_uncommitted.cf();
+        self.batch.put_cf(&cf, key.to_vec(), value);
     }
 
     pub fn insert_message_uncommitted(
@@ -376,10 +428,19 @@ impl InternalQueueTransaction {
         let uncommited_stats = &self.db.internal_message_stats_uncommitted;
         let uncommited_stats_cf = &uncommited_stats.cf();
 
+        let diff_tail_committed_cf = &self.db.internal_message_diffs_tail.cf();
+        let diff_tail_uncommitted_cf = &self.db.internal_message_diffs_tail_uncommitted.cf();
+
         let mut uncommited_stats_iter = {
             let mut readopts = uncommited_stats.new_read_config();
             readopts.set_snapshot(&snapshot.snapshot);
             db.raw_iterator_cf_opt(uncommited_stats_cf, readopts)
+        };
+
+        let mut uncommited_diff_tail_iter = {
+            let mut readopts = uncommited_stats.new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(diff_tail_uncommitted_cf, readopts)
         };
 
         for range in ranges {
@@ -426,6 +487,25 @@ impl InternalQueueTransaction {
                 uncommited_stats_cf,
                 stats_cf,
             )?;
+
+            // Collect diffs tails range
+            let from_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.from,
+            };
+
+            let to_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.to,
+            };
+
+            commit_range(
+                &mut uncommited_diff_tail_iter,
+                &from_diff_tail_key.to_vec(),
+                &to_diff_tail_key.to_vec(),
+                diff_tail_uncommitted_cf,
+                diff_tail_committed_cf,
+            )?;
         }
 
         Ok(())
@@ -466,6 +546,14 @@ impl InternalQueueSnapshot {
         self.iter_messages(&self.db.shard_internal_messages_uncommitted, from, to)
     }
 
+    pub fn calc_diffs_tail_committed(&self, from: &DiffTailKey) -> u32 {
+        self.calc_diffs_tail(&self.db.internal_message_diffs_tail, from)
+    }
+
+    pub fn calc_diffs_tail_uncommitted(&self, from: &DiffTailKey) -> u32 {
+        self.calc_diffs_tail(&self.db.internal_message_diffs_tail_uncommitted, from)
+    }
+
     fn iter_messages<T: ColumnFamily>(
         &self,
         table: &Table<T>,
@@ -486,6 +574,25 @@ impl InternalQueueSnapshot {
             inner: unsafe { OwnedRawIterator::new(db.clone(), iter) },
             first: true,
         }
+    }
+
+    fn calc_diffs_tail<T: ColumnFamily>(&self, table: &Table<T>, from: &DiffTailKey) -> u32 {
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(&self.snapshot);
+
+        let cf = table.cf();
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+
+        let from_key = from.to_vec();
+        iter.seek(&from_key);
+
+        let mut count = 0;
+        while let Some((_, _)) = iter.item() {
+            count += 1;
+            iter.next();
+        }
+
+        count
     }
 
     pub fn collect_committed_stats_in_range(
