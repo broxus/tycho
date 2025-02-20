@@ -44,6 +44,16 @@ pub struct BlockchainRpcClientConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub min_broadcast_timeout: Duration,
 
+    /// Archive size threshold to recheck
+    ///
+    /// Default: 1 GB.
+    pub check_archive_size_threshold: ByteSize,
+
+    /// Maximum difference between archives from different nodes
+    ///
+    /// Default: 100 MB.
+    pub max_archive_size_diff: ByteSize,
+
     /// Minimum number of neighbours with `TooNew`
     /// response required to switch provider
     ///
@@ -60,6 +70,8 @@ impl Default for BlockchainRpcClientConfig {
     fn default() -> Self {
         Self {
             min_broadcast_timeout: Duration::from_millis(100),
+            check_archive_size_threshold: ByteSize::mb(1024),
+            max_archive_size_diff: ByteSize::mb(100),
             too_new_archive_threshold: 4,
             download_retries: 10,
         }
@@ -478,16 +490,18 @@ impl BlockchainRpcClient {
     }
 
     pub async fn find_archive(&self, mc_seqno: u32) -> Result<PendingArchiveResponse, Error> {
-        const NEIGHBOUR_COUNT: usize = 10;
-
-        // Get reliable neighbours with higher weight
-        let neighbours = self
-            .overlay_client()
-            .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
+        let config = &self.inner.config;
 
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {
+            const NEIGHBOUR_COUNT: usize = 10;
+
+            // Get reliable neighbours with higher weight
+            let neighbours = self
+                .overlay_client()
+                .neighbours()
+                .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
+
             let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
 
             // Number of ArchiveInfo::TooNew responses
@@ -535,7 +549,7 @@ impl BlockchainRpcClient {
             }
 
             // Stop using archives if enough neighbors responded TooNew
-            if new_archive_count >= self.inner.config.too_new_archive_threshold {
+            if new_archive_count >= config.too_new_archive_threshold {
                 return Ok(PendingArchiveResponse::TooNew);
             }
 
@@ -545,6 +559,61 @@ impl BlockchainRpcClient {
             };
         };
 
+        'crosscheck_size: {
+            if pending_archive.size.get() > config.check_archive_size_threshold.as_u64() {
+                const NEIGHBOUR_COUNT: usize = 5;
+
+                let neighbours = self
+                    .overlay_client()
+                    .neighbours()
+                    .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
+
+                let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+
+                let mut futures = FuturesUnordered::new();
+                for neighbour in neighbours {
+                    if pending_archive.neighbour.peer_id() != neighbour.peer_id() {
+                        futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
+                    }
+                }
+
+                let mut err = None;
+                while let Some(info) = futures.next().await {
+                    let (handle, info) = match info {
+                        Ok(res) => res.split(),
+                        Err(e) => {
+                            err = Some(e);
+                            continue;
+                        }
+                    };
+
+                    match info {
+                        ArchiveInfo::Found { size, .. } => {
+                            if pending_archive.size.get().abs_diff(size.get())
+                                < config.max_archive_size_diff.as_u64()
+                            {
+                                handle.accept();
+                                break 'crosscheck_size;
+                            }
+
+                            pending_archive
+                                .neighbour
+                                .punish(crate::overlay_client::PunishReason::Dumb);
+                        }
+                        ArchiveInfo::NotFound | ArchiveInfo::TooNew => {
+                            handle.accept();
+                            continue;
+                        }
+                    }
+                }
+
+                return match err {
+                    None => Err(Error::NotFound),
+                    Some(err) => Err(err),
+                };
+            }
+        };
+
         tracing::info!(
             peer_id = %pending_archive.neighbour.peer_id(),
             archive_id = pending_archive.id,
@@ -552,6 +621,7 @@ impl BlockchainRpcClient {
             archuve_chunk_size = %ByteSize(pending_archive.chunk_size.get() as _),
             "found archive",
         );
+
         Ok(PendingArchiveResponse::Found(pending_archive))
     }
 
