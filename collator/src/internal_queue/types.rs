@@ -122,6 +122,14 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
             partition_router: Default::default(),
         }
     }
+
+    pub fn min_message(&self) -> Option<&QueueKey> {
+        self.messages.keys().next()
+    }
+
+    pub fn max_message(&self) -> Option<&QueueKey> {
+        self.messages.keys().next_back()
+    }
 }
 
 impl QueueDiffWithMessages<EnqueuedMessage> {
@@ -362,6 +370,27 @@ impl QueueStatistics {
             }
         }
     }
+
+    pub fn shard_messages_count(&self) -> FastHashMap<ShardIdent, u64> {
+        let mut shards_messages_count = FastHashMap::default();
+
+        for stat in self.statistics.iter() {
+            let (addr, msg_count) = stat;
+            // TODO after split/merge implementation we should use detailed counter for 256 shards
+            let dest_shard = if addr.is_masterchain() {
+                ShardIdent::MASTERCHAIN
+            } else {
+                ShardIdent::new_full(0)
+            };
+
+            shards_messages_count
+                .entry(dest_shard)
+                .and_modify(|count: &mut u64| *count += *msg_count)
+                .or_insert(*msg_count);
+        }
+
+        shards_messages_count
+    }
 }
 
 impl PartialEq for QueueStatistics {
@@ -414,6 +443,10 @@ impl DiffStatistics {
             .copied()
             .unwrap_or_default()
     }
+
+    pub fn shards_messages_count(&self) -> &FastHashMap<ShardIdent, u64> {
+        &self.inner.shards_messages_count
+    }
 }
 #[derive(Debug, Clone)]
 struct DiffStatisticsInner {
@@ -424,13 +457,34 @@ struct DiffStatisticsInner {
     shards_messages_count: FastHashMap<ShardIdent, u64>,
 }
 
-impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for DiffStatistics {
-    fn from(value: (&QueueDiffWithMessages<V>, ShardIdent)) -> Self {
-        let (diff, shard_ident) = value;
-        let min_message = diff.messages.keys().next().cloned().unwrap_or_default();
-        let max_message = diff.messages.keys().last().cloned().unwrap_or_default();
-        let mut shards_messages_count = FastHashMap::default();
+impl DiffStatistics {
+    pub fn new(
+        shard_ident: ShardIdent,
+        min_message: QueueKey,
+        max_message: QueueKey,
+        statistics: FastHashMap<QueuePartitionIdx, FastHashMap<IntAddr, u64>>,
+        shards_messages_count: FastHashMap<ShardIdent, u64>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DiffStatisticsInner {
+                shard_ident,
+                min_message,
+                max_message,
+                statistics,
+                shards_messages_count,
+            }),
+        }
+    }
+}
 
+impl DiffStatistics {
+    pub fn from_diff<V: InternalMessageValue>(
+        diff: &QueueDiffWithMessages<V>,
+        shard_ident: ShardIdent,
+        min_message: QueueKey,
+        max_message: QueueKey,
+    ) -> Self {
+        let mut shards_messages_count = FastHashMap::default();
         let mut statistics = FastHashMap::default();
 
         for message in diff.messages.values() {
@@ -475,6 +529,7 @@ impl<V: InternalMessageValue> From<(&QueueDiffWithMessages<V>, ShardIdent)> for 
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use tycho_storage::model::DiffInfo;
     use tycho_util::FastHashSet;
 
     use super::*;
@@ -527,5 +582,32 @@ mod tests {
             // addr4 -> partition 10
             assert_eq!(*src_router.get(&addr4).unwrap(), 10);
         }
+    }
+
+    #[test]
+    fn test_diff_info_value_serialization() {
+        // 1) Create example data
+        let mut map = FastHashMap::default();
+        map.insert(ShardIdent::MASTERCHAIN, 123);
+        map.insert(ShardIdent::BASECHAIN, 999);
+
+        let original = DiffInfo {
+            end_lt: QueueKey {
+                lt: 42,
+                hash: HashBytes::from([0xAB; 32]),
+            },
+            shards_messages_count: map,
+            hash: Default::default(),
+        };
+
+        // 2) Serialize
+        let serialized = tl_proto::serialize(&original);
+
+        // 3) Deserialize
+        let deserialized = tl_proto::deserialize::<DiffInfo>(&serialized)
+            .expect("Failed to deserialize DiffInfoValue");
+
+        // 4) Compare original and deserialized
+        assert_eq!(original, deserialized);
     }
 }

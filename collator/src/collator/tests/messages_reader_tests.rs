@@ -456,7 +456,6 @@ where
             },
             &queue_diff_hash,
             statistics.clone(),
-            max_message,
         )?;
         self.secondary_mq_adapter.apply_diff(
             queue_diff_with_msgs,
@@ -466,7 +465,6 @@ where
             },
             &queue_diff_hash,
             statistics,
-            max_message,
         )?;
 
         // update working state

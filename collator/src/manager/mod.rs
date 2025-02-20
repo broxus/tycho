@@ -29,7 +29,7 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
 };
-use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
+use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, QueueDiffWithMessages};
 use crate::manager::types::BlockCacheStoreResult;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
@@ -184,6 +184,7 @@ where
     }
 
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
+        // !TODO! loaded processed upto reuse
         let processed_upto = state.state().processed_upto.load()?;
 
         metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
@@ -502,8 +503,8 @@ where
         }
 
         // skip already applied diff
-        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id()) {
-            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id())? {
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
                 queue_diff_block_id = %block_entry.block_id.as_short_id(),
                 "queue diff apply skipped because it is already applied",
             );
@@ -546,14 +547,18 @@ where
 
         let queue_diff_with_msgs = QueueDiffWithMessages::from_queue_diff(queue_diff, out_msgs)?;
 
-        let statistics = (&queue_diff_with_msgs, queue_diff.block_id().shard).into();
+        let statistics = DiffStatistics::from_diff(
+            &queue_diff_with_msgs,
+            queue_diff.block_id().shard,
+            queue_diff.as_ref().min_message,
+            queue_diff.as_ref().max_message,
+        );
 
         mq_adapter.apply_diff(
             queue_diff_with_msgs,
             queue_diff.block_id().as_short_id(),
             queue_diff.diff_hash(),
             statistics,
-            queue_diff.as_ref().max_message,
         )
     }
 
@@ -1218,7 +1223,7 @@ where
             }
 
             if let Some(top_mc_block_id_for_next_collation) =
-                self.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id)
+                self.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id)?
             {
                 // Should wait for next collated mc block when collators are active
                 // but when all were cancelled or waiting, we can process last received mc block.
@@ -1469,7 +1474,7 @@ where
 
         let queue_diffs_applied_to_top_blocks = if self.config.fast_sync {
             if let Some(applied_to_mc_block_id) =
-                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)
+                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
             {
                 // collect top blocks queue diffs already applied to
                 self.get_top_blocks_seqno(&applied_to_mc_block_id).await?
@@ -1574,6 +1579,7 @@ where
                         queue_diff_with_messages,
                         *queue_diff_stuff.diff_hash(),
                         prev_block_id,
+                        queue_diff_stuff.as_ref().min_message,
                         queue_diff_stuff.as_ref().max_message,
                     ));
 
@@ -1587,15 +1593,14 @@ where
         }
 
         // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id, max_message)) = prev_queue_diffs.pop() {
-            let statistics = (&diff, block_id.shard).into();
-            self.mq_adapter.apply_diff(
-                diff,
-                block_id.as_short_id(),
-                &diff_hash,
-                statistics,
-                max_message,
-            )?;
+        while let Some((diff, diff_hash, block_id, min_message, max_message)) =
+            prev_queue_diffs.pop()
+        {
+            let statistics =
+                DiffStatistics::from_diff(&diff, block_id.shard, min_message, max_message);
+
+            self.mq_adapter
+                .apply_diff(diff, block_id.as_short_id(), &diff_hash, statistics)?;
         }
 
         // sync all applied blocks
@@ -1773,7 +1778,7 @@ where
     fn get_queue_diffs_applied_to_mc_block_id(
         &self,
         last_collated_mc_block_id: Option<BlockId>,
-    ) -> Option<BlockId> {
+    ) -> Result<Option<BlockId>> {
         self.get_top_mc_block_id_for_next_collation(last_collated_mc_block_id)
         // TODO: should check for block id of top committed queue diff if top collated or synced_to undefined
     }
@@ -1785,17 +1790,17 @@ where
     fn get_top_mc_block_id_for_next_collation(
         &self,
         last_collated_mc_block_id: Option<BlockId>,
-    ) -> Option<BlockId> {
+    ) -> Result<Option<BlockId>> {
         let last_synced_to_mc_block_id = self.get_last_synced_to_mc_block_id();
         match (last_synced_to_mc_block_id, last_collated_mc_block_id) {
             (Some(last_synced_to), Some(last_collated)) => {
                 if last_synced_to.seqno > last_collated.seqno {
-                    Some(last_synced_to)
+                    Ok(Some(last_synced_to))
                 } else {
-                    Some(last_collated)
+                    Ok(Some(last_collated))
                 }
             }
-            (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Some(mc_block_id),
+            (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Ok(Some(mc_block_id)),
             _ => self.mq_adapter.get_last_applied_mc_block_id(),
         }
     }

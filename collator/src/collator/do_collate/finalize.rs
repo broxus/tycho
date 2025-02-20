@@ -26,7 +26,7 @@ use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
     PreparedInMsg, PreparedOutMsg,
 };
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
@@ -69,41 +69,6 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
-        // getting top shard blocks
-        let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
-            self.state
-                .collation_data
-                .top_shard_blocks
-                .iter()
-                .map(|b| (b.block_id.shard, b.block_id.seqno))
-                .collect()
-        } else {
-            let mut top_blocks: FastHashMap<ShardIdent, u32> = self
-                .state
-                .mc_data
-                .shards
-                .iter()
-                .filter(|(shard, descr)| {
-                    descr.top_sc_block_updated && shard != &self.state.shard_id
-                })
-                .map(|(shard_ident, descr)| (*shard_ident, descr.seqno))
-                .collect();
-
-            top_blocks.insert(
-                self.state.mc_data.block_id.shard,
-                self.state.mc_data.block_id.seqno,
-            );
-
-            top_blocks
-        };
-
-        let mut diffs = FastHashMap::default();
-        for (shard, seqno) in &top_shard_blocks {
-            if let Some(diff) = mq_adapter.get_diff(shard, *seqno) {
-                diffs.insert(*shard, diff);
-            }
-        }
-
         // get queue diff and check for pending internals
         let create_queue_diff_elapsed;
         let FinalizedMessagesReader {
@@ -116,8 +81,8 @@ impl Phase<FinalizeState> {
                 "tycho_do_collate_create_queue_diff_time",
                 &labels,
             );
-            let finalize_message_reader_res =
-                messages_reader.finalize(self.extra.executor.min_next_lt(), diffs)?;
+            let finalize_message_reader_res = messages_reader
+                .finalize(self.extra.executor.min_next_lt(), &self.state.diffs_info)?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };
@@ -164,7 +129,12 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
-                let statistics = (&queue_diff_with_msgs, block_id_short.shard).into();
+                let statistics = DiffStatistics::from_diff(
+                    &queue_diff_with_msgs,
+                    block_id_short.shard,
+                    min_message,
+                    max_message,
+                );
 
                 histogram.finish();
 
@@ -179,7 +149,6 @@ impl Phase<FinalizeState> {
                     block_id_short,
                     &queue_diff_hash,
                     statistics,
-                    max_message,
                 )?;
                 let apply_queue_diff_elapsed = histogram.finish();
 

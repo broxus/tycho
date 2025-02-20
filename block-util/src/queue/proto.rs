@@ -165,7 +165,7 @@ pub struct QueueKey {
 }
 
 impl QueueKey {
-    const SIZE_HINT: usize = 8 + 32;
+    pub const SIZE_HINT: usize = 8 + 32;
 
     pub const MIN: Self = Self {
         lt: 0,
