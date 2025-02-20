@@ -102,7 +102,7 @@ impl PeerSchedule {
 
     /// on peer set change
     pub fn apply_scheduled(&self, current: Round) {
-        if (self.atomic().next_epoch_start).map_or(true, |scheduled| scheduled > current) {
+        if (self.atomic().next_epoch_start).is_none_or(|scheduled| scheduled > current) {
             return;
         }
         let mut locked = self.write();

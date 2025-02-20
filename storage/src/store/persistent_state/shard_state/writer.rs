@@ -398,7 +398,7 @@ fn deserialize_cell<'a>(
     let data = &value[*index..*index + data_len];
     index.advance(data_len);
 
-    assert_eq!((bit_length as usize + 7) / 8, data_len);
+    assert_eq!((bit_length as usize).div_ceil(8), data_len);
 
     index.advance((32 + 2) * descriptor.hash_count() as usize);
 

@@ -89,7 +89,7 @@ fn gc_task<V: InternalMessageValue>(
                 .get(partition)
                 .unwrap_or(&FastHashMap::default())
                 .get(shard)
-                .map_or(true, |last_key| *current_last_key > *last_key);
+                .is_none_or(|last_key| *current_last_key > *last_key);
 
             if can_delete {
                 let range = vec![QueueShardRange {

@@ -41,9 +41,7 @@ impl TempFileStorage {
                 }
             })
         })
-        .await?
-        .map_err(Into::into)
-    }
+        .await?}
 
     pub fn retain_files<F>(&self, mut f: F) -> Result<()>
     where

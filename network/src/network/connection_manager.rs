@@ -259,7 +259,7 @@ impl ConnectionManager {
                     && self
                         .dial_backoff_states
                         .get(&peer_info.id)
-                        .map_or(true, |state| now > state.next_attempt_at))
+                        .is_none_or(|state| now > state.next_attempt_at))
                 .then(|| arc_swap::Guard::into_inner(peer_info))
             })
             .take(outstanding_connections_limit)

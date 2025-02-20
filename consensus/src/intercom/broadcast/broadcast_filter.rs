@@ -215,7 +215,7 @@ impl BroadcastFilterInner {
         // we should ban a peer that broadcasts its rounds out of order,
         //   though we cannot prove this decision for other nodes;
         // rarely a consecutive pair of broadcasts may be reordered during high CPU load
-        let level = if verified_result.as_ref().map_or(true, |vr| vr.is_err())
+        let level = if verified_result.as_ref().is_none_or(|vr| vr.is_err())
             || duplicates.is_some()
             || equivocation.is_some()
         {

@@ -69,7 +69,6 @@ impl ProgressBar {
         self.total
             .filter(|&total| total > 0)
             .map(|total| self.current * 100u64 / total)
-            .map(From::from)
     }
 }
 
