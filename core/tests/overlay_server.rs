@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::boc::{Boc, BocRepr};
+use everscale_types::models::{BlockId, ExtInMsgInfo, OwnedMessage, ShardIdent};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
@@ -134,9 +134,16 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     tracing::info!("broadcasting messages...");
+    let msg = BocRepr::encode(OwnedMessage {
+        info: ExtInMsgInfo::default().into(),
+        init: None,
+        body: Default::default(),
+        layout: None,
+    })?;
+
     for node in &nodes {
         node.blockchain_client
-            .broadcast_external_message(b"hello world")
+            .broadcast_external_message(&msg)
             .await;
     }
 

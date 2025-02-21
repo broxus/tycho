@@ -6,6 +6,7 @@ use bytes::{Buf, Bytes};
 use everscale_types::models::BlockId;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
+use tycho_block_util::message::validate_external_message;
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
 use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
@@ -325,6 +326,11 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 metrics::counter!("tycho_rpc_broadcast_external_message_rx_bytes_total")
                     .increment(req.body.len() as u64);
                 BoxFutureOrNoop::future(async move {
+                    if let Err(e) = validate_external_message(&req.body).await {
+                        tracing::debug!("invalid external message: {e:?}");
+                        return;
+                    }
+
                     inner
                         .broadcast_listener
                         .handle_message(req.metadata, req.body)

@@ -10,13 +10,6 @@ pub mod time;
 
 pub mod tl;
 
-#[cfg(any(test, feature = "bc"))]
-pub mod bc {
-    pub use ext_msg_repr::ExtMsgRepr;
-
-    mod ext_msg_repr;
-}
-
 pub mod futures {
     pub use self::box_future_or_noop::BoxFutureOrNoop;
     pub use self::join_task::JoinTask;

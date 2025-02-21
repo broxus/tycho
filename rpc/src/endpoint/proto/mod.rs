@@ -8,7 +8,7 @@ use bytes::Bytes;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tycho_util::bc::ExtMsgRepr;
+use tycho_block_util::message::validate_external_message;
 
 pub use self::cache::ProtoEndpointCache;
 use self::protos::rpc::{self, request, response, Request};
@@ -66,13 +66,14 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         Some(request::Call::SendMessage(p)) => {
-            if let Err(e) = ExtMsgRepr::decode(&p.message) {
+            if let Err(e) = validate_external_message(&p.message).await {
                 return ProtoErrorResponse {
                     code: INVALID_BOC_CODE,
                     message: e.to_string().into(),
                 }
                 .into_response();
-            };
+            }
+
             state.broadcast_external_message(&p.message).await;
             ok_to_response(response::Result::SendMessage(()))
         }

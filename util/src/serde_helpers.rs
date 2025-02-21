@@ -4,6 +4,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::Result;
+use base64::prelude::{Engine as _, BASE64_STANDARD};
+use bytes::Bytes;
 use serde::de::{Error, Expected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -186,6 +188,96 @@ pub mod humantime {
     impl Serialize for Serde<Option<SystemTime>> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             Serde(&self.0).serialize(serializer)
+        }
+    }
+}
+
+pub struct Base64BytesWithLimit<const LIMIT: usize>;
+
+impl<const LIMIT: usize> Base64BytesWithLimit<LIMIT> {
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            let base64 = BASE64_STANDARD.encode(value);
+            serializer.serialize_str(&base64)
+        } else {
+            serializer.serialize_bytes(value)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct BytesVisitorWithLimit<const LIMIT: usize>;
+
+        impl<'de, const LIMIT: usize> Visitor<'de> for BytesVisitorWithLimit<LIMIT> {
+            type Value = Bytes;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("byte array")
+            }
+
+            #[inline]
+            fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
+            where
+                V: serde::de::SeqAccess<'de>,
+            {
+                'valid: {
+                    let hint = seq.size_hint().unwrap_or(0);
+                    if hint > LIMIT {
+                        break 'valid;
+                    }
+
+                    let len = std::cmp::min(hint, 4096);
+                    let mut values: Vec<u8> = Vec::with_capacity(len);
+
+                    while let Some(value) = seq.next_element()? {
+                        if values.len() > LIMIT {
+                            break 'valid;
+                        }
+
+                        values.push(value);
+                    }
+
+                    return Ok(Bytes::from(values));
+                }
+
+                Err(Error::custom("slice is too big"))
+            }
+
+            #[inline]
+            fn visit_bytes<E: Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                if v.len() > LIMIT {
+                    return Err(Error::custom("slice is too big"));
+                }
+                Ok(Bytes::copy_from_slice(v))
+            }
+
+            #[inline]
+            fn visit_byte_buf<E: Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                if v.len() > LIMIT {
+                    return Err(Error::custom("slice is too big"));
+                }
+                Ok(Bytes::from(v))
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            let BorrowedStr(s) = <_>::deserialize(deserializer)?;
+            if base64::decoded_len_estimate(s.len()) >= LIMIT {
+                return Err(Error::custom("slice is too big"));
+            }
+
+            let v = BASE64_STANDARD
+                .decode(s.as_ref())
+                .map_err(|_e| D::Error::custom("invalid base64"))?;
+
+            Ok(Bytes::from(v))
+        } else {
+            deserializer.deserialize_bytes(BytesVisitorWithLimit::<LIMIT>)
         }
     }
 }
