@@ -389,7 +389,6 @@ impl InternalsPartitionReader {
             .map(|(_, reader)| {
                 Some(InternalsRangeReaderInfo {
                     last_to_lts: reader.reader_state.shards.clone(),
-                    processed_offset: reader.reader_state.processed_offset,
                     last_range_block_seqno: reader.seqno,
                 })
             })
@@ -407,7 +406,6 @@ impl InternalsPartitionReader {
 
         let InternalsRangeReaderInfo {
             last_to_lts,
-            processed_offset,
             last_range_block_seqno,
         } = last_range_reader_info_opt.unwrap_or_default();
 
@@ -489,8 +487,8 @@ impl InternalsPartitionReader {
             remaning_msgs_stats: None,
 
             shards: shard_reader_states,
-            skip_offset: processed_offset,
-            processed_offset,
+            skip_offset: self.reader_state.curr_processed_offset,
+            processed_offset: self.reader_state.curr_processed_offset,
         };
 
         // get statistics for the range
@@ -861,7 +859,6 @@ impl InternalsPartitionReader {
 #[derive(Debug, Default)]
 struct InternalsRangeReaderInfo {
     last_to_lts: BTreeMap<ShardIdent, ShardReaderState>,
-    processed_offset: u32,
     last_range_block_seqno: BlockSeqno,
 }
 
