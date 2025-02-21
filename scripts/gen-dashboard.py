@@ -521,18 +521,7 @@ def net_traffic() -> RowPanel:
     return create_row("network: Traffic", metrics)
 
 
-def core_blockchain_rpc() -> RowPanel:
-    methods = [
-        "getNextKeyBlockIds",
-        "getBlockFull",
-        "getBlockDataChunk",
-        "getNextBlockFull",
-        "getKeyBlockProof",
-        "getArchiveInfo",
-        "getArchiveChunk",
-        "getPersistentStateInfo",
-        "getPersistentStatePart",
-    ]
+def core_blockchain_rpc_general() -> RowPanel:
     metrics = [
         create_gauge_panel(
             "tycho_core_overlay_client_validators_to_resolve",
@@ -558,7 +547,36 @@ def core_blockchain_rpc() -> RowPanel:
             legend_format="{{instance}} - {{kind}}",
         ),
     ]
-    metrics += [
+    return create_row("blockchain: RPC - General Stats", metrics)
+
+
+def core_blockchain_rpc_per_method_stats() -> RowPanel:
+    methods = [
+        "Ping",
+        "GetNextKeyBlockIds",
+        "GetBlockFull",
+        "GetNextBlockFull",
+        "GetBlockDataChunk",
+        "GetKeyBlockProof",
+        "GetPersistentShardStateInfo",
+        "GetPersistentQueueStateInfo",
+        "GetPersistentShardStateChunk",
+        "GetPersistentQueueStateChunk",
+        "GetArchiveInfo",
+        "GetArchiveChunk",
+    ]
+
+    counter_panels = [
+        create_counter_panel(
+            expr="tycho_blockchain_rpc_method_time_count",
+            title=f"Blockchain RPC {method} calls/s",
+            labels_selectors=[f'method="{method}"'],
+            legend_format="{{instance}}",
+        )
+        for method in methods
+    ]
+
+    heatmap_panels = [
         create_heatmap_panel(
             "tycho_blockchain_rpc_method_time",
             f"Blockchain RPC {method} time",
@@ -566,7 +584,8 @@ def core_blockchain_rpc() -> RowPanel:
         )
         for method in methods
     ]
-    return create_row("blockchain: RPC", metrics)
+
+    return create_row("blockchain: RPC - Method Stats", counter_panels + heatmap_panels)
 
 
 def net_conn_manager() -> RowPanel:
@@ -2588,7 +2607,8 @@ dashboard = Dashboard(
         blockchain_stats(),
         core_bc(),
         core_block_strider(),
-        core_blockchain_rpc(),
+        core_blockchain_rpc_general(),
+        core_blockchain_rpc_per_method_stats(),
         storage(),
         collator_params_metrics(),
         collation_metrics(),

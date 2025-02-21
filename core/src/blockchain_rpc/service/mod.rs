@@ -1,3 +1,5 @@
+mod util;
+
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
@@ -5,6 +7,7 @@ use anyhow::Context;
 use bytes::{Buf, Bytes};
 use everscale_types::models::BlockId;
 use futures_util::Future;
+use metrics::Label;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
@@ -161,7 +164,19 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             }
         };
 
-        tycho_network::match_tl_request!(body, tag = constructor, {
+        let method = util::Constructor::from_tl_id(constructor);
+        let label = vec![Label::new(
+            "method",
+            method.map_or("unknown", |m| m.as_str()),
+        )];
+        let timer =
+            move || HistogramGuard::begin_with_labels_owned(RPC_METHOD_TIMINGS_METRIC, label);
+
+        let inner = self.inner.clone();
+
+        // NOTE: update `constructor_to_string` after adding new methods
+        tycho_network::match_tl_request!(body, tag = constructor,
+            {
             overlay::Ping as _ => BoxFutureOrNoop::future(async {
                 Some(Response::from_tl(overlay::Pong))
             }),
@@ -171,65 +186,44 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     max_size = req.max_size,
                     "getNextKeyBlockIds",
                 );
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_next_key_block_ids(&req);
-                    Some(Response::from_tl(res))
+                timed_future(timer, async move {
+                    Some(Response::from_tl(inner.handle_get_next_key_block_ids(&req)))
                 })
             },
             rpc::GetBlockFull as req => {
                 tracing::debug!(block_id = %req.block_id, "getBlockFull");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_block_full(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_block_full(&req).await))
                 })
             },
             rpc::GetNextBlockFull as req => {
                 tracing::debug!(prev_block_id = %req.prev_block_id, "getNextBlockFull");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_next_block_full(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_next_block_full(&req).await))
                 })
             },
             rpc::GetBlockDataChunk as req => {
                 tracing::debug!(block_id = %req.block_id, offset = %req.offset, "getBlockDataChunk");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_block_data_chunk(&req);
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_block_data_chunk(&req)))
                 })
             },
             rpc::GetKeyBlockProof as req => {
                 tracing::debug!(block_id = %req.block_id, "getKeyBlockProof");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_key_block_proof(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_key_block_proof(&req).await))
                 })
             },
             rpc::GetPersistentShardStateInfo as req => {
                 tracing::debug!(block_id = %req.block_id, "getPersistentShardStateInfo");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_persistent_state_info(&req);
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_persistent_state_info(&req)))
                 })
             },
             rpc::GetPersistentQueueStateInfo as req => {
                 tracing::debug!(block_id = %req.block_id, "getPersistentQueueStateInfo");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_queue_persistent_state_info(&req);
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_queue_persistent_state_info(&req)))
                 })
             },
             rpc::GetPersistentShardStateChunk as req => {
@@ -238,11 +232,8 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     offset = %req.offset,
                     "getPersistentShardStateChunk"
                 );
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_persistent_shard_state_chunk(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_persistent_shard_state_chunk(&req).await))
                 })
             },
             rpc::GetPersistentQueueStateChunk as req => {
@@ -251,20 +242,14 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     offset = %req.offset,
                     "getPersistentQueueStateChunk"
                 );
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_persistent_queue_state_chunk(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_persistent_queue_state_chunk(&req).await))
                 })
             },
             rpc::GetArchiveInfo as req => {
                 tracing::debug!(mc_seqno = %req.mc_seqno, "getArchiveInfo");
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_archive_info(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_archive_info(&req).await))
                 })
             },
             rpc::GetArchiveChunk as req => {
@@ -273,11 +258,8 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     offset = %req.offset,
                     "getArchiveChunk"
                 );
-
-                let inner = self.inner.clone();
-                BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_archive_chunk(&req).await;
-                    Some(Response::from_tl(res))
+                 timed_future(timer,async move {
+                    Some(Response::from_tl(inner.handle_get_archive_chunk(&req).await))
                 })
             },
         }, e => {
@@ -344,6 +326,20 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
     }
 }
 
+pub fn timed_future<F, Timer, TimerRet, T>(t: Timer, f: F) -> BoxFutureOrNoop<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    Timer: FnOnce() -> TimerRet + Send + 'static,
+    TimerRet: Send + 'static,
+    T: 'static,
+{
+    let future = async move {
+        let _timer = t();
+        f.await
+    };
+    BoxFutureOrNoop::future(future)
+}
+
 struct Inner<B> {
     storage: Storage,
     config: BlockchainRpcServiceConfig,
@@ -359,9 +355,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetNextKeyBlockIds,
     ) -> overlay::Response<KeyBlockIds> {
-        let label = [("method", "getNextKeyBlockIds")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
         let block_handle_storage = self.storage().block_handle_storage();
 
         let limit = std::cmp::min(req.max_size as usize, self.config.max_key_blocks_list_len);
@@ -405,9 +398,6 @@ impl<B> Inner<B> {
     }
 
     async fn handle_get_block_full(&self, req: &rpc::GetBlockFull) -> overlay::Response<BlockFull> {
-        let label = [("method", "getBlockFull")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
         match self.get_block_full(&req.block_id).await {
             Ok(block_full) => overlay::Response::Ok(block_full),
             Err(e) => {
@@ -421,9 +411,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetNextBlockFull,
     ) -> overlay::Response<BlockFull> {
-        let label = [("method", "getNextBlockFull")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
         let block_handle_storage = self.storage().block_handle_storage();
         let block_connection_storage = self.storage().block_connection_storage();
 
@@ -448,9 +435,6 @@ impl<B> Inner<B> {
     }
 
     fn handle_get_block_data_chunk(&self, req: &rpc::GetBlockDataChunk) -> overlay::Response<Data> {
-        let label = [("method", "getBlockDataChunk")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
         let block_storage = self.storage.block_storage();
         match block_storage.get_block_data_chunk(&req.block_id, req.offset) {
             Ok(Some(data)) => overlay::Response::Ok(Data {
@@ -468,9 +452,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetKeyBlockProof,
     ) -> overlay::Response<KeyBlockProof> {
-        let label = [("method", "getKeyBlockProof")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
@@ -501,9 +482,6 @@ impl<B> Inner<B> {
     ) -> overlay::Response<ArchiveInfo> {
         let mc_seqno = req.mc_seqno;
         let node_state = self.storage.node_state();
-
-        let label = [("method", "getArchiveInfo")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
         match node_state.load_last_mc_block_id() {
             Some(last_applied_mc_block) => {
@@ -540,9 +518,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetArchiveChunk,
     ) -> overlay::Response<Data> {
-        let label = [("method", "getArchiveChunk")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-
         let block_storage = self.storage.block_storage();
 
         let get_archive_chunk = || async {
@@ -578,8 +553,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentQueueStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
-        let label = [("method", "getQueuePersistentStateInfo")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
         let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Queue);
         overlay::Response::Ok(res)
     }
@@ -588,8 +561,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentShardStateChunk,
     ) -> overlay::Response<Data> {
-        let label = [("method", "getPersistentShardStateChunk")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
         self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Shard)
             .await
     }
@@ -598,8 +569,6 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentQueueStateChunk,
     ) -> overlay::Response<Data> {
-        let label = [("method", "getPersistentQueueStateChunk")];
-        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
         self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Queue)
             .await
     }
