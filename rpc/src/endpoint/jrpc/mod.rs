@@ -9,9 +9,10 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use tycho_block_util::message::{validate_external_message, ExtMsgRepr};
 use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{bc, serde_helpers};
+use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 pub use self::cache::JrpcEndpointCache;
 use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
@@ -66,15 +67,16 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             }
         }
         MethodParams::SendMessage(p) => {
-            let Ok(data) = BocRepr::encode(p.message) else {
+            if let Err(e) = validate_external_message(&p.message).await {
                 return JrpcErrorResponse {
                     id: Some(req.id),
                     code: INVALID_BOC_CODE,
-                    message: Cow::Borrowed("invalid message BOC"),
+                    message: e.to_string().into(),
                 }
                 .into_response();
-            };
-            state.broadcast_external_message(&data).await;
+            }
+
+            state.broadcast_external_message(&p.message).await;
             ok_to_response(req.id, ())
         }
         MethodParams::GetLibraryCell(p) => {
@@ -198,8 +200,8 @@ impl<'de> Deserialize<'de> for EmptyParams {
 
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
-    #[serde(with = "bc::ExtMsgRepr")]
-    pub message: Box<OwnedMessage>,
+    #[serde(with = "Base64BytesWithLimit::<{ ExtMsgRepr::MAX_BOC_SIZE }>")]
+    pub message: bytes::Bytes,
 }
 
 #[derive(Debug, Deserialize)]

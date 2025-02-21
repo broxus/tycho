@@ -1,15 +1,19 @@
 use std::cell::RefCell;
 
-use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_types::cell::CellTreeStats;
 use everscale_types::error::Error;
-use everscale_types::models::{IntAddr, MessageLayout, MsgInfo, OwnedMessage, StateInit};
+use everscale_types::models::{IntAddr, MsgInfo, StateInit};
 use everscale_types::prelude::*;
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serializer};
+use tycho_util::FastHashMap;
 
-use crate::serde_helpers::BorrowedStr;
-use crate::FastHashMap;
+pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), InvalidExtMsg> {
+    if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
+        let body = body.clone();
+        tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body)).await
+    } else {
+        ExtMsgRepr::validate(body)
+    }
+}
 
 pub struct ExtMsgRepr;
 
@@ -19,60 +23,20 @@ impl ExtMsgRepr {
     pub const MAX_ALLOWED_MERKLE_DEPTH: u8 = 2;
     pub const MAX_MSG_BITS: u64 = 1 << 21;
     pub const MAX_MSG_CELLS: u64 = 1 << 13;
+    pub const BOUNDARY_BOC_SIZE: usize = 1 << 12;
 
     pub const ALLOWED_WORKCHAINS: std::ops::RangeInclusive<i8> = -1..=0;
 
-    // === Serde methods ===
-
-    pub fn serialize<S>(msg: &OwnedMessage, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        BocRepr::serialize(msg, serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Box<OwnedMessage>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let BorrowedStr(str) = <BorrowedStr<'_> as Deserialize>::deserialize(deserializer)?;
-
-        let decoded_len = base64::decoded_len_estimate(str.len());
-        if decoded_len > Self::MAX_BOC_SIZE {
-            return Err(D::Error::invalid_length(decoded_len, &"less than 64 kB"));
-        }
-
-        let bytes = BASE64_STANDARD
-            .decode(str.as_ref())
-            .map_err(D::Error::custom)?;
-        drop(str);
-
-        Self::decode(bytes).map_err(D::Error::custom)
-    }
-
     // === General methods ===
 
-    pub fn decode_base64<T: AsRef<[u8]>>(base64: T) -> anyhow::Result<Box<OwnedMessage>> {
-        let decoded_len = base64::decoded_len_estimate(base64.as_ref().len());
-        anyhow::ensure!(
-            decoded_len <= Self::MAX_BOC_SIZE,
-            InvalidExtMsg::BocSizeExceeded
-        );
-
-        let bytes = BASE64_STANDARD.decode(base64.as_ref())?;
-        drop(base64);
-
-        Self::decode(bytes).map_err(Into::into)
-    }
-
-    pub fn decode<T: AsRef<[u8]>>(bytes: T) -> Result<Box<OwnedMessage>, InvalidExtMsg> {
+    pub fn validate<T: AsRef<[u8]>>(bytes: T) -> Result<(), InvalidExtMsg> {
         // Apply limits to the encoded BOC.
         if bytes.as_ref().len() > Self::MAX_BOC_SIZE {
             return Err(InvalidExtMsg::BocSizeExceeded);
         }
 
         // Decode BOC.
-        let msg_root = Boc::decode(bytes)?;
+        let msg_root = Self::boc_decode_with_limit(bytes.as_ref(), Self::MAX_MSG_CELLS)?;
 
         // Cell must not contain any suspicious pruned branches not wrapped into merkle stuff.
         if msg_root.level() != 0 {
@@ -121,48 +85,58 @@ impl ExtMsgRepr {
         }
 
         // Process message state init.
-        let mut layout = MessageLayout {
-            init_to_cell: false,
-            body_to_cell: false,
-        };
-        let init = if cs.load_bit()? {
-            Some(if cs.load_bit()? {
+        if cs.load_bit()? {
+            if cs.load_bit()? {
                 // State init as reference.
-                layout.init_to_cell = true;
-                cs.load_reference().and_then(|c| c.parse::<StateInit>())
+                cs.load_reference().and_then(|c| {
+                    let mut cs = c.as_slice()?;
+                    StateInit::load_from(&mut cs)?;
+
+                    // State init cell must not contain anything else.
+                    if cs.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidData)
+                    }
+                })?;
             } else {
                 // Inline state init.
-                StateInit::load_from(&mut cs)
-            }?)
-        } else {
-            None
-        };
+                StateInit::load_from(&mut cs)?;
+            }
+        }
 
         // Process message body.
-        let body = if cs.load_bit()? {
-            // Body as cell.
-            layout.body_to_cell = true;
-            let body_cell = cs.load_reference_cloned()?;
-
-            // Message must not contain anything else.
-            if !cs.is_empty() {
+        if cs.load_bit()? {
+            // Message must not contain anything other than body as cell.
+            if !cs.is_data_empty() || cs.size_refs() != 1 {
                 return Err(InvalidExtMsg::InvalidMessage(Error::InvalidData));
             }
+        }
 
-            let body_range = CellSliceRange::full(body_cell.as_ref());
-            (body_cell, body_range)
-        } else {
-            // Inline body.
-            let body_range = cs.range();
-            (msg_root, body_range)
-        };
+        Ok(())
+    }
 
-        Ok(Box::new(OwnedMessage {
-            info,
-            init,
-            body,
-            layout: Some(layout),
-        }))
+    fn boc_decode_with_limit(data: &[u8], max_cells: u64) -> Result<Cell, InvalidExtMsg> {
+        use everscale_types::boc::de::{self, Options};
+
+        let header = everscale_types::boc::de::BocHeader::decode(data, &Options {
+            max_roots: Some(1),
+            min_roots: Some(1),
+        })?;
+
+        // Optimistic check based on just cell data ranges.
+        if header.cells().len() as u64 > max_cells {
+            return Err(InvalidExtMsg::MsgSizeExceeded);
+        }
+
+        if let Some(&root) = header.roots().first() {
+            let cells = header.finalize(Cell::empty_context())?;
+            if let Some(root) = cells.get(root) {
+                return Ok(root);
+            }
+        }
+
+        Err(InvalidExtMsg::BocError(de::Error::RootCellNotFound))
     }
 }
 
@@ -182,7 +156,7 @@ pub enum InvalidExtMsg {
     MsgSizeExceeded,
 }
 
-struct MsgStorageStat<'a> {
+pub struct MsgStorageStat<'a> {
     visited: &'a mut FastHashMap<&'static HashBytes, u8>,
     limits: CellTreeStats,
     max_merkle_depth: u8,
@@ -198,7 +172,7 @@ impl<'a> MsgStorageStat<'a> {
         );
     }
 
-    fn check_slice<'c: 'a>(
+    pub fn check_slice<'c: 'a>(
         cs: &CellSlice<'c>,
         max_merkle_depth: u8,
         limits: CellTreeStats,
@@ -273,17 +247,18 @@ impl<'a> MsgStorageStat<'a> {
 #[cfg(test)]
 mod test {
     use everscale_types::error::Error;
-    use everscale_types::merkle::{FilterAction, MerkleFilter, MerkleProof};
-    use everscale_types::models::{ExtOutMsgInfo, IntMsgInfo};
+    use everscale_types::merkle::MerkleProof;
+    use everscale_types::models::{ExtOutMsgInfo, IntMsgInfo, MessageLayout, OwnedMessage};
 
     use super::*;
+    use crate::block::AlwaysInclude;
 
     #[test]
     fn fits_into_limits() -> anyhow::Result<()> {
         #[track_caller]
         fn unwrap_msg(cell: Cell) {
             let boc = Boc::encode(cell);
-            ExtMsgRepr::decode(boc).unwrap();
+            ExtMsgRepr::validate(boc).unwrap();
         }
 
         // Simple message.
@@ -340,7 +315,7 @@ mod test {
         #[track_caller]
         fn expect_err(cell: Cell) -> InvalidExtMsg {
             let boc = Boc::encode(cell);
-            ExtMsgRepr::decode(boc).unwrap_err()
+            ExtMsgRepr::validate(boc).unwrap_err()
         }
 
         // Garbage.
@@ -437,49 +412,60 @@ mod test {
 
         // Too big message.
         {
-            let mut count = 0;
-            let body = make_big_tree(8, &mut count, ExtMsgRepr::MAX_MSG_CELLS as u16 + 10);
-            let body_range = CellSliceRange::full(body.as_ref());
-
-            let cell = CellBuilder::build_from(OwnedMessage {
-                info: MsgInfo::ExtIn(Default::default()),
-                init: None,
-                body: (body, body_range),
-                layout: None,
-            })?;
-
+            let cell = exceed_big_message()?;
             assert!(matches!(expect_err(cell), InvalidExtMsg::MsgSizeExceeded));
         }
 
         // Too big merkle depth.
         {
-            let leaf_proof = MerkleProof::create(Cell::empty_cell_ref(), AlwaysInclude)
-                .build()
-                .and_then(CellBuilder::build_from)?;
-
-            let inner_proof = MerkleProof::create(leaf_proof.as_ref(), AlwaysInclude)
-                .build()
-                .and_then(CellBuilder::build_from)?;
-
-            let body = MerkleProof::create(inner_proof.as_ref(), AlwaysInclude)
-                .build()
-                .and_then(CellBuilder::build_from)?;
-            let body_range = CellSliceRange::full(body.as_ref());
-
-            let cell = CellBuilder::build_from(OwnedMessage {
-                info: MsgInfo::ExtIn(Default::default()),
-                init: None,
-                body: (body, body_range),
-                layout: Some(MessageLayout {
-                    body_to_cell: true,
-                    init_to_cell: false,
-                }),
-            })?;
-
+            let cell = create_deep_merkle()?;
             assert!(matches!(expect_err(cell), InvalidExtMsg::MsgSizeExceeded));
         }
 
         Ok(())
+    }
+
+    fn exceed_big_message() -> anyhow::Result<Cell> {
+        let mut count = 0;
+        let body = make_big_tree(8, &mut count, ExtMsgRepr::MAX_MSG_CELLS as u16 + 100);
+
+        let body_range = CellSliceRange::full(body.as_ref());
+
+        let cell = CellBuilder::build_from(OwnedMessage {
+            info: MsgInfo::ExtIn(Default::default()),
+            init: None,
+            body: (body, body_range),
+            layout: None,
+        })?;
+
+        Ok(cell)
+    }
+
+    fn create_deep_merkle() -> anyhow::Result<Cell> {
+        let leaf_proof = MerkleProof::create(Cell::empty_cell_ref(), AlwaysInclude)
+            .build()
+            .and_then(CellBuilder::build_from)?;
+
+        let inner_proof = MerkleProof::create(leaf_proof.as_ref(), AlwaysInclude)
+            .build()
+            .and_then(CellBuilder::build_from)?;
+
+        let body = MerkleProof::create(inner_proof.as_ref(), AlwaysInclude)
+            .build()
+            .and_then(CellBuilder::build_from)?;
+        let body_range = CellSliceRange::full(body.as_ref());
+
+        let cell = CellBuilder::build_from(OwnedMessage {
+            info: MsgInfo::ExtIn(Default::default()),
+            init: None,
+            body: (body, body_range),
+            layout: Some(MessageLayout {
+                body_to_cell: true,
+                init_to_cell: false,
+            }),
+        })?;
+
+        Ok(cell)
     }
 
     fn make_big_tree(depth: u8, count: &mut u16, target: u16) -> Cell {
@@ -496,14 +482,6 @@ mod test {
                 }
             }
             b.build().unwrap()
-        }
-    }
-
-    struct AlwaysInclude;
-
-    impl MerkleFilter for AlwaysInclude {
-        fn check(&self, _: &HashBytes) -> FilterAction {
-            FilterAction::Include
         }
     }
 }

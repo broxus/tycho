@@ -20,16 +20,6 @@ pub struct BlockProofStuff {
 impl BlockProofStuff {
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(block_id: &BlockId) -> Self {
-        use everscale_types::merkle::MerkleUpdate;
-
-        struct AlwaysInclude;
-
-        impl MerkleFilter for AlwaysInclude {
-            fn check(&self, _: &HashBytes) -> FilterAction {
-                FilterAction::Include
-            }
-        }
-
         let block_info = BlockInfo {
             shard: block_id.shard,
             seqno: block_id.seqno,
@@ -240,7 +230,7 @@ impl BlockProofStuff {
 
         anyhow::ensure!(
             &signatures.consensus_info == mc_consensus_info,
-            "block consensus info does not match master state consensus info (found: {:?}, expected: {:?}", 
+            "block consensus info does not match master state consensus info (found: {:?}, expected: {:?}",
             signatures.consensus_info, mc_consensus_info,
         );
 
@@ -547,5 +537,14 @@ impl ValidatorSubsetInfo {
             validators,
             short_hash,
         })
+    }
+}
+
+// TODO: Move into `types`.
+pub struct AlwaysInclude;
+
+impl MerkleFilter for AlwaysInclude {
+    fn check(&self, _: &HashBytes) -> FilterAction {
+        FilterAction::Include
     }
 }

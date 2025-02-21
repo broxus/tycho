@@ -37,13 +37,11 @@ tracing-subscriber = { workspace = true, optional = true }
 zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 
-everscale-types = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
-everscale-types = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
@@ -60,7 +58,6 @@ cli = [
     "metrics-exporter-prometheus",
     "tikv-jemalloc-ctl",
 ]
-bc = ["dep:everscale-types"]
 
 [[bench]]
 name = "p2"

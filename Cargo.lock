@@ -3470,7 +3470,9 @@ version = "0.2.3"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "base64",
  "bytes",
+ "criterion",
  "everscale-types",
  "hex",
  "parking_lot",
@@ -3829,7 +3831,6 @@ dependencies = [
  "castaway",
  "criterion",
  "dashmap",
- "everscale-types",
  "futures-util",
  "getip",
  "humantime",

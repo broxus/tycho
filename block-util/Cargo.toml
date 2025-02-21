@@ -9,6 +9,14 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[[bench]]
+name = "big_message"
+harness = false
+
+[[bench]]
+name = "decode_message"
+harness = false
+
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
@@ -24,6 +32,8 @@ tl-proto = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
+criterion = { workspace = true }
 
 [features]
 test = []
