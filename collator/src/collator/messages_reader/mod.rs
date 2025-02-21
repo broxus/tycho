@@ -216,11 +216,7 @@ impl MessagesReader {
         };
 
         // define the initial reader stage
-        let all_read_externals_collected = res.externals_reader.all_ranges_read_and_collected();
-        let initial_reader_stage = match all_read_externals_collected {
-            true => MessagesReaderStage::ExistingAndExternals,
-            false => MessagesReaderStage::FinishPreviousExternals,
-        };
+        let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
 
         // create internals readers by partitions
         let mut partition_reader_states = cx.reader_state.internals.partitions;
@@ -312,11 +308,7 @@ impl MessagesReader {
         self.metrics_by_partitions = Default::default();
 
         // define the initial reader stage
-        let all_read_externals_collected = self.externals_reader.all_ranges_read_and_collected();
-        let initial_reader_stage = match all_read_externals_collected {
-            true => MessagesReaderStage::ExistingAndExternals,
-            false => MessagesReaderStage::FinishPreviousExternals,
-        };
+        let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
 
         // reset internals reader stages
         for (_, par_reader_stage) in self.readers_stages.iter_mut() {
