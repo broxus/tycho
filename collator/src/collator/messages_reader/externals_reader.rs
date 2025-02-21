@@ -409,33 +409,20 @@ impl ExternalsReader {
 
     #[tracing::instrument(skip_all)]
     fn create_next_externals_range_reader(&self) -> ExternalsRangeReader {
-        let (from, processed_offsets_by_partitions) = self
+        let from = self
             .range_readers
             .values()
             .last()
-            .map(|r| {
-                (
-                    r.reader_state.range.to,
-                    r.reader_state
-                        .by_partitions
-                        .iter()
-                        .map(|(par_id, par)| (*par_id, par.processed_offset))
-                        .collect::<BTreeMap<_, _>>(),
-                )
-            })
+            .map(|r| r.reader_state.range.to)
             .unwrap_or_default();
 
         // create range reader states by partitions
         let mut by_partitions = BTreeMap::new();
-        for par_id in self.reader_state.by_partitions.keys() {
-            let processed_offset = processed_offsets_by_partitions
-                .get(par_id)
-                .cloned()
-                .unwrap_or_default();
+        for (par_id, par) in &self.reader_state.by_partitions {
             by_partitions.insert(*par_id, ExternalsRangeReaderStateByPartition {
                 buffer: Default::default(),
-                skip_offset: processed_offset,
-                processed_offset,
+                skip_offset: par.curr_processed_offset,
+                processed_offset: par.curr_processed_offset,
             });
         }
 
