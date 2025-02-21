@@ -1116,29 +1116,40 @@ def collation_metrics() -> RowPanel:
             "tycho_node_in_current_vset",
             "Node is in current validator set",
         ),
+        create_gauge_panel(
+            "tycho_last_block_seqno",
+            "Last received/synced_to/collated block seqno",
+            labels=['workchain=~"$workchain"'],
+            legend_format = "{{instance}} workchain: {{workchain}} src: {{src}}",
+        ),
         create_counter_panel(
             "tycho_collator_sync_to_applied_mc_block_count",
             "Number of syncs to applied mc block",
-        ),
-        create_counter_panel(
-            "tycho_do_collate_blocks_with_limits_reached_count",
-            "Number of blocks with limits reached",
-            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_collator_block_mismatch_count",
             "Number of mismatched blocks",
             labels_selectors=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_collator_sync_is_running",
+            "Collator: sync is running",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_collator_refill_messages_is_running",
+            "Collator: refill messages is running",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_counter_panel(
             "tycho_do_collate_tx_total",
             "Number of transactions over time",
             labels_selectors=['workchain=~"$workchain"'],
         ),
-        create_gauge_panel(
-            "tycho_do_collate_block_seqno",
-            "Collated block seqno",
-            labels=['workchain=~"$workchain"'],
+        create_counter_panel(
+            "tycho_do_collate_blocks_with_limits_reached_count",
+            "Number of blocks with limits reached",
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_tx_per_block",
@@ -1176,7 +1187,6 @@ def collation_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_blocks_count_in_collation_manager_cache",
             "Blocks count in collation manager cache",
-            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Collation Metrics", metrics)

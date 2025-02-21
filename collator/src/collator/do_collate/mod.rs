@@ -870,14 +870,15 @@ impl CollatorStdImpl {
     }
 
     fn report_collation_metrics(&self, collation_data: &BlockCollationData) {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        let mut labels = vec![("workchain", self.shard_id.workchain().to_string())];
 
         metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
             .set(collation_data.accounts_count as f64);
-        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
-            .set(collation_data.block_id_short.seqno);
         metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
             .set(collation_data.diff_tail_len);
+
+        labels.push(("src", "03_collated".to_string()));
+        metrics::gauge!("tycho_last_block_seqno", &labels).set(collation_data.block_id_short.seqno);
     }
 
     fn report_wu_metrics(

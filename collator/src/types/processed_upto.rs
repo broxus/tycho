@@ -96,47 +96,6 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
         }
 
         Ok(res)
-
-        // let mut externals = ExternalsProcessedUptoStuff {
-        //     processed_to: value.externals.processed_to,
-        //     ranges: Default::default(),
-        // };
-        // for r_item in value.externals.ranges.iter() {
-        //     let (seqno, r) = r_item?;
-        //     externals.ranges.insert(seqno, r.into());
-        // }
-
-        // let mut internals = InternalsProcessedUptoStuff::default();
-        // for par_item in value.internals.partitions.iter() {
-        //     let (par_id, par) = par_item?;
-        //     let mut partition = InternalsProcessedUptoStuff::default();
-        //     for item in par.processed_to.iter() {
-        //         let (shard_id_full, p_to) = item?;
-        //         partition
-        //             .processed_to
-        //             .insert(ShardIdent::try_from(shard_id_full)?, p_to.into());
-        //     }
-        //     for r_item in par.ranges.iter() {
-        //         let (seqno, r) = r_item?;
-        //         let mut int_range = InternalsRangeStuff {
-        //             processed_offset: r.processed_offset,
-        //             shards: Default::default(),
-        //         };
-        //         for s_r_item in r.shards.iter() {
-        //             let (shard_id_full, s_r) = s_r_item?;
-        //             int_range
-        //                 .shards
-        //                 .insert(ShardIdent::try_from(shard_id_full.clone())?, s_r.into());
-        //         }
-        //         partition.ranges.insert(seqno, int_range);
-        //     }
-        //     internals.partitions.insert(par_id, partition);
-        // }
-
-        // Ok(Self {
-        //     externals,
-        //     internals,
-        // })
     }
 }
 
@@ -181,26 +140,6 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
         }
 
         Ok(res)
-
-        // let mut externals = ExternalsProcessedUpto {
-        //     processed_to: value.externals.processed_to,
-        //     ranges: Default::default(),
-        // };
-        // for (seqno, r) in value.externals.ranges {
-        //     externals.ranges.set(seqno, ExternalsRange::from(r))?;
-        // }
-
-        // let mut internals = InternalsProcessedUpto::default();
-        // for (par_id, par) in value.internals.partitions {
-        //     let mut partition = PartitionProcessedUpto::default();
-
-        //     internals.partitions.set(par_id, partition)?;
-        // }
-
-        // Ok(Self {
-        //     externals,
-        //     internals,
-        // })
     }
 }
 
@@ -227,16 +166,24 @@ impl std::fmt::Debug for ExternalsProcessedUptoStuff {
         struct ExternalsRangesInfo {
             seqno: String,
             processed_offset: String,
-            last_skip_offset: u32,
+            skip_offset: String,
             chain_time: String,
             from: (MempoolAnchorId, u64),
             to: (MempoolAnchorId, u64),
         }
 
-        let (first_seqno, first_processed_offset, first_ct, first_from) = self
+        let (first_seqno, first_skip_offset, first_processed_offset, first_ct, first_from) = self
             .ranges
             .first_key_value()
-            .map(|(seqno, r)| (*seqno, r.processed_offset, r.chain_time, r.from))
+            .map(|(seqno, r)| {
+                (
+                    *seqno,
+                    r.skip_offset,
+                    r.processed_offset,
+                    r.chain_time,
+                    r.from,
+                )
+            })
             .unwrap_or_default();
         let (last_seqno, last_skip_offset, last_processed_offset, last_ct, last_to) = self
             .ranges
@@ -255,7 +202,7 @@ impl std::fmt::Debug for ExternalsProcessedUptoStuff {
         let ranges = ExternalsRangesInfo {
             seqno: format!("{}-{}", first_seqno, last_seqno),
             processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
-            last_skip_offset,
+            skip_offset: format!("{}-{}", first_skip_offset, last_skip_offset),
             chain_time: format!("{}-{}", first_ct, last_ct),
             from: first_from,
             to: last_to,
@@ -313,14 +260,14 @@ impl std::fmt::Debug for InternalsProcessedUptoStuff {
         struct InternalsRangesInfo {
             seqno: String,
             processed_offset: String,
-            last_skip_offset: u32,
+            skip_offset: String,
             shards: BTreeMap<ShardIdent, ShardRangeInfo>,
         }
 
-        let (first_seqno, first_processed_offset, mut first_shards) = self
+        let (first_seqno, first_skip_offset, first_processed_offset, mut first_shards) = self
             .ranges
             .first_key_value()
-            .map(|(seqno, r)| (*seqno, r.processed_offset, r.shards.clone()))
+            .map(|(seqno, r)| (*seqno, r.skip_offset, r.processed_offset, r.shards.clone()))
             .unwrap_or_default();
         let (last_seqno, last_skip_offset, last_processed_offset, last_shards) = self
             .ranges
@@ -338,7 +285,7 @@ impl std::fmt::Debug for InternalsProcessedUptoStuff {
         let ranges = InternalsRangesInfo {
             seqno: format!("{}-{}", first_seqno, last_seqno),
             processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
-            last_skip_offset,
+            skip_offset: format!("{}-{}", first_skip_offset, last_skip_offset),
             shards: first_shards,
         };
 

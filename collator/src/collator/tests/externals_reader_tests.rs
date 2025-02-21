@@ -453,7 +453,9 @@ fn test_read_externals() {
         externals_reader
             .set_processed_to_current_position(par_id)
             .unwrap();
-        externals_reader.set_skip_offset_to_current(par_id).unwrap();
+        externals_reader
+            .set_skip_processed_offset_to_current(par_id)
+            .unwrap();
     }
     externals_reader
         .set_from_to_current_position_in_last_range_reader()

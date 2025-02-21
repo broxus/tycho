@@ -366,17 +366,19 @@ impl BlocksCache {
                 block_mismatch = res.block_mismatch;
                 received_and_collated = res.received_and_collated;
 
-                // if collated block mismatched remove it from last collated blocks ids
+                // if collated block mismatched remove it and all next from last collated blocks ids
                 if block_mismatch {
                     masters_guard
                         .data
-                        .remove_last_collated_block_id(&block_id.seqno);
+                        .remove_last_collated_block_ids_from(&block_id.seqno);
                 }
 
                 last_collated_mc_block_id =
                     masters_guard.data.get_last_collated_block_id().cloned();
                 applied_mc_queue_range = masters_guard.data.applied_mc_queue_range;
             } else {
+                let ref_by_mc_seqno = ctx.ref_by_mc_seqno;
+
                 let res = {
                     let mut g = self.shards.entry(block_id.shard).or_default();
                     if let Some(last_known_synced) =
@@ -389,6 +391,14 @@ impl BlocksCache {
 
                 received_and_collated = res.received_and_collated;
                 block_mismatch = res.block_mismatch;
+
+                // if collated block mismatched remove its master and all next from last collated blocks ids
+                if block_mismatch {
+                    let mut masters_guard = self.masters.lock();
+                    masters_guard
+                        .data
+                        .remove_last_collated_block_ids_from(&ref_by_mc_seqno);
+                }
 
                 (last_collated_mc_block_id, applied_mc_queue_range) =
                     self.get_last_collated_block_and_applied_mc_queue_range();
@@ -492,9 +502,9 @@ impl BlocksCache {
                     } else {
                         let mc_block_entry = occupied_entry.remove();
                         // clean previous last collated blocks ids
-                        guard.data.remove_prev_from_last_collated_block_ids(
-                            &mc_block_entry.block_id.seqno,
-                        );
+                        guard
+                            .data
+                            .remove_last_collated_block_ids_before(&mc_block_entry.block_id.seqno);
                         // update range of received blocks
                         guard.data.move_range_start(mc_block_entry.block_id.seqno);
                         extracted_mc_block_entry = Some(mc_block_entry);
@@ -535,7 +545,7 @@ impl BlocksCache {
             // clean previous last collated blocks ids
             guard
                 .data
-                .remove_prev_from_last_collated_block_ids(&block_id.seqno);
+                .remove_last_collated_block_ids_before(&block_id.seqno);
 
             occupied_entry
         };
@@ -648,7 +658,9 @@ impl BlocksCache {
                 });
                 // remove from last collated blocks ids
                 for removed_seqno in removed_seqno_list {
-                    guard.data.remove_last_collated_block_id(&removed_seqno);
+                    guard
+                        .data
+                        .remove_last_collated_block_ids_from(&removed_seqno);
                 }
             }
         }
@@ -705,7 +717,9 @@ impl BlocksCache {
                 });
                 // remove from last collated blocks ids
                 for removed_seqno in removed_seqno_list {
-                    guard.data.remove_last_collated_block_id(&removed_seqno);
+                    guard
+                        .data
+                        .remove_last_collated_block_ids_from(&removed_seqno);
                 }
             } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
                 shard_cache.blocks.retain(|key, value| {
@@ -916,11 +930,12 @@ impl MasterBlocksCacheData {
             .insert(block_id.seqno, *block_id);
     }
 
-    fn remove_last_collated_block_id(&mut self, block_seqno: &BlockSeqno) -> Option<BlockId> {
-        self.last_collated_mc_block_ids.remove(block_seqno)
+    fn remove_last_collated_block_ids_from(&mut self, from_block_seqno: &BlockSeqno) {
+        self.last_collated_mc_block_ids
+            .retain(|seqno, _| seqno < from_block_seqno);
     }
 
-    fn remove_prev_from_last_collated_block_ids(&mut self, before_block_seqno: &BlockSeqno) {
+    fn remove_last_collated_block_ids_before(&mut self, before_block_seqno: &BlockSeqno) {
         self.last_collated_mc_block_ids
             .retain(|seqno, _| seqno >= before_block_seqno);
     }

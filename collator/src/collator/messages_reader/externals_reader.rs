@@ -73,7 +73,13 @@ impl ExternalsReader {
             all_ranges_fully_read: false,
         };
 
+        // create existing range readers
         reader.create_existing_range_readers();
+
+        // if no range readers create the first one right now
+        if reader.range_readers.is_empty() {
+            reader.create_append_next_range_reader();
+        }
 
         reader
     }
@@ -159,6 +165,42 @@ impl ExternalsReader {
         })
     }
 
+    pub fn last_range_offset_reached(&self, par_id: &QueuePartitionIdx) -> bool {
+        self.reader_state
+            .by_partitions
+            .get(par_id)
+            .map(|state_by_partition| {
+                self.get_last_range_reader().map(|(_, r)| {
+                    r.reader_state
+                        .by_partitions
+                        .get(par_id)
+                        .map(|range_state_by_partition| {
+                            range_state_by_partition.processed_offset
+                                <= state_by_partition.curr_processed_offset
+                        })
+                })
+            })
+            .and_then(|res| res.ok())
+            .and_then(|res| res)
+            .unwrap_or(true)
+    }
+
+    pub fn last_range_offsets_reached_in_all_partitions(&self) -> bool {
+        self.get_last_range_reader()
+            .map(|(_, r)| {
+                r.reader_state.by_partitions.iter().all(|(par_id, par)| {
+                    par.processed_offset
+                        <= self
+                            .reader_state
+                            .by_partitions
+                            .get(par_id)
+                            .unwrap()
+                            .curr_processed_offset
+                })
+            })
+            .unwrap_or(true)
+    }
+
     pub fn get_last_range_reader_offsets_by_partitions(&self) -> Vec<(QueuePartitionIdx, u32)> {
         self.get_last_range_reader()
             .map(|(_, r)| {
@@ -212,7 +254,7 @@ impl ExternalsReader {
 
     pub fn retain_only_last_range_reader(&mut self) -> Result<()> {
         let (last_seqno, last_range_reader) = self.range_readers.pop_last().context(
-            "externals reader should have at least one range reader after reading into buffer",
+            "externals reader should have at least one range reader when retain_only_last_range_reader() called",
         )?;
 
         if last_seqno < self.block_seqno {
@@ -245,9 +287,9 @@ impl ExternalsReader {
     }
 
     pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &ExternalsRangeReader)> {
-        self.range_readers.last_key_value().context(
-            "externals reader should have at least one range reader after reading into buffer",
-        )
+        self.range_readers
+            .last_key_value()
+            .context("externals reader should have at least one range reader")
     }
 
     pub fn get_last_range_reader_mut(&mut self) -> Result<&mut ExternalsRangeReader> {
@@ -289,7 +331,10 @@ impl ExternalsReader {
         Ok(())
     }
 
-    pub fn set_skip_offset_to_current(&mut self, par_id: QueuePartitionIdx) -> Result<()> {
+    pub fn set_skip_processed_offset_to_current(
+        &mut self,
+        par_id: QueuePartitionIdx,
+    ) -> Result<()> {
         let curr_processed_offset = self
             .reader_state
             .get_state_by_partition(par_id)?

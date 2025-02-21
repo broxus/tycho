@@ -47,6 +47,8 @@ pub(super) struct CollationSyncState {
     pub active_sync_to_applied: Option<ActiveSync>,
     /// Seqno of last received master block which may be not saved to cache yet
     pub last_received_mc_block_seqno: Option<BlockSeqno>,
+    /// Last received applied master block id we have synced to
+    pub last_synced_to_mc_block_id: Option<BlockId>,
 }
 
 #[derive(Debug)]

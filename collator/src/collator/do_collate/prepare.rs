@@ -122,9 +122,19 @@ impl Phase<PrepareState> {
             self.extra.mq_adapter.clone(),
         )?;
 
+        // metrics - sync finished
+        let labels = [("workchain", self.state.shard_id.workchain().to_string())];
+        metrics::gauge!("tycho_collator_sync_is_running", &labels).set(0);
+
         // refill messages buffer and skip groups upto offset (on node restart)
         if messages_reader.check_need_refill() {
+            // metrics - refill is running
+            metrics::gauge!("tycho_collator_refill_messages_is_running", &labels).set(1);
+
             messages_reader.refill_buffers_upto_offsets()?;
+
+            // metrics - refill finished
+            metrics::gauge!("tycho_collator_refill_messages_is_running", &labels).set(0);
         }
 
         Ok(Phase::<ExecuteState> {
