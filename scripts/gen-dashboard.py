@@ -519,18 +519,7 @@ def net_traffic() -> RowPanel:
     return create_row("network: Traffic", metrics)
 
 
-def core_blockchain_rpc() -> RowPanel:
-    methods = [
-        "getNextKeyBlockIds",
-        "getBlockFull",
-        "getBlockDataChunk",
-        "getNextBlockFull",
-        "getKeyBlockProof",
-        "getArchiveInfo",
-        "getArchiveChunk",
-        "getPersistentStateInfo",
-        "getPersistentStatePart",
-    ]
+def core_blockchain_rpc_general() -> RowPanel:
     metrics = [
         create_gauge_panel(
             "tycho_core_overlay_client_validators_to_resolve",
@@ -556,7 +545,36 @@ def core_blockchain_rpc() -> RowPanel:
             legend_format="{{instance}} - {{kind}}",
         ),
     ]
-    metrics += [
+    return create_row("blockchain: RPC - General Stats", metrics)
+
+
+def core_blockchain_rpc_per_method_stats() -> RowPanel:
+    methods = [
+        "Ping",
+        "GetNextKeyBlockIds",
+        "GetBlockFull",
+        "GetNextBlockFull",
+        "GetBlockDataChunk",
+        "GetKeyBlockProof",
+        "GetPersistentShardStateInfo",
+        "GetPersistentQueueStateInfo",
+        "GetPersistentShardStateChunk",
+        "GetPersistentQueueStateChunk",
+        "GetArchiveInfo",
+        "GetArchiveChunk",
+    ]
+
+    counter_panels = [
+        create_counter_panel(
+            expr="tycho_blockchain_rpc_method_time_count",
+            title=f"Blockchain RPC {method} calls/s",
+            labels_selectors=[f'method="{method}"'],
+            legend_format="{{instance}}",
+        )
+        for method in methods
+    ]
+
+    heatmap_panels = [
         create_heatmap_panel(
             "tycho_blockchain_rpc_method_time",
             f"Blockchain RPC {method} time",
@@ -564,7 +582,8 @@ def core_blockchain_rpc() -> RowPanel:
         )
         for method in methods
     ]
-    return create_row("blockchain: RPC", metrics)
+
+    return create_row("blockchain: RPC - Method Stats", counter_panels + heatmap_panels)
 
 
 def net_conn_manager() -> RowPanel:
@@ -881,9 +900,7 @@ def storage() -> RowPanel:
         create_gauge_panel(
             "tycho_core_mc_blocks_gc_lag", "Blocks GC lag", unit_format="Blocks"
         ),
-        create_gauge_panel(
-            "tycho_core_blocks_gc_tail_len", "GC diffs tail len"
-        ),
+        create_gauge_panel("tycho_core_blocks_gc_tail_len", "GC diffs tail len"),
         create_heatmap_panel(
             "tycho_storage_move_into_archive_time", "Time to move into archive"
         ),
@@ -1277,7 +1294,7 @@ def collator_message_metrics() -> RowPanel:
             "tycho_do_collate_msgs_read_count_ext_by_partitions",
             "Read Ext msgs count (by partitions)",
             labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
-            by_labels=['instance', 'par_id'],
+            by_labels=["instance", "par_id"],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_ext",
@@ -1307,7 +1324,7 @@ def collator_message_metrics() -> RowPanel:
             "tycho_do_collate_msgs_read_count_int_by_partitions",
             "Read Int msgs count (by partitions)",
             labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
-            by_labels=['instance', 'par_id'],
+            by_labels=["instance", "par_id"],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_int",
@@ -1337,7 +1354,7 @@ def collator_message_metrics() -> RowPanel:
             "tycho_do_collate_msgs_read_count_new_int_by_partitions",
             "Read NewInt msgs count (by partitions)",
             labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
-            by_labels=['instance', 'par_id'],
+            by_labels=["instance", "par_id"],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_new_int",
@@ -1373,22 +1390,28 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
         create_gauge_panel(
-            "tycho_internal_queue_gc_state_size", "Total GC state size",
+            "tycho_internal_queue_gc_state_size",
+            "Total GC state size",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_commited_state_iterator_create_time", "Commited iterator init time"
+            "tycho_internal_queue_commited_state_iterator_create_time",
+            "Commited iterator init time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_uncommited_state_iterator_create_time", "Uncommitted iterator init time"
+            "tycho_internal_queue_uncommited_state_iterator_create_time",
+            "Uncommitted iterator init time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_uncommitted_statistics_load_time", "Uncommited statistics load time"
+            "tycho_internal_queue_uncommitted_statistics_load_time",
+            "Uncommited statistics load time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_committed_statistics_load_time", "Committed statistics load time"
+            "tycho_internal_queue_committed_statistics_load_time",
+            "Committed statistics load time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_apply_diff_add_statistics_time", "Apply statistics time"
+            "tycho_internal_queue_apply_diff_add_statistics_time",
+            "Apply statistics time",
         ),
         create_heatmap_panel(
             "tycho_internal_queue_apply_diff_add_messages_time", "Apply messages time"
@@ -1397,16 +1420,15 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
             "Statistics accounts count",
             legend_format=legend_format_partition,
-            by_labels=["instance", "partition"]
+            by_labels=["instance", "partition"],
         ),
-        create_heatmap_panel(
-            "tycho_internal_queue_snapshot_time", "Snapshot time"
-        ),
+        create_heatmap_panel("tycho_internal_queue_snapshot_time", "Snapshot time"),
         create_heatmap_panel(
             "tycho_internal_queue_create_iterator_time", "Create iterator time"
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_add_messages_with_statistics_write_time", "Write uncommited data time"
+            "tycho_internal_queue_add_messages_with_statistics_write_time",
+            "Write uncommited data time",
         ),
         create_counter_panel(
             "tycho_collator_queue_adapter_iterators_count", "Iterators count"
@@ -2351,7 +2373,8 @@ dashboard = Dashboard(
         blockchain_stats(),
         core_bc(),
         core_block_strider(),
-        core_blockchain_rpc(),
+        core_blockchain_rpc_general(),
+        core_blockchain_rpc_per_method_stats(),
         storage(),
         collator_params_metrics(),
         collation_metrics(),
