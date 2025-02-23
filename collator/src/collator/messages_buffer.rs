@@ -598,6 +598,23 @@ impl IntoParallelIterator for MessageGroup {
     }
 }
 
+impl IntoIterator for MessageGroup {
+    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
+    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.msgs.into_iter()
+    }
+}
+
+#[cfg(test)]
+impl MessageGroup {
+    #[allow(clippy::vec_box)]
+    pub fn msgs(&self) -> &FastHashMap<HashBytes, Vec<Box<ParsedMessage>>> {
+        &self.msgs
+    }
+}
+
 pub(super) struct DisplayMessageGroup<'a>(pub &'a MessageGroup);
 impl std::fmt::Debug for DisplayMessageGroup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

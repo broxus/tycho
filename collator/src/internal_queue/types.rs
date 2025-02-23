@@ -203,7 +203,7 @@ impl EnqueuedMessage {
     }
 
     pub fn hash(&self) -> &HashBytes {
-        self.cell.repr_hash()
+        &self.hash
     }
 }
 
@@ -236,7 +236,7 @@ impl EnqueuedMessage {
     }
 }
 
-pub trait InternalMessageValue: Send + Sync + Ord + 'static {
+pub trait InternalMessageValue: Send + Sync + Ord + Clone + 'static {
     fn deserialize(bytes: &[u8]) -> anyhow::Result<Self>
     where
         Self: Sized;
@@ -250,6 +250,10 @@ pub trait InternalMessageValue: Send + Sync + Ord + 'static {
     fn destination(&self) -> &IntAddr;
 
     fn key(&self) -> QueueKey;
+
+    fn info(&self) -> &IntMsgInfo;
+
+    fn cell(&self) -> &Cell;
 }
 
 impl InternalMessageValue for EnqueuedMessage {
@@ -284,6 +288,14 @@ impl InternalMessageValue for EnqueuedMessage {
 
     fn key(&self) -> QueueKey {
         self.key()
+    }
+
+    fn info(&self) -> &IntMsgInfo {
+        &self.info
+    }
+
+    fn cell(&self) -> &Cell {
+        &self.cell
     }
 }
 

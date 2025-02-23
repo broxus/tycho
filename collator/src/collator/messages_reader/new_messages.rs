@@ -19,7 +19,7 @@ use crate::collator::messages_buffer::{
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::{
-    EnqueuedMessage, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
 use crate::tracing_targets;
 use crate::types::ProcessedTo;
@@ -132,11 +132,11 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     }
 }
 
-impl InternalsPartitionReader {
+impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     pub fn get_new_messages_range_reader(
         &mut self,
         current_next_lt: u64,
-    ) -> Result<&mut InternalsRangeReader> {
+    ) -> Result<&mut InternalsRangeReader<V>> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
 
         // create range reader for new messages if it does not exist
@@ -244,7 +244,7 @@ impl InternalsPartitionReader {
 
     pub fn read_new_messages_into_buffers(
         &mut self,
-        new_messages: &mut NewMessagesState<EnqueuedMessage>,
+        new_messages: &mut NewMessagesState<V>,
         current_next_lt: u64,
     ) -> Result<ReadNewMessagesResult> {
         // update new messages reader "to" boundary on current next lt
@@ -280,7 +280,7 @@ impl InternalsPartitionReader {
 
     fn read_new_messages_into_buffer_impl(
         &mut self,
-        new_messages: &mut BinaryHeap<Reverse<MessageExt<EnqueuedMessage>>>,
+        new_messages: &mut BinaryHeap<Reverse<MessageExt<V>>>,
         current_next_lt: u64,
     ) -> Result<ReadNewMessagesResult> {
         let mut res = ReadNewMessagesResult::default();
@@ -322,9 +322,9 @@ impl InternalsPartitionReader {
                         .reader_state
                         .buffer
                         .add_message(Box::new(ParsedMessage {
-                            info: MsgInfo::Int(msg.message.info.clone()),
+                            info: MsgInfo::Int(msg.message.info().clone()),
                             dst_in_current_shard: true,
-                            cell: msg.message.cell.clone(),
+                            cell: msg.message.cell().clone(),
                             special_origin: None,
                             block_seqno: Some(block_seqno),
                             from_same_shard: Some(msg.source == for_shard_id),
