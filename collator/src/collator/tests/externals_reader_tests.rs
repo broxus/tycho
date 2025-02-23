@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent};
+use tycho_block_util::queue::QueuePartitionIdx;
 
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
 use crate::collator::messages_reader::{
     CollectExternalsResult, DebugExternalsRangeReaderState, DisplayMessageGroup, ExternalKey,
-    ExternalsReader, FinalizedExternalsReader, GetNextMessageGroupMode,
+    ExternalsReader, FinalizedExternalsReader, GetNextMessageGroupMode, InternalsPartitionReader,
     InternalsPartitionReaderState, ReaderState,
 };
 use crate::collator::types::AnchorsCache;
-use crate::internal_queue::types::PartitionRouter;
+use crate::internal_queue::types::{EnqueuedMessage, PartitionRouter};
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
 use crate::types::DisplayIter;
@@ -297,6 +298,9 @@ fn test_read_externals() {
 
     let par_ids = externals_reader.get_partition_ids();
 
+    let prev_partitions_readers =
+        BTreeMap::<QueuePartitionIdx, InternalsPartitionReader<EnqueuedMessage>>::new();
+
     // collect messages 1
     println!("collect messages 1");
     let mut msg_groups = BTreeMap::new();
@@ -306,7 +310,12 @@ fn test_read_externals() {
             .unwrap();
         let mut msg_group = MessageGroup::default();
         let CollectExternalsResult { metrics: _ } = externals_reader
-            .collect_messages(*par_id, &mut msg_group, &BTreeMap::new(), &msg_groups)
+            .collect_messages(
+                *par_id,
+                &mut msg_group,
+                &prev_partitions_readers,
+                &msg_groups,
+            )
             .unwrap();
         println!(
             "par {} msg_group: {}",
@@ -356,7 +365,12 @@ fn test_read_externals() {
             .unwrap();
         let mut msg_group = MessageGroup::default();
         let CollectExternalsResult { metrics: _ } = externals_reader
-            .collect_messages(*par_id, &mut msg_group, &BTreeMap::new(), &msg_groups)
+            .collect_messages(
+                *par_id,
+                &mut msg_group,
+                &prev_partitions_readers,
+                &msg_groups,
+            )
             .unwrap();
         println!(
             "par {} msg_group: {}",
@@ -406,7 +420,12 @@ fn test_read_externals() {
             .unwrap();
         let mut msg_group = MessageGroup::default();
         let CollectExternalsResult { metrics: _ } = externals_reader
-            .collect_messages(*par_id, &mut msg_group, &BTreeMap::new(), &msg_groups)
+            .collect_messages(
+                *par_id,
+                &mut msg_group,
+                &prev_partitions_readers,
+                &msg_groups,
+            )
             .unwrap();
         println!(
             "par {} msg_group: {}",
@@ -742,7 +761,12 @@ fn test_read_externals() {
                 .unwrap();
             let mut msg_group = MessageGroup::default();
             let CollectExternalsResult { metrics: _ } = externals_reader
-                .collect_messages(*par_id, &mut msg_group, &BTreeMap::new(), &msg_groups)
+                .collect_messages(
+                    *par_id,
+                    &mut msg_group,
+                    &prev_partitions_readers,
+                    &msg_groups,
+                )
                 .unwrap();
             println!(
                 "par {} msg_group: {}",

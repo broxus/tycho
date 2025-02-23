@@ -15,7 +15,7 @@ use crate::collator::messages_buffer::{
 };
 use crate::collator::types::{MsgsExecutionParamsExtension, ParsedMessage};
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange, QueueStatistics};
+use crate::internal_queue::types::{InternalMessageValue, QueueShardRange, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};
@@ -24,7 +24,7 @@ use crate::types::processed_upto::{BlockSeqno, Lt};
 // INTERNALS READER
 //=========
 
-pub(super) struct InternalsPartitionReader {
+pub(super) struct InternalsPartitionReader<V: InternalMessageValue> {
     pub(super) partition_id: QueuePartitionIdx,
     pub(super) for_shard_id: ShardIdent,
     pub(super) block_seqno: BlockSeqno,
@@ -41,10 +41,10 @@ pub(super) struct InternalsPartitionReader {
     /// end lt list from top shards of mc block
     mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
 
-    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
 
     reader_state: InternalsPartitionReaderState,
-    range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>,
+    range_readers: BTreeMap<BlockSeqno, InternalsRangeReader<V>>,
 
     pub(super) all_ranges_fully_read: bool,
 }
@@ -62,10 +62,10 @@ pub(super) struct InternalsPartitionReaderContext {
     pub reader_state: InternalsPartitionReaderState,
 }
 
-impl InternalsPartitionReader {
+impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     pub fn new(
         cx: InternalsPartitionReaderContext,
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<Self> {
         let mut reader = Self {
             partition_id: cx.partition_id,
@@ -176,7 +176,7 @@ impl InternalsPartitionReader {
         &self.reader_state
     }
 
-    pub fn range_readers(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReader> {
+    pub fn range_readers(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReader<V>> {
         &self.range_readers
     }
 
@@ -197,13 +197,13 @@ impl InternalsPartitionReader {
         Ok(())
     }
 
-    pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, InternalsRangeReader)> {
+    pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, InternalsRangeReader<V>)> {
         self.range_readers.pop_first()
     }
 
     pub fn set_range_readers(
         &mut self,
-        mut range_readers: BTreeMap<BlockSeqno, InternalsRangeReader>,
+        mut range_readers: BTreeMap<BlockSeqno, InternalsRangeReader<V>>,
     ) {
         self.range_readers.append(&mut range_readers);
     }
@@ -211,21 +211,21 @@ impl InternalsPartitionReader {
     pub(super) fn insert_range_reader(
         &mut self,
         seqno: BlockSeqno,
-        reader: InternalsRangeReader,
-    ) -> &mut InternalsRangeReader {
+        reader: InternalsRangeReader<V>,
+    ) -> &mut InternalsRangeReader<V> {
         self.range_readers.insert(seqno, reader);
         self.range_readers
             .get_mut(&seqno)
             .expect("just inserted range reader should exist")
     }
 
-    pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &InternalsRangeReader)> {
+    pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &InternalsRangeReader<V>)> {
         self.range_readers
             .last_key_value()
             .context("partition reader should have at least one range reader")
     }
 
-    pub fn get_last_range_reader_mut(&mut self) -> Result<&mut InternalsRangeReader> {
+    pub fn get_last_range_reader_mut(&mut self) -> Result<&mut InternalsRangeReader<V>> {
         let (&last_seqno, _) = self.get_last_range_reader()?;
         Ok(self.range_readers.get_mut(&last_seqno).unwrap())
     }
@@ -282,7 +282,7 @@ impl InternalsPartitionReader {
         &self,
         mut range_reader_state: InternalsRangeReaderState,
         seqno: BlockSeqno,
-    ) -> Result<InternalsRangeReader> {
+    ) -> Result<InternalsRangeReader<V>> {
         let mut ranges = Vec::with_capacity(range_reader_state.shards.len());
 
         let mut fully_read = true;
@@ -383,7 +383,7 @@ impl InternalsPartitionReader {
     fn create_next_internals_range_reader(
         &self,
         range_max_messages: Option<u32>,
-    ) -> Result<InternalsRangeReader> {
+    ) -> Result<InternalsRangeReader<V>> {
         let last_range_reader_info_opt = self
             .get_last_range_reader()
             .map(|(_, reader)| {
@@ -620,9 +620,9 @@ impl InternalsPartitionReader {
                     match iterator.next(false)? {
                         Some(int_msg) => {
                             let msg = Box::new(ParsedMessage {
-                                info: MsgInfo::Int(int_msg.item.message.info.clone()),
+                                info: MsgInfo::Int(int_msg.item.message.info().clone()),
                                 dst_in_current_shard: true,
-                                cell: int_msg.item.message.cell.clone(),
+                                cell: int_msg.item.message.cell().clone(),
                                 special_origin: None,
                                 block_seqno: None,
                                 from_same_shard: Some(int_msg.item.source == self.for_shard_id),
@@ -641,8 +641,10 @@ impl InternalsPartitionReader {
                             if let Some(remaning_msgs_stats) =
                                 range_reader.reader_state.remaning_msgs_stats.as_mut()
                             {
-                                remaning_msgs_stats
-                                    .decrement_for_account(int_msg.item.message.dest().clone(), 1);
+                                remaning_msgs_stats.decrement_for_account(
+                                    int_msg.item.message.destination().clone(),
+                                    1,
+                                );
                             }
                         }
                         None => {
@@ -791,7 +793,7 @@ impl InternalsPartitionReader {
         &mut self,
         par_reader_stage: &MessagesReaderStage,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectInternalsResult> {
         let mut res = CollectInternalsResult::default();
@@ -807,7 +809,7 @@ impl InternalsPartitionReader {
 
         // extract range readers from state to use previous readers buffers and stats
         // to check for account skip on collecting messages from the next
-        let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader>::new();
+        let mut range_readers = BTreeMap::<BlockSeqno, InternalsRangeReader<V>>::new();
         while let Some((seqno, mut range_reader)) = self.pop_first_range_reader() {
             if matches!(
                 (par_reader_stage, range_reader.kind),
@@ -875,7 +877,7 @@ pub(super) enum InternalsRangeReaderKind {
     NewMessages,
 }
 
-pub(super) struct InternalsRangeReader {
+pub(super) struct InternalsRangeReader<V: InternalMessageValue> {
     pub(super) partition_id: QueuePartitionIdx,
     pub(super) for_shard_id: ShardIdent,
     pub(super) seqno: BlockSeqno,
@@ -884,12 +886,12 @@ pub(super) struct InternalsRangeReader {
     pub(super) buffer_limits: MessagesBufferLimits,
     pub(super) reader_state: InternalsRangeReaderState,
     pub(super) fully_read: bool,
-    pub(super) mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    pub(super) iterator_opt: Option<Box<dyn QueueIterator<EnqueuedMessage>>>,
+    pub(super) mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+    pub(super) iterator_opt: Option<Box<dyn QueueIterator<V>>>,
     pub(super) initialized: bool,
 }
 
-impl InternalsRangeReader {
+impl<V: InternalMessageValue> InternalsRangeReader<V> {
     fn init(&mut self) -> Result<()> {
         // do not init iterator if range is fully read
         if !self.fully_read {
@@ -927,8 +929,8 @@ impl InternalsRangeReader {
     fn collect_messages(
         &mut self,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
-        prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
+        prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> CollectMessagesFromRangeReaderResult {
         let FillMessageGroupResult {

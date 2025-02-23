@@ -88,6 +88,14 @@ impl InternalMessageValue for StoredObject {
             hash: HashBytes::default(),
         }
     }
+
+    fn info(&self) -> &IntMsgInfo {
+        unreachable!("method is not used in internal queue tests")
+    }
+
+    fn cell(&self) -> &Cell {
+        unreachable!("method is not used in internal queue tests")
+    }
 }
 
 fn create_stored_object(key: u64, dest_addr: RouterAddr) -> anyhow::Result<Arc<StoredObject>> {
