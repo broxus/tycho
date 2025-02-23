@@ -416,7 +416,7 @@ impl InternalsPartitionReader {
                 while current_block_seqno < self.block_seqno {
                     let diff = self
                         .mq_adapter
-                        .get_diff(self.for_shard_id, current_block_seqno)
+                        .get_diff(&self.for_shard_id, current_block_seqno)?
                         .ok_or_else(|| {
                             anyhow!(
                                 "cannot get diff for block {}:{}",
@@ -425,9 +425,7 @@ impl InternalsPartitionReader {
                             )
                         })?;
 
-                    messages_count += diff
-                        .statistics()
-                        .get_messages_count_by_shard(&self.for_shard_id);
+                    messages_count += diff.get_messages_count_by_shard(&self.for_shard_id);
 
                     if messages_count > max_messages as u64 {
                         break;
@@ -446,14 +444,14 @@ impl InternalsPartitionReader {
 
             let shard_range_to = if shard_id == self.for_shard_id {
                 if range_seqno != self.block_seqno {
-                    let diff =
-                        self.mq_adapter
-                            .get_diff(shard_id, range_seqno)
-                            .ok_or_else(|| {
-                                anyhow!("cannot get diff for block {shard_id}:{range_seqno}")
-                            })?;
+                    let diff = self
+                        .mq_adapter
+                        .get_diff(&shard_id, range_seqno)?
+                        .ok_or_else(|| {
+                            anyhow!("cannot get diff for block {shard_id}:{range_seqno}")
+                        })?;
 
-                    *diff.max_message()
+                    diff.max_message
                 } else {
                     QueueKey::max_for_lt(self.prev_state_gen_lt)
                 }

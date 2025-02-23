@@ -1,6 +1,9 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
+use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
+use tycho_block_util::tl;
+use tycho_util::FastHashMap;
 
 use crate::util::{StoredValue, StoredValueBuffer};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -144,6 +147,33 @@ impl StatKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DiffTailKey {
+    pub shard_ident: ShardIdent,
+    pub max_message: QueueKey,
+}
+
+impl DiffTailKey {
+    pub fn new(shard_ident: ShardIdent, max_message: QueueKey) -> Self {
+        Self {
+            shard_ident,
+            max_message,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DiffInfoKey {
+    pub shard_ident: ShardIdent,
+    pub seqno: u32,
+}
+
+impl DiffInfoKey {
+    pub fn new(shard_ident: ShardIdent, seqno: u32) -> Self {
+        Self { shard_ident, seqno }
+    }
+}
+
 impl StoredValue for StatKey {
     const SIZE_HINT: usize = ShardIdent::SIZE_HINT
         + QueuePartitionIdx::SIZE_HINT
@@ -181,6 +211,60 @@ impl StoredValue for StatKey {
     }
 }
 
+impl StoredValue for DiffTailKey {
+    const SIZE_HINT: usize = ShardIdent::SIZE_HINT + QueueKey::SIZE_HINT;
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        self.shard_ident.serialize(buffer);
+        self.max_message.serialize(buffer);
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self
+    where
+        Self: Sized,
+    {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let shard_ident = ShardIdent::deserialize(reader);
+        let max_message = QueueKey::deserialize(reader);
+
+        Self {
+            shard_ident,
+            max_message,
+        }
+    }
+}
+
+impl StoredValue for DiffInfoKey {
+    const SIZE_HINT: usize = ShardIdent::SIZE_HINT + 4;
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        self.shard_ident.serialize(buffer);
+        buffer.write_raw_slice(&self.seqno.to_be_bytes());
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self
+    where
+        Self: Sized,
+    {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let shard_ident = ShardIdent::deserialize(reader);
+        let mut seqno_bytes = [0u8; 4];
+        seqno_bytes.copy_from_slice(&reader[..4]);
+        let seqno = u32::from_be_bytes(seqno_bytes);
+        *reader = &reader[4..];
+
+        Self { shard_ident, seqno }
+    }
+}
+
 pub struct QueueRange {
     pub shard_ident: ShardIdent,
     pub partition: QueuePartitionIdx,
@@ -208,5 +292,83 @@ impl StoredValue for QueuePartitionIdx {
         *reader = &reader[2..];
 
         partition
+    }
+}
+
+#[test]
+fn diff_info_key_serialization() {
+    let key = DiffInfoKey::new(ShardIdent::MASTERCHAIN, 10);
+    let mut buffer = Vec::with_capacity(DiffInfoKey::SIZE_HINT);
+    key.serialize(&mut buffer);
+    let key2 = DiffInfoKey::deserialize(&mut buffer.as_slice());
+    assert_eq!(key, key2);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffInfo {
+    pub max_message: QueueKey,
+    pub shards_messages_count: FastHashMap<ShardIdent, u64>,
+    pub hash: HashBytes,
+}
+
+impl DiffInfo {
+    pub fn get_messages_count_by_shard(&self, shard_ident: &ShardIdent) -> u64 {
+        self.shards_messages_count
+            .get(shard_ident)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+impl TlWrite for DiffInfo {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        QueueKey::SIZE_HINT
+            + 4
+            + self.shards_messages_count.len() * (tl::shard_ident::SIZE_HINT + 8)
+            + tl::hash_bytes::SIZE_HINT
+    }
+
+    fn write_to<P: TlPacket>(&self, packet: &mut P) {
+        self.max_message.write_to(packet);
+        packet.write_u32(self.shards_messages_count.len() as u32);
+
+        for (shard_ident, count) in &self.shards_messages_count {
+            tl::shard_ident::write(shard_ident, packet);
+            packet.write_u64(*count);
+        }
+
+        tl::hash_bytes::write(&self.hash, packet);
+    }
+}
+
+impl<'tl> TlRead<'tl> for DiffInfo {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(data: &mut &'tl [u8]) -> TlResult<Self> {
+        let max_message = QueueKey::read_from(data)?;
+
+        let len = u32::read_from(data)? as usize;
+        if len > 10_000_000 {
+            return Err(TlError::InvalidData);
+        }
+
+        let mut shards_messages_count =
+            FastHashMap::with_capacity_and_hasher(len, Default::default());
+
+        for _ in 0..len {
+            let shard_ident = tl::shard_ident::read(data)?;
+            let count = u64::read_from(data)?;
+            shards_messages_count.insert(shard_ident, count);
+        }
+
+        let hash = tl::hash_bytes::read(data)?;
+
+        Ok(DiffInfo {
+            max_message,
+            shards_messages_count,
+            hash,
+        })
     }
 }
