@@ -319,6 +319,14 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             *par_reader_stage = initial_reader_stage;
         }
 
+        // reset internals readers
+        for (_, par) in self.internals_partition_readers.iter_mut() {
+            par.reset_read_state();
+        }
+
+        // reset externals reader
+        self.externals_reader.reset_read_state();
+
         tracing::debug!(target: tracing_targets::COLLATOR,
             readers_stages = ?self.readers_stages,
             externals_all_ranges_read_and_collected = self.externals_reader.all_ranges_read_and_collected(),
