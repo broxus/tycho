@@ -17,7 +17,7 @@ use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::queue::ShortQueueDiff;
 use crate::internal_queue::types::{
-    EnqueuedMessage, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -29,11 +29,15 @@ mod internals_reader;
 mod new_messages;
 mod reader_state;
 
-pub(super) struct FinalizedMessagesReader {
+#[cfg(test)]
+#[path = "../tests/messages_reader_tests.rs"]
+pub(super) mod tests;
+
+pub(super) struct FinalizedMessagesReader<V: InternalMessageValue> {
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
-    pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
+    pub queue_diff_with_msgs: QueueDiffWithMessages<V>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +54,7 @@ enum MessagesReaderStage {
     ExternalsAndNew,
 }
 
-pub(super) struct MessagesReader {
+pub(super) struct MessagesReader<V: InternalMessageValue> {
     for_shard_id: ShardIdent,
 
     msgs_exec_params: Arc<MsgsExecutionParams>,
@@ -58,10 +62,10 @@ pub(super) struct MessagesReader {
     /// Collect separate metrics by partitions
     metrics_by_partitions: MessagesReaderMetricsByPartitions,
 
-    new_messages: NewMessagesState<EnqueuedMessage>,
+    new_messages: NewMessagesState<V>,
 
     externals_reader: ExternalsReader,
-    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
+    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
 
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
@@ -79,10 +83,10 @@ pub(super) struct MessagesReaderContext {
     pub anchors_cache: AnchorsCache,
 }
 
-impl MessagesReader {
+impl<V: InternalMessageValue> MessagesReader<V> {
     pub fn new(
         cx: MessagesReaderContext,
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<Self> {
         let slots_fractions = cx.msgs_exec_params.group_slots_fractions()?;
 
@@ -360,7 +364,7 @@ impl MessagesReader {
         mut self,
         current_next_lt: u64,
         diffs: FastHashMap<ShardIdent, ShortQueueDiff>,
-    ) -> Result<FinalizedMessagesReader> {
+    ) -> Result<FinalizedMessagesReader<V>> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
             || self.has_pending_externals_in_cache();
@@ -614,7 +618,7 @@ impl MessagesReader {
         &self.metrics_by_partitions
     }
 
-    pub fn add_new_messages(&mut self, messages: impl IntoIterator<Item = Arc<EnqueuedMessage>>) {
+    pub fn add_new_messages(&mut self, messages: impl IntoIterator<Item = Arc<V>>) {
         self.new_messages.add_messages(messages);
     }
 
@@ -755,6 +759,9 @@ impl MessagesReader {
         // check if we have FinishExternals stage in any partition
         let mut has_finish_externals_stage = false;
 
+        // init local metrics
+        let mut metrics_by_partitions = MessagesReaderMetricsByPartitions::default();
+
         //--------------------
         // read internals
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
@@ -782,9 +789,7 @@ impl MessagesReader {
             match par_reader_stage {
                 MessagesReaderStage::ExistingAndExternals => {
                     let read_metrics = par_reader.read_existing_messages_into_buffers(read_mode)?;
-                    self.metrics_by_partitions
-                        .get_mut(*par_id)
-                        .append(&read_metrics);
+                    metrics_by_partitions.get_mut(*par_id).append(&read_metrics);
                 }
                 MessagesReaderStage::FinishPreviousExternals
                 | MessagesReaderStage::FinishCurrentExternals => {
@@ -793,7 +798,7 @@ impl MessagesReader {
                 MessagesReaderStage::ExternalsAndNew => {
                     let read_new_messages_res = par_reader
                         .read_new_messages_into_buffers(&mut self.new_messages, current_next_lt)?;
-                    self.metrics_by_partitions
+                    metrics_by_partitions
                         .get_mut(*par_id)
                         .append(&read_new_messages_res.metrics);
                 }
@@ -820,7 +825,7 @@ impl MessagesReader {
             let read_metrics = self
                 .externals_reader
                 .read_into_buffers(read_mode, self.new_messages.partition_router());
-            self.metrics_by_partitions.append(read_metrics);
+            metrics_by_partitions.append(read_metrics);
         }
 
         // messages buffers metrics
@@ -884,7 +889,7 @@ impl MessagesReader {
                 &msg_groups,
             )?;
             msg_groups.insert(*par_id, msg_group);
-            self.metrics_by_partitions.get_mut(*par_id).append(&metrics);
+            metrics_by_partitions.get_mut(*par_id).append(&metrics);
 
             // detect if can drop procssing offset in all partitions
             if !can_drop_processing_offset {
@@ -924,7 +929,7 @@ impl MessagesReader {
         }
 
         // log metrics from partitions
-        for (par_id, par_metrics) in self.metrics_by_partitions.iter() {
+        for (par_id, par_metrics) in metrics_by_partitions.iter() {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "messages read from partition {}: existing={}, ext={}, new={}",
                 par_id,
@@ -951,7 +956,7 @@ impl MessagesReader {
         );
 
         // aggregate message group
-        let par_0_metrics = self.metrics_by_partitions.get_mut(0);
+        let par_0_metrics = metrics_by_partitions.get_mut(0);
         par_0_metrics.add_to_message_groups_timer.start();
         let msg_group = msg_groups
             .into_iter()
@@ -959,15 +964,24 @@ impl MessagesReader {
         par_0_metrics.add_to_message_groups_timer.stop();
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            has_pending_new_messages = self.has_pending_new_messages(),
-            has_pending_externals_in_cache = self.has_pending_externals_in_cache(),
+            has_not_fully_read_externals_ranges = self.has_not_fully_read_externals_ranges(),
             has_not_fully_read_internals_ranges = self.has_not_fully_read_internals_ranges(),
+            has_pending_new_messages = self.has_pending_new_messages(),
+            has_messages_in_buffers = self.has_messages_in_buffers(),
+            has_pending_externals_in_cache = self.has_pending_externals_in_cache(),
             ?read_mode,
             all_prev_processed_offset_reached,
-            add_to_message_groups_total_elapsed_ms = self.metrics_by_partitions.add_to_message_groups_total_elapsed().as_millis(),
+            add_to_message_groups_total_elapsed_ms = metrics_by_partitions.add_to_message_groups_total_elapsed().as_millis(),
             "aggregated collected message group: {:?}",
             DebugMessageGroup(&msg_group),
         );
+
+        // aggregate metrics from partitions
+        for (par_id, par_metrics) in metrics_by_partitions.iter() {
+            self.metrics_by_partitions
+                .get_mut(*par_id)
+                .append(par_metrics);
+        }
 
         // retun None when messages group is empty
         if msg_group.len() == 0
@@ -987,10 +1001,10 @@ impl MessagesReader {
     fn collect_messages_for_partition(
         read_mode: GetNextMessageGroupMode,
         par_reader_stage: &mut MessagesReaderStage,
-        par_reader: &mut InternalsPartitionReader,
+        par_reader: &mut InternalsPartitionReader<V>,
         externals_reader: &mut ExternalsReader,
         has_pending_new_messages_for_partition: bool,
-        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();

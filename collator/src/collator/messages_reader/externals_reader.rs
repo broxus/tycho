@@ -16,7 +16,7 @@ use crate::collator::messages_buffer::{
     MessagesBufferLimits, SaturatingAddAssign,
 };
 use crate::collator::types::{AnchorsCache, MsgsExecutionParamsExtension, ParsedMessage};
-use crate::internal_queue::types::PartitionRouter;
+use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 
@@ -602,11 +602,11 @@ impl ExternalsReader {
         metrics_by_partitions
     }
 
-    pub fn collect_messages(
+    pub fn collect_messages<V: InternalMessageValue>(
         &mut self,
         par_id: QueuePartitionIdx,
         msg_group: &mut MessageGroup,
-        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectExternalsResult> {
         let mut res = CollectExternalsResult::default();

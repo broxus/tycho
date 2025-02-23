@@ -53,7 +53,7 @@ pub struct FinalizeBlockContext {
 impl Phase<FinalizeState> {
     pub fn finalize_messages_reader(
         &mut self,
-        messages_reader: MessagesReader,
+        messages_reader: MessagesReader<EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     ) -> Result<(
         FinalizeMessagesReaderResult,

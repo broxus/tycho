@@ -9,10 +9,11 @@ use super::phase::{Phase, PhaseState};
 use super::work_units::PrepareMsgGroupsWu;
 use crate::collator::messages_reader::{GetNextMessageGroupMode, MessagesReader};
 use crate::collator::types::{BlockCollationData, BlockLimitsLevel, ExecuteResult};
+use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 
 pub struct ExecuteState {
-    pub messages_reader: MessagesReader,
+    pub messages_reader: MessagesReader<EnqueuedMessage>,
     pub execute_result: Option<ExecuteResult>,
     pub executor: ExecutorWrapper,
 }
@@ -185,7 +186,7 @@ impl Phase<ExecuteState> {
         Ok(())
     }
 
-    pub fn finish(self) -> (Phase<FinalizeState>, MessagesReader) {
+    pub fn finish(self) -> (Phase<FinalizeState>, MessagesReader<EnqueuedMessage>) {
         self.report_execute_metrics();
         let executor = self.extra.executor.executor;
         (
