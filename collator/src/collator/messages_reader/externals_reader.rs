@@ -79,6 +79,10 @@ impl ExternalsReader {
         reader
     }
 
+    pub(super) fn reset_read_state(&mut self) {
+        self.all_ranges_fully_read = false;
+    }
+
     pub fn finalize(mut self) -> Result<FinalizedExternalsReader> {
         // collect range reader states
         let mut range_readers = self.range_readers.into_iter().peekable();

@@ -88,6 +88,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         Ok(reader)
     }
 
+    pub(super) fn reset_read_state(&mut self) {
+        self.all_ranges_fully_read = false;
+    }
+
     pub(super) fn drop_next_range_reader(&mut self) {
         self.range_readers
             .retain(|_, r| r.kind != InternalsRangeReaderKind::Next);
