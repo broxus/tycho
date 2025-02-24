@@ -115,13 +115,13 @@ pub(super) struct BlockCandidateStuff {
     pub total_signature_weight: u64,
 }
 
-impl From<BlockCandidateStuff> for BlockStuffForSync {
-    fn from(stuff: BlockCandidateStuff) -> Self {
+impl BlockCandidateStuff {
+    pub fn into_block_for_sync(self) -> Arc<BlockStuffForSync> {
         let BlockCandidateStuff {
             candidate,
             signatures,
             total_signature_weight,
-        } = stuff;
+        } = self;
 
         let BlockCandidate {
             ref_by_mc_seqno,
@@ -133,7 +133,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             ..
         } = candidate;
 
-        Self {
+        Arc::new(BlockStuffForSync {
             ref_by_mc_seqno,
             block_stuff_aug,
             queue_diff_aug,
@@ -142,7 +142,7 @@ impl From<BlockCandidateStuff> for BlockStuffForSync {
             prev_blocks_ids,
             top_shard_blocks_ids,
             consensus_info,
-        }
+        })
     }
 }
 

@@ -2791,8 +2791,8 @@ where
         };
 
         let block_id = *candidate_stuff.candidate.block.id();
-        let block_stuff_for_sync = candidate_stuff.into();
-        self.state_node_adapter.accept_block(block_stuff_for_sync)?;
+        self.state_node_adapter
+            .accept_block(candidate_stuff.into_block_for_sync())?;
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Block was successfully sent to sync ({})",

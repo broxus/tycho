@@ -15,6 +15,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_storage::{BlockHandle, MaybeExistingHandle, NewBlockMeta, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
@@ -72,7 +73,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Accept block:
     /// 1. (TODO) Broadcast block to blockchain network
     /// 2. Provide block to the block strider
-    fn accept_block(&self, block: BlockStuffForSync) -> Result<()>;
+    fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()>;
     /// Waits for the specified block to be received and returns it
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Waits for the specified block by prev_id to be received and returns it
@@ -88,7 +89,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
 
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
-    blocks: FastDashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>,
+    blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -241,7 +242,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(self.storage.block_handle_storage().load_handle(block_id))
     }
 
-    fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
+    fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()> {
         let block_id = *block.block_stuff_aug.id();
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block_id.as_short_id());
@@ -375,8 +376,11 @@ impl StateNodeAdapterStdImpl {
         let mut receiver = self.broadcaster.subscribe();
         loop {
             if let Some(shard_blocks) = self.blocks.get(&block_id.shard()) {
-                if let Some(block) = shard_blocks.get(&block_id.seqno()) {
-                    return match self.save_block_proof(block).await {
+                let block = shard_blocks.get(&block_id.seqno()).cloned();
+                drop(shard_blocks);
+
+                if let Some(block) = block {
+                    return match self.save_block_proof(&block).await {
                         Ok(_) => Some(Ok(block.block_stuff_aug.clone())),
                         Err(e) => Some(Err(anyhow!("failed to save block proof: {e:?}"))),
                     };
@@ -401,27 +405,36 @@ impl StateNodeAdapterStdImpl {
         }
     }
 
-    async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
-        let PreparedProof { proof, block_info } = prepare_block_proof(
-            &block.block_stuff_aug.data,
-            &block.consensus_info,
-            &block.signatures,
-            block.total_signature_weight,
-        )
-        .unwrap_or_else(|_| {
-            panic!(
-                "failed to prepare block proof, block id: {}",
-                block.block_stuff_aug.id().as_short_id()
-            )
-        });
+    async fn save_block_proof(&self, block: &Arc<BlockStuffForSync>) -> Result<()> {
+        let (block_info, archive_data) = rayon_run({
+            let block = block.clone();
+            move || {
+                let PreparedProof { proof, block_info } = prepare_block_proof(
+                    &block.block_stuff_aug.data,
+                    &block.consensus_info,
+                    &block.signatures,
+                    block.total_signature_weight,
+                )
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "failed to prepare block proof for {:?}: {e:?}",
+                        block.block_stuff_aug.id()
+                    )
+                });
+
+                let block_proof_stuff = BlockProofStuff::from_proof(proof);
+
+                let proof_boc = BocRepr::encode_rayon(block_proof_stuff.as_ref())
+                    .expect("valid block proof must be successfully serialized");
+                let archive_data = block_proof_stuff.with_archive_data(proof_boc);
+
+                (block_info, archive_data)
+            }
+        })
+        .await;
 
         let _histogram =
             HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
-
-        let block_proof_stuff = BlockProofStuff::from_proof(proof);
-
-        let proof_boc = BocRepr::encode_rayon(block_proof_stuff.as_ref())?;
-        let archive_data = block_proof_stuff.with_archive_data(proof_boc);
 
         let block_storage = self.storage.block_storage();
         let result = block_storage
