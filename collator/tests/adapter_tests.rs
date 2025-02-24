@@ -51,7 +51,7 @@ async fn test_add_and_get_block() {
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
     let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
 
-    let block = BlockStuffForSync {
+    let block = Arc::new(BlockStuffForSync {
         ref_by_mc_seqno: 1,
         block_stuff_aug,
         queue_diff_aug,
@@ -60,7 +60,7 @@ async fn test_add_and_get_block() {
         prev_blocks_ids: Vec::new(),
         top_shard_blocks_ids: Vec::new(),
         consensus_info: Default::default(),
-    };
+    });
     adapter.accept_block(block).unwrap();
 
     // Test getting the next block (which should be the one just added)
@@ -122,7 +122,7 @@ async fn test_add_and_get_next_block() {
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
     let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(block_stuff_aug.id()));
 
-    let block = BlockStuffForSync {
+    let block = Arc::new(BlockStuffForSync {
         ref_by_mc_seqno: 2,
         block_stuff_aug,
         queue_diff_aug,
@@ -131,7 +131,7 @@ async fn test_add_and_get_next_block() {
         prev_blocks_ids: vec![*prev_block_id],
         top_shard_blocks_ids: Vec::new(),
         consensus_info: Default::default(),
-    };
+    });
     adapter.accept_block(block).unwrap();
 
     let next_block = adapter.wait_for_block_next(prev_block_id).await;
@@ -193,7 +193,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 let queue_diff_aug =
                     QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
 
-                let block = BlockStuffForSync {
+                let block = Arc::new(BlockStuffForSync {
                     ref_by_mc_seqno: i,
                     block_stuff_aug,
                     queue_diff_aug,
@@ -202,7 +202,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     prev_blocks_ids: Vec::new(),
                     top_shard_blocks_ids: Vec::new(),
                     consensus_info: Default::default(),
-                };
+                });
                 let accept_result = adapter.accept_block(block);
                 assert!(accept_result.is_ok(), "Block {} should be accepted", i);
             }
