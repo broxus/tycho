@@ -41,6 +41,7 @@ pub struct Broadcaster {
     // results
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
+    attempt: u8,
 
     bcast_request: Request,
     bcast_peers: FastHashSet<PeerId>,
@@ -87,6 +88,7 @@ impl Broadcaster {
             removed_peers: Default::default(),
             rejections: Default::default(),
             signatures: Default::default(),
+            attempt: 0,
 
             bcast_request: Dispatcher::broadcast_request(&point),
             bcast_peers,
@@ -167,8 +169,8 @@ impl Broadcaster {
         })
     }
 
-    pub async fn run_continue(mut self, round_ctx: RoundCtx) {
-        self.ctx = BroadcastCtx::new(&round_ctx, &self.point);
+    pub async fn run_continue(mut self, round_ctx: &RoundCtx) {
+        self.ctx = BroadcastCtx::new(round_ctx, &self.point);
 
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             self.ctx.conf().consensus.broadcast_retry_millis as _,
@@ -226,8 +228,22 @@ impl Broadcaster {
                             _ = sender.send(BroadcasterSignal::Ok);
                         };
                     }
-                    for peer in mem::take(&mut self.sig_peers) {
-                        self.request_signature(false, &peer);
+                    self.attempt = self.attempt.wrapping_add(1);
+                    if self.attempt == 0 {
+                        // network is stuck, give all broadcast filters a push; forget rejections
+                        self.sig_peers.clear();
+                        self.rejections.clear();
+                        self.sig_futures.clear();
+                        self.bcast_futures.clear();
+                        let peers = self.signers.clone();
+                        for peer in &*peers {
+                            self.broadcast(peer);
+                        }
+                    } else {
+                        let peers = mem::take(&mut self.sig_peers);
+                        for peer in &peers {
+                            self.request_signature(false, peer);
+                        }
                     }
                     false
                 }
@@ -236,6 +252,7 @@ impl Broadcaster {
         tracing::debug!(
             parent: self.ctx.span(),
             result = result,
+            attempt = self.attempt,
             collector_signal = debug(collector_signal),
             signatures = self.signatures.len(),
             "2F" = self.signers_count.majority_of_others(),

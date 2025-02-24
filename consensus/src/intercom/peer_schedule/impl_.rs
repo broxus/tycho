@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arc_swap::{ArcSwap, Guard};
 use everscale_crypto::ed25519::KeyPair;
@@ -14,9 +14,8 @@ use tycho_network::{
     KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard,
 };
-use tycho_util::futures::JoinTask;
 
-use crate::effects::{AltFmt, AltFormat};
+use crate::effects::{AltFmt, AltFormat, Task, TaskTracker};
 use crate::engine::MempoolMergedConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
@@ -33,10 +32,12 @@ use crate::models::Round;
 
 #[derive(Clone)]
 pub struct PeerSchedule(Arc<PeerScheduleInner>);
+pub(super) struct WeakPeerSchedule(Weak<PeerScheduleInner>);
 
 struct PeerScheduleInner {
     locked: RwLock<PeerScheduleLocked>,
     atomic: ArcSwap<PeerScheduleStateless>,
+    task_tracker: TaskTracker,
 }
 
 impl PeerSchedule {
@@ -44,11 +45,13 @@ impl PeerSchedule {
         local_keys: Arc<KeyPair>,
         overlay: PrivateOverlay,
         merged_conf: &MempoolMergedConfig,
+        task_tracker: &TaskTracker,
     ) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
         let this = Self(Arc::new(PeerScheduleInner {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
+            task_tracker: task_tracker.clone(),
         }));
         // validator set is not defined for genesis
         let genesis_round = merged_conf.conf.genesis_round;
@@ -68,7 +71,7 @@ impl PeerSchedule {
 
     pub fn set_next_set(&self, validator_set: &[PeerId]) {
         let mut locked = self.write();
-        locked.set_next_set(self.clone(), validator_set);
+        locked.set_next_set(self.downgrade(), validator_set);
     }
 
     // `false` if next round is outdated
@@ -85,7 +88,7 @@ impl PeerSchedule {
         }
         let mut locked = self.write();
 
-        locked.set_next_set(self.clone(), validator_set);
+        locked.set_next_set(self.downgrade(), validator_set);
 
         locked.data.set_next_subset(working_subset);
         locked.data.next_epoch_start = Some(next_round);
@@ -118,7 +121,7 @@ impl PeerSchedule {
         );
 
         // rotate only after previous data is cleaned
-        locked.forget_previous(self.clone());
+        locked.forget_previous(self.downgrade());
         locked.data.rotate();
 
         // atomic part is updated under lock too
@@ -140,7 +143,7 @@ impl PeerSchedule {
     pub fn forget_previous(&self) {
         let mut locked = self.write();
 
-        locked.forget_previous(self.clone());
+        locked.forget_previous(self.downgrade());
         // atomic part is updated under lock too
         self.update_atomic(|stateless| stateless.forget_previous());
     }
@@ -167,14 +170,14 @@ impl PeerSchedule {
         let (local_id, mut rx) = {
             let mut guard = self.write();
 
-            guard.abort_resolve_peers = None;
+            guard.resolve_peers_task = None;
             let local_id = guard.local_id;
             let (rx, resolved_waiters) = {
                 let entries = guard.overlay.read_entries();
                 let rx = entries.subscribe();
                 (rx, Self::resolved_waiters(&local_id, &entries))
             };
-            guard.abort_resolve_peers = self.clone().new_resolve_task(resolved_waiters);
+            guard.resolve_peers_task = self.downgrade().new_resolve_task(resolved_waiters);
 
             (local_id, rx)
         };
@@ -185,12 +188,13 @@ impl PeerSchedule {
                     let mut guard = self.write();
                     let restart = guard.set_state(&peer, PeerState::Unknown);
                     if restart {
-                        guard.abort_resolve_peers = None;
+                        guard.resolve_peers_task = None;
                         let resolved_waiters = {
                             let entries = guard.overlay.read_entries();
                             Self::resolved_waiters(&local_id, &entries)
                         };
-                        guard.abort_resolve_peers = self.clone().new_resolve_task(resolved_waiters);
+                        guard.resolve_peers_task =
+                            self.downgrade().new_resolve_task(resolved_waiters);
                     }
                     drop(guard);
                     tracing::info!(
@@ -242,30 +246,47 @@ impl PeerSchedule {
         fut
     }
 
-    pub(super) fn new_resolve_task(
+    fn downgrade(&self) -> WeakPeerSchedule {
+        WeakPeerSchedule(Arc::downgrade(&self.0))
+    }
+}
+
+impl WeakPeerSchedule {
+    fn upgrade(&self) -> Option<PeerSchedule> {
+        self.0.upgrade().map(PeerSchedule)
+    }
+
+    pub fn new_resolve_task(
         self,
         mut resolved_waiters: FuturesUnordered<
             impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
         >,
-    ) -> Option<JoinTask<()>> {
+    ) -> Option<Task<()>> {
         let gauge = metrics::gauge!("tycho_mempool_peers_resolving");
         gauge.set(resolved_waiters.len() as u32);
         if resolved_waiters.is_empty() {
             tracing::info!("peer schedule resolve task not started: all peers resolved");
-            None
-        } else {
-            let join_task = JoinTask::new(async move {
-                tracing::info!("peer schedule resolve task started");
-                scopeguard::defer!(tracing::info!("peer schedule resolve task stopped"));
-                while let Some(known_peer_handle) = resolved_waiters.next().await {
-                    _ = self
-                        .write()
-                        .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
-                    gauge.decrement(1);
-                }
-            });
-            Some(join_task)
+            return None;
         }
+        let Some(peer_schedule) = self.upgrade() else {
+            tracing::warn!("peer schedule is dropped, cannot spawn resolve task");
+            return None;
+        };
+        let task_ctx = peer_schedule.0.task_tracker.ctx();
+        Some(task_ctx.spawn(async move {
+            tracing::info!("peer schedule resolve task started");
+            scopeguard::defer!(tracing::info!("peer schedule resolve task stopped"));
+            while let Some(known_peer_handle) = resolved_waiters.next().await {
+                let Some(peer_schedule) = self.upgrade() else {
+                    tracing::warn!("peer schedule is dropped, cannot apply resolve update");
+                    break;
+                };
+                _ = peer_schedule
+                    .write()
+                    .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
+                gauge.decrement(1);
+            }
+        }))
     }
 }
 

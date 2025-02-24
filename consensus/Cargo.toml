@@ -37,7 +37,7 @@ thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, default-features = false }
 tokio-stream = { workspace = true, optional = true }
-tokio-util = { workspace = true, default-features = false, features = ["time"] }
+tokio-util = { workspace = true, default-features = false, features = ["time", "rt"] }
 tracing = { workspace = true }
 tracing-flame = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true }
