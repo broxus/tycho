@@ -28,6 +28,7 @@ pub struct CollatorConfig {
     pub min_mc_block_delta_from_bc_to_sync: u32,
     pub check_value_flow: bool,
     pub validate_config: bool,
+    pub fast_sync: bool,
 }
 
 impl Default for CollatorConfig {
@@ -38,6 +39,7 @@ impl Default for CollatorConfig {
             min_mc_block_delta_from_bc_to_sync: 3,
             check_value_flow: false,
             validate_config: true,
+            fast_sync: false,
         }
     }
 }
@@ -47,6 +49,7 @@ struct PartialCollatorConfig {
     min_mc_block_delta_from_bc_to_sync: u32,
     check_value_flow: bool,
     validate_config: bool,
+    fast_sync: bool,
 }
 
 impl<'de> serde::Deserialize<'de> for CollatorConfig {
@@ -60,6 +63,7 @@ impl<'de> serde::Deserialize<'de> for CollatorConfig {
             min_mc_block_delta_from_bc_to_sync: partial.min_mc_block_delta_from_bc_to_sync,
             check_value_flow: partial.check_value_flow,
             validate_config: partial.validate_config,
+            fast_sync: partial.fast_sync,
             ..Default::default()
         })
     }
@@ -74,6 +78,7 @@ impl serde::Serialize for CollatorConfig {
             min_mc_block_delta_from_bc_to_sync: self.min_mc_block_delta_from_bc_to_sync,
             check_value_flow: self.check_value_flow,
             validate_config: self.validate_config,
+            fast_sync: self.fast_sync,
         }
         .serialize(serializer)
     }
