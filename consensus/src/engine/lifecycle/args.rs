@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
 use tokio::sync::mpsc;
-use tycho_network::{Network, OverlayId, OverlayService, PeerResolver, PrivateOverlay};
+use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
 
-use crate::effects::MempoolAdapterStore;
+use crate::effects::{MempoolAdapterStore, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
@@ -32,12 +32,17 @@ pub struct EngineNetwork {
     pub dispatcher: Dispatcher,
     /// dropped at full restart
     pub responder: Responder,
+    pub(super) peer_id: PeerId,
     overlay_service: OverlayService,
-    overlay_id: OverlayId,
+    pub(super) overlay_id: OverlayId,
 }
 
 impl EngineNetwork {
-    pub(super) fn new(net_args: &EngineNetworkArgs, merged_conf: &MempoolMergedConfig) -> Self {
+    pub(super) fn new(
+        net_args: &EngineNetworkArgs,
+        task_tracker: &TaskTracker,
+        merged_conf: &MempoolMergedConfig,
+    ) -> Self {
         let responder = Responder::default();
         let overlay_id = merged_conf.overlay_id;
 
@@ -56,12 +61,17 @@ impl EngineNetwork {
         );
 
         let dispatcher = Dispatcher::new(&net_args.network, &private_overlay);
-        let peer_schedule =
-            PeerSchedule::new(net_args.key_pair.clone(), private_overlay, merged_conf);
+        let peer_schedule = PeerSchedule::new(
+            net_args.key_pair.clone(),
+            private_overlay,
+            merged_conf,
+            task_tracker,
+        );
         Self {
             peer_schedule,
             dispatcher,
             responder,
+            peer_id: net_args.key_pair.public_key.into(),
             overlay_service,
             overlay_id,
         }
