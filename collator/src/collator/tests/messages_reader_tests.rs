@@ -15,6 +15,7 @@ use rand::{Rng, SeedableRng};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_network::PeerId;
 use tycho_storage::Storage;
+use tycho_util::FastHashMap;
 
 use super::{
     FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader, MessagesReaderContext,
@@ -29,7 +30,7 @@ use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, InternalMess
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use crate::test_utils::try_init_test_tracing;
-use crate::types::processed_upto::ProcessedUptoInfoStuff;
+use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::DebugDisplay;
 
 const DEX_PAIR_USDC_NATIVE: u8 = 10;
@@ -99,10 +100,13 @@ async fn test_refill_messages() -> Result<()> {
         buffer_limit: 20,
         group_limit: 5,
         group_vert_size: 2,
-        externals_expire_timeout: 60,
+        externals_expire_timeout: 30,
         open_ranges_limit: 3,
         par_0_ext_msgs_count_limit: 10,
-        par_0_int_msgs_count_limit: 50,
+        // 1) fails when use partitions (par_0_int_msgs_count_limit: 50)
+        //      partition router is initializing incorrectly because we use statistics only from ranges of the previous block
+        //      and those ranges include only part of diffs because of range messages limit
+        par_0_int_msgs_count_limit: 5000,
         group_slots_fractions,
         range_messages_limit: 20,
     });
@@ -124,16 +128,19 @@ async fn test_refill_messages() -> Result<()> {
         msgs_exec_params,
         mc_gen_lt: 0,
 
-        last_block_seqno: 0,
-        last_block_gen_lt: 0,
-        last_queue_diff_hash: HashBytes::default(),
+        block_seqno: 0,
 
+        last_block_gen_lt: 0,
         curr_lt: 0,
+
+        last_queue_diff_hash: HashBytes::default(),
 
         primary_working_state: Some(TestWorkingState {
             anchors_cache: AnchorsCache::default(),
             reader_state,
         }),
+
+        mempool: BTreeMap::default(),
 
         last_anchor_id: 0,
         last_anchor_ct: 0,
@@ -183,8 +190,8 @@ async fn test_refill_messages() -> Result<()> {
     //--------------
     // RUN SWAPS
     //--------------
-    for _ in 0..5 {
-        let messages = test_adapter.create_swap_messages(&dex_pairs, &dex_wallets, 5)?;
+    for _ in 0..10 {
+        let messages = test_adapter.create_swap_messages(&dex_pairs, &dex_wallets, 10)?;
         test_adapter.add_anchor_with_messages(messages);
         test_adapter.test_collate_block_and_check_refill()?;
     }
@@ -192,10 +199,11 @@ async fn test_refill_messages() -> Result<()> {
     //--------------
     // RUN SWAPS AND TRANSFERS
     //--------------
-    for _ in 0..10 {
-        let mut messages = test_adapter.create_swap_messages(&dex_pairs, &dex_wallets, 5)?;
+    for _ in 0..20 {
+        // we create 30 externals per anchor so that they do not fit one buffer limit
+        let mut messages = test_adapter.create_swap_messages(&dex_pairs, &dex_wallets, 10)?;
         let mut transfer_messages =
-            test_adapter.create_transfer_messages(&transfers_wallets, 10)?;
+            test_adapter.create_transfer_messages(&transfers_wallets, 20)?;
         messages.append(&mut transfer_messages);
         test_adapter.add_anchor_with_messages(messages);
         test_adapter.test_collate_block_and_check_refill()?;
@@ -226,13 +234,16 @@ where
     msgs_exec_params: Arc<MsgsExecutionParams>,
     mc_gen_lt: u64,
 
-    last_block_seqno: u32,
-    last_block_gen_lt: u64,
-    last_queue_diff_hash: HashBytes,
+    block_seqno: u32,
 
+    last_block_gen_lt: u64,
     curr_lt: u64,
 
+    last_queue_diff_hash: HashBytes,
+
     primary_working_state: Option<TestWorkingState>,
+
+    mempool: BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>,
 
     last_anchor_id: MempoolAnchorId,
     last_anchor_ct: u64,
@@ -266,7 +277,7 @@ impl<V: InternalMessageValue, F> RefillTestAdapter<V, F>
 where
     F: Fn(IntMsgInfo, HashBytes, Cell) -> V,
 {
-    #[tracing::instrument("test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.last_block_seqno + 1 }))]
+    #[tracing::instrument("test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.block_seqno + 1 }))]
     fn test_collate_block_and_check_refill(&mut self) -> Result<TestCollateResult> {
         let TestWorkingState {
             anchors_cache,
@@ -274,9 +285,8 @@ where
         } = self.primary_working_state.take().unwrap();
 
         let processed_upto = reader_state.get_updated_processed_upto();
-        let secondary_anchors_cache = anchors_cache.clone();
 
-        let block_seqno = self.last_block_seqno + 1;
+        self.block_seqno += 1;
         let next_chain_time = anchors_cache
             .last_imported_anchor()
             .map(|a| a.ct)
@@ -286,7 +296,7 @@ where
         let mut primary_messages_reader = self.create_primary_reader(
             MessagesReaderContext {
                 for_shard_id: self.shard_id,
-                block_seqno,
+                block_seqno: self.block_seqno,
                 next_chain_time,
                 msgs_exec_params: self.msgs_exec_params.clone(),
                 mc_state_gen_lt: self.mc_gen_lt,
@@ -300,10 +310,11 @@ where
 
         // create secondary reader
         let secondary_reader_state = ReaderState::new(&processed_upto);
+        let secondary_anchors_cache = self.init_secondary_anchors_cache(&processed_upto);
         let mut secondary_messages_reader = self.create_secondary_reader(
             MessagesReaderContext {
                 for_shard_id: self.shard_id,
-                block_seqno,
+                block_seqno: self.block_seqno,
                 next_chain_time,
                 msgs_exec_params: self.msgs_exec_params.clone(),
                 mc_state_gen_lt: self.mc_gen_lt,
@@ -356,8 +367,8 @@ where
                         test_int_msg.msg.key(),
                         TestInternalMessageState {
                             info: test_int_msg.info,
-                            primary_exec_count: 0,
-                            secondary_exec_count: 0,
+                            _primary_exec_count: 0,
+                            _secondary_exec_count: 0,
                         },
                     );
 
@@ -376,6 +387,19 @@ where
                 const EXEC_COUNT_LIMIT: usize = 20;
                 if total_exec_count >= EXEC_COUNT_LIMIT {
                     tracing::trace!(
+                        has_not_fully_read_externals_ranges =
+                            primary_messages_reader.has_not_fully_read_externals_ranges(),
+                        has_not_fully_read_internals_ranges =
+                            primary_messages_reader.has_not_fully_read_internals_ranges(),
+                        has_pending_new_messages =
+                            primary_messages_reader.has_pending_new_messages(),
+                        has_messages_in_buffers = primary_messages_reader.has_messages_in_buffers(),
+                        has_externals_in_buffers =
+                            primary_messages_reader.has_externals_in_buffers(),
+                        has_internals_in_buffers =
+                            primary_messages_reader.has_internals_in_buffers(),
+                        has_pending_externals_in_cache =
+                            primary_messages_reader.has_pending_externals_in_cache(),
                         "block limits reached: total_exec_count {}/{}",
                         total_exec_count,
                         EXEC_COUNT_LIMIT,
@@ -392,7 +416,7 @@ where
         // finalize test block and update message queue
 
         // finalize reader
-        let other_shards_top_block_diffs = vec![];
+        let other_shards_top_block_diffs = FastHashMap::default();
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
@@ -412,7 +436,7 @@ where
             }
         };
         let queue_diff =
-            QueueDiffStuff::builder(self.shard_id, block_seqno, &self.last_queue_diff_hash)
+            QueueDiffStuff::builder(self.shard_id, self.block_seqno, &self.last_queue_diff_hash)
                 .with_processed_to(reader_state.internals.get_min_processed_to_by_shards())
                 .with_messages(
                     &min_message,
@@ -428,7 +452,7 @@ where
             queue_diff_with_msgs.clone(),
             BlockIdShort {
                 shard: self.shard_id,
-                seqno: block_seqno,
+                seqno: self.block_seqno,
             },
             &queue_diff_hash,
             statistics.clone(),
@@ -438,7 +462,7 @@ where
             queue_diff_with_msgs,
             BlockIdShort {
                 shard: self.shard_id,
-                seqno: block_seqno,
+                seqno: self.block_seqno,
             },
             &queue_diff_hash,
             statistics,
@@ -451,7 +475,6 @@ where
             reader_state,
         });
 
-        self.last_block_seqno = block_seqno;
         self.last_block_gen_lt = self.curr_lt;
         self.last_queue_diff_hash = queue_diff_hash;
 
@@ -476,6 +499,34 @@ where
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<MessagesReader<V>> {
         MessagesReader::new(cx, mq_adapter)
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn init_secondary_anchors_cache(
+        &self,
+        processed_upto: &ProcessedUptoInfoStuff,
+    ) -> AnchorsCache {
+        let mut anchors_cache = AnchorsCache::default();
+
+        let (processed_to_anchor_id, processed_msgs_offset) = processed_upto
+            .get_min_externals_processed_to()
+            .unwrap_or_default();
+
+        for (anchor_id, anchor) in self.mempool.range(processed_to_anchor_id..) {
+            let msgs_offset = if anchor_id == &processed_to_anchor_id {
+                processed_msgs_offset
+            } else {
+                0
+            };
+            let our_exts_count = anchor.count_externals_for(&self.shard_id, msgs_offset as usize);
+            if anchor.chain_time <= self.last_anchor_ct {
+                anchors_cache.insert(anchor.clone(), our_exts_count);
+            } else {
+                break;
+            }
+        }
+
+        anchors_cache
     }
 
     #[tracing::instrument(skip_all)]
@@ -520,7 +571,10 @@ where
                 // both None so they are equal
             }
             _ => {
-                panic!("one message group is None while the other is Some");
+                panic!(
+                    "one message group is None while the other is Some (block_seqno={})",
+                    self.block_seqno,
+                );
             }
         }
     }
@@ -530,23 +584,27 @@ where
         assert_eq!(
             expected.msgs().len(),
             actual.msgs().len(),
-            "different number of accounts in groups"
+            "different number of accounts in groups (block_seqno={})",
+            self.block_seqno,
         );
 
         // iterate over each account and its messages in the expected group
         for (account_id, expected_msgs) in expected.msgs() {
             // retrieve the corresponding messages from the actual group
-            let actual_msgs = actual
-                .msgs()
-                .get(account_id)
-                .unwrap_or_else(|| panic!("account {} is missing in the actual group", account_id));
+            let actual_msgs = actual.msgs().get(account_id).unwrap_or_else(|| {
+                panic!(
+                    "account {} is missing in the actual group (block_seqno={})",
+                    account_id, self.block_seqno,
+                )
+            });
 
             // compare the number of messages
             assert_eq!(
                 expected_msgs.len(),
                 actual_msgs.len(),
-                "different number of messages for account {}",
-                account_id
+                "different number of messages for account {} (block_seqno={})",
+                account_id,
+                self.block_seqno,
             );
 
             // compare each message one-by-one
@@ -556,41 +614,37 @@ where
                 let act_test_msg_info = self.get_test_msg_info(act_msg);
                 assert_eq!(
                     exp_test_msg_info, act_test_msg_info,
-                    "mismatch message {} for account {}",
-                    i, account_id
+                    "mismatch message {} for account {} (block_seqno={})",
+                    i, account_id, self.block_seqno,
                 );
 
                 assert_eq!(
                     exp_msg.info, act_msg.info,
-                    "mismatch in 'info' field of message {} for account {}",
-                    i, account_id
+                    "mismatch in 'info' field of message {} for account {} (block_seqno={})",
+                    i, account_id, self.block_seqno,
                 );
                 assert_eq!(
                     exp_msg.dst_in_current_shard, act_msg.dst_in_current_shard,
-                    "mismatch in 'dst_in_current_shard' field of message {} for account {}",
-                    i, account_id
+                    "mismatch in 'dst_in_current_shard' field of message {} for account {} (block_seqno={})",
+                    i, account_id, self.block_seqno,
                 );
                 assert_eq!(
                     exp_msg.cell.repr_hash(),
                     act_msg.cell.repr_hash(),
-                    "mismatch in 'cell' field of message {} for account {}",
+                    "mismatch in 'cell' field of message {} for account {} (block_seqno={})",
                     i,
-                    account_id
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
                     exp_msg.special_origin, act_msg.special_origin,
-                    "mismatch in 'special_origin' field of message {} for account {}",
-                    i, account_id
+                    "mismatch in 'special_origin' field of message {} for account {} (block_seqno={})",
+                    i, account_id, self.block_seqno,
                 );
-                // assert_eq!(
-                //     exp_msg.block_seqno, act_msg.block_seqno,
-                //     "mismatch in 'block_seqno' field of message {} for account {}",
-                //     i, account_id
-                // );
                 assert_eq!(
                     exp_msg.from_same_shard, act_msg.from_same_shard,
-                    "mismatch in 'from_same_shard' field of message {} for account {}",
-                    i, account_id
+                    "mismatch in 'from_same_shard' field of message {} for account {} (block_seqno={})",
+                    i, account_id, self.block_seqno,
                 );
             }
         }
@@ -629,83 +683,63 @@ where
                 exec_count += 1;
                 account_lt += 1;
 
-                let msg_hash = *msg.cell.repr_hash();
+                let test_msg_info = self.get_test_msg_info(&msg);
 
-                // exec external message
-                let ext_msg_info_opt = match self.ext_msgs_journal.get_mut(&msg_hash) {
-                    Some(ext_msg_state) => {
-                        ext_msg_state.primary_exec_count += 1;
-                        Some(ext_msg_state.info.clone())
-                    }
-                    None => None,
-                };
-                if let Some(msg_info) = ext_msg_info_opt {
-                    let dst = msg_info.dst.clone();
+                tracing::trace!("executing message: {:?}", test_msg_info);
 
-                    match msg_info.msg_type {
-                        TestExternalMessageType::OneToMany => {
-                            let mut new_messages =
-                                self.create_one_to_many_int_messages(&mut account_lt, dst)?;
-                            created_messages.append(&mut new_messages);
-                        }
-                        TestExternalMessageType::Swap {
-                            route,
-                            step,
-                            pair_addr,
-                        } => {
-                            if let Some(message) = self.create_swap_int_message(
-                                &mut account_lt,
-                                pair_addr,
-                                dst,
-                                route,
-                                step,
-                            )? {
-                                created_messages.push(message);
-                            }
-                        }
-                        TestExternalMessageType::Transfer { target_addr } => {
-                            let message = self.create_transfer_int_message(
-                                &mut account_lt,
-                                dst,
-                                target_addr,
-                            )?;
-                            created_messages.push(message);
-                        }
-                    }
-                }
+                match test_msg_info {
+                    // exec external message
+                    TestMessageInfo::Ext(msg_info) => {
+                        let dst = msg_info.dst.clone();
 
-                // exec internal message
-                if let MsgInfo::Int(IntMsgInfo {
-                    src,
-                    dst,
-                    created_lt,
-                    ..
-                }) = msg.info
-                {
-                    let key = QueueKey {
-                        lt: created_lt,
-                        hash: msg_hash,
-                    };
-                    let int_msg_info_opt = match self.int_msgs_journal.get_mut(&key) {
-                        Some(ext_msg_state) => {
-                            ext_msg_state.primary_exec_count += 1;
-                            Some(ext_msg_state.info.clone())
-                        }
-                        None => None,
-                    };
-                    if let Some(msg_info) = int_msg_info_opt {
                         match msg_info.msg_type {
-                            TestInternalMessageType::OneToMany => {
+                            TestExternalMessageType::OneToMany => {
                                 let mut new_messages =
                                     self.create_one_to_many_int_messages(&mut account_lt, dst)?;
                                 created_messages.append(&mut new_messages);
                             }
+                            TestExternalMessageType::Swap {
+                                route,
+                                step,
+                                pair_addr,
+                            } => {
+                                if let Some(message) = self.create_swap_int_message(
+                                    &mut account_lt,
+                                    pair_addr,
+                                    dst,
+                                    route,
+                                    step,
+                                )? {
+                                    created_messages.push(message);
+                                }
+                            }
+                            TestExternalMessageType::Transfer { target_addr } => {
+                                let message = self.create_transfer_int_message(
+                                    &mut account_lt,
+                                    dst,
+                                    target_addr,
+                                )?;
+                                created_messages.push(message);
+                            }
+                        }
+                    }
+                    // exec internal message
+                    TestMessageInfo::Int(msg_info) => {
+                        match msg_info.msg_type {
+                            TestInternalMessageType::OneToMany => {
+                                let mut new_messages = self.create_one_to_many_int_messages(
+                                    &mut account_lt,
+                                    msg_info.src,
+                                )?;
+                                created_messages.append(&mut new_messages);
+                            }
+                            #[allow(unused)]
                             TestInternalMessageType::Swap {
                                 route,
                                 step,
                                 target_addr,
                             } => {
-                                todo!()
+                                // TODO exec internal swap message
                             }
                             TestInternalMessageType::Transfer => {
                                 // transfer completed
@@ -734,7 +768,7 @@ where
         let mut res = vec![];
 
         for _ in 0..5 {
-            if self.one_to_many_counter >= 100 {
+            if self.one_to_many_counter >= 200 {
                 // do not create new one-to-many messages
                 // balance finished
                 break;
@@ -777,6 +811,7 @@ where
         Ok(res)
     }
 
+    #[allow(unused, clippy::unused_self)]
     fn create_swap_int_message(
         &mut self,
         account_lt: &mut u64,
@@ -876,8 +911,8 @@ where
                 self.ext_msgs_journal
                     .insert(msg.info.hash, TestExternalMessageState {
                         info: msg.info,
-                        primary_exec_count: 0,
-                        secondary_exec_count: 0,
+                        _primary_exec_count: 0,
+                        _secondary_exec_count: 0,
                     });
 
                 externals.push(msg.msg);
@@ -893,7 +928,11 @@ where
 
             let our_exts_count = anchor.count_externals_for(&self.shard_id, 0);
 
-            working_state.anchors_cache.insert(anchor, our_exts_count);
+            working_state
+                .anchors_cache
+                .insert(anchor.clone(), our_exts_count);
+
+            self.mempool.insert(anchor_id, anchor);
 
             self.last_anchor_id = anchor_id;
             self.last_anchor_ct = anchor_ct;
@@ -1115,8 +1154,8 @@ struct TestExternalMessage {
 
 struct TestExternalMessageState {
     info: TestExternalMessageInfo,
-    primary_exec_count: usize,
-    secondary_exec_count: usize,
+    _primary_exec_count: usize,
+    _secondary_exec_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1177,6 +1216,7 @@ impl std::fmt::Debug for TestExternalMessageType {
 /// NATIVE/BTC,
 /// USDC/USDT,
 /// USDT/BNB.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 enum SwapRoute {
@@ -1201,8 +1241,8 @@ struct TestInternalMessage<V: InternalMessageValue> {
 
 struct TestInternalMessageState {
     info: TestInternalMessageInfo,
-    primary_exec_count: usize,
-    secondary_exec_count: usize,
+    _primary_exec_count: usize,
+    _secondary_exec_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1215,6 +1255,7 @@ struct TestInternalMessageInfo {
     msg_type: TestInternalMessageType,
 }
 
+#[allow(unused)]
 #[derive(Clone, PartialEq, Eq)]
 enum TestInternalMessageType {
     OneToMany,
