@@ -3,20 +3,23 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use everscale_crypto::ed25519;
-use everscale_types::models::GenesisInfo;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore, MempoolConfigBuilder};
+use tycho_consensus::prelude::{
+    EngineBinding, EngineCreated, EngineNetworkArgs, InputBuffer, MempoolAdapterStore,
+    MempoolConfigBuilder, MempoolMergedConfig,
+};
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
-use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
-use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
+use tycho_core::global_config::{GlobalConfig, ZerostateId};
+use tycho_network::PeerId;
 use tycho_storage::{NewBlockMeta, Storage};
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::{resolve_public_ip, signal};
+use tycho_util::futures::JoinTask;
 
 use crate::node::{NodeConfig, NodeKeys};
 
@@ -41,7 +44,7 @@ pub struct CmdRun {
 
     /// list of zerostate files to import
     #[clap(long)]
-    import_zerostate: Option<Vec<PathBuf>>,
+    import_zerostate: Vec<PathBuf>,
 
     /// simulate anchor id from last signed mc block to start with (otherwise may be paused)
     #[allow(clippy::option_option, reason = "run-mempool.sh")]
@@ -66,106 +69,62 @@ impl CmdRun {
             .stack_size(8 * 1024 * 1024)
             .thread_name(|_| "rayon_worker".to_string())
             .num_threads(node_config.threads.rayon_threads)
-            .build_global()
-            .unwrap();
+            .build_global()?;
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(node_config.threads.tokio_workers)
             .build()?
-            .block_on(async move {
-                let run_fut = tokio::spawn(self.run_impl(node_config));
-                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-                tokio::select! {
-                    res = run_fut => res.unwrap(),
-                    signal = stop_fut => match signal {
-                        Ok(signal) => {
-                            tracing::info!(?signal, "received termination signal");
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                }
-            })
+            .block_on(self.run_impl(node_config))
     }
 
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
-        init_logger(&node_config.logger, self.logger_config)?;
+        init_logger(&node_config.logger, self.logger_config.clone())?;
         test_logger::set_print_panic_hook(true);
 
-        let mempool = {
-            let global_config = GlobalConfig::from_file(self.global_config)
-                .context("failed to load global config")?;
+        let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
 
-            let keys = NodeKeys::from_file(self.keys).context("failed to load node keys")?;
+        let top_known_anchor = self.top_known_anchor.flatten().unwrap_or_default();
 
-            let public_ip = resolve_public_ip(node_config.public_ip).await?;
-            let socket_addr = SocketAddr::new(public_ip, node_config.port);
+        let mempool = Mempool::new(self, node_config).await?;
 
-            Mempool::new(socket_addr, keys, node_config, global_config).await?
-        };
+        let (engine, anchor_consumer) = mempool.boot().await.context("init mempool")?;
 
-        let mc_zerostate = mempool.load_zerostate(self.import_zerostate).await?;
+        (anchor_consumer.top_known_anchor).set_max_raw(top_known_anchor);
 
-        let (engine, anchor_consumer) = mempool
-            .boot(mc_zerostate, self.payload_step, self.steps_until_full)
-            .await
-            .context("failed to init mempool")?;
+        let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
+        let _engine = engine.run(engine_stop_tx);
 
-        anchor_consumer.top_known_anchor.set_max_raw(
-            self.top_known_anchor
-                .unwrap_or_default()
-                .unwrap_or_default(),
-        );
+        let _drain_anchors = JoinTask::new(anchor_consumer.drain());
 
-        tokio::spawn(anchor_consumer.drain());
+        tracing::info!("started mempool");
 
-        tracing::info!("starting mempool");
-
-        engine.run().await;
-
-        Ok(())
+        tokio::select! {
+            _ = &mut engine_stop_rx => bail!("engine exited"),
+            signal = stop_fut => match signal {
+                Ok(signal) => {
+                    tracing::info!(?signal, "received termination signal");
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
+        }
     }
 }
 
 struct Mempool {
-    keypair: Arc<ed25519::KeyPair>,
-
-    zerostate: ZerostateId,
-
-    dht_client: DhtClient,
-    peer_resolver: PeerResolver,
-    overlay_service: OverlayService,
-    storage: Storage,
-
+    net_args: EngineNetworkArgs,
     bootstrap_peers: Vec<PeerId>,
 
-    config_builder: MempoolConfigBuilder,
-    config_override: Option<MempoolGlobalConfig>,
+    storage: Storage,
+    input_buffer: InputBuffer,
+    merged_conf: MempoolMergedConfig,
 }
 
 impl Mempool {
-    pub async fn new(
-        public_addr: SocketAddr,
-        keys: NodeKeys,
-        node_config: NodeConfig,
-        global_config: GlobalConfig,
-    ) -> Result<Self> {
-        let local_addr = SocketAddr::from((node_config.local_ip, node_config.port));
-
-        let (dht_client, peer_resolver, overlay_service) =
-            tycho_consensus::test_utils::from_validator(
-                local_addr,
-                &keys.as_secret(),
-                Some(public_addr),
-                node_config.dht,
-                Some(node_config.peer_resolver),
-                Some(node_config.overlay),
-                node_config.network,
-            );
-
-        let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
-        let local_id: PeerId = keypair.public_key.into();
+    async fn new(cmd: CmdRun, node_config: NodeConfig) -> Result<Mempool> {
+        let global_config =
+            GlobalConfig::from_file(&cmd.global_config).context("failed to load global config")?;
 
         let bootstrap_peers = global_config
             .bootstrap_peers
@@ -173,19 +132,49 @@ impl Mempool {
             .map(|info| info.id)
             .collect::<Vec<_>>();
 
-        let mut peer_count = 0usize;
-        for peer in global_config.bootstrap_peers {
-            let is_new = dht_client.add_peer(Arc::new(peer))?;
-            peer_count += is_new as usize;
-        }
+        let net_args = {
+            let keys = NodeKeys::from_file(&cmd.keys).context("failed to load node keys")?;
 
-        tracing::info!(
-            %local_id,
-            %local_addr,
-            %public_addr,
-            bootstrap_peers = peer_count,
-            "initialized network"
-        );
+            let public_ip = resolve_public_ip(node_config.public_ip).await?;
+            let public_addr = SocketAddr::new(public_ip, node_config.port);
+
+            let local_addr = SocketAddr::from((node_config.local_ip, node_config.port));
+
+            let (dht_client, peer_resolver, overlay_service) =
+                tycho_consensus::test_utils::from_validator(
+                    local_addr,
+                    &keys.as_secret(),
+                    Some(public_addr),
+                    node_config.dht,
+                    Some(node_config.peer_resolver),
+                    Some(node_config.overlay),
+                    node_config.network,
+                );
+
+            let key_pair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
+            let local_id: PeerId = key_pair.public_key.into();
+
+            let mut peer_count = 0usize;
+            for peer in global_config.bootstrap_peers {
+                let is_new = dht_client.add_peer(Arc::new(peer))?;
+                peer_count += is_new as usize;
+            }
+
+            tracing::info!(
+                %local_id,
+                %local_addr,
+                %public_addr,
+                bootstrap_peers = peer_count,
+                "initialized network"
+            );
+
+            EngineNetworkArgs {
+                key_pair,
+                network: dht_client.network().clone(),
+                peer_resolver,
+                overlay_service,
+            }
+        };
 
         // Setup storage
         let storage = Storage::builder()
@@ -199,101 +188,101 @@ impl Mempool {
             "initialized storage"
         );
 
-        let config_builder = MempoolConfigBuilder::new(&node_config.mempool);
+        let mc_zerostate = load_mc_zerostate(
+            FileZerostateProvider(cmd.import_zerostate),
+            &storage,
+            &global_config.zerostate,
+        )
+        .await?;
 
-        Ok(Self {
-            keypair,
-            zerostate: global_config.zerostate,
-            dht_client,
-            peer_resolver,
-            overlay_service,
+        let mut config_builder = MempoolConfigBuilder::new(&node_config.mempool);
+
+        config_builder.set_genesis(match &global_config.mempool {
+            Some(global_config) => global_config.genesis_info,
+            None => mc_zerostate.state_extra()?.consensus_info.genesis_info,
+        });
+
+        config_builder.set_consensus_config(&match (global_config.mempool)
+            .and_then(|global| global.consensus_config)
+        {
+            Some(consensus_config) => consensus_config,
+            None => (mc_zerostate.config_params()?.params).get_consensus_config()?,
+        })?;
+
+        let merged_conf = config_builder.build()?;
+
+        let input_buffer = InputBuffer::new_stub(
+            cmd.payload_step,
+            cmd.steps_until_full,
+            merged_conf.consensus(),
+        );
+
+        Ok(Mempool {
+            net_args,
             bootstrap_peers,
+
             storage,
-            config_builder,
-            config_override: global_config.mempool,
+            input_buffer,
+            merged_conf: config_builder.build()?,
         })
     }
 
-    pub async fn boot(
-        mut self,
-        zerostate: ShardStateStuff,
-        payload_step: usize,
-        steps_until_full: NonZeroUsize,
-    ) -> Result<(Engine, AnchorConsumer)> {
-        let local_id = self.dht_client.network().peer_id();
+    pub async fn boot(&self) -> Result<(EngineCreated, AnchorConsumer)> {
+        let local_id = self.net_args.network.peer_id();
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let mut anchor_consumer = AnchorConsumer::default();
         anchor_consumer.add(*local_id, committed_rx);
 
-        // FIXME load genesis data from McStateExtra instead of using default
-        let global_config = self.config_override.unwrap_or(MempoolGlobalConfig {
-            genesis_info: GenesisInfo::default(),
-            consensus_config: None,
-        });
-
-        self.config_builder.set_genesis(global_config.genesis_info);
-
-        let consensus_config = match &global_config.consensus_config {
-            Some(consensus_config) => consensus_config,
-            None => {
-                let config = zerostate.config_params()?;
-                &config.params.get_consensus_config()?
-            }
-        };
-        self.config_builder.set_consensus_config(consensus_config)?;
-
-        let input_buffer = InputBuffer::new_stub(payload_step, steps_until_full, consensus_config);
-
-        let engine = Engine::new(
-            self.keypair.clone(),
-            self.dht_client.network(),
-            &self.peer_resolver,
-            &self.overlay_service,
-            &MempoolAdapterStore::new(
+        let bind = EngineBinding {
+            mempool_adapter_store: MempoolAdapterStore::new(
                 self.storage.mempool_storage().clone(),
                 anchor_consumer.commit_round.clone(),
             ),
-            input_buffer,
-            committed_tx,
-            &anchor_consumer.top_known_anchor,
-            &self.config_builder.build()?,
-        );
+            input_buffer: self.input_buffer.clone(),
+            top_known_anchor: anchor_consumer.top_known_anchor.clone(),
+            output: committed_tx,
+        };
 
-        engine.set_start_peers(&self.bootstrap_peers);
+        let engine = EngineCreated::new(bind, &self.net_args, &self.merged_conf);
+
+        engine.handle().set_start_peers(&self.bootstrap_peers);
 
         tracing::info!("mempool engine initialized");
 
         Ok((engine, anchor_consumer))
     }
+}
 
-    async fn load_zerostate(
-        &self,
-        import_zerostate: Option<Vec<PathBuf>>,
-    ) -> Result<ShardStateStuff> {
-        let mc_zerostate = import_zerostate
-            .map(FileZerostateProvider)
-            .context("no zerostates provided")?
-            .load_zerostates(self.storage.shard_state_storage().min_ref_mc_state())
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .find(|state| state.block_id() == &self.zerostate.as_block_id())
-            .context("no masterchain zerostate provided")?;
+async fn load_mc_zerostate(
+    provider: FileZerostateProvider,
+    storage: &Storage,
+    mc_zerostate_id: &ZerostateId,
+) -> Result<ShardStateStuff> {
+    let zerostates = provider
+        .load_zerostates(storage.shard_state_storage().min_ref_mc_state())
+        .collect::<Result<Vec<_>, _>>()?;
 
-        let (mc_zerostate_handle, _) = self.storage.block_handle_storage().create_or_load_handle(
-            mc_zerostate.block_id(),
-            NewBlockMeta {
-                is_key_block: true,
-                gen_utime: mc_zerostate.as_ref().gen_utime,
-                ref_by_mc_seqno: 0,
-            },
-        );
+    let mc_block_id = mc_zerostate_id.as_block_id();
 
-        self.storage
-            .shard_state_storage()
-            .store_state(&mc_zerostate_handle, &mc_zerostate, Default::default())
-            .await?;
+    let mc_zerostate = zerostates
+        .into_iter()
+        .find(|state| state.block_id() == &mc_block_id)
+        .context("no masterchain zerostate provided")?;
 
-        Ok(mc_zerostate)
-    }
+    let (mc_zerostate_handle, _) = storage.block_handle_storage().create_or_load_handle(
+        mc_zerostate.block_id(),
+        NewBlockMeta {
+            is_key_block: true,
+            gen_utime: mc_zerostate.as_ref().gen_utime,
+            ref_by_mc_seqno: 0,
+        },
+    );
+
+    storage
+        .shard_state_storage()
+        .store_state(&mc_zerostate_handle, &mc_zerostate, Default::default())
+        .await?;
+
+    Ok(mc_zerostate)
 }

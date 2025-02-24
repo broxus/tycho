@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::ConsensusConfig;
-use tokio::sync::{mpsc, Mutex, MutexGuard};
+use futures_util::FutureExt;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::MempoolStorage;
@@ -27,16 +28,12 @@ use crate::mempool::{
 use crate::tracing_targets;
 
 pub struct MempoolAdapterStdImpl {
+    cache: Arc<Cache>,
+    net_args: EngineNetworkArgs,
+
     config: Mutex<ConfigAdapter>,
 
-    cache: Arc<Cache>,
-
-    key_pair: Arc<KeyPair>,
-    network: Network,
-    peer_resolver: PeerResolver,
-    overlay_service: OverlayService,
     store: MempoolAdapterStore,
-
     input_buffer: InputBuffer,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
@@ -53,16 +50,18 @@ impl MempoolAdapterStdImpl {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
 
         Self {
+            cache: Default::default(),
+            net_args: EngineNetworkArgs {
+                key_pair,
+                network: network.clone(),
+                peer_resolver: peer_resolver.clone(),
+                overlay_service: overlay_service.clone(),
+            },
             config: Mutex::new(ConfigAdapter {
                 builder: config_builder,
                 state_update_ctx: None,
-                engine_handle: None,
+                engine_running: None,
             }),
-            cache: Default::default(),
-            key_pair,
-            network: network.clone(),
-            peer_resolver: peer_resolver.clone(),
-            overlay_service: overlay_service.clone(),
             store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
@@ -80,7 +79,7 @@ impl MempoolAdapterStdImpl {
     }
 
     /// Runs mempool engine
-    fn run(&self, config_guard: &MutexGuard<'_, ConfigAdapter>) -> Result<EngineHandle> {
+    fn run(&self, config_guard: &ConfigAdapter) -> Result<EngineRunning> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
@@ -98,20 +97,14 @@ impl MempoolAdapterStdImpl {
         self.top_known_anchor
             .set_max_raw(last_state_update.top_processed_to_anchor_id);
 
-        let engine = Engine::new(
-            self.key_pair.clone(),
-            &self.network,
-            &self.peer_resolver,
-            &self.overlay_service,
-            &self.store,
-            self.input_buffer.clone(),
-            anchor_tx,
-            &self.top_known_anchor,
-            // This will be used as next set after genesis, skipping some existed set
-            &mempool_config,
-        );
+        let bind = EngineBinding {
+            mempool_adapter_store: self.store.clone(),
+            input_buffer: self.input_buffer.clone(),
+            top_known_anchor: self.top_known_anchor.clone(),
+            output: anchor_tx,
+        };
 
-        let handle = engine.get_handle();
+        let engine = EngineCreated::new(bind, &self.net_args, &mempool_config);
 
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = last_state_update
@@ -122,11 +115,11 @@ impl MempoolAdapterStdImpl {
             if last_state_update.prev_validator_set.is_some() {
                 tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
             }
-            ConfigAdapter::apply_vset(&handle, last_state_update)?;
-            ConfigAdapter::apply_next_vset(&handle, last_state_update);
+            ConfigAdapter::apply_vset(engine.handle(), last_state_update)?;
+            ConfigAdapter::apply_next_vset(engine.handle(), last_state_update);
         } else if estimated_sync_bottom >= last_state_update.consensus_info.prev_vset_switch_round {
-            ConfigAdapter::apply_prev_vset(&handle, last_state_update)?;
-            ConfigAdapter::apply_vset(&handle, last_state_update)?;
+            ConfigAdapter::apply_prev_vset(engine.handle(), last_state_update)?;
+            ConfigAdapter::apply_vset(engine.handle(), last_state_update)?;
             if last_state_update.next_validator_set.is_some() {
                 tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, "cannot use next vset");
             }
@@ -143,24 +136,36 @@ impl MempoolAdapterStdImpl {
             )
         };
 
-        tokio::spawn(async move {
-            scopeguard::defer!(tracing::warn!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                "mempool engine stopped"
-            ));
-            engine.run().await;
-        });
+        let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
+        let engine = engine.run(engine_stop_tx);
 
-        tokio::spawn(Self::handle_anchors_task(
+        let mut anchor_task = Self::handle_anchors_task(
             self.cache.clone(),
             self.store.clone(),
             mempool_config.consensus().clone(),
             anchor_rx,
-        ));
+        )
+        .boxed();
+
+        tokio::spawn(async move {
+            tokio::select! {
+                () = &mut anchor_task => {}, // just poll
+                engine_result = &mut engine_stop_rx => match engine_result {
+                    Ok(()) => tracing::info!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        "Mempool main task is stopped: some subtask was cancelled"
+                    ),
+                    Err(_recv_error) => tracing::info!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        "Mempool main task is cancelled"
+                    ),
+                },
+            }
+        });
 
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool started");
 
-        Ok(handle)
+        Ok(engine)
     }
 
     pub fn send_external(&self, message: Bytes) {
@@ -273,7 +278,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
         let mut config_guard = self.config.lock().await;
 
-        let Some(engine) = config_guard.engine_handle.as_ref() else {
+        let Some(engine) = config_guard.engine_running.as_ref() else {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = %new_cx.mc_block_id.as_short_id(),
@@ -330,7 +335,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             };
 
             config_guard.state_update_ctx = Some(new_cx);
-            config_guard.engine_handle = Some(self.run(&config_guard)?);
+            config_guard.engine_running = Some(self.run(&config_guard)?);
             return Ok(());
         };
 
@@ -346,8 +351,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        ConfigAdapter::apply_vset(engine, &new_cx)?;
-        ConfigAdapter::apply_next_vset(engine, &new_cx);
+        ConfigAdapter::apply_vset(engine.handle(), &new_cx)?;
+        ConfigAdapter::apply_next_vset(engine.handle(), &new_cx);
         config_guard.state_update_ctx = Some(new_cx);
         Ok(())
     }
