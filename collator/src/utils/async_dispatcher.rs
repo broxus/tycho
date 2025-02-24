@@ -34,7 +34,7 @@ impl<W> Clone for AsyncDispatcher<W> {
         Self {
             descr: self.descr.clone(),
             queue_buffer_size: self.queue_buffer_size,
-            spawned_tasks_sender: self.queued_tasks_sender.clone(),
+            spawned_tasks_sender: self.spawned_tasks_sender.clone(),
             queued_tasks_sender: self.queued_tasks_sender.clone(),
         }
     }
