@@ -1,6 +1,8 @@
 use tokio::sync::oneshot;
+use tracing::Span;
 use tycho_network::PeerId;
 
+use crate::effects::{AltFormat, TaskTracker};
 use crate::engine::lifecycle::args::{EngineBinding, EngineNetwork, EngineNetworkArgs};
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::models::Round;
@@ -11,6 +13,7 @@ use crate::prelude::EngineRunning;
 pub struct EngineHandle {
     pub(crate) bind: EngineBinding,
     pub(crate) net: EngineNetwork,
+    pub(crate) task_tracker: TaskTracker,
     pub(crate) merged_conf: MempoolMergedConfig,
 }
 
@@ -20,11 +23,13 @@ impl EngineHandle {
         net_args: &EngineNetworkArgs,
         merged_conf: &MempoolMergedConfig,
     ) -> Self {
-        let net = EngineNetwork::new(net_args, merged_conf);
+        let task_tracker = TaskTracker::default();
+        let net = EngineNetwork::new(net_args, &task_tracker, merged_conf);
 
         Self {
             bind,
             net,
+            task_tracker,
             merged_conf: merged_conf.clone(),
         }
     }
@@ -60,5 +65,22 @@ impl EngineHandle {
             }
         }
         self.net.peer_schedule.set_next_set(set);
+    }
+
+    pub(super) fn tracing_span(&self) -> Span {
+        tracing::error_span!(
+            "mempool",
+            peer = %self.net.peer_id.alt(),
+            genesis_round = self.merged_conf.conf.genesis_round.0,
+            overlay = %self.net.overlay_id,
+        )
+    }
+}
+
+impl Drop for EngineHandle {
+    fn drop(&mut self) {
+        let _guard = self.tracing_span().entered();
+        tracing::warn!("stop in progress: engine handle is dropped, threads are aborted");
+        self.task_tracker.close();
     }
 }

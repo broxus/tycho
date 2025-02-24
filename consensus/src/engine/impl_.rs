@@ -5,17 +5,17 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt, StreamExt};
+use futures_util::{future, FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use rayon::prelude::IntoParallelRefIterator;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tycho_network::PeerId;
-use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
-use crate::effects::{AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx};
+use crate::effects::{
+    AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult,
+};
 use crate::engine::lifecycle::EngineHandle;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
@@ -28,12 +28,13 @@ use crate::models::{
 
 pub struct Engine {
     dag: DagFront,
-    committer_run: JoinHandle<Committer>,
+    committer_run: Task<Committer>,
     output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
+    _peer_schedule_updater: Task<()>,
+    init_task: Option<Task<()>>,
     ctx: EngineCtx,
-    init_task: Option<JoinTask<()>>,
 }
 
 impl Engine {
@@ -41,6 +42,7 @@ impl Engine {
         let EngineHandle {
             bind,
             net,
+            task_tracker,
             merged_conf,
         } = handle;
 
@@ -51,7 +53,7 @@ impl Engine {
         consensus_round.set_max(conf.genesis_round);
         bind.top_known_anchor.set_max(conf.genesis_round);
 
-        let engine_ctx = EngineCtx::new(consensus_round.get(), conf);
+        let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker);
 
         genesis.verify_hash().expect("Failed to verify genesis");
         Verifier::verify(&genesis, &net.peer_schedule, conf).expect("genesis failed to verify");
@@ -74,24 +76,15 @@ impl Engine {
             &net.peer_schedule,
             conf,
         );
-        let committer_run = tokio::spawn(future::ready(committer));
+        let committer_run = engine_ctx.task().spawn_blocking(|| committer);
 
-        let init_task = JoinTask::new({
+        let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
             let overlay_id = merged_conf.overlay_id;
             let conf = conf.clone();
-            async move {
-                let init_storage_task = tokio::task::spawn_blocking({
-                    move || {
-                        store.init_storage(&overlay_id);
-                        store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
-                    }
-                });
-                match init_storage_task.await {
-                    Ok(()) => (),
-                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Err(e) => panic!("failed to clean db on genesis {e:?}"),
-                }
+            move || {
+                store.init_storage(&overlay_id);
+                store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
             }
         });
 
@@ -105,7 +98,7 @@ impl Engine {
             bind.input_buffer.clone(),
         );
 
-        tokio::spawn({
+        let peer_schedule_updater = engine_ctx.task().spawn({
             let peer_schedule = net.peer_schedule.clone();
             peer_schedule.run_updater()
         });
@@ -116,23 +109,24 @@ impl Engine {
             output: bind.output.clone(),
             db_cleaner,
             round_task,
+            _peer_schedule_updater: peer_schedule_updater,
             init_task: Some(init_task),
             ctx: engine_ctx,
         }
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> Option<(Point, Option<Point>)> {
-        self.init_task.take().expect("init task must be set").await;
+    async fn pre_run(&mut self) -> TaskResult<Option<(Point, Option<Point>)>> {
+        (self.init_task.take().expect("init task must be set")).await?;
 
         // take last round from db
 
-        let last_db_round = tokio::task::spawn_blocking({
-            let store = self.round_task.state.store.clone();
-            move || store.last_round()
-        })
-        .await
-        .expect("load last round from db");
+        let last_db_round = (self.ctx.task())
+            .spawn_blocking({
+                let store = self.round_task.state.store.clone();
+                move || store.last_round()
+            })
+            .await?;
 
         tracing::info!("found last db round {}", last_db_round.0);
 
@@ -167,7 +161,7 @@ impl Engine {
         self.round_task.state.consensus_round.set_max(dag_top_round);
         let round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
 
-        let mut committer = take_committer(&mut self.committer_run).expect("init");
+        let mut committer = take_committer(&mut self.committer_run, &round_ctx)?.expect("init");
         (self.dag).fill_to_top(
             dag_top_round,
             Some(&mut committer),
@@ -179,7 +173,7 @@ impl Engine {
             conf,
         );
         let dag_bottom_round = committer.bottom_round();
-        self.committer_run = tokio::spawn(future::ready(committer));
+        self.committer_run = round_ctx.task().spawn(future::ready(committer));
 
         // preload and sign last rounds if node may still participate in consensus
 
@@ -192,7 +186,7 @@ impl Engine {
                 "will restore points from DB",
             );
             let range = RangeInclusive::new(dag_bottom_round, last_db_round);
-            self.preload_points(range, &round_ctx).await;
+            self.preload_points(range, &round_ctx).await?;
         } else {
             tracing::info!(
                 parent: round_ctx.span(),
@@ -219,6 +213,7 @@ impl Engine {
                 .and_then(|local_id| dag_round.view(&local_id, |loc| loc.first_valid()))
                 .flatten()
                 .and_then(|dag_point_fut| dag_point_fut.now_or_never())
+                .transpose()?
                 .map(|dag_point| dag_point.id());
             if let Some(last_id) = first_valid {
                 tracing::info!(
@@ -239,7 +234,7 @@ impl Engine {
                 (dag_top_round.next(), None)
             }
             Some(last_id) => {
-                let task = tokio::task::spawn_blocking({
+                let task = round_ctx.task().spawn_blocking({
                     let store = self.round_task.state.store.clone();
                     move || {
                         let last = store
@@ -253,24 +248,22 @@ impl Engine {
                         (last, prev)
                     }
                 });
+                let (last, prev) = task.await?;
                 // if there's a broadcast at two last DB rounds - then it's round will be current
-                match task.await {
-                    Ok((last, prev)) => (last.round().next(), Some((last, prev))),
-                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Err(e) => {
-                        let _span = round_ctx.span().enter();
-                        panic!("loading broadcasts on init: {e}")
-                    }
-                }
+                (last.round().next(), Some((last, prev)))
             }
         };
         self.round_task.state.consensus_round.set_max(new_top_round);
 
-        replay_bcasts
+        Ok(replay_bcasts)
     }
 
-    async fn preload_points(&self, range: RangeInclusive<Round>, round_ctx: &RoundCtx) {
-        let task = tokio::task::spawn_blocking({
+    async fn preload_points(
+        &self,
+        range: RangeInclusive<Round>,
+        round_ctx: &RoundCtx,
+    ) -> TaskResult<()> {
+        let task = round_ctx.task().spawn_blocking({
             let store = self.round_task.state.store.clone();
             let peer_schedule = self.round_task.state.peer_schedule.clone();
             let round_ctx = round_ctx.clone();
@@ -314,16 +307,8 @@ impl Engine {
                 map
             }
         });
-        let preloaded = match task.await {
-            Ok(result) => result,
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(e) => {
-                let _span = round_ctx.span().enter();
-                panic!("preload last rounds on init: {e}");
-            }
-        };
 
-        for ((round, _), point_restores) in preloaded {
+        for ((round, _), point_restores) in task.await? {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let dag_restore = FuturesUnordered::new();
             for point_restore in point_restores {
@@ -334,18 +319,19 @@ impl Engine {
                     round_ctx,
                 ));
             }
-            dag_restore.collect::<Vec<DagPoint>>().await;
+            dag_restore.try_collect::<Vec<DagPoint>>().await?;
         }
+        Ok(())
     }
 
     // this future never completes with Ok result
-    pub async fn run(mut self) -> futures_util::never::Never {
-        let mut replay_bcasts = self.pre_run().await;
+    pub(crate) async fn run(mut self) -> TaskResult<futures_util::never::Never> {
+        let mut replay_bcasts = self.pre_run().await?;
         let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
             start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
         });
         let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
-        let _db_clean_task = self.db_cleaner.new_task(
+        let _db_clean_task: Task<()> = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
             &round_ctx,
@@ -357,7 +343,8 @@ impl Engine {
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
-            let mut ready_committer = take_committer(&mut self.committer_run);
+            // note the previous round context
+            let mut ready_committer = take_committer(&mut self.committer_run, &round_ctx)?;
 
             {
                 let old_dag_top_round = self.dag.top().round();
@@ -408,7 +395,7 @@ impl Engine {
                                 committer,
                                 full_history_bottom.take(),
                                 self.output.clone(),
-                                round_ctx.clone(),
+                                &round_ctx,
                             );
                         }
                         continue;
@@ -449,7 +436,7 @@ impl Engine {
                     if let Some(prev) = prev_bcast {
                         self.round_task.init_prev_broadcast(prev, &round_ctx);
                     }
-                    future::ready(Some(point)).boxed()
+                    future::ready(Some(Ok(point))).boxed()
                 }
                 None => self.round_task.own_point_task(
                     &head,
@@ -468,17 +455,11 @@ impl Engine {
                     committer,
                     full_history_bottom.take(),
                     self.output.clone(),
-                    round_ctx.clone(),
+                    &round_ctx,
                 );
             }
 
-            match round_task_run.await {
-                Ok(round_task) => {
-                    self.round_task = round_task;
-                }
-                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                Err(e) => panic!("mempool engine failed: {e:?}"),
-            }
+            self.round_task = round_task_run.await?;
         }
     }
 }
@@ -545,28 +526,30 @@ fn collator_feedback(
     }
 }
 
-fn take_committer(committer_run: &mut JoinHandle<Committer>) -> Option<Committer> {
-    if committer_run.is_finished() {
-        let taken = mem::replace(committer_run, tokio::spawn(future::pending()));
-        committer_run.abort();
-        match taken.now_or_never() {
-            Some(Ok(committer)) => Some(committer),
-            Some(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Some(Err(e)) => panic!("committer task: {e:?}"),
-            None => unreachable!("committer task is finished and can be taken only once"),
-        }
-    } else {
-        None
-    }
+fn take_committer(
+    committer_run: &mut Task<Committer>,
+    round_ctx: &RoundCtx,
+) -> TaskResult<Option<Committer>> {
+    if !committer_run.is_finished() {
+        return Ok(None);
+    };
+    let taken = mem::replace(committer_run, Task::aborted());
+    let Some(committer_result) = taken.now_or_never() else {
+        let _guard = round_ctx.span().enter();
+        panic!("committer task is finished and can be taken only once")
+    };
+    committer_result.map(Some)
 }
 
 fn committer_task(
     mut committer: Committer,
     full_history_bottom: Option<Round>,
     committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-    round_ctx: RoundCtx,
-) -> JoinHandle<Committer> {
-    tokio::task::spawn_blocking(move || {
+    round_ctx: &RoundCtx,
+) -> Task<Committer> {
+    let task_ctx = round_ctx.task();
+    let round_ctx = round_ctx.clone();
+    task_ctx.spawn_blocking(move || {
         // may run for long several times in a row and commit nothing, because of missed points
         let _span = round_ctx.span().enter();
 
