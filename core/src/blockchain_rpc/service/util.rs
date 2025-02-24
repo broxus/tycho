@@ -1,3 +1,6 @@
+use governor::state::keyed::DefaultKeyedStateStore;
+use tycho_network::PeerId;
+
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
 
@@ -41,3 +44,9 @@ constructor_to_string! {
     rpc::GetArchiveInfo as GetArchiveInfo,
     rpc::GetArchiveChunk as GetArchiveChunk
 }
+
+pub type RateLimiter = governor::RateLimiter<
+    PeerId,
+    DefaultKeyedStateStore<PeerId, ahash::RandomState>,
+    governor::clock::DefaultClock,
+>;

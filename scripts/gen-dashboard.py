@@ -544,6 +544,11 @@ def core_blockchain_rpc_general() -> RowPanel:
             unit_format=UNITS.SECONDS,
             legend_format="{{instance}} - {{kind}}",
         ),
+        create_counter_panel(
+            "tycho_rpc_rate_limit_exceeded_total",
+            "RPC Rate Limit Exceeded",
+            legend_format="{{instance}} - {{method}}",
+        ),
     ]
     return create_row("blockchain: RPC - General Stats", metrics)
 
@@ -1137,7 +1142,7 @@ def collation_metrics() -> RowPanel:
             "tycho_last_block_seqno",
             "Last received/synced_to/collated block seqno",
             labels=['workchain=~"$workchain"'],
-            legend_format = "{{instance}} workchain: {{workchain}} src: {{src}}",
+            legend_format="{{instance}} workchain: {{workchain}} src: {{src}}",
         ),
         create_counter_panel(
             "tycho_collator_sync_to_applied_mc_block_count",
