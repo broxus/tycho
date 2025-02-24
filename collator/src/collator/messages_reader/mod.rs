@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use self::externals_reader::*;
 use self::internals_reader::*;
@@ -367,7 +367,7 @@ impl MessagesReader {
     pub fn finalize(
         mut self,
         current_next_lt: u64,
-        diffs: Vec<(ShardIdent, ShortQueueDiff)>,
+        diffs: FastHashMap<ShardIdent, ShortQueueDiff>,
     ) -> Result<FinalizedMessagesReader> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
@@ -498,7 +498,7 @@ impl MessagesReader {
         partition_router: &mut PartitionRouter,
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
-        top_block_diffs: Vec<(ShardIdent, ShortQueueDiff)>,
+        top_block_diffs: FastHashMap<ShardIdent, ShortQueueDiff>,
     ) -> Result<FastHashSet<HashBytes>> {
         let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
@@ -534,7 +534,7 @@ impl MessagesReader {
                 let acc_shard_diff_info = top_block_diffs
                     .iter()
                     .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
-                    .map(|(_, diff)| diff);
+                    .map(|(_, diff)| diff.clone());
 
                 // try to get remote partition from diff
                 let total_msgs = match acc_shard_diff_info {
