@@ -282,10 +282,9 @@ mod test {
     use super::*;
     use crate::dag::dag_location::DagLocation;
     use crate::dag::DagFront;
-    use crate::effects::{AltFormat, EngineCtx, MempoolStore, RoundCtx};
+    use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
     use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::test_utils;
-    use crate::test_utils::default_test_config;
 
     const PEER_COUNT: usize = 3;
 
@@ -293,30 +292,25 @@ mod test {
     async fn test_commit_with_gap() {
         let stub_store = MempoolStore::no_read_stub();
 
-        let (conf, genesis) = {
-            let merged_conf = default_test_config();
-            let genesis = merged_conf.genesis();
-            (merged_conf.conf, genesis)
-        };
-        let engine_ctx = EngineCtx::new(conf.genesis_round, &conf);
-        let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
-
         let peers: [(PeerId, Arc<KeyPair>); PEER_COUNT] = array::from_fn(|i| {
             let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));
             (PeerId::from(keys.public_key), Arc::new(keys))
         });
         let local_keys = &peers[0].1;
 
-        let (peer_schedule, stub_downloader) =
-            test_utils::make_dag_parts(&peers, local_keys, &genesis);
+        let (peer_schedule, stub_downloader, genesis, engine_ctx) =
+            test_utils::make_engine_parts(&peers, local_keys.clone());
+        let conf = engine_ctx.conf();
 
-        let genesis_round = DagRound::new_bottom(conf.genesis_round, &peer_schedule, &conf);
+        let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
+
+        let genesis_round = DagRound::new_bottom(conf.genesis_round, &peer_schedule, conf);
         genesis_round
             .add_local(&genesis, Some(local_keys), &stub_store, &round_ctx)
             .await;
 
         let mut dag = DagFront::default();
-        let mut committer = dag.init(genesis_round, &conf);
+        let mut committer = dag.init(genesis_round, conf);
 
         for round in (0..100).map(Round) {
             // println!("{}", round.0);
@@ -349,10 +343,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), &conf).len(), 7);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 7);
             }
             if round.0 == 66 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), &conf).len(), 4);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 4);
             }
         }
 
@@ -377,21 +371,21 @@ mod test {
 
         let r_round = remove_round(&mut committer.dag, Round(70));
 
-        assert_eq!(commit(&mut committer, None, &conf).len(), 1);
+        assert_eq!(commit(&mut committer, None, conf).len(), 1);
 
         for pack in r_points {
             restore_point(&mut committer.dag, pack);
         }
 
-        assert_eq!(commit(&mut committer, None, &conf).len(), 2);
+        assert_eq!(commit(&mut committer, None, conf).len(), 2);
 
         restore_point(&mut committer.dag, r_leader);
 
-        assert_eq!(commit(&mut committer, None, &conf).len(), 2);
+        assert_eq!(commit(&mut committer, None, conf).len(), 2);
 
         restore_round(&mut committer.dag, r_round);
 
-        assert_eq!(commit(&mut committer, None, &conf).len(), 7);
+        assert_eq!(commit(&mut committer, None, conf).len(), 7);
 
         std::io::stderr().flush().ok();
         std::io::stdout().flush().ok();
