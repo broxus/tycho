@@ -170,6 +170,38 @@ async fn test_refill_messages() -> Result<()> {
     test_adapter.test_collate_block_and_check_refill()?;
 
     //--------------
+    // TEST CASE:
+    //  * we have some existing internals in queue
+    //  * we have many imported externals
+    //  * existing internals finished, all read externals finished, we moved to ExternalsAndNew stage
+    //  * small part of externals produces new messages with the same dst as externals, so we read all new messages each step
+    //  * finally we have some externals and new messages in buffers
+    //--------------
+
+    // process anchor with 14 transfer externals, this will produce 14 internals
+    let transfer_messages = test_adapter.create_transfer_messages(&transfers_wallets, 14)?;
+    test_adapter.add_anchor_with_messages(transfer_messages);
+    // 20 of 28 messages will be executed, 8 new messages will be added to queue
+    test_adapter.test_collate_block_and_check_refill()?;
+
+    // process anchor with 40 externals (5 transfer and 35 dummy)
+    let mut transfer_messages = test_adapter.create_transfer_messages(&transfers_wallets, 5)?;
+    let target_accounts: Vec<_> = transfer_messages
+        .iter()
+        .map(|m| m.info.dst.clone())
+        .collect();
+    let mut messages = test_adapter.create_dummy_messages(&target_accounts, 35)?;
+    messages.append(&mut transfer_messages);
+    test_adapter.add_anchor_with_messages(messages);
+    // 8 existing internals collected first, then will be collected already read externals,
+    // then will be collecting externals and new messages
+    test_adapter.test_collate_block_and_check_refill()?;
+
+    // and process empty anchor to check refill
+    test_adapter.add_anchor_with_messages(vec![]);
+    test_adapter.test_collate_block_and_check_refill()?;
+
+    //--------------
     // START one-to-many IN THE NEXT BLOCK
     //--------------
 
@@ -721,6 +753,9 @@ where
                                 )?;
                                 created_messages.push(message);
                             }
+                            TestExternalMessageType::Dummy => {
+                                // just do nothing
+                            }
                         }
                     }
                     // exec internal message
@@ -1134,6 +1169,41 @@ where
 
         Ok(res)
     }
+
+    fn create_dummy_messages(
+        &mut self,
+        target_accounts: &[IntAddr],
+        count: usize,
+    ) -> Result<Vec<TestExternalMessage>> {
+        let mut res = vec![];
+
+        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        for _ in 0..count {
+            let idx = self.next_ext_idx;
+            self.next_ext_idx += 1;
+
+            let dst = target_accounts.choose(&mut self.rng).unwrap().clone();
+
+            let msg_type = TestExternalMessageType::Dummy;
+
+            let body = {
+                let mut builder = CellBuilder::new();
+                builder.store_u64(idx)?;
+                builder.store_u32(msg_type.as_u32())?;
+                builder.build()?
+            };
+
+            tracing::trace!(
+                idx, %dst, ?msg_type,
+                "created dummy ext message"
+            );
+
+            let test_ext_msg = Self::create_test_ext_message(idx, dst, msg_type, body)?;
+            res.push(test_ext_msg);
+        }
+
+        Ok(res)
+    }
 }
 
 struct TestWorkingState {
@@ -1177,6 +1247,7 @@ enum TestExternalMessageType {
     Transfer {
         target_addr: IntAddr,
     },
+    Dummy,
 }
 
 impl TestExternalMessageType {
@@ -1185,6 +1256,7 @@ impl TestExternalMessageType {
             Self::OneToMany => 1,
             Self::Swap { .. } => 2,
             Self::Transfer { .. } => 3,
+            Self::Dummy => 4,
         }
     }
 }
@@ -1207,6 +1279,7 @@ impl std::fmt::Debug for TestExternalMessageType {
                 .debug_struct("Transfer")
                 .field("target_addr", &DebugDisplay(&target_addr))
                 .finish(),
+            Self::Dummy => write!(f, "Dummy"),
         }
     }
 }
