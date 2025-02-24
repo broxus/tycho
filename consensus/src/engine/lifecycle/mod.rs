@@ -1,5 +1,5 @@
 /// [`EngineNetworkArgs`] + [`EngineBinding`] => [`EngineHandle::new()`] =>
-/// [`EngineHandle::run()`]
+/// [`EngineHandle::run()`] => [`EngineRunning::stop()`]
 pub use args::*;
 pub use handle::*;
 pub use running::*;

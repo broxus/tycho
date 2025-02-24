@@ -12,7 +12,7 @@ use tycho_util::sync::rayon_run_fifo;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
-use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
+use crate::effects::{AltFormat, Ctx, MempoolStore, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
@@ -124,7 +124,7 @@ impl Verifier {
         store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
         ctx: ValidateCtx,
-    ) -> ValidateResult {
+    ) -> TaskResult<ValidateResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = ctx.span().enter();
 
@@ -270,15 +270,15 @@ impl Verifier {
                     }
                 },
                 is_valid = &mut is_valid_fut => {
-                    break is_valid;
+                    break is_valid?;
                 },
             }
         };
 
         let status = if valid {
-            ctx.validated(ValidateResult::Valid { is_certified })
+            ValidateResult::Valid { is_certified }
         } else {
-            ctx.validated(ValidateResult::Invalid { is_certified })
+            ValidateResult::Invalid { is_certified }
         };
 
         ctx.validated(status)
@@ -411,7 +411,7 @@ impl Verifier {
         info: PointInfo,
         mut deps_and_prev: FuturesUnordered<DagPointFuture>,
         conf: &MempoolConfig,
-    ) -> bool {
+    ) -> TaskResult<bool> {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.data().prev_digest();
         let prev_round = info.round().prev();
@@ -429,17 +429,18 @@ impl Verifier {
         let max_allowed_dep_time =
             info.data().time + UnixTime::from_millis(conf.consensus.clock_skew_millis as _);
 
-        while let Some(dag_point) = deps_and_prev.next().await {
+        while let Some(task_result) = deps_and_prev.next().await {
+            let dag_point = task_result?;
             if dag_point.round() == prev_round && dag_point.author() == info.data().author {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         let Some(proven) = dag_point.trusted() else {
                             // author must have skipped current point's round
                             // to clear its bad history
-                            return false;
+                            return Ok(false);
                         };
                         if !Self::is_proof_ok(&info, proven) {
-                            return false;
+                            return Ok(false);
                         } // else ok continue
                     }
                     Some(_) | None => {
@@ -448,16 +449,17 @@ impl Verifier {
                             DagPoint::Valid(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`
                                 // None: point must have filled `prev_digest` and `includes`
-                                return false;
+                                return Ok(false);
                             }
                             DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`,
                                 //       just to be invalid for an invalid dependency
                                 // None: author must have skipped current point's round
-                                return false;
+                                return Ok(false);
                             }
                             DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                                return false; // same as for valid
+                                // same as for valid
+                                return Ok(false);
                             }
                             DagPoint::NotFound(_) => {
                                 // failed download is ok for both Some and None:
@@ -468,17 +470,18 @@ impl Verifier {
                 }
             } else {
                 let Some(dep) = dag_point.trusted() else {
-                    return false; // just invalid dependency
+                    // just invalid dependency
+                    return Ok(false);
                 };
                 if dep.data().time > max_allowed_dep_time {
                     // dependency time may exceed those in point only by a small value from config
-                    return false;
+                    return Ok(false);
                 }
                 if dep.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
                     || dep.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
                 {
                     // did not actualize the chain
-                    return false;
+                    return Ok(false);
                 }
 
                 let dep_id = dep.id();
@@ -486,21 +489,21 @@ impl Verifier {
                     && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
                 {
                     // path does not lead to destination
-                    return false;
+                    return Ok(false);
                 }
                 if dep_id == anchor_proof_link_id {
                     if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
                         // path does not lead to destination
-                        return false;
+                        return Ok(false);
                     }
                     if dep.data().anchor_time != info.data().anchor_time {
                         // anchor candidate's time is not inherited from its proof
-                        return false;
+                        return Ok(false);
                     }
                 }
             }
         }
-        true
+        Ok(true)
     }
 
     /// blame author and every dependent point's author
@@ -764,7 +767,7 @@ impl ValidateCtx {
             .increment(1);
     }
 
-    fn validated(&self, result: ValidateResult) -> ValidateResult {
+    fn validated(&self, result: ValidateResult) -> TaskResult<ValidateResult> {
         match &result {
             ValidateResult::IllFormed(reason) => {
                 tracing::error!(
@@ -791,6 +794,6 @@ impl ValidateCtx {
                 );
             }
         };
-        result
+        Ok(result)
     }
 }

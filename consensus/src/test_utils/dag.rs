@@ -13,7 +13,7 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
-use crate::effects::{Ctx, EngineCtx, MempoolStore, RoundCtx, ValidateCtx};
+use crate::effects::{Ctx, EngineCtx, MempoolStore, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
@@ -36,14 +36,16 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
+    let task_tracker = TaskTracker::default();
+
     let merged_conf = crate::test_utils::default_test_config();
     let conf = &merged_conf.conf;
     let genesis = merged_conf.genesis();
 
-    let engine_ctx = EngineCtx::new(conf.genesis_round, conf);
+    let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
 
     // any peer id will be ok, network is not used
-    let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &merged_conf);
+    let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &merged_conf, &task_tracker);
     peer_schedule.set_next_subset(
         &[],
         genesis.round().next(),
@@ -76,6 +78,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
+                .map(|p| p.expect("shutdown"))
                 .map(|p| p.valid().expect("must be valid").info().clone())
                 .next()
         })
@@ -141,7 +144,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         )
         .await;
         assert!(
-            matches!(validated, ValidateResult::Valid { .. }),
+            matches!(validated, Ok(ValidateResult::Valid { .. })),
             "expected valid point, got {validated:?}"
         );
     }
@@ -149,7 +152,8 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     for point in points.values() {
         dag_round
             .add_local(point, Some(local_keys), store, round_ctx)
-            .await;
+            .await
+            .expect("cancelled");
     }
 }
 
