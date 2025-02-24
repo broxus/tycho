@@ -11,7 +11,7 @@ use super::{
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
-    MessagesBufferLimits, SaturatingAddAssign,
+    MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
 };
 use crate::collator::types::{MsgsExecutionParamsExtension, ParsedMessage};
 use crate::internal_queue::iterator::QueueIterator;
@@ -126,6 +126,19 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             {
                 range_reader.reader_state.processed_offset =
                     self.reader_state.curr_processed_offset;
+            }
+
+            // drop buffer and current position in new messages range reader
+            // they will be read again in the next block
+            // and this will guarantee an equal order on continue and after refill
+            if range_reader.kind == InternalsRangeReaderKind::NewMessages {
+                range_reader.reader_state.buffer = MessagesBuffer::default();
+                let shard_reader_state = range_reader
+                    .reader_state
+                    .shards
+                    .get_mut(&self.for_shard_id)
+                    .unwrap();
+                shard_reader_state.current_position = QueueKey::max_for_lt(shard_reader_state.from);
             }
 
             self.reader_state
