@@ -104,10 +104,8 @@ where
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
-    /// Get diffs for the given blocks from committed and uncommitted state
-    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
     /// Get diff for the given blocks from committed and uncommitted state
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> bool;
 }
@@ -466,38 +464,14 @@ where
         Ok(statistics)
     }
 
-    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
-        let mut result = Vec::new();
-
-        for (shard_ident, seqno) in blocks {
-            if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
-                for (block_seqno, diff) in shard_diffs.value() {
-                    if *block_seqno <= seqno {
-                        result.push((shard_ident, diff.clone()));
-                    }
-                }
-            }
-
-            if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
-                for (block_seqno, diff) in shard_diffs.value() {
-                    if *block_seqno <= seqno {
-                        result.push((shard_ident, diff.clone()));
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
-        if let Some(shard_diffs) = self.uncommitted_diffs.get(&shard_ident) {
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
+        if let Some(shard_diffs) = self.uncommitted_diffs.get(shard_ident) {
             if let Some(diff) = shard_diffs.get(&seqno) {
                 return Some(diff.clone());
             }
         }
 
-        if let Some(shard_diffs) = self.committed_diffs.get(&shard_ident) {
+        if let Some(shard_diffs) = self.committed_diffs.get(shard_ident) {
             if let Some(diff) = shard_diffs.get(&seqno) {
                 return Some(diff.clone());
             }
