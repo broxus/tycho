@@ -97,7 +97,12 @@ impl Phase<FinalizeState> {
             top_blocks
         };
 
-        let diffs = mq_adapter.get_diffs(top_shard_blocks);
+        let mut diffs = FastHashMap::default();
+        for (shard, seqno) in &top_shard_blocks {
+            if let Some(diff) = mq_adapter.get_diff(shard, *seqno) {
+                diffs.insert(*shard, diff);
+            }
+        }
 
         // get queue diff and check for pending internals
         let create_queue_diff_elapsed;

@@ -1315,7 +1315,7 @@ impl CollatorStdImpl {
             mut reader_state, ..
         } = messages_reader.finalize(
             0, // can pass 0 because new messages reader was not initialized in this case
-            vec![],
+            Default::default(),
         )?;
         std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
