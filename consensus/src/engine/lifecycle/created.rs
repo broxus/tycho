@@ -1,5 +1,6 @@
 use tokio::sync::oneshot;
 
+use crate::effects::TaskTracker;
 use crate::engine::lifecycle::EngineNetwork;
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::prelude::{EngineBinding, EngineHandle, EngineNetworkArgs, EngineRunning};
@@ -16,14 +17,16 @@ impl EngineCreated {
         net_args: &EngineNetworkArgs,
         merged_conf: &MempoolMergedConfig,
     ) -> Self {
-        let net = EngineNetwork::new(net_args, merged_conf);
+        let super_tracker = TaskTracker::default();
+        let net = EngineNetwork::new(net_args, &super_tracker, merged_conf);
 
         let handle = EngineHandle {
+            super_tracker,
             bind,
             net,
             merged_conf: merged_conf.clone(),
         };
-        let engine = Engine::new(&handle);
+        let engine = Engine::new(&handle, &handle.super_tracker);
         Self { handle, engine }
     }
 

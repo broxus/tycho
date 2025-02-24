@@ -307,7 +307,8 @@ mod test {
         let genesis_round = DagRound::new_bottom(conf.genesis_round, &peer_schedule, conf);
         genesis_round
             .add_local(&genesis, Some(local_keys), &stub_store, &round_ctx)
-            .await;
+            .await
+            .expect("cannot be closed");
 
         let mut dag = DagFront::default();
         let mut committer = dag.init(genesis_round, conf);
