@@ -1142,6 +1142,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // then we can switch to the "read existing internals stage"
         if all_read_externals_collected
             && *par_reader_stage == MessagesReaderStage::FinishPreviousExternals
+            && read_mode != GetNextMessageGroupMode::Refill
         {
             // switch to the "read existing internals stage" stage
             update_reader_stage(par_reader_stage, MessagesReaderStage::ExistingAndExternals);
@@ -1164,11 +1165,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 );
             }
 
-            // switch to the "collect only already read externals" stage
-            update_reader_stage(
-                par_reader_stage,
-                MessagesReaderStage::FinishCurrentExternals,
-            );
+            if read_mode != GetNextMessageGroupMode::Refill {
+                // switch to the "collect only already read externals" stage
+                update_reader_stage(
+                    par_reader_stage,
+                    MessagesReaderStage::FinishCurrentExternals,
+                );
+            }
         }
 
         // if all read externals collected from current block collation
@@ -1193,14 +1196,19 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             // set skip and processed offset to current offset
             par_reader.set_skip_processed_offset_to_current()?;
 
-            // switch to the "new messages processing" stage
-            // if all existing messages read (last range reader was created in current block)
-            let (last_seqno, _) = par_reader.get_last_range_reader()?;
-            if last_seqno == &par_reader.block_seqno {
-                update_reader_stage(par_reader_stage, MessagesReaderStage::ExternalsAndNew);
-            } else {
-                // otherwise return to the reading of existing messages
-                update_reader_stage(par_reader_stage, MessagesReaderStage::ExistingAndExternals);
+            if read_mode != GetNextMessageGroupMode::Refill {
+                // switch to the "new messages processing" stage
+                // if all existing messages read (last range reader was created in current block)
+                let (last_seqno, _) = par_reader.get_last_range_reader()?;
+                if last_seqno == &par_reader.block_seqno {
+                    update_reader_stage(par_reader_stage, MessagesReaderStage::ExternalsAndNew);
+                } else {
+                    // otherwise return to the reading of existing messages
+                    update_reader_stage(
+                        par_reader_stage,
+                        MessagesReaderStage::ExistingAndExternals,
+                    );
+                }
             }
         }
 
