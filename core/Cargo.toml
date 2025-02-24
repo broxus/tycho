@@ -17,6 +17,7 @@ bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
 everscale-types = { workspace = true, features = ["blake3", "rayon"] }
 futures-util = { workspace = true }
+governor = "0.8.0"
 humantime = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
