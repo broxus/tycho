@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use clap::Parser;
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
-use futures_util::future::FutureExt;
+use futures_util::FutureExt;
 use parking_lot::deadlock;
-use tokio::sync::{mpsc, Notify};
-use tycho_consensus::prelude::{Engine, InputBuffer, MempoolAdapterStore};
+use tokio::sync::{mpsc, oneshot, Notify};
+use tycho_consensus::prelude::{
+    EngineBinding, EngineCreated, EngineNetworkArgs, InputBuffer, MempoolAdapterStore,
+};
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::Storage;
@@ -110,6 +112,13 @@ fn make_network(
         .collect::<Vec<_>>();
 
     let merged_conf = default_test_config();
+    let dht_config = DhtConfig {
+        local_info_announce_period: Duration::from_secs(1),
+        local_info_announce_period_max_jitter: Duration::from_secs(1),
+        routing_table_refresh_period: Duration::from_secs(1),
+        routing_table_refresh_period_max_jitter: Duration::from_secs(1),
+        ..Default::default()
+    };
 
     let mut handles = vec![];
 
@@ -122,13 +131,19 @@ fn make_network(
     {
         let all_peers = all_peers.clone();
         let peer_info = peer_info.clone();
+
+        let started = started.clone();
         let run_guard = run_guard.clone();
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+
+        let merged_conf = merged_conf.clone();
+        let dht_config = dht_config.clone();
+
         let top_known_anchor = anchor_consumer.top_known_anchor.clone();
         let commit_round = anchor_consumer.commit_round.clone();
-        let merged_conf = merged_conf.clone();
-        let started = started.clone();
+
+        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         anchor_consumer.add(peer_id, committed_rx);
+
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
             .spawn(move || {
@@ -143,54 +158,56 @@ fn make_network(
                     .build()
                     .expect("new tokio runtime")
                     .block_on(async move {
-                        let (dht_client, peer_resolver, overlay_service) = from_validator(
-                            bind_address,
-                            &secret_key,
-                            None::<Address>,
-                            DhtConfig {
-                                local_info_announce_period: Duration::from_secs(1),
-                                local_info_announce_period_max_jitter: Duration::from_secs(1),
-                                routing_table_refresh_period: Duration::from_secs(1),
-                                routing_table_refresh_period_max_jitter: Duration::from_secs(1),
-                                ..Default::default()
-                            },
-                            None::<PeerResolverConfig>,
-                            None::<OverlayConfig>,
-                            NetworkConfig::default(),
-                        );
-                        for info in &peer_info {
-                            if info.id != dht_client.network().peer_id() {
-                                dht_client
-                                    .add_peer(info.clone())
-                                    .expect("add peer to dht client");
+                        let net_args = {
+                            let (dht_client, peer_resolver, overlay_service) = from_validator(
+                                bind_address,
+                                &secret_key,
+                                None::<Address>,
+                                dht_config,
+                                None::<PeerResolverConfig>,
+                                None::<OverlayConfig>,
+                                NetworkConfig::default(),
+                            );
+                            for info in peer_info {
+                                if info.id != peer_id {
+                                    dht_client.add_peer(info).expect("add peer to dht client");
+                                }
                             }
-                        }
+                            EngineNetworkArgs {
+                                key_pair,
+                                network: dht_client.network().clone(),
+                                peer_resolver: peer_resolver.clone(),
+                                overlay_service: overlay_service.clone(),
+                            }
+                        };
+
                         let (mock_storage, _tmp_dir) =
                             Storage::new_temp().await.expect("new storage");
-                        let engine = Engine::new(
-                            key_pair,
-                            dht_client.network(),
-                            &peer_resolver,
-                            &overlay_service,
-                            &MempoolAdapterStore::new(
+
+                        let bind = EngineBinding {
+                            mempool_adapter_store: MempoolAdapterStore::new(
                                 mock_storage.mempool_storage().clone(),
                                 commit_round,
                             ),
-                            InputBuffer::new_stub(
+                            input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,
                                 merged_conf.consensus(),
                             ),
-                            committed_tx.clone(),
-                            &top_known_anchor,
-                            &merged_conf,
-                        );
-                        engine.set_start_peers(&all_peers);
+                            output: committed_tx,
+                            top_known_anchor,
+                        };
+
+                        let engine = EngineCreated::new(bind, &net_args, &merged_conf);
+                        engine.handle().set_start_peers(&all_peers);
+
+                        let (engine_stop_tx, engine_stop_rx) = oneshot::channel();
+                        let _engine_run = engine.run(engine_stop_tx); // keep alive
 
                         started.add_permits(1);
-                        tracing::info!("created engine {}", dht_client.network().peer_id());
+                        tracing::info!("created engine {peer_id}");
                         tokio::try_join!(
-                            engine.run().map(|_| Err::<(), ()>(())),
+                            engine_stop_rx.map(|_| Err::<(), ()>(())),
                             run_guard.until_any_dropped()
                         )
                         .ok();
