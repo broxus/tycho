@@ -4,7 +4,6 @@ use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl, ShortQueueDiff};
@@ -72,10 +71,8 @@ where
     fn clear_uncommitted_state(&self) -> Result<()>;
     /// Removes all diffs from the cache that are less than `inclusive_until` which source shard is `source_shard`
     fn trim_diffs(&self, source_shard: &ShardIdent, inclusive_until: &QueueKey) -> Result<()>;
-    /// Get diffs for the given blocks from committed and uncommitted state
-    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)>;
     /// Get diff for the given block from committed and uncommitted state
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Option<ShortQueueDiff>;
     /// Returns the number of diffs in cache for the given shard
     fn get_diffs_count_by_shard(&self, shard_ident: &ShardIdent) -> usize;
     /// Check if diff exists in the cache
@@ -208,11 +205,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.trim_diffs(source_shard, inclusive_until)
     }
 
-    fn get_diffs(&self, blocks: FastHashMap<ShardIdent, u32>) -> Vec<(ShardIdent, ShortQueueDiff)> {
-        self.queue.get_diffs(blocks)
-    }
-
-    fn get_diff(&self, shard_ident: ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
+    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Option<ShortQueueDiff> {
         self.queue.get_diff(shard_ident, seqno)
     }
 
