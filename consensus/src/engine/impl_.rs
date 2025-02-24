@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
 use std::mem;
 use std::ops::RangeInclusive;
-use std::sync::Arc;
 use std::time::Duration;
 
-use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt, StreamExt};
@@ -12,19 +10,17 @@ use itertools::{Either, Itertools};
 use rayon::prelude::IntoParallelRefIterator;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
+use tycho_network::PeerId;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
-use crate::effects::{
-    AltFormat, Ctx, DbCleaner, EngineCtx, MempoolAdapterStore, MempoolStore, RoundCtx,
-};
-use crate::engine::input_buffer::InputBuffer;
+use crate::effects::{AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx};
+use crate::engine::lifecycle::EngineHandle;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
-use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
+use crate::engine::ConsensusConfigExt;
+use crate::intercom::CollectorSignal;
 use crate::models::{
     AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointRestoreSelect,
     PointStatusStoredRef, Round,
@@ -33,77 +29,36 @@ use crate::models::{
 pub struct Engine {
     dag: DagFront,
     committer_run: JoinHandle<Committer>,
-    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+    output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     ctx: EngineCtx,
     init_task: Option<JoinTask<()>>,
 }
 
-#[derive(Clone)]
-pub struct EngineHandle {
-    peer_schedule: PeerSchedule,
-    genesis_round: Round,
-}
-impl EngineHandle {
-    pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
-        if let Some((switch_round, subset)) = subset {
-            // specially for zerostate with unaligned genesis,
-            // and for first (prev) vset after reboot or a new genesis
-            let round = if switch_round <= self.genesis_round.0 {
-                self.genesis_round.next()
-            } else {
-                Round(switch_round)
-            };
-            if !(self.peer_schedule).set_next_subset(set, round, subset) {
-                tracing::trace!("cannot schedule outdated round {switch_round} and set");
-                return;
-            }
-        }
-        self.peer_schedule.set_next_set(set);
-    }
-}
-
 impl Engine {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        key_pair: Arc<KeyPair>,
-        network: &Network,
-        peer_resolver: &PeerResolver,
-        overlay_service: &OverlayService,
-        mempool_adapter_store: &MempoolAdapterStore,
-        input_buffer: InputBuffer,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-        top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        merged_conf: &MempoolMergedConfig,
-    ) -> Self {
+    pub fn new(handle: &EngineHandle) -> Engine {
+        let EngineHandle {
+            bind,
+            net,
+            merged_conf,
+        } = handle;
+
         let conf = &merged_conf.conf;
         let genesis = merged_conf.genesis();
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(conf.genesis_round);
-        top_known_anchor.set_max(conf.genesis_round);
+        bind.top_known_anchor.set_max(conf.genesis_round);
 
         let engine_ctx = EngineCtx::new(consensus_round.get(), conf);
         let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
 
-        let responder = Responder::default();
-
-        let private_overlay = PrivateOverlay::builder(merged_conf.overlay_id)
-            .with_peer_resolver(peer_resolver.clone())
-            .named("tycho-consensus")
-            .build(responder.clone());
-
-        overlay_service.add_private_overlay(&private_overlay);
-
-        let dispatcher = Dispatcher::new(network, &private_overlay);
-        let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay, &genesis);
-
         genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis, &peer_schedule, conf).expect("genesis failed to verify");
+        Verifier::verify(&genesis, &net.peer_schedule, conf).expect("genesis failed to verify");
 
-        let store = MempoolStore::new(mempool_adapter_store);
-        let db_cleaner = DbCleaner::new(mempool_adapter_store);
+        let store = MempoolStore::new(&bind.mempool_adapter_store);
+        let db_cleaner = DbCleaner::new(&bind.mempool_adapter_store);
 
         // Dag, created at genesis, will at first extend up to its greatest length
         // (in case last broadcast is within it) without data,
@@ -111,13 +66,13 @@ impl Engine {
         // before being filled with data
         let mut dag = DagFront::default();
         let mut committer = dag.init(
-            DagRound::new_bottom(conf.genesis_round.prev(), &peer_schedule, conf),
+            DagRound::new_bottom(conf.genesis_round.prev(), &net.peer_schedule, conf),
             conf,
         );
         dag.fill_to_top(
             conf.genesis_round,
             Some(&mut committer),
-            &peer_schedule,
+            &net.peer_schedule,
             &round_ctx,
         );
         let committer_run = tokio::spawn(future::ready(committer));
@@ -142,44 +97,29 @@ impl Engine {
         });
 
         let round_task = RoundTaskReady::new(
-            &dispatcher,
-            peer_schedule,
+            &net.dispatcher,
+            net.peer_schedule.clone(),
             store,
             &consensus_round,
-            top_known_anchor.clone(),
-            responder,
-            input_buffer,
+            bind.top_known_anchor.clone(),
+            net.responder.clone(),
+            bind.input_buffer.clone(),
         );
 
         tokio::spawn({
-            let peer_schedule = round_task.state.peer_schedule.clone();
-            async move {
-                peer_schedule.run_updater().await;
-            }
+            let peer_schedule = net.peer_schedule.clone();
+            peer_schedule.run_updater()
         });
 
         Self {
             dag,
             committer_run,
-            committed_info_tx,
+            output: bind.output.clone(),
             db_cleaner,
             round_task,
-            ctx: engine_ctx,
             init_task: Some(init_task),
+            ctx: engine_ctx,
         }
-    }
-
-    pub fn get_handle(&self) -> EngineHandle {
-        EngineHandle {
-            peer_schedule: self.round_task.state.peer_schedule.clone(),
-            genesis_round: self.ctx.conf().genesis_round,
-        }
-    }
-
-    #[cfg(any(test, feature = "test"))]
-    pub fn set_start_peers(&self, peers: &[PeerId]) {
-        let first = self.ctx.conf().genesis_round.next();
-        (self.round_task.state.peer_schedule).set_next_subset(peers, first, peers);
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
@@ -405,9 +345,13 @@ impl Engine {
         }
     }
 
-    pub async fn run(mut self) {
+    // this future never completes with Ok result
+    pub async fn run(mut self) -> futures_util::never::Never {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
         let mut start_replay_bcasts = Some(self.pre_run().await);
+        let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
+            start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
+        });
         let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
         let _db_clean_task = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
@@ -450,7 +394,7 @@ impl Engine {
                     self.round_task.state.top_known_anchor.receiver(),
                     old_dag_top_round,
                     &mut is_paused,
-                    &self.committed_info_tx,
+                    &self.output,
                     &round_ctx,
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
@@ -460,7 +404,7 @@ impl Engine {
                             self.committer_run = committer_task(
                                 committer,
                                 full_history_bottom.take(),
-                                self.committed_info_tx.clone(),
+                                self.output.clone(),
                                 round_ctx.clone(),
                             );
                         }
@@ -485,7 +429,7 @@ impl Engine {
                     self.committer_run = committer_task(
                         committer,
                         full_history_bottom.take(),
-                        self.committed_info_tx.clone(),
+                        self.output.clone(),
                         round_ctx.clone(),
                     );
                 }
@@ -539,7 +483,7 @@ impl Engine {
                             self.committer_run = committer_task(
                                 committer,
                                 full_history_bottom.take(),
-                                self.committed_info_tx.clone(),
+                                self.output.clone(),
                                 round_ctx.clone(),
                             );
                         }

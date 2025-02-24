@@ -7,6 +7,7 @@ pub use mempool_config::*;
 mod consensus_config_ext;
 mod impl_;
 mod input_buffer;
+pub mod lifecycle;
 mod mempool_config;
 mod round_task;
 pub mod round_watch;
