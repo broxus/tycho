@@ -49,6 +49,7 @@ struct PartialCollatorConfig {
     min_mc_block_delta_from_bc_to_sync: u32,
     check_value_flow: bool,
     validate_config: bool,
+    #[serde(default)]
     fast_sync: bool,
 }
 
