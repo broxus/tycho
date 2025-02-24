@@ -5,7 +5,7 @@ use anyhow::{ensure, Context, Result};
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use everscale_types::models::{ConsensusConfig, GenesisInfo};
 use serde::{Deserialize, Serialize};
-use tycho_network::OverlayId;
+use tycho_network::{OverlayId, PeerId};
 
 use crate::dag::align_genesis;
 use crate::models::{Link, Point, PointData, Round, UnixTime};
@@ -43,6 +43,12 @@ impl MempoolMergedConfig {
     pub fn consensus(&self) -> &ConsensusConfig {
         &self.conf.consensus
     }
+
+    pub(crate) fn genesis_author(&self) -> PeerId {
+        let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
+        key_pair.public_key.into()
+    }
+
     pub(crate) fn genesis(&self) -> Point {
         let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
         let millis = UnixTime::from_millis(self.genesis_info.genesis_millis);
