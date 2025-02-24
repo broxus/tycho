@@ -9,12 +9,11 @@ use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::OverlayId;
 use tycho_storage::MempoolStorage;
-use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
-use crate::effects::{AltFormat, Ctx, RoundCtx};
+use crate::effects::{AltFormat, Cancelled, Ctx, RoundCtx, Task};
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::models::{
@@ -240,12 +239,13 @@ impl DbCleaner {
         mut consensus_round: RoundWatcher<Consensus>,
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
         round_ctx: &RoundCtx,
-    ) -> JoinTask<()> {
+    ) -> Task<()> {
         let storage = self.storage.clone();
+        let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         let mut committed_round = self.committed_round.receiver();
 
-        JoinTask::new(async move {
+        task_ctx.spawn(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
             let mut top_known = top_known_anchor.get();
@@ -272,9 +272,9 @@ impl DbCleaner {
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
                     .set(consensus - new_least_to_keep);
 
-                if new_least_to_keep > prev_least_to_keep {
+                if prev_least_to_keep < new_least_to_keep {
                     let storage = storage.clone();
-                    let task = tokio::task::spawn_blocking(move || {
+                    let task = round_ctx.task().spawn_blocking(move || {
                         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
                         MempoolStorage::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
 
@@ -304,10 +304,9 @@ impl DbCleaner {
                     });
                     match task.await {
                         Ok(()) => prev_least_to_keep = new_least_to_keep,
-                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                        Err(cancelled) => {
-                            tracing::error!("clean mempool storage task: {cancelled:?}");
-                            // keep prev value unchanged to retry
+                        Err(Cancelled()) => {
+                            tracing::warn!("mempool clean task DB cancelled");
+                            break;
                         }
                     }
                 }

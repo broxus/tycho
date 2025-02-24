@@ -6,11 +6,13 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use everscale_crypto::ed25519;
+use futures_util::future::Either;
+use tokio::signal::unix;
 use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineCreated, EngineNetworkArgs, InputBuffer, MempoolAdapterStore,
-    MempoolConfigBuilder, MempoolMergedConfig,
+    MempoolConfigBuilder, MempoolMergedConfig, RoundWatch, TopKnownAnchor,
 };
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
@@ -51,6 +53,12 @@ pub struct CmdRun {
     #[clap(long)]
     top_known_anchor: Option<Option<u32>>,
 
+    /// `ctrl+c` will restart mempool engine keeping the cli while the value exceeds 1,
+    /// and cli will be shut down when value reaches 0
+    #[allow(clippy::option_option, reason = "run-mempool.sh")]
+    #[arg(long)]
+    restarts: Option<Option<u8>>,
+
     /// step is an amount of points produced by node for payload to grow in size
     #[arg(short, long, default_value_t = 0)]
     payload_step: usize,
@@ -82,31 +90,46 @@ impl CmdRun {
         init_logger(&node_config.logger, self.logger_config.clone())?;
         test_logger::set_print_panic_hook(true);
 
-        let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+        let mut stop_fut = any_signal_repeatable(signal::TERMINATION_SIGNALS);
 
-        let top_known_anchor = self.top_known_anchor.flatten().unwrap_or_default();
+        let mut top_known_anchor: Either<u32, RoundWatch<TopKnownAnchor>> =
+            Either::Left(self.top_known_anchor.flatten().unwrap_or_default());
+
+        let mut restarts_remain: u8 = self.restarts.unwrap_or_default().unwrap_or_default();
 
         let mempool = Mempool::new(self, node_config).await?;
 
-        let (engine, anchor_consumer) = mempool.boot().await.context("init mempool")?;
+        loop {
+            let (engine, anchor_consumer) = mempool.boot().await.context("init mempool")?;
 
-        (anchor_consumer.top_known_anchor).set_max_raw(top_known_anchor);
+            (anchor_consumer.top_known_anchor).set_max_raw(match top_known_anchor {
+                Either::Left(from_cli_arg) => from_cli_arg,
+                Either::Right(from_prev_run) => from_prev_run.get().0,
+            });
 
-        let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
-        let _engine = engine.run(engine_stop_tx);
+            let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
+            let engine = engine.run(engine_stop_tx);
 
-        let _drain_anchors = JoinTask::new(anchor_consumer.drain());
+            top_known_anchor = Either::Right(anchor_consumer.top_known_anchor.clone());
 
-        tracing::info!("started mempool");
+            let drain_anchors = JoinTask::new(anchor_consumer.drain());
 
-        tokio::select! {
-            _ = &mut engine_stop_rx => bail!("engine exited"),
-            signal = stop_fut => match signal {
-                Ok(signal) => {
-                    tracing::info!(?signal, "received termination signal");
-                    Ok(())
+            tracing::info!("started mempool");
+
+            tokio::select! {
+                result = &mut engine_stop_rx => bail!("engine exited as {result:?}"),
+                stop = stop_fut.recv() => match stop {
+                    Some(signal) => {
+                        drop(drain_anchors);
+                        engine.stop().await;
+                        restarts_remain = restarts_remain.saturating_sub(1);
+                        tracing::warn!(?signal, ?restarts_remain, "received termination");
+                        if restarts_remain == 0 {
+                            return Ok(());
+                        }
+                    }
+                    None => bail!("cli signal listener channel dropped"),
                 }
-                Err(e) => Err(e.into()),
             }
         }
     }
@@ -285,4 +308,47 @@ async fn load_mc_zerostate(
         .await?;
 
     Ok(mc_zerostate)
+}
+
+/// Version of [`any_signal()`](tycho_util::cli::signal::any_signal)
+/// that allows to receive same signal multiple times
+fn any_signal_repeatable<I, T>(signals: I) -> mpsc::UnboundedReceiver<unix::SignalKind>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<unix::SignalKind> + Send + 'static,
+{
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    let mut signal_zip_rx = signals
+        .into_iter()
+        .map(|signal| {
+            let signal = signal.into();
+            let signal_rx = unix::signal(signal).expect("Failed subscribing on unix signals");
+            (signal, signal_rx)
+        })
+        .collect::<Vec<_>>();
+
+    tokio::spawn(async move {
+        loop {
+            let any_signal = futures_util::future::select_all(signal_zip_rx.iter_mut().map(
+                |(signal, signal_rx)| {
+                    Box::pin(async move {
+                        match signal_rx.recv().await {
+                            Some(()) => signal,
+                            None => panic!("no more signal {signal:?} can be received"),
+                        }
+                    })
+                },
+            ));
+
+            let signal = *any_signal.await.0;
+
+            match tx.send(signal) {
+                Ok(()) => {}
+                Err(e) => panic!("failed to send signal {signal:?}: {e}"),
+            }
+        }
+    });
+
+    rx
 }

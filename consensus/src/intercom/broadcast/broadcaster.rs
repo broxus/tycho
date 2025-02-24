@@ -167,8 +167,8 @@ impl Broadcaster {
         })
     }
 
-    pub async fn run_continue(mut self, round_ctx: RoundCtx) {
-        self.ctx = BroadcastCtx::new(&round_ctx, &self.point);
+    pub async fn run_continue(mut self, round_ctx: &RoundCtx) {
+        self.ctx = BroadcastCtx::new(round_ctx, &self.point);
 
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             self.ctx.conf().consensus.broadcast_retry_millis as _,
