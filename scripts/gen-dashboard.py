@@ -546,6 +546,11 @@ def core_blockchain_rpc_general() -> RowPanel:
             unit_format=UNITS.SECONDS,
             legend_format="{{instance}} - {{kind}}",
         ),
+        create_counter_panel(
+            "tycho_rpc_rate_limit_exceeded_total",
+            "RPC Rate Limit Exceeded",
+            legend_format="{{instance}} - {{method}}",
+        ),
     ]
     return create_row("blockchain: RPC - General Stats", metrics)
 
