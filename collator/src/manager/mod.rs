@@ -516,7 +516,7 @@ where
         // skip diff below min processed to
         if let Some(min_pt) = min_processed_to {
             if queue_diff.as_ref().max_message <= *min_pt {
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
                     "Skipping diff for block {}: max_message {} <= min_processed_to {}",
                     block_entry.block_id.as_short_id(),
                     queue_diff.as_ref().max_message,
@@ -1440,11 +1440,15 @@ where
                 }).collect::<Vec<_>>().as_slice(),
         );
 
-        // collect top blocks queue diffs already applied to
-        let queue_diffs_applied_to_top_blocks = if let Some(applied_to_mc_block_id) =
-            self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)
-        {
-            self.get_top_blocks_seqno(&applied_to_mc_block_id).await?
+        let queue_diffs_applied_to_top_blocks = if self.config.fast_sync {
+            if let Some(applied_to_mc_block_id) =
+                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)
+            {
+                // collect top blocks queue diffs already applied to
+                self.get_top_blocks_seqno(&applied_to_mc_block_id).await?
+            } else {
+                FastHashMap::default()
+            }
         } else {
             FastHashMap::default()
         };
