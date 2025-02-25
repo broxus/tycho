@@ -530,7 +530,7 @@ mod messages_list {
     use super::*;
 
     /// We assume that the number of messages is limited.
-    const MAX_SIZE: usize = 100_000;
+    const MAX_SIZE: usize = 10_000_000;
 
     pub fn size_hint(items: &[HashBytes]) -> usize {
         4 + items.len() * tl::hash_bytes::SIZE_HINT
