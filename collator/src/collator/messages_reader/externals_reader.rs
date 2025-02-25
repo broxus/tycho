@@ -19,6 +19,7 @@ use crate::collator::types::{AnchorsCache, MsgsExecutionParamsExtension, ParsedM
 use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
+use crate::types::DebugIter;
 
 #[cfg(test)]
 #[path = "../tests/externals_reader_tests.rs"]
@@ -541,12 +542,22 @@ impl ExternalsReader {
                 }
 
                 let max_fill_state_by_slots = read_res.max_fill_state_by_slots;
+                let max_fill_state_by_count = read_res.max_fill_state_by_count;
 
                 last_ext_read_res_opt = Some(read_res);
 
                 // do not try to read from the next range
                 // if we already can fill all slots in messages group from almost one buffer
                 if max_fill_state_by_slots == BufferFillStateBySlots::CanFill {
+                    break 'main_loop;
+                }
+
+                // do not try to read from the next range
+                // if buffers are full but current range was not fully read
+                // this is actual for refill when we need to read from multiple ranges
+                if max_fill_state_by_count == BufferFillStateByCount::IsFull
+                    && !range_reader.fully_read
+                {
                     break 'main_loop;
                 }
             }
@@ -1074,6 +1085,7 @@ impl ExternalsRangeReader {
             );
         } else if matches!(max_fill_state_by_count, BufferFillStateByCount::IsFull) {
             tracing::debug!(target: tracing_targets::COLLATOR,
+                max_msgs_limits = ?DebugIter(self.buffer_limits_by_partitions.iter().map(|(par_id, limits)| (par_id, limits.max_count))),
                 reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
                 "externals reader: messages buffers filled up to limits",
             );
@@ -1128,6 +1140,7 @@ impl ExternalsRangeReader {
         ReadExternalsRangeResult {
             has_pending_externals,
             last_read_to_anchor_chain_time,
+            max_fill_state_by_count,
             max_fill_state_by_slots,
             metrics_by_partitions,
         }
@@ -1148,6 +1161,9 @@ struct ReadExternalsRangeResult {
     /// The chain time of the last read anchor.
     /// Used to calc externals time diff.
     last_read_to_anchor_chain_time: Option<u64>,
+
+    /// Shows if messages buffer is fully filled in any partition
+    max_fill_state_by_count: BufferFillStateByCount,
 
     /// Shows if we can fill all slots in message group from almost one buffer
     max_fill_state_by_slots: BufferFillStateBySlots,
