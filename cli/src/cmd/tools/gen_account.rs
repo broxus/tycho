@@ -179,7 +179,6 @@ impl WalletBuilder {
             last_trans_lt: 0,
             balance: self.balance.into(),
             state: AccountState::Active(state_init),
-            init_code_hash: None,
         };
 
         account.storage_stat.used = compute_storage_used(&account)?;
@@ -332,7 +331,6 @@ impl MultisigBuilder {
             last_trans_lt: 0,
             balance: self.balance.into(),
             state: AccountState::Active(state_init),
-            init_code_hash: None,
         };
 
         account.storage_stat.used = compute_storage_used(&account)?;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::GlobalCapability;
-use ton_executor::{ExecuteParams, PreloadedBlockchainConfig};
+use tycho_executor::{ExecutorParams, ParsedConfig};
 
 use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
@@ -48,38 +48,32 @@ impl Phase<PrepareState> {
         );
 
         // init executor
-        let preloaded_bc_config = Arc::new(PreloadedBlockchainConfig::with_config(
-            self.state.mc_data.config.clone(),
-            self.state.mc_data.global_id,
+        let preloaded_bc_config = Arc::new(ParsedConfig::parse(
+            self.state.mc_data.config.params.clone(),
+            self.state.collation_data.gen_utime,
         )?);
-        let block_version = preloaded_bc_config.global_version().version;
-        let signature_with_id = if preloaded_bc_config
-            .global_version()
-            .capabilities
-            .contains(GlobalCapability::CapSignatureWithId)
-        {
-            Some(self.state.mc_data.global_id)
-        } else {
-            None
-        };
+        let capabilities = preloaded_bc_config.global.capabilities;
         let executor = MessagesExecutor::new(
             self.state.shard_id,
             self.state.collation_data.next_lt,
             preloaded_bc_config,
-            Arc::new(ExecuteParams {
-                state_libs: self.state.mc_data.libraries.clone(),
+            Arc::new(ExecutorParams {
+                libraries: self.state.mc_data.libraries.clone(),
                 // generated unix time
                 block_unixtime: self.state.collation_data.gen_utime,
                 // block's start logical time
                 block_lt: self.state.collation_data.start_lt,
                 // block random seed
-                seed_block: self.state.collation_data.rand_seed,
-                block_version,
-                behavior_modifiers: Some(tycho_vm::BehaviourModifiers {
-                    signature_with_id,
+                rand_seed: self.state.collation_data.rand_seed,
+                disable_delete_frozen_accounts: true,
+                full_body_in_bounced: capabilities.contains(GlobalCapability::CapFullBodyInBounced),
+                charge_action_fees_on_fail: true,
+                vm_modifiers: tycho_vm::BehaviourModifiers {
+                    signature_with_id: capabilities
+                        .contains(GlobalCapability::CapSignatureWithId)
+                        .then_some(self.state.mc_data.global_id),
                     ..Default::default()
-                }),
-                debug: false,
+                },
             }),
             self.state.prev_shard_data.observable_accounts().clone(),
             self.state
