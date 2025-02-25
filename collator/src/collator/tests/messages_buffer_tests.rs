@@ -21,11 +21,7 @@ pub(crate) fn make_stub_internal_parsed_message(
         ..Default::default()
     };
     let cell = CellBuilder::build_from(&info).unwrap();
-    let enq_msg = EnqueuedMessage {
-        info,
-        hash: *cell.repr_hash(),
-        cell,
-    };
+    let enq_msg = EnqueuedMessage { info, cell };
     let msg = ParsedMessage {
         info: MsgInfo::Int(enq_msg.info),
         dst_in_current_shard: true,

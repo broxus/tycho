@@ -169,7 +169,6 @@ pub struct QueueFullDiff<V: InternalMessageValue> {
 pub struct EnqueuedMessage {
     pub info: IntMsgInfo,
     pub cell: Cell,
-    pub hash: HashBytes,
 }
 
 #[cfg(test)]
@@ -178,18 +177,13 @@ impl Default for EnqueuedMessage {
         let info = IntMsgInfo::default();
         let cell = everscale_types::cell::CellBuilder::build_from(&info).unwrap();
 
-        Self {
-            info,
-            hash: *cell.repr_hash(),
-            cell,
-        }
+        Self { info, cell }
     }
 }
 
 impl From<(IntMsgInfo, Cell)> for EnqueuedMessage {
     fn from((info, cell): (IntMsgInfo, Cell)) -> Self {
-        let hash = *cell.repr_hash();
-        EnqueuedMessage { info, cell, hash }
+        EnqueuedMessage { info, cell }
     }
 }
 
@@ -203,7 +197,7 @@ impl EnqueuedMessage {
     }
 
     pub fn hash(&self) -> &HashBytes {
-        &self.hash
+        self.cell.repr_hash()
     }
 }
 
@@ -231,7 +225,7 @@ impl EnqueuedMessage {
     pub fn key(&self) -> QueueKey {
         QueueKey {
             lt: self.info.created_lt,
-            hash: self.hash,
+            hash: *self.hash(),
         }
     }
 }
@@ -262,10 +256,7 @@ impl InternalMessageValue for EnqueuedMessage {
         let message = Message::load_from(&mut cell.as_slice().context("Failed to load message")?)?;
 
         match message.info {
-            MsgInfo::Int(info) => {
-                let hash = *cell.repr_hash();
-                Ok(Self { info, cell, hash })
-            }
+            MsgInfo::Int(info) => Ok(Self { info, cell }),
             _ => anyhow::bail!("Expected internal message"),
         }
     }
