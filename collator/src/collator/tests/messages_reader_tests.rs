@@ -159,7 +159,7 @@ async fn test_refill_messages() -> Result<()> {
         int_msgs_journal: Default::default(),
         next_int_idx: 0,
 
-        create_int_msg_value_func: |info, hash, cell| EnqueuedMessage { info, hash, cell },
+        create_int_msg_value_func: |info, cell| EnqueuedMessage { info, cell },
 
         one_to_many_counter: 0,
     };
@@ -322,7 +322,7 @@ async fn test_refill_messages() -> Result<()> {
 
 struct RefillTestAdapter<V: InternalMessageValue, F>
 where
-    F: Fn(IntMsgInfo, HashBytes, Cell) -> V,
+    F: Fn(IntMsgInfo, Cell) -> V,
 {
     rng: StdRng,
 
@@ -371,7 +371,7 @@ struct TestExecuteGroupResult<V: InternalMessageValue> {
 
 impl<V: InternalMessageValue, F> RefillTestAdapter<V, F>
 where
-    F: Fn(IntMsgInfo, HashBytes, Cell) -> V,
+    F: Fn(IntMsgInfo, Cell) -> V,
 {
     #[tracing::instrument("test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.block_seqno + 1 }))]
     fn test_collate_block_and_check_refill(
@@ -988,7 +988,7 @@ where
 
         let hash = *cell.repr_hash();
 
-        let msg = Arc::new((self.create_int_msg_value_func)(info, hash, cell));
+        let msg = Arc::new((self.create_int_msg_value_func)(info, cell));
 
         let test_int_msg = TestInternalMessage {
             info: TestInternalMessageInfo {
