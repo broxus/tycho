@@ -149,6 +149,12 @@ impl MessagesBuffer {
 
             let mut not_filled_slots = VecDeque::<SlotId>::default();
             loop {
+                // update last slot id
+                slots_info.last_slot_id = slots_info
+                    .last_slot_id
+                    .map(|last_slot_id| last_slot_id.max(slot_id))
+                    .or(Some(slot_id));
+
                 // get slot
                 let slot = slots_info.slots.entry(slot_id).or_default();
                 let mut slot_cx = SlotContext {
@@ -452,6 +458,12 @@ impl std::fmt::Debug for DebugMessagesBuffer<'_> {
 pub enum BufferFillStateByCount {
     IsFull,
     NotFull,
+}
+
+impl Default for BufferFillStateByCount {
+    fn default() -> Self {
+        Self::NotFull
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

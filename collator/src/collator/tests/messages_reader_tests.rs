@@ -52,6 +52,9 @@ async fn test_refill_messages() -> Result<()> {
     // one-to-many address
     let one_to_many_address = IntAddr::Std(StdAddr::new(0, HashBytes([255; 32])));
 
+    // non existed account address
+    let non_existed_account_address = IntAddr::Std(StdAddr::new(0, HashBytes([254; 32])));
+
     // dex pairs addresses
     let dex_pairs: BTreeMap<u8, IntAddr> = [
         (
@@ -97,10 +100,10 @@ async fn test_refill_messages() -> Result<()> {
     group_slots_fractions.set(0, 80)?;
     group_slots_fractions.set(1, 10)?;
     let msgs_exec_params = Arc::new(MsgsExecutionParams {
-        buffer_limit: 20,
+        buffer_limit: 30,
         group_limit: 5,
         group_vert_size: 2,
-        externals_expire_timeout: 30,
+        externals_expire_timeout: 10,
         open_ranges_limit: 3,
         par_0_ext_msgs_count_limit: 10,
         // 1) fails when use partitions (par_0_int_msgs_count_limit: 50)
@@ -110,6 +113,8 @@ async fn test_refill_messages() -> Result<()> {
         group_slots_fractions,
         range_messages_limit: 20,
     });
+
+    const DEFAULT_BLOCK_EXEC_COUNT_LIMIT: usize = 20;
 
     //--------------
     // INIT PROCESSED UPTO INFO AND READER STATE
@@ -160,29 +165,31 @@ async fn test_refill_messages() -> Result<()> {
     };
 
     //--------------
-    // FIRST BLOCK IS EMPTY
+    // TEST CASE 001: EXTERNALS TO NON EXISTED ACCOUNTS
     //--------------
+    tracing::trace!("TEST CASE 001: EXTERNALS TO NON EXISTED ACCOUNTS");
 
-    // import empty anchor
-    test_adapter.add_anchor_with_messages(vec![]);
-
+    let messages =
+        test_adapter.create_messages_to_non_existed_account(&non_existed_account_address, 1)?;
+    test_adapter.add_anchor_with_messages(messages);
     // collate block and check refill
-    test_adapter.test_collate_block_and_check_refill()?;
+    test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
 
     //--------------
-    // TEST CASE:
+    // TEST CASE 002:
     //  * we have some existing internals in queue
     //  * we have many imported externals
     //  * existing internals finished, all read externals finished, we moved to ExternalsAndNew stage
     //  * small part of externals produces new messages with the same dst as externals, so we read all new messages each step
     //  * finally we have some externals and new messages in buffers
     //--------------
+    tracing::trace!("TEST CASE 002");
 
     // process anchor with 14 transfer externals, this will produce 14 internals
     let transfer_messages = test_adapter.create_transfer_messages(&transfers_wallets, 14)?;
     test_adapter.add_anchor_with_messages(transfer_messages);
     // 20 of 28 messages will be executed, 8 new messages will be added to queue
-    test_adapter.test_collate_block_and_check_refill()?;
+    test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
 
     // process anchor with 40 externals (5 transfer and 35 dummy)
     let mut transfer_messages = test_adapter.create_transfer_messages(&transfers_wallets, 5)?;
@@ -195,42 +202,101 @@ async fn test_refill_messages() -> Result<()> {
     test_adapter.add_anchor_with_messages(messages);
     // 8 existing internals collected first, then will be collected already read externals,
     // then will be collecting externals and new messages
-    test_adapter.test_collate_block_and_check_refill()?;
+    test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
 
     // and process empty anchor to check refill
     test_adapter.add_anchor_with_messages(vec![]);
-    test_adapter.test_collate_block_and_check_refill()?;
+    test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+
+    while let TestCollateResult {
+        has_unprocessed_messages: true,
+    } = test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
+    {
+        // process all messages
+    }
 
     //--------------
-    // START one-to-many IN THE NEXT BLOCK
+    // TEST CASE 003: REFILL EXTERNALS WITH 2+ OPEN RANGES
+    //  * we have some existing internals in queue
+    //  * we have some imported anchors with externals
+    //  * existing internals finished, all read externals finished, we moved to ExternalsAndNew stage
+    //  * we read externals minimum 2 times, not all externals read and we proceed to next block
+    //  * we open one more externals range but not fully read them
+    //  * on refill we should fully read first externals range and only then proceed to the next
     //--------------
+    tracing::trace!("TEST CASE 003: REFILL EXTERNALS WITH 2+ OPEN RANGES");
+
+    // process anchor with transfer externals amount > block limit
+    let transfer_messages = test_adapter.create_transfer_messages(&transfers_wallets, 25)?;
+    test_adapter.add_anchor_with_messages(transfer_messages);
+    // some unprocessed new messages will be added to queue
+    test_adapter.test_collate_block_and_check_refill(40)?;
+
+    // process anchor with lot of externals (transfer < dummy)
+    let mut transfer_messages = test_adapter.create_transfer_messages(&transfers_wallets, 30)?;
+    let target_accounts: Vec<_> = transfer_messages
+        .iter()
+        .map(|m| m.info.dst.clone())
+        .collect();
+    let mut messages = test_adapter.create_dummy_messages(&target_accounts, 70)?;
+    // let mut messages =
+    //     test_adapter.create_messages_to_non_existed_account(&non_existed_account_address, 90)?;
+    messages.append(&mut transfer_messages);
+    test_adapter.add_anchor_with_messages(messages);
+    // will start read new anchor, then all existing internals will be collected,
+    // then will be collected previously read externals,
+    // then will read and collect externals and new messages minimum 2 times
+    test_adapter.test_collate_block_and_check_refill(60)?;
+
+    // will open new externals range, read some externals
+    // will collect all existing internals
+    // then will start to collect previously read externals
+    // finally we will have 2 externals open ranges
+    test_adapter.add_anchor_with_messages(vec![]);
+    test_adapter.test_collate_block_and_check_refill(40)?;
+
+    // we should correctly read externals in 2 ranges on refill
+    test_adapter.add_anchor_with_messages(vec![]);
+    test_adapter.test_collate_block_and_check_refill(40)?;
+
+    while let TestCollateResult {
+        has_unprocessed_messages: true,
+    } = test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
+    {
+        // process all messages
+    }
+
+    //--------------
+    // TEST CASE 004: START one-to-many AND PROCESS SOME BLOCKS
+    //--------------
+    tracing::trace!("TEST CASE 004:  START one-to-many AND PROCESS SOME BLOCKS");
 
     // import anchor with one-to-many start message
     let messages = test_adapter.create_one_to_many_start_message(one_to_many_address)?;
     test_adapter.add_anchor_with_messages(messages);
 
-    // collate block and check refill
-    test_adapter.test_collate_block_and_check_refill()?;
+    test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
 
-    //--------------
-    // PROCESS one-to-many SOME BLOCKS
-    //--------------
     for _ in 0..3 {
-        test_adapter.test_collate_block_and_check_refill()?;
+        test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
     }
 
     //--------------
-    // RUN SWAPS
+    // TEST CASE 005: RUN SWAPS
     //--------------
+    tracing::trace!("TEST CASE 005: RUN SWAPS");
+
     for _ in 0..10 {
         let messages = test_adapter.create_swap_messages(&dex_pairs, &dex_wallets, 10)?;
         test_adapter.add_anchor_with_messages(messages);
-        test_adapter.test_collate_block_and_check_refill()?;
+        test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
     }
 
     //--------------
-    // RUN SWAPS AND TRANSFERS
+    // TEST CASE 006: RUN SWAPS AND TRANSFERS
     //--------------
+    tracing::trace!("TEST CASE 006: RUN SWAPS AND TRANSFERS");
+
     for _ in 0..20 {
         // we create 30 externals per anchor so that they do not fit one buffer limit
         let mut messages = test_adapter.create_swap_messages(&dex_pairs, &dex_wallets, 10)?;
@@ -238,19 +304,17 @@ async fn test_refill_messages() -> Result<()> {
             test_adapter.create_transfer_messages(&transfers_wallets, 20)?;
         messages.append(&mut transfer_messages);
         test_adapter.add_anchor_with_messages(messages);
-        test_adapter.test_collate_block_and_check_refill()?;
+        test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
     }
 
     //--------------
     // PROCESS THE REST OF MESSAGES QUEUES
     //--------------
-    loop {
-        let TestCollateResult {
-            has_unprocessed_messages,
-        } = test_adapter.test_collate_block_and_check_refill()?;
-        if !has_unprocessed_messages {
-            break;
-        }
+    while let TestCollateResult {
+        has_unprocessed_messages: true,
+    } = test_adapter.test_collate_block_and_check_refill(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
+    {
+        // process all messages
     }
 
     Ok(())
@@ -310,7 +374,10 @@ where
     F: Fn(IntMsgInfo, HashBytes, Cell) -> V,
 {
     #[tracing::instrument("test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.block_seqno + 1 }))]
-    fn test_collate_block_and_check_refill(&mut self) -> Result<TestCollateResult> {
+    fn test_collate_block_and_check_refill(
+        &mut self,
+        block_tx_limit: usize,
+    ) -> Result<TestCollateResult> {
         let TestWorkingState {
             anchors_cache,
             reader_state,
@@ -416,8 +483,7 @@ where
                     "message group executed",
                 );
 
-                const EXEC_COUNT_LIMIT: usize = 20;
-                if total_exec_count >= EXEC_COUNT_LIMIT {
+                if total_exec_count >= block_tx_limit {
                     tracing::trace!(
                         has_not_fully_read_externals_ranges =
                             primary_messages_reader.has_not_fully_read_externals_ranges(),
@@ -434,7 +500,7 @@ where
                             primary_messages_reader.has_pending_externals_in_cache(),
                         "block limits reached: total_exec_count {}/{}",
                         total_exec_count,
-                        EXEC_COUNT_LIMIT,
+                        block_tx_limit,
                     );
                     break;
                 }
@@ -755,6 +821,11 @@ where
                             }
                             TestExternalMessageType::Dummy => {
                                 // just do nothing
+                            }
+                            TestExternalMessageType::ToNonExistedAccount => {
+                                // external to non existed account will be skipped without creating transaction
+                                exec_count -= 1;
+                                account_lt -= 1;
                             }
                         }
                     }
@@ -1204,6 +1275,41 @@ where
 
         Ok(res)
     }
+
+    fn create_messages_to_non_existed_account(
+        &mut self,
+        non_existed_account_address: &IntAddr,
+        count: usize,
+    ) -> Result<Vec<TestExternalMessage>> {
+        let mut res = vec![];
+
+        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        for _ in 0..count {
+            let idx = self.next_ext_idx;
+            self.next_ext_idx += 1;
+
+            let dst = non_existed_account_address.clone();
+
+            let msg_type = TestExternalMessageType::ToNonExistedAccount;
+
+            let body = {
+                let mut builder = CellBuilder::new();
+                builder.store_u64(idx)?;
+                builder.store_u32(msg_type.as_u32())?;
+                builder.build()?
+            };
+
+            tracing::trace!(
+                idx, %dst, ?msg_type,
+                "created ext message to non-existed account"
+            );
+
+            let test_ext_msg = Self::create_test_ext_message(idx, dst, msg_type, body)?;
+            res.push(test_ext_msg);
+        }
+
+        Ok(res)
+    }
 }
 
 struct TestWorkingState {
@@ -1248,6 +1354,7 @@ enum TestExternalMessageType {
         target_addr: IntAddr,
     },
     Dummy,
+    ToNonExistedAccount,
 }
 
 impl TestExternalMessageType {
@@ -1257,6 +1364,7 @@ impl TestExternalMessageType {
             Self::Swap { .. } => 2,
             Self::Transfer { .. } => 3,
             Self::Dummy => 4,
+            Self::ToNonExistedAccount => 5,
         }
     }
 }
@@ -1280,6 +1388,7 @@ impl std::fmt::Debug for TestExternalMessageType {
                 .field("target_addr", &DebugDisplay(&target_addr))
                 .finish(),
             Self::Dummy => write!(f, "Dummy"),
+            Self::ToNonExistedAccount => write!(f, "ToNonExistedAccount"),
         }
     }
 }
