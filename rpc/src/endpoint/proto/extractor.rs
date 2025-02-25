@@ -10,6 +10,9 @@ use prost::Message;
 
 use crate::endpoint::{proto, APPLICATION_PROTOBUF, PARSE_ERROR_CODE};
 
+// Counters
+const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
+
 pub struct Protobuf<T>(pub T);
 
 #[axum::async_trait]
@@ -126,6 +129,8 @@ pub struct ProtoErrorResponse {
 
 impl IntoResponse for ProtoErrorResponse {
     fn into_response(self) -> Response {
+        metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
+
         Protobuf(proto::rpc::Error {
             code: self.code,
             message: self.message.into(),

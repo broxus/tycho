@@ -9,6 +9,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_block_util::message::validate_external_message;
+use tycho_util::metrics::HistogramGuard;
 
 pub use self::cache::ProtoEndpointCache;
 use self::protos::rpc::{self, request, response, Request};
@@ -27,31 +28,72 @@ mod cache;
 mod extractor;
 mod protos;
 
+macro_rules! declare_proto_methods {
+    ($($name:ident),*$(,)?) => {
+        trait RequestExt {
+            fn method_name(&self) -> &'static str;
+        }
+
+        impl RequestExt for request::Call {
+            fn method_name(&self) -> &'static str {
+                match self {
+                    $(request::Call::$name { .. } => stringify!($name)),*
+                }
+            }
+        }
+    };
+}
+
+declare_proto_methods! {
+    GetCapabilities,
+    GetLatestKeyBlock,
+    GetBlockchainConfig,
+    GetStatus,
+    GetTimings,
+    SendMessage,
+    GetContractState,
+    GetLibraryCell,
+    GetAccountsByCodeHash,
+    GetTransactionsList,
+    GetTransaction,
+    GetDstTransaction,
+}
+
 pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Request>) -> Response {
-    match req.call {
-        Some(request::Call::GetCapabilities(())) => {
+    let Some(call) = req.call else {
+        return ProtoErrorResponse {
+            code: METHOD_NOT_FOUND_CODE,
+            message: "unknown method".into(),
+        }
+        .into_response();
+    };
+
+    let label = [("method", call.method_name())];
+    let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
+    match call {
+        request::Call::GetCapabilities(()) => {
             let result = get_capabilities(&state);
             (StatusCode::OK, ProtobufRef(result)).into_response()
         }
-        Some(request::Call::GetLatestKeyBlock(())) => {
+        request::Call::GetLatestKeyBlock(()) => {
             match &*state.proto_cache().load_latest_key_block() {
                 Some(config) => config.as_ref().clone().into_response(),
                 None => error_to_response(RpcStateError::NotReady),
             }
         }
-        Some(request::Call::GetBlockchainConfig(())) => {
+        request::Call::GetBlockchainConfig(()) => {
             match &*state.proto_cache().load_blockchain_config() {
                 Some(config) => config.as_ref().clone().into_response(),
                 None => error_to_response(RpcStateError::NotReady),
             }
         }
-        Some(request::Call::GetStatus(())) => {
+        request::Call::GetStatus(()) => {
             let result = response::Result::GetStatus(response::GetStatus {
                 ready: state.is_ready(),
             });
             ok_to_response(result)
         }
-        Some(request::Call::GetTimings(())) => {
+        request::Call::GetTimings(()) => {
             if state.is_ready() {
                 let timings = state.load_timings();
                 let result = response::Result::GetTimings(response::GetTimings {
@@ -65,7 +107,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 error_to_response(RpcStateError::NotReady)
             }
         }
-        Some(request::Call::SendMessage(p)) => {
+        request::Call::SendMessage(p) => {
             if let Err(e) = validate_external_message(&p.message).await {
                 return ProtoErrorResponse {
                     code: INVALID_BOC_CODE,
@@ -77,8 +119,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             state.broadcast_external_message(&p.message).await;
             ok_to_response(response::Result::SendMessage(()))
         }
-
-        Some(request::Call::GetLibraryCell(p)) => {
+        request::Call::GetLibraryCell(p) => {
             let Some(hash) = hash_from_bytes(p.hash) else {
                 return ProtoErrorResponse {
                     code: INVALID_PARAMS_CODE,
@@ -102,7 +143,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 cell: cell_opt,
             }))
         }
-        Some(request::Call::GetContractState(p)) => {
+        request::Call::GetContractState(p) => {
             let Some(address) = addr_from_bytes(p.address) else {
                 return ProtoErrorResponse {
                     code: INVALID_PARAMS_CODE,
@@ -197,7 +238,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
 
             ok_to_response(response::Result::GetContractState(response))
         }
-        Some(request::Call::GetAccountsByCodeHash(p)) => {
+        request::Call::GetAccountsByCodeHash(p) => {
             if p.limit == 0 {
                 let result = response::Result::GetAccounts(response::GetAccountsByCodeHash {
                     account: Vec::new(),
@@ -241,7 +282,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 Err(e) => error_to_response(e),
             }
         }
-        Some(request::Call::GetTransactionsList(p)) => {
+        request::Call::GetTransactionsList(p) => {
             if p.limit == 0 {
                 let result = response::Result::GetTransactionsList(response::GetTransactionsList {
                     transactions: Vec::new(),
@@ -274,7 +315,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 Err(e) => error_to_response(e),
             }
         }
-        Some(request::Call::GetTransaction(p)) => {
+        request::Call::GetTransaction(p) => {
             let Some(hash) = hash_from_bytes(p.id) else {
                 return ProtoErrorResponse {
                     code: INVALID_PARAMS_CODE,
@@ -293,7 +334,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 Err(e) => error_to_response(e),
             }
         }
-        Some(request::Call::GetDstTransaction(p)) => {
+        request::Call::GetDstTransaction(p) => {
             let Some(hash) = hash_from_bytes(p.message_hash) else {
                 return ProtoErrorResponse {
                     code: INVALID_PARAMS_CODE,
@@ -312,11 +353,6 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 Err(e) => error_to_response(e),
             }
         }
-        None => ProtoErrorResponse {
-            code: METHOD_NOT_FOUND_CODE,
-            message: "unknown method".into(),
-        }
-        .into_response(),
     }
 }
 
