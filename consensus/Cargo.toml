@@ -19,7 +19,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 blake3 = { workspace = true }
-bytes = { workspace = true, features = ["serde"] }
+bytes = { workspace = true }
 dashmap = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
@@ -37,6 +37,7 @@ thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, default-features = false }
 tokio-stream = { workspace = true, optional = true }
+tokio-util = { workspace = true, default-features = false, features = ["time"] }
 tracing = { workspace = true }
 tracing-flame = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true }
@@ -68,4 +69,4 @@ tycho-util = { workspace = true, features = ["test", "cli"] }
 workspace = true
 
 [features]
-test = ["dep:tokio-stream", "dep:hex", "dep:tracing-flame", "tracing-subscriber"]
+test = ["dep:tokio-stream", "dep:hex", "dep:tracing-flame", "dep:tracing-subscriber"]
