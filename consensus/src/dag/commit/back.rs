@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::ops::Bound;
+use std::ops::{Bound, RangeInclusive};
 use std::sync::atomic;
 use std::{array, mem};
 
@@ -11,7 +11,7 @@ use tycho_network::PeerId;
 
 use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::commit::SyncError;
-use crate::dag::DagRound;
+use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
@@ -116,18 +116,15 @@ impl DagBack {
     /// `last_proof_round` allows to continue chain from its end
     pub(super) fn triggers(
         &self,
-        last_proof_round_or_bottom: Round,
-        up_to: Round,
-    ) -> Result<VecDeque<PointInfo>, Round> {
+        range: RangeInclusive<Round>,
+    ) -> Result<VecDeque<PointInfo>, HistoryConflict> {
         let mut triggers = VecDeque::new();
-        // let mut string = String::new();
-        let rev_iter = self
-            .rounds
-            .range((
-                Bound::Included(last_proof_round_or_bottom),
-                Bound::Included(up_to),
-            ))
-            .rev();
+
+        if range.is_empty() {
+            // may happen after history is invalidated, do not panic here
+            return Ok(triggers);
+        }
+        let rev_iter = self.rounds.range(range).rev();
 
         let mut max_conflict_round = None;
 
@@ -145,7 +142,7 @@ impl DagBack {
                     triggers.push_front(trigger.info().clone());
                 }
                 Err(SyncError::TryLater) => {} // skip
-                Err(SyncError::Impossible(round)) => {
+                Err(SyncError::HistoryConflict(round)) => {
                     max_conflict_round = max_conflict_round.or(Some(round));
                 }
             }
@@ -153,7 +150,7 @@ impl DagBack {
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
 
         match max_conflict_round {
-            Some(round) if triggers.is_empty() => Err(round),
+            Some(round) if triggers.is_empty() => Err(HistoryConflict(round)),
             _ => Ok(triggers),
         }
     }
@@ -273,16 +270,17 @@ impl DagBack {
             return Ok(VecDeque::new());
         }
 
-        let mut rev_iter = self
-            .rounds
-            .range((
-                // exclude used or unusable proof (it may be out of range)
-                Bound::Excluded(last_proof_round),
-                // include topmost proof only
-                Bound::Excluded(trigger.round()),
-            ))
-            .rev()
-            .peekable();
+        let range = RangeInclusive::new(
+            // exclude used or unusable proof (it may be out of range)
+            last_proof_round.next(),
+            // include topmost proof only
+            trigger.round().prev(),
+        );
+        if range.is_empty() {
+            // may happen after history is invalidated, do not panic here
+            return Ok(VecDeque::new());
+        }
+        let mut rev_iter = self.rounds.range(range).rev().peekable();
 
         let mut lookup_proof_id = trigger
             .prev_id()
@@ -427,10 +425,7 @@ impl DagBack {
 
         let rev_iter = self
             .rounds
-            .range((
-                Bound::Included(history_limit),
-                Bound::Excluded(anchor.round()),
-            ))
+            .range(RangeInclusive::new(history_limit, anchor.round().prev()))
             .rev();
 
         let mut next_round = anchor.round();
@@ -489,7 +484,7 @@ impl DagBack {
                     .filter_map(|version| version.clone().now_or_never())
                     .map(|task_result| match task_result {
                         Ok(dag_point) => Ok(dag_point),
-                        Err(Cancelled()) => Err(SyncError::Impossible(dag_round.round())),
+                        Err(Cancelled()) => Err(SyncError::HistoryConflict(dag_round.round())),
                     })
                     // take any suitable
                     .filter_map_ok(move |dag_point| match dag_point {
@@ -501,10 +496,10 @@ impl DagBack {
                             }
                         }
                         DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                            Some(Err(SyncError::Impossible(dag_round.round())))
+                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                            Some(Err(SyncError::Impossible(dag_round.round())))
+                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
                             None
@@ -534,15 +529,15 @@ impl DagBack {
         }; // not yet resolved;
         let dag_point = match dag_point_result {
             Ok(dag_point) => dag_point,
-            Err(Cancelled()) => return Err(SyncError::Impossible(dag_round.round())),
+            Err(Cancelled()) => return Err(SyncError::HistoryConflict(dag_round.round())),
         };
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
             DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                Err(SyncError::Impossible(dag_round.round()))
+                Err(SyncError::HistoryConflict(dag_round.round()))
             }
             DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                Err(SyncError::Impossible(dag_round.round()))
+                Err(SyncError::HistoryConflict(dag_round.round()))
             }
             dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
                 panic!("{point_kind} {}: {:?}", dp.alt(), dp.id().alt())
