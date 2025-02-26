@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use bytes::BytesMut;
 use bytesize::ByteSize;
@@ -41,7 +43,7 @@ impl StateSubscriber for DummySubscriber {
 }
 
 pub struct ArchiveProvider {
-    archive: Archive,
+    archive: Arc<Archive>,
     proof_checker: ProofChecker,
 }
 
@@ -52,10 +54,11 @@ impl ArchiveProvider {
             block_id,
         } = block_id_relation;
 
-        let (ref block, ref proof, ref queue_diff) = match self.archive.get_entry_by_id(block_id) {
-            Ok(entry) => entry,
-            Err(e) => return Some(Err(e.into())),
-        };
+        let (ref block, ref proof, ref queue_diff) =
+            match self.archive.get_entry_by_id(block_id).await {
+                Ok(entry) => entry,
+                Err(e) => return Some(Err(e.into())),
+            };
 
         match self
             .proof_checker
@@ -249,7 +252,7 @@ async fn archives() -> Result<()> {
 
     // Archive provider
     let archive_data = utils::read_file("archive_1.bin")?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive = utils::parse_archive(&archive_data).map(Arc::new)?;
 
     let archive_provider = ArchiveProvider {
         archive,
@@ -258,7 +261,7 @@ async fn archives() -> Result<()> {
 
     // Next archive provider
     let next_archive_data = utils::read_file("archive_2.bin")?;
-    let next_archive = utils::parse_archive(&next_archive_data)?;
+    let next_archive = utils::parse_archive(&next_archive_data).map(Arc::new)?;
 
     let next_archive_provider = ArchiveProvider {
         archive: next_archive,
@@ -267,7 +270,7 @@ async fn archives() -> Result<()> {
 
     // Last archive provider
     let last_archive_data = utils::read_file("archive_3.bin")?;
-    let last_archive = utils::parse_archive(&last_archive_data)?;
+    let last_archive = utils::parse_archive(&last_archive_data).map(Arc::new)?;
 
     let last_archive_provider = ArchiveProvider {
         archive: last_archive,
@@ -360,7 +363,7 @@ async fn heavy_archives() -> Result<()> {
     // Archive provider
     let archive_path = integration_test_path.join("archive_1.bin");
     let archive_data = std::fs::read(archive_path)?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive = utils::parse_archive(&archive_data).map(Arc::new)?;
 
     let archive_provider = ArchiveProvider {
         archive,
@@ -370,7 +373,7 @@ async fn heavy_archives() -> Result<()> {
     // Next archive provider
     let next_archive_path = integration_test_path.join("archive_2.bin");
     let next_archive_data = std::fs::read(next_archive_path)?;
-    let next_archive = utils::parse_archive(&next_archive_data)?;
+    let next_archive = utils::parse_archive(&next_archive_data).map(Arc::new)?;
 
     let next_archive_provider = ArchiveProvider {
         archive: next_archive,
@@ -380,7 +383,7 @@ async fn heavy_archives() -> Result<()> {
     // Last archive provider
     let last_archive_path = integration_test_path.join("archive_3.bin");
     let last_archive_data = std::fs::read(last_archive_path)?;
-    let last_archive = utils::parse_archive(&last_archive_data)?;
+    let last_archive = utils::parse_archive(&last_archive_data).map(Arc::new)?;
 
     let last_archive_provider = ArchiveProvider {
         archive: last_archive,

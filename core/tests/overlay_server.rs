@@ -239,7 +239,7 @@ async fn overlay_server_blocks() -> Result<()> {
         .build();
 
     let archive_data = utils::read_file("archive_1.bin")?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive = utils::parse_archive(&archive_data).map(Arc::new)?;
 
     for block_id in archive.blocks.keys() {
         if block_id.shard.is_masterchain() {
@@ -248,7 +248,7 @@ async fn overlay_server_blocks() -> Result<()> {
                 .await?;
 
             let (archive_block, archive_proof, archive_queue_diff) =
-                archive.get_entry_by_id(block_id)?;
+                archive.get_entry_by_id(block_id).await?;
 
             if let Some(block_full) = &result.data {
                 let block = BlockStuff::deserialize_checked(block_id, &block_full.block_data)?;
