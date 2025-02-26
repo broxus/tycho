@@ -61,6 +61,8 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn last_round(&self) -> Result<Round>;
 
+    fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()>;
+
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>>;
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
@@ -181,6 +183,13 @@ impl MempoolStore {
 
     pub fn last_round(&self) -> Round {
         self.0.last_round().expect("DB load last round")
+    }
+
+    pub fn reset_statuses(&self, range: &RangeInclusive<Round>) {
+        self.0
+            .reset_statuses(range)
+            .with_context(|| format!("range [{}..={}]", range.start().0, range.end().0))
+            .expect("DB reset statuses");
     }
 
     pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestoreSelect> {
@@ -571,6 +580,36 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(Round(round))
     }
 
+    fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()> {
+        let status_t = &self.db.tables().points_status;
+        let db = self.db.rocksdb();
+
+        let mut start = [0_u8; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_prefix(range.start().0, &mut start);
+
+        let mut end_excl = [0_u8; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_prefix(range.end().next().0, &mut end_excl);
+
+        let mut conf = status_t.new_read_config();
+        conf.set_iterate_lower_bound(start);
+        conf.set_iterate_upper_bound(end_excl);
+        let mut iter = db.iterator_cf_opt(&status_t.cf(), conf, IteratorMode::Start);
+
+        let mut batch = WriteBatch::default();
+        batch.delete_range_cf(&status_t.cf(), start, end_excl);
+        loop {
+            let Some(kv) = iter.next() else { break };
+            let k = kv.context("status iter next")?.0;
+            batch.put_cf(&status_t.cf(), k, []);
+        }
+
+        db.write(batch)?;
+
+        db.compact_range_cf(&status_t.cf(), Some(start), Some(end_excl));
+
+        self.wait_for_compact()
+    }
+
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
@@ -723,6 +762,10 @@ impl MempoolStoreImpl for () {
     }
 
     fn last_round(&self) -> Result<Round> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn reset_statuses(&self, _: &RangeInclusive<Round>) -> Result<()> {
         anyhow::bail!("should not be used in tests")
     }
 
