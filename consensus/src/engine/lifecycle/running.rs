@@ -1,30 +1,48 @@
 use std::sync::Arc;
 
+use futures_util::never::Never;
+use futures_util::FutureExt;
+use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use crate::effects::{Cancelled, Task};
+use crate::effects::{Cancelled, Task, TaskTracker};
 use crate::engine::lifecycle::handle::EngineHandle;
+use crate::engine::lifecycle::{EngineError, FixHistoryFlag};
 use crate::engine::Engine;
 
 pub struct EngineRunning {
     handle: Arc<EngineHandle>,
-    _engine_run: Task<()>,
+    engine_stop_tx: oneshot::Sender<()>,
+    engine_task_tracker: Arc<Mutex<GuardedTaskTracker>>,
+    engine_recover_loop: Task<()>,
+}
+
+struct EngineRecoverLoop {
+    handle: Arc<EngineHandle>,
+    engine_task_tracker: Arc<Mutex<GuardedTaskTracker>>,
+    engine_run: Task<Result<Never, EngineError>>,
+}
+
+#[derive(Default)]
+struct GuardedTaskTracker {
+    inner: TaskTracker,
+    is_stop: bool,
 }
 
 impl EngineRunning {
     pub fn new(handle: EngineHandle, engine_stop_tx: oneshot::Sender<()>) -> Self {
         let handle = Arc::new(handle);
-        let engine = Engine::new(&handle, &handle.super_tracker);
-        let _engine_run = handle.super_tracker.ctx().spawn(async move {
-            match engine.run().await {
-                Err(Cancelled()) => {
-                    engine_stop_tx.send(()).ok(); // caller may be dropped earlier on shutdown
-                }
-            }
+        let engine_task_tracker = <Arc<Mutex<GuardedTaskTracker>>>::default();
+        let engine_recover_loop = handle.super_tracker.ctx().spawn({
+            let handle = handle.clone();
+            let engine_task_tracker = engine_task_tracker.clone();
+            EngineRecoverLoop::new(handle, engine_task_tracker).run_loop()
         });
         Self {
             handle,
-            _engine_run,
+            engine_stop_tx,
+            engine_task_tracker,
+            engine_recover_loop,
         }
     }
 
@@ -37,12 +55,87 @@ impl EngineRunning {
 
         span.in_scope(|| tracing::warn!("waiting engine threads to exit"));
 
+        let engine_tracker = {
+            let mut guard = self.engine_task_tracker.lock();
+            guard.is_stop = true;
+            guard.inner.clone()
+        };
+        drop(self.engine_task_tracker);
+        drop(self.engine_recover_loop); // aborts engine round task and drop second Arc<Handle>
+        engine_tracker.stop().await;
+
+        span.in_scope(|| tracing::warn!("engine threads exited, waiting handle threads"));
+
         let handle_super_tracker = self.handle.super_tracker.clone();
-
-        drop(self);
-
+        drop(self.handle); // stops super tracker that spawned `engine_run` and network tasks
         handle_super_tracker.stop().await;
 
         span.in_scope(|| tracing::warn!("stop completed"));
+
+        self.engine_stop_tx.send(()).ok();
+    }
+}
+
+impl EngineRecoverLoop {
+    pub fn new(
+        handle: Arc<EngineHandle>,
+        engine_task_tracker: Arc<Mutex<GuardedTaskTracker>>,
+    ) -> Self {
+        let task_tracker = {
+            let guard = engine_task_tracker.lock();
+            guard.inner.clone()
+        };
+        let engine_run = task_tracker.ctx().spawn({
+            let handle = handle.clone();
+            let task_tracker = task_tracker.clone();
+            Engine::new(&handle, &task_tracker, FixHistoryFlag::default()).run()
+        });
+        Self {
+            engine_task_tracker,
+            engine_run,
+            handle,
+        }
+    }
+
+    pub async fn run_loop(mut self) {
+        loop {
+            let never_ok = self.engine_run.await;
+
+            let mut task_tracker = {
+                let guard = self.engine_task_tracker.lock();
+                guard.inner.clone()
+            };
+
+            task_tracker.stop().await;
+
+            match never_ok {
+                Err(Cancelled()) | Ok(Err(EngineError::Cancelled)) => break,
+                Ok(Err(EngineError::HistoryConflict(_))) => {}
+            }
+
+            task_tracker = {
+                let mut guard = self.engine_task_tracker.lock();
+                if guard.is_stop {
+                    break; // do not update task tracker
+                }
+                guard.inner = TaskTracker::default();
+                guard.inner.clone()
+            };
+
+            self.engine_run = task_tracker.ctx().spawn({
+                let handle = self.handle.clone();
+                let task_tracker = task_tracker.clone();
+                Engine::new(&handle, &task_tracker, FixHistoryFlag(true)).run()
+            });
+        }
+    }
+}
+
+// just in case the whole mempool thingy is dropped
+impl Drop for GuardedTaskTracker {
+    fn drop(&mut self) {
+        let _guard = tracing::span::Span::current().entered();
+        self.inner.stop().now_or_never();
+        tracing::warn!("engine task tracker is stopped, will not spawn new threads");
     }
 }
