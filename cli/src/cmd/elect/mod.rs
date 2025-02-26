@@ -559,6 +559,10 @@ struct CmdWithdraw {
     #[clap(long)]
     all: bool,
 
+    /// Withdraw everything from the wallet reserving at least an `amount` of tokens.
+    #[clap(long, conflicts_with = "all")]
+    all_but: bool,
+
     /// Sets `bounce` message flag.
     #[clap(short, long)]
     bounce: bool,
@@ -593,6 +597,7 @@ impl CmdWithdraw {
 
             let amount = match self.amount {
                 None => Amount::All,
+                Some(amount) if self.all_but => Amount::AllBut(*amount),
                 Some(amount) => Amount::Exact(*amount),
             };
 
@@ -856,45 +861,89 @@ impl Wallet {
     async fn transfer(&self, msg: InternalMessage, params: TransferParams) -> Result<SentMessage> {
         const BALANCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+        enum TargetBalance {
+            Sufficient { to_send: u128 },
+            Insufficient { target_balance: u128 },
+        }
+
+        #[derive(Clone, Copy)]
+        enum Value {
+            Exact(u128),
+            AllBut(u128),
+        }
+
+        impl Value {
+            fn target_balance(self, account_balance: u128, mut reserve: u128) -> TargetBalance {
+                match self {
+                    Self::Exact(to_send) => {
+                        let target_balance = to_send.saturating_add(reserve);
+                        if account_balance < target_balance {
+                            TargetBalance::Insufficient { target_balance }
+                        } else {
+                            TargetBalance::Sufficient { to_send }
+                        }
+                    }
+                    Self::AllBut(all_but) => {
+                        reserve = reserve.saturating_add(all_but);
+                        match account_balance.checked_sub(reserve) {
+                            Some(to_send) => TargetBalance::Sufficient { to_send },
+                            None => TargetBalance::Insufficient {
+                                target_balance: reserve,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+
         let (value, flags) = match msg.amount {
-            Amount::Exact(value) => (value, wallet::MSG_FLAGS_SIMPLE_SEND),
-            Amount::All => (0, wallet::MSG_FLAGS_SEND_ALL),
+            Amount::Exact(value) => (Value::Exact(value), wallet::MSG_FLAGS_SIMPLE_SEND),
+            Amount::AllBut(value) => (Value::AllBut(value), wallet::MSG_FLAGS_SEPARATE_SEND),
+            Amount::All => (Value::Exact(0), wallet::MSG_FLAGS_SEND_ALL),
         };
 
-        let target_balance = value.saturating_add(params.reserve);
         let mut prev_balance = None;
-        let init = loop {
+        let (value, init) = loop {
             let account = {
                 let (_, account) = self.client.get_account_state(&self.address).await?;
                 account.context("wallet account does not exist")?
             };
             let account_balance = account.balance.tokens.into_inner();
 
-            if account_balance < target_balance {
-                if !params.wait_for_balance {
-                    anyhow::bail!("insufficient balance");
-                }
+            match value.target_balance(account_balance, params.reserve) {
+                TargetBalance::Insufficient { target_balance } => {
+                    if !params.wait_for_balance {
+                        anyhow::bail!(
+                            "insufficient balance (account_balance={}, target_balance: {})",
+                            FpTokens(account_balance),
+                            FpTokens(target_balance),
+                        );
+                    }
 
-                if prev_balance != Some(account_balance) {
-                    tracing::warn!(
-                        account_balance = %FpTokens(account_balance),
-                        target_balance = %FpTokens(target_balance),
-                        "insufficient balance, waiting for refill"
-                    );
-                }
-                prev_balance = Some(account_balance);
+                    if prev_balance != Some(account_balance) {
+                        tracing::warn!(
+                            account_balance = %FpTokens(account_balance),
+                            target_balance = %FpTokens(target_balance),
+                            "insufficient balance, waiting for refill"
+                        );
+                    }
+                    prev_balance = Some(account_balance);
 
-                tokio::time::sleep(BALANCE_POLL_INTERVAL).await;
-                continue;
+                    tokio::time::sleep(BALANCE_POLL_INTERVAL).await;
+                }
+                TargetBalance::Sufficient { to_send } => {
+                    break match account.state {
+                        AccountState::Active(_) => (to_send, None),
+                        AccountState::Uninit => {
+                            let init = Some(wallet::make_state_init(
+                                &ed25519::PublicKey::from_bytes(self.public.to_bytes()).unwrap(),
+                            ));
+                            (to_send, init)
+                        }
+                        AccountState::Frozen(_) => anyhow::bail!("wallet account is frozen"),
+                    }
+                }
             }
-
-            break match account.state {
-                AccountState::Active(_) => None,
-                AccountState::Uninit => Some(wallet::make_state_init(
-                    &ed25519::PublicKey::from_bytes(self.public.to_bytes()).unwrap(),
-                )),
-                AccountState::Frozen(_) => anyhow::bail!("wallet account is frozen"),
-            };
         };
 
         let AbiValue::Tuple(inputs) = wallet::methods::SendTransactionInputs {
@@ -1022,6 +1071,7 @@ struct InternalMessage {
 #[derive(Debug, Clone, Copy)]
 enum Amount {
     Exact(u128),
+    AllBut(u128),
     All,
 }
 

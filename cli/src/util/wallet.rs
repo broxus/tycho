@@ -8,6 +8,7 @@ use everscale_types::models::{StateInit, StdAddr};
 use everscale_types::prelude::*;
 
 pub const MSG_FLAGS_SIMPLE_SEND: u8 = 3;
+pub const MSG_FLAGS_SEPARATE_SEND: u8 = 2;
 pub const MSG_FLAGS_SEND_ALL: u8 = 3 + 128;
 
 pub fn compute_address(workchain: i8, public_key: &ed25519::PublicKey) -> StdAddr {
