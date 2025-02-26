@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use everscale_types::cell::Lazy;
 use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
@@ -233,7 +234,7 @@ impl Phase<FinalizeState> {
         let executor = self.extra.executor;
 
         // update shard accounts tree and prepare accounts blocks
-        let mut global_libraries = executor.executor_params().state_libs.clone();
+        let mut global_libraries = executor.executor_params().libraries.clone();
 
         let is_masterchain = shard.is_masterchain();
         let config_address = &self.state.mc_data.config.address;
@@ -542,7 +543,6 @@ impl Phase<FinalizeState> {
                         .as_ref()
                         .map(Lazy::new)
                         .transpose()?,
-                    copyleft_msgs: Default::default(),
                     config: if mc_state_extra.after_key_block {
                         Some(mc_state_extra.config.clone())
                     } else {
@@ -995,7 +995,6 @@ impl Phase<FinalizeState> {
             last_key_block,
             block_create_stats,
             global_balance,
-            copyleft_rewards: Default::default(),
         };
 
         Ok((mc_state_extra, min_ref_mc_seqno))

@@ -20,6 +20,8 @@ pub struct BlockProofStuff {
 impl BlockProofStuff {
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(block_id: &BlockId) -> Self {
+        use everscale_types::cell::Lazy;
+
         let block_info = BlockInfo {
             shard: block_id.shard,
             seqno: block_id.seqno,
@@ -101,7 +103,7 @@ impl BlockProofStuff {
     }
 
     pub fn virtualize_block_root(&self) -> Result<&DynCell> {
-        let merkle_proof = self.inner.proof.root.parse::<MerkleProofRef<'_>>()?;
+        let merkle_proof = self.inner.proof.root.parse_exotic::<MerkleProofRef<'_>>()?;
         let block_virt_root = merkle_proof.cell.virtualize();
 
         anyhow::ensure!(
