@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
-use std::mem;
 use std::ops::RangeInclusive;
 use std::time::Duration;
+use std::{cmp, mem};
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
@@ -12,11 +12,11 @@ use tokio::sync::{mpsc, watch};
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
+use crate::dag::{Committer, DagFront, DagRound, HistoryConflict, KeyGroup, Verifier};
 use crate::effects::{
     AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult,
 };
-use crate::engine::lifecycle::EngineHandle;
+use crate::engine::lifecycle::{EngineError, EngineHandle, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::ConsensusConfigExt;
@@ -26,19 +26,22 @@ use crate::models::{
     PointStatusStoredRef, Round,
 };
 
+type EngineResult<T> = std::result::Result<T, EngineError>;
+type CommitterTask = Either<Committer, Result<Committer, HistoryConflict>>;
+
 pub struct Engine {
     dag: DagFront,
-    committer_run: Task<Committer>,
+    committer_run: Task<CommitterTask>,
     output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     _peer_schedule_updater: Task<()>,
-    init_task: Option<Task<()>>,
+    init_task: Option<Task<FixHistoryFlag>>,
     ctx: EngineCtx,
 }
 
 impl Engine {
-    pub fn new(handle: &EngineHandle) -> Engine {
+    pub fn new(handle: &EngineHandle, fix_history: FixHistoryFlag) -> Engine {
         let EngineHandle {
             bind,
             net,
@@ -76,7 +79,7 @@ impl Engine {
             &net.peer_schedule,
             conf,
         );
-        let committer_run = engine_ctx.task().spawn_blocking(|| committer);
+        let committer_run = engine_ctx.task().spawn_blocking(|| Either::Left(committer));
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
@@ -85,6 +88,7 @@ impl Engine {
             move || {
                 store.init_storage(&overlay_id);
                 store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                fix_history // just pass further
             }
         });
 
@@ -116,8 +120,8 @@ impl Engine {
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> TaskResult<Option<(Point, Option<Point>)>> {
-        (self.init_task.take().expect("init task must be set")).await?;
+    async fn pre_run(&mut self) -> EngineResult<Option<(Point, Option<Point>)>> {
+        let fix_history = (self.init_task.take().expect("init task must be set")).await?;
 
         // take last round from db
 
@@ -173,7 +177,7 @@ impl Engine {
             conf,
         );
         let dag_bottom_round = committer.bottom_round();
-        self.committer_run = round_ctx.task().spawn(future::ready(committer));
+        self.committer_run = (round_ctx.task()).spawn(future::ready(Either::Left(committer)));
 
         // preload and sign last rounds if node may still participate in consensus
 
@@ -186,7 +190,7 @@ impl Engine {
                 "will restore points from DB",
             );
             let range = RangeInclusive::new(dag_bottom_round, last_db_round);
-            self.preload_points(range, &round_ctx).await?;
+            self.preload_points(range, fix_history, &round_ctx).await?;
         } else {
             tracing::info!(
                 parent: round_ctx.span(),
@@ -261,6 +265,7 @@ impl Engine {
     async fn preload_points(
         &self,
         range: RangeInclusive<Round>,
+        fix_history: FixHistoryFlag,
         round_ctx: &RoundCtx,
     ) -> TaskResult<()> {
         let task = round_ctx.task().spawn_blocking({
@@ -269,6 +274,9 @@ impl Engine {
             let round_ctx = round_ctx.clone();
             move || {
                 let _guard = round_ctx.span().enter();
+                if fix_history.0 {
+                    store.reset_statuses(&range);
+                }
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
@@ -308,6 +316,7 @@ impl Engine {
             }
         });
 
+        let mut reversed_futures = BTreeMap::new();
         for ((round, _), point_restores) in task.await? {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let dag_restore = FuturesUnordered::new();
@@ -316,16 +325,24 @@ impl Engine {
                     point_restore,
                     &self.round_task.state.downloader,
                     &self.round_task.state.store,
+                    fix_history,
                     round_ctx,
                 ));
             }
+            if fix_history.0 {
+                reversed_futures.insert(cmp::Reverse(round), dag_restore);
+            } else {
+                dag_restore.try_collect::<Vec<DagPoint>>().await?;
+            }
+        }
+        for dag_restore in reversed_futures.into_values() {
             dag_restore.try_collect::<Vec<DagPoint>>().await?;
         }
         Ok(())
     }
 
     // this future never completes with Ok result
-    pub(crate) async fn run(mut self) -> TaskResult<futures_util::never::Never> {
+    pub(crate) async fn run(mut self) -> EngineResult<futures_util::never::Never> {
         let mut replay_bcasts = self.pre_run().await?;
         let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
             start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
@@ -391,7 +408,7 @@ impl Engine {
                     Err(collator_sync) => {
                         collator_sync.await;
                         if let Some(committer) = ready_committer {
-                            self.committer_run = committer_task(
+                            self.committer_run = committer_task_dropping(
                                 committer,
                                 full_history_bottom.take(),
                                 self.output.clone(),
@@ -445,21 +462,22 @@ impl Engine {
                 ),
             };
 
-            let round_task_run = self
+            self.round_task = self
                 .round_task
                 .run(own_point_fut, collector_signal_tx, &head, &round_ctx)
-                .until_ready();
+                .until_ready()
+                .await?;
 
+            // TKA is known and fresh (otherwise inaccessible because of pause)
+            // consensus round is known (otherwise Collector hangs up)
             if let Some(committer) = ready_committer {
-                self.committer_run = committer_task(
+                self.committer_run = committer_task_fallible(
                     committer,
                     full_history_bottom.take(),
                     self.output.clone(),
                     &round_ctx,
                 );
             }
-
-            self.round_task = round_task_run.await?;
         }
     }
 }
@@ -527,9 +545,9 @@ fn collator_feedback(
 }
 
 fn take_committer(
-    committer_run: &mut Task<Committer>,
+    committer_run: &mut Task<CommitterTask>,
     round_ctx: &RoundCtx,
-) -> TaskResult<Option<Committer>> {
+) -> EngineResult<Option<Committer>> {
     if !committer_run.is_finished() {
         return Ok(None);
     };
@@ -538,25 +556,29 @@ fn take_committer(
         let _guard = round_ctx.span().enter();
         panic!("committer task is finished and can be taken only once")
     };
-    committer_result.map(Some)
+    Ok(Some(match committer_result? {
+        Either::Left(committer) => committer,
+        Either::Right(committer_result) => committer_result?,
+    }))
 }
 
-fn committer_task(
+/// This version does not throw `HistoryConflict`
+fn committer_task_dropping(
     mut committer: Committer,
     full_history_bottom: Option<Round>,
     committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
     round_ctx: &RoundCtx,
-) -> Task<Committer> {
+) -> Task<CommitterTask> {
     let task_ctx = round_ctx.task();
     let round_ctx = round_ctx.clone();
-    task_ctx.spawn_blocking(move || {
+    let dropping_task = move || {
         // may run for long several times in a row and commit nothing, because of missed points
         let _span = round_ctx.span().enter();
 
         let mut committed = None;
         let mut new_full_history_bottom = None;
 
-        let start_bottom = committer.bottom_round();
+        let start_bottom = committer.bottom_round().0;
         let start_dag_len = committer.dag_len();
 
         for attempt in 0.. {
@@ -565,11 +587,11 @@ fn committer_task(
                     committed = Some(data);
                     break;
                 }
-                Err(round) => {
+                Err(HistoryConflict(round)) => {
                     let result = committer.drop_upto(round.next(), round_ctx.conf());
                     new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
                     tracing::info!(
-                        ?start_bottom,
+                        start_bottom,
                         start_dag_len,
                         current_bottom = ?committer.bottom_round(),
                         current_dag_len = committer.dag_len(),
@@ -581,7 +603,7 @@ fn committer_task(
                     } else if attempt > start_dag_len {
                         panic!(
                             "infinite loop on dropping dag rounds: \
-                             start dag len {start_dag_len}, start bottom {start_bottom:?} \
+                             start dag len {start_dag_len}, start bottom {start_bottom} \
                              resulting {:?}",
                             committer.alt()
                         )
@@ -609,7 +631,62 @@ fn committer_task(
         EngineCtx::meter_dag_len(committer.dag_len());
 
         committer
-    })
+    };
+
+    task_ctx.spawn_blocking(|| Either::Left(dropping_task()))
+}
+
+fn committer_task_fallible(
+    mut committer: Committer,
+    full_history_bottom: Option<Round>,
+    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+    round_ctx: &RoundCtx,
+) -> Task<CommitterTask> {
+    let task_ctx = round_ctx.task();
+    let round_ctx = round_ctx.clone();
+    let fallible_task = move || {
+        // may run for long several times in a row and commit nothing, because of missed points
+        let _span = round_ctx.span().enter();
+
+        let start_bottom = committer.bottom_round().0;
+        let start_dag_len = committer.dag_len();
+
+        let committed = match committer.commit(round_ctx.conf()) {
+            Ok(data) => data,
+            Err(history_conflict) => {
+                tracing::warn!(
+                    err = %history_conflict,
+                    start_bottom,
+                    start_dag_len,
+                    current_bottom = ?committer.bottom_round(),
+                    current_dag_len = committer.dag_len(),
+                    "will try to fix local history"
+                );
+                return Err(history_conflict);
+            }
+        };
+
+        if let Some(new_bottom) = full_history_bottom {
+            committed_info_tx
+                .send(MempoolOutput::NewStartAfterGap(new_bottom)) // not recoverable
+                .expect("Failed to send anchor history info to mpsc channel");
+        }
+
+        if !committed.is_empty() {
+            round_ctx.log_committed(&committed);
+            for data in committed {
+                round_ctx.commit_metrics(&data.anchor);
+                committed_info_tx
+                    .send(MempoolOutput::NextAnchor(data)) // not recoverable
+                    .expect("Failed to send anchor history info to mpsc channel");
+            }
+        }
+
+        EngineCtx::meter_dag_len(committer.dag_len());
+
+        Ok(committer)
+    };
+    task_ctx.spawn_blocking(|| Either::Right(fallible_task()))
 }
 
 impl RoundCtx {

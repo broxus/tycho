@@ -4,6 +4,7 @@ use tycho_network::PeerId;
 
 use crate::effects::{AltFormat, TaskTracker};
 use crate::engine::lifecycle::args::{EngineBinding, EngineNetwork, EngineNetworkArgs};
+use crate::engine::lifecycle::FixHistoryFlag;
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::models::Round;
 use crate::prelude::EngineRunning;
@@ -35,7 +36,7 @@ impl EngineHandle {
     }
 
     pub fn run(self, engine_stop_tx: oneshot::Sender<()>) -> EngineRunning {
-        let engine = Engine::new(&self);
+        let engine = Engine::new(&self, FixHistoryFlag::default());
         EngineRunning::new(engine, self, engine_stop_tx)
     }
 

@@ -10,7 +10,7 @@ use rand::SeedableRng;
 use tycho_network::PeerId;
 
 use crate::dag::commit::SyncError;
-use crate::dag::{DagRound, EnqueuedAnchor};
+use crate::dag::{DagRound, EnqueuedAnchor, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
@@ -117,7 +117,7 @@ impl DagBack {
         &self,
         last_proof_round_or_bottom: Round,
         up_to: Round,
-    ) -> Result<VecDeque<PointInfo>, Round> {
+    ) -> Result<VecDeque<PointInfo>, HistoryConflict> {
         let mut triggers = VecDeque::new();
         // let mut string = String::new();
         let rev_iter = self
@@ -142,7 +142,7 @@ impl DagBack {
                     triggers.push_front(trigger.info().clone());
                 }
                 Err(SyncError::TryLater) => {} // skip
-                Err(SyncError::Impossible(round)) => return Err(round),
+                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
             }
         }
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
@@ -481,7 +481,7 @@ impl DagBack {
                     .filter_map(|version| version.clone().now_or_never())
                     .map(|task_result| match task_result {
                         Ok(dag_point) => Ok(dag_point),
-                        Err(Cancelled()) => Err(SyncError::Impossible(dag_round.round())),
+                        Err(Cancelled()) => Err(SyncError::HistoryConflict(dag_round.round())),
                     })
                     // take any suitable
                     .filter_map_ok(move |dag_point| match dag_point {
@@ -493,10 +493,10 @@ impl DagBack {
                             }
                         }
                         DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                            Some(Err(SyncError::Impossible(dag_round.round())))
+                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                            Some(Err(SyncError::Impossible(dag_round.round())))
+                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
                             None
@@ -526,15 +526,15 @@ impl DagBack {
         }; // not yet resolved;
         let dag_point = match dag_point_result {
             Ok(dag_point) => dag_point,
-            Err(Cancelled()) => return Err(SyncError::Impossible(dag_round.round())),
+            Err(Cancelled()) => return Err(SyncError::HistoryConflict(dag_round.round())),
         };
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
             DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                Err(SyncError::Impossible(dag_round.round()))
+                Err(SyncError::HistoryConflict(dag_round.round()))
             }
             DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                Err(SyncError::Impossible(dag_round.round()))
+                Err(SyncError::HistoryConflict(dag_round.round()))
             }
             dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
                 panic!("{point_kind} {}: {:?}", dp.alt(), dp.id().alt())

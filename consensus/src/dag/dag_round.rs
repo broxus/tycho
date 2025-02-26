@@ -11,6 +11,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
 use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
+use crate::engine::lifecycle::FixHistoryFlag;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
@@ -280,6 +281,7 @@ impl DagRound {
         point_restore: PointRestore,
         downloader: &Downloader,
         store: &MempoolStore,
+        fix_history: FixHistoryFlag,
         round_ctx: &RoundCtx,
     ) -> DagPointFuture {
         let _guard = round_ctx.span().enter();
@@ -305,6 +307,7 @@ impl DagRound {
                         &loc.state,
                         downloader,
                         store,
+                        fix_history,
                         round_ctx,
                     )
                 })

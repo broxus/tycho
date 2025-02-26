@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-use crate::effects::{Cancelled, Task};
+use crate::effects::Task;
 use crate::engine::lifecycle::handle::EngineHandle;
+use crate::engine::lifecycle::{EngineError, FixHistoryFlag};
 use crate::engine::Engine;
 
 pub struct EngineRunning {
@@ -13,15 +14,24 @@ pub struct EngineRunning {
 
 impl EngineRunning {
     pub(super) fn new(
-        engine: Engine,
+        mut engine: Engine,
         handle: EngineHandle,
         engine_stop_tx: oneshot::Sender<()>,
     ) -> Self {
         let handle = Arc::new(handle);
-        let engine_run = async move {
-            match engine.run().await {
-                Err(Cancelled()) => {
-                    engine_stop_tx.send(()).ok(); // caller may be dropped earlier on shutdown
+        let engine_run = {
+            let handle = handle.clone();
+            async move {
+                loop {
+                    match engine.run().await {
+                        Err(EngineError::Cancelled) => {
+                            engine_stop_tx.send(()).ok(); // caller may be dropped earlier on shutdown
+                            break;
+                        }
+                        Err(EngineError::HistoryConflict(_)) => {
+                            engine = Engine::new(&handle, FixHistoryFlag(true));
+                        }
+                    }
                 }
             }
         };

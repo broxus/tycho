@@ -15,6 +15,7 @@ use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
 use crate::effects::{
     AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, TaskResult, ValidateCtx,
 };
+use crate::engine::lifecycle::FixHistoryFlag;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
     DagPoint, Digest, Point, PointId, PointInfo, PointRestore, PointStatusIllFormed,
@@ -323,6 +324,7 @@ impl DagPointFuture {
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
+        fix_history: FixHistoryFlag,
         round_ctx: &RoundCtx,
     ) -> Self {
         // keep this section sync so that call site may not wait for each result to resolve
@@ -358,7 +360,7 @@ impl DagPointFuture {
 
                 let (certified_tx, certified_rx) = oneshot::channel();
 
-                let nested = task_ctx.spawn(async move {
+                let future = async move {
                     let validate_ctx = ValidateCtx::new(&round_ctx, &verified);
                     let validated = Verifier::validate(
                         verified.clone(),
@@ -379,9 +381,15 @@ impl DagPointFuture {
                         state.resolve(&dag_point);
                         dag_point
                     }))
-                });
+                };
+                let nested = if fix_history.0 {
+                    (async move { future.await?.await }).boxed() // still lazy
+                } else {
+                    let eager = task_ctx.spawn(future);
+                    (async move { eager.await??.await }).boxed()
+                };
                 DagPointFuture(DagPointFutureType::Validate {
-                    task: Shared::new((async move { nested.await??.await }).boxed()),
+                    task: Shared::new(nested),
                     certified: Arc::new(OnceTake::new(certified_tx)),
                 })
             }
