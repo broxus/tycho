@@ -1,6 +1,7 @@
 mod anchor_chain;
 mod back;
 
+use std::ops::RangeInclusive;
 use std::sync::atomic::Ordering;
 
 use tycho_util::metrics::HistogramGuard;
@@ -12,9 +13,14 @@ use crate::effects::{AltFmt, AltFormat};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorData, AnchorStageRole, Round};
 
+#[derive(thiserror::Error, Debug)]
+#[error("Committer encountered local history conflict at round {}", .0.0)]
+pub struct HistoryConflict(pub Round);
+type CommitterResult<T> = std::result::Result<T, HistoryConflict>;
+// private error type
 enum SyncError {
     TryLater,
-    Impossible(Round),
+    HistoryConflict(Round),
 }
 
 pub struct Committer {
@@ -80,7 +86,7 @@ impl Committer {
         }
     }
 
-    pub fn commit(&mut self, conf: &MempoolConfig) -> Result<Vec<AnchorData>, Round> {
+    pub fn commit(&mut self, conf: &MempoolConfig) -> CommitterResult<Vec<AnchorData>> {
         // may run for long several times in a row and commit nothing, because of missed points
         let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
 
@@ -94,7 +100,7 @@ impl Committer {
         &mut self,
         current_round: Round,
         conf: &MempoolConfig,
-    ) -> Result<Vec<AnchorData>, Round> {
+    ) -> CommitterResult<Vec<AnchorData>> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -128,22 +134,22 @@ impl Committer {
             match self.dequeue_anchor(next, conf) {
                 Ok(data) => committed.push(data),
                 Err(SyncError::TryLater) => break,
-                Err(SyncError::Impossible(round)) => return Err(round),
+                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
             }
         }
         Ok(committed)
     }
 
-    fn enqueue_new_anchors(&mut self, current_round: Round) -> Result<(), Round> {
+    fn enqueue_new_anchors(&mut self, current_round: Round) -> CommitterResult<()> {
         // some state may have restored from db or resolved from download
 
         // take all ready triggers, skipping not ready ones
-        let triggers = self.dag.triggers(
+        let triggers = self.dag.triggers(RangeInclusive::new(
             self.anchor_chain
                 .top_proof_round()
                 .unwrap_or(self.dag.bottom_round()),
             current_round,
-        )?;
+        ))?;
 
         if let Some(last_trigger) = triggers.back() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
@@ -161,13 +167,13 @@ impl Committer {
                     // init chain after each gap
                     Ok(last_unusable_proof_round) => last_unusable_proof_round,
                     Err(SyncError::TryLater) => return Ok(()), // cannot init
-                    Err(SyncError::Impossible(round)) => return Err(round),
+                    Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
                 },
             };
             let chain_part = match self.dag.anchor_chain(last_proof_round, &trigger) {
                 Ok(chain_part) => chain_part,
                 Err(SyncError::TryLater) => break, // some dag point future is not yet resolved
-                Err(SyncError::Impossible(round)) => return Err(round),
+                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
             };
             for next in chain_part {
                 if let Some(back) = self.anchor_chain.top() {
