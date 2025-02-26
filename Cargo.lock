@@ -3471,6 +3471,7 @@ dependencies = [
  "everscale-types",
  "hex",
  "parking_lot",
+ "rayon",
  "thiserror 2.0.11",
  "tl-proto",
  "tycho-util",

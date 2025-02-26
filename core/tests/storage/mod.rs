@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 use tycho_storage::{NewBlockMeta, Storage};
@@ -29,10 +31,10 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
 
     // Init blocks
     let archive_data = utils::read_file("archive_1.bin")?;
-    let block_provider = utils::parse_archive(&archive_data)?;
+    let block_provider = utils::parse_archive(&archive_data).map(Arc::new)?;
 
     for block_id in block_provider.mc_block_ids.values() {
-        let (block, proof, diff) = block_provider.get_entry_by_id(block_id)?;
+        let (block, proof, diff) = block_provider.get_entry_by_id(block_id).await?;
 
         let info = block.load_info().context("Failed to load block info")?;
         let meta = NewBlockMeta {
