@@ -5,9 +5,10 @@ use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
 
-use crate::dag::Committer;
+use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
-use crate::engine::MempoolConfig;
+use crate::engine::lifecycle::EngineError;
+use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig};
 use crate::models::{AnchorData, MempoolOutput, PointInfo, Round};
 
 pub struct CommitterTask {
@@ -19,6 +20,7 @@ enum Inner {
     Uninit,
     Ready(Committer),
     Dropping(Task<Result<Committer, Cancelled>>),
+    Fallible(Task<Result<Committer, EngineError>>),
 }
 
 impl CommitterTask {
@@ -34,7 +36,7 @@ impl CommitterTask {
         }
     }
 
-    pub async fn ready_mut(&mut self) -> Result<Option<&mut Committer>, Cancelled> {
+    pub async fn ready_mut(&mut self) -> EngineResult<Option<&mut Committer>> {
         if let Some(committer) = self.inner.take_ready().await? {
             self.inner = Inner::Ready(committer);
         };
@@ -49,17 +51,22 @@ impl CommitterTask {
         full_history_bottom: Option<Round>,
         committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
-    ) -> Result<(), Cancelled> {
+    ) -> EngineResult<()> {
         let Some(committer) = self.inner.take_ready().await? else {
             return Ok(());
         };
-        self.inner = Inner::dropping(committer, full_history_bottom, committed_info_tx, round_ctx);
+        let is_dropping = committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
+        self.inner = if is_dropping {
+            Inner::dropping(committer, full_history_bottom, committed_info_tx, round_ctx)
+        } else {
+            Inner::fallible(committer, full_history_bottom, committed_info_tx, round_ctx)
+        };
         Ok(())
     }
 }
 
 impl Inner {
-    async fn take_ready(&mut self) -> Result<Option<Committer>, Cancelled> {
+    async fn take_ready(&mut self) -> EngineResult<Option<Committer>> {
         Ok(match mem::replace(self, Inner::Uninit) {
             Inner::Uninit => panic!("must be taken only once"),
             Inner::Ready(committer) => Some(committer),
@@ -68,6 +75,14 @@ impl Inner {
                     Some(task.await??)
                 } else {
                     *self = Self::Dropping(task);
+                    None
+                }
+            }
+            Inner::Fallible(task) => {
+                if task.is_finished() {
+                    Some(task.await??)
+                } else {
+                    *self = Inner::Fallible(task);
                     None
                 }
             }
@@ -99,7 +114,7 @@ impl Inner {
                         committed = Some(data);
                         break;
                     }
-                    Err(round) => {
+                    Err(HistoryConflict(round)) => {
                         let result = committer.drop_upto(round.next(), round_ctx.conf());
                         new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
                         tracing::info!(
@@ -146,6 +161,57 @@ impl Inner {
         };
 
         Self::Dropping(task_ctx.spawn_blocking(dropping_task))
+    }
+
+    fn fallible(
+        mut committer: Committer,
+        full_history_bottom: Option<Round>,
+        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+        round_ctx: &RoundCtx,
+    ) -> Self {
+        let task_ctx = round_ctx.task();
+        let round_ctx = round_ctx.clone();
+        let fallible_task = move || {
+            // may run for long several times in a row and commit nothing, because of missed points
+            let _span = round_ctx.span().enter();
+
+            let start_bottom = committer.bottom_round().0;
+            let start_dag_len = committer.dag_len();
+
+            let committed = match committer.commit(round_ctx.conf()) {
+                Ok(data) => data,
+                Err(history_conflict) => {
+                    tracing::warn!(
+                        err = %history_conflict,
+                        start_bottom,
+                        start_dag_len,
+                        current_bottom = ?committer.bottom_round(),
+                        current_dag_len = committer.dag_len(),
+                        "will try to fix local history"
+                    );
+                    return Err(history_conflict.into());
+                }
+            };
+
+            if let Some(new_bottom) = full_history_bottom {
+                committed_info_tx
+                    .send(MempoolOutput::NewStartAfterGap(new_bottom))
+                    .map_err(|_closed| EngineError::Cancelled)?;
+            }
+
+            round_ctx.log_committed(&committed);
+            for data in committed {
+                round_ctx.commit_metrics(&data.anchor);
+                committed_info_tx
+                    .send(MempoolOutput::NextAnchor(data))
+                    .map_err(|_closed| EngineError::Cancelled)?;
+            }
+
+            EngineCtx::meter_dag_len(committer.dag_len());
+
+            Ok(committer)
+        };
+        Inner::Fallible(task_ctx.spawn_blocking(fallible_task))
     }
 }
 
