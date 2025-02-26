@@ -59,7 +59,7 @@ impl MempoolAdapterStdImpl {
             },
             config: Mutex::new(ConfigAdapter {
                 builder: config_builder,
-                state_update_queue: Default::default(),
+                state_update_ctx: None,
                 engine_running: None,
             }),
             store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),

@@ -84,3 +84,12 @@ impl Drop for EngineNetwork {
             .remove_private_overlay(&self.overlay_id);
     }
 }
+
+/// Use `false` to read point history from old to new rounds, preserving their stored statuses.
+/// This is the default mode to run [`Engine`](crate::engine::Engine).
+///
+/// Use `true` to read point statuses in inverted order of rounds, re-validating invalid points.
+/// This allows to fix rare cases, when node synced slowly and began to validate new broadcasts
+/// with all history being invalid because some point was not downloaded.
+#[derive(Default, Clone, Copy)]
+pub struct FixHistoryFlag(pub bool);
