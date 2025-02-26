@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use crate::effects::{
     AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult, TaskTracker,
 };
 use crate::engine::committer_task::CommitterTask;
-use crate::engine::lifecycle::EngineHandle;
+use crate::engine::lifecycle::{EngineError, EngineHandle, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::ConsensusConfigExt;
@@ -25,6 +26,8 @@ use crate::models::{
     DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
 
+pub type EngineResult<T> = std::result::Result<T, EngineError>;
+
 pub struct Engine {
     dag: DagFront,
     committer_run: CommitterTask,
@@ -32,12 +35,16 @@ pub struct Engine {
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     _peer_schedule_updater: Task<()>,
-    init_task: Option<Task<()>>,
+    init_task: Option<Task<FixHistoryFlag>>,
     ctx: EngineCtx,
 }
 
 impl Engine {
-    pub fn new(handle: &EngineHandle, task_tracker: &TaskTracker) -> Engine {
+    pub fn new(
+        handle: &EngineHandle,
+        task_tracker: &TaskTracker,
+        fix_history: FixHistoryFlag,
+    ) -> Engine {
         let EngineHandle {
             bind,
             net,
@@ -85,6 +92,7 @@ impl Engine {
             move || {
                 store.init_storage(&overlay_id);
                 store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                fix_history // just pass further
             }
         });
 
@@ -116,8 +124,8 @@ impl Engine {
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> TaskResult<Option<(Point, Option<Point>)>> {
-        (self.init_task.take().expect("init task must be set")).await?;
+    async fn pre_run(&mut self) -> EngineResult<Option<(Point, Option<Point>)>> {
+        let fix_history = (self.init_task.take().expect("init task must be set")).await?;
 
         // take last round from db
 
@@ -187,7 +195,7 @@ impl Engine {
                 "will restore points from DB",
             );
             let range = RangeInclusive::new(dag_bottom_round, last_db_round);
-            self.preload_points(range, &round_ctx).await?;
+            self.preload_points(range, fix_history, &round_ctx).await?;
         } else {
             tracing::info!(
                 parent: round_ctx.span(),
@@ -269,6 +277,7 @@ impl Engine {
     async fn preload_points(
         &self,
         range: RangeInclusive<Round>,
+        fix_history: FixHistoryFlag,
         round_ctx: &RoundCtx,
     ) -> TaskResult<()> {
         let task = round_ctx.task().spawn_blocking({
@@ -277,6 +286,9 @@ impl Engine {
             let round_ctx = round_ctx.clone();
             move || {
                 let _guard = round_ctx.span().enter();
+                if fix_history.0 {
+                    store.reset_statuses(&range);
+                }
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
@@ -314,7 +326,8 @@ impl Engine {
             }
         });
 
-        for ((round, _), point_restores) in task.await? {
+        let mut reversed_futures = BTreeMap::new();
+        for ((round, order), point_restores) in task.await? {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let dag_restore = FuturesUnordered::new();
             for point_restore in point_restores {
@@ -325,13 +338,16 @@ impl Engine {
                     round_ctx,
                 ));
             }
+            reversed_futures.insert((cmp::Reverse(round), order), dag_restore);
+        }
+        for dag_restore in reversed_futures.into_values() {
             dag_restore.try_collect::<Vec<DagPoint>>().await?;
         }
         Ok(())
     }
 
     // this future never completes with Ok result
-    pub async fn run(mut self) -> TaskResult<futures_util::never::Never> {
+    pub async fn run(mut self) -> EngineResult<futures_util::never::Never> {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
         let mut start_replay_bcasts = Some(self.pre_run().await?);
         let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
