@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::task::AbortHandle;
-use tycho_network::{ConnectionError, Network, PublicOverlay, Request, UnknownPeerError};
+use tycho_network::proto::overlay::{rpc, PublicEntriesResponse};
+use tycho_network::{
+    ConnectionError, Network, NetworkExt, PeerId, PublicOverlay, Request, UnknownPeerError,
+};
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
@@ -25,6 +28,7 @@ pub struct PublicOverlayClient {
 
 impl PublicOverlayClient {
     pub fn new(
+        local_id: PeerId,
         network: Network,
         overlay: PublicOverlay,
         config: PublicOverlayClientConfig,
@@ -50,6 +54,7 @@ impl PublicOverlayClient {
             ValidatorsResolver::new(network.clone(), overlay.clone(), config.validators.clone());
 
         let mut res = Inner {
+            local_id,
             network,
             overlay,
             neighbours,
@@ -59,6 +64,7 @@ impl PublicOverlayClient {
             update_task: None,
             score_task: None,
             cleanup_task: None,
+            exchange_task: None,
         };
 
         // NOTE: Reuse same `Inner` type to avoid introducing a new type for shard state
@@ -67,6 +73,8 @@ impl PublicOverlayClient {
         res.update_task = Some(tokio::spawn(res.clone().update_neighbours_task()).abort_handle());
         res.score_task = Some(tokio::spawn(res.clone().apply_score_task()).abort_handle());
         res.cleanup_task = Some(tokio::spawn(res.clone().cleanup_neighbours_task()).abort_handle());
+        res.exchange_task =
+            Some(tokio::spawn(res.clone().exchange_public_entries_task()).abort_handle());
 
         Self {
             inner: Arc::new(res),
@@ -162,6 +170,7 @@ pub enum Error {
 }
 
 struct Inner {
+    local_id: PeerId,
     network: Network,
     overlay: PublicOverlay,
     neighbours: Neighbours,
@@ -173,11 +182,13 @@ struct Inner {
     update_task: Option<AbortHandle>,
     score_task: Option<AbortHandle>,
     cleanup_task: Option<AbortHandle>,
+    exchange_task: Option<AbortHandle>,
 }
 
 impl Clone for Inner {
     fn clone(&self) -> Self {
         Self {
+            local_id: self.local_id,
             network: self.network.clone(),
             overlay: self.overlay.clone(),
             neighbours: self.neighbours.clone(),
@@ -187,6 +198,7 @@ impl Clone for Inner {
             update_task: None,
             score_task: None,
             cleanup_task: None,
+            exchange_task: None,
         }
     }
 }
@@ -307,6 +319,29 @@ impl Inner {
         }
     }
 
+    #[tracing::instrument(name = "exchange_public_entries", skip_all)]
+    async fn exchange_public_entries_task(self) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
+        loop {
+            self.overlay.unknown_peer_added().notified().await;
+
+            // Iterate over unknown peers with max weight and make public entries exchange
+            for peer_id in self.overlay.unknown_peer_ids() {
+                if let Err(e) = self.exchange_public_entries(&peer_id).await {
+                    tracing::error!(?peer_id, "failed to exchange public entries: {e}");
+                }
+
+                // Remove node from unknown peers
+                self.overlay.remove_unknown_peer(&peer_id);
+            }
+
+            // Remove expired unknown peers
+            self.overlay.cleanup_unknown_peers();
+        }
+    }
+
     async fn send<R>(&self, data: R) -> Result<(), Error>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
@@ -401,6 +436,78 @@ impl Inner {
                 Err(Error::Timeout)
             }
         }
+    }
+
+    async fn exchange_public_entries(&self, target_peer_id: &PeerId) -> Result<()> {
+        // TODO: take from OverlayConfig
+        const EXCHANGE_PUBLIC_ENTRIES_BATCH: usize = 20;
+
+        let n = EXCHANGE_PUBLIC_ENTRIES_BATCH;
+        let mut entries = Vec::with_capacity(n);
+
+        let network = &self.network;
+        let overlay = &self.overlay;
+
+        // Always include us in the response
+        entries.push(Arc::new(tycho_network::make_local_public_overlay_entry(
+            self.local_id,
+            network,
+            overlay.overlay_id(),
+            tycho_util::time::now_sec(),
+        )));
+
+        {
+            let rng = &mut rand::thread_rng();
+
+            let all_entries = overlay.read_entries();
+
+            // Add additional random entries to the response.
+            // NOTE: `n` instead of `n - 1` because we might ignore the target peer
+            entries.extend(
+                all_entries
+                    .choose_multiple(rng, n)
+                    .filter(|&item| item.entry.peer_id != target_peer_id)
+                    .map(|item| item.entry.clone())
+                    .take(n - 1),
+            );
+        };
+
+        // Send request
+        let response = network
+            .query(
+                target_peer_id,
+                Request::from_tl(rpc::ExchangeRandomPublicEntries {
+                    overlay_id: overlay.overlay_id().to_bytes(),
+                    entries,
+                }),
+            )
+            .await?
+            .parse_tl::<PublicEntriesResponse>()?;
+
+        // Populate the overlay with the response
+        match response {
+            PublicEntriesResponse::PublicEntries(entries) => {
+                tracing::debug!(
+                    peer_id = %target_peer_id,
+                    count = entries.len(),
+                    "received public entries"
+                );
+                overlay.add_untrusted_entries(
+                    &self.local_id,
+                    &entries,
+                    tycho_util::time::now_sec(),
+                );
+            }
+            PublicEntriesResponse::OverlayNotFound => {
+                tracing::debug!(
+                    peer_id = %target_peer_id,
+                    "peer does not have the overlay",
+                );
+            }
+        }
+
+        // Done
+        Ok(())
     }
 }
 
