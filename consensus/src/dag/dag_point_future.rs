@@ -356,7 +356,6 @@ impl DagPointFuture {
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
-        wait_dependencies: bool,
     ) -> Self {
         let point_dag_round = point_dag_round.downgrade();
         let state = state.clone();
@@ -414,22 +413,6 @@ impl DagPointFuture {
                     })
                     .await
                     .expect("spawned update point status")
-                }
-                Either::Right(DagPoint::Valid(valid)) if wait_dependencies => {
-                    // only some last rounds should wait for dependencies to resolve, because
-                    // deep, unlinked and not found dependencies must not slow down the whole;
-                    // anyway, already resolved dag point means all its dependencies were resolved
-                    let validate_ctx = ValidateCtx::new(&round_ctx, &valid.info);
-                    Verifier::restore_dependencies(
-                        valid.clone(),
-                        point_dag_round,
-                        downloader,
-                        store.clone(),
-                        certified_rx,
-                        validate_ctx,
-                    )
-                    .await;
-                    DagPoint::Valid(valid)
                 }
                 Either::Right(dag_point) => dag_point,
             };
