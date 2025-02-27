@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["Broxus Team"]
 rust-version = "1.83.0"
@@ -123,15 +123,15 @@ ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", rev = 
 tycho-vm = { git = "https://github.com/broxus/tycho-vm.git" }
 
 # local deps
-tycho-block-util = { path = "./block-util", version = "0.2.4" }
-tycho-collator = { path = "./collator", version = "0.2.4" }
-tycho-consensus = { path = "./consensus", version = "0.2.4" }
-tycho-control = { path = "./control", version = "0.2.4" }
-tycho-core = { path = "./core", version = "0.2.4" }
-tycho-network = { path = "./network", version = "0.2.4" }
-tycho-rpc = { path = "./rpc", version = "0.2.4" }
-tycho-storage = { path = "./storage", version = "0.2.4" }
-tycho-util = { path = "./util", version = "0.2.4" }
+tycho-block-util = { path = "./block-util", version = "0.2.5" }
+tycho-collator = { path = "./collator", version = "0.2.5" }
+tycho-consensus = { path = "./consensus", version = "0.2.5" }
+tycho-control = { path = "./control", version = "0.2.5" }
+tycho-core = { path = "./core", version = "0.2.5" }
+tycho-network = { path = "./network", version = "0.2.5" }
+tycho-rpc = { path = "./rpc", version = "0.2.5" }
+tycho-storage = { path = "./storage", version = "0.2.5" }
+tycho-util = { path = "./util", version = "0.2.5" }
 
 [patch.crates-io]
 everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "adada6e6539abd798dbbc5a7fc1d17cc31fa7eff" }
