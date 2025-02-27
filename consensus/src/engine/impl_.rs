@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::mem;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +8,8 @@ use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt, StreamExt};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
+use rayon::prelude::IntoParallelRefIterator;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
@@ -25,7 +27,8 @@ use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
 use crate::models::{
-    AnchorData, MempoolOutput, Point, PointInfo, PointRestore, PointStatusStoredRef, Round,
+    AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointStatusStoredRef,
+    Round,
 };
 
 pub struct Engine {
@@ -230,7 +233,7 @@ impl Engine {
 
         // preload and sign last rounds if node may still participate in consensus
 
-        let preloaded = if dag_bottom_round <= last_db_round {
+        if dag_bottom_round <= last_db_round {
             tracing::info!(
                 parent: round_ctx.span(),
                 dag_bottom_round = dag_bottom_round.0,
@@ -238,29 +241,8 @@ impl Engine {
                 dag_top_round = dag_top_round.0,
                 "will restore points from DB",
             );
-            let task = tokio::task::spawn_blocking({
-                let store = self.round_task.state.store.clone();
-                move || {
-                    let mut map = BTreeMap::<(Round, _), Vec<PointRestore>>::new();
-                    for (key, group) in &store
-                        .load_restore(dag_bottom_round, last_db_round)
-                        .into_iter()
-                        .group_by(|pre| (pre.round(), pre.restore_order_asc()))
-                    {
-                        map.insert(key, group.collect());
-                    }
-                    map
-                }
-            })
-            .instrument(round_ctx.span().clone());
-            match task.await {
-                Ok(result) => result,
-                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                Err(e) => {
-                    let _span = round_ctx.span().enter();
-                    panic!("preload last rounds on init: {e}");
-                }
-            }
+            let range = RangeInclusive::new(dag_bottom_round, last_db_round);
+            self.preload_points(range, &round_ctx).await;
         } else {
             tracing::info!(
                 parent: round_ctx.span(),
@@ -269,44 +251,14 @@ impl Engine {
                 dag_top_round = dag_top_round.0,
                 "will not restore points from DB",
             );
-            Default::default()
         };
-
-        // also last 3 rounds is enough to create point at last round with all witness deps
-        let head_min_round = dag_top_round.prev().prev(); // 3 DagHead rounds inclusive
-        for ((round, _), point_restores) in preloaded {
-            let dag_round = self.dag.top().scan(round).expect("must exist");
-            for point_restore in point_restores {
-                dag_round.restore(
-                    point_restore,
-                    &self.round_task.state.downloader,
-                    &self.round_task.state.store,
-                    &round_ctx,
-                    round >= head_min_round,
-                );
-            }
-        }
-
-        // all dependencies are spawned, wait for DagHead rounds to resolve
-
-        let mut dag_restore = FuturesUnordered::new();
-        for head_round in (head_min_round.0..=dag_top_round.0).map(Round) {
-            let dag_round = self.dag.top().scan(head_round).expect("must exist");
-            let iter = dag_round.select(|(_, loc)| {
-                // each restore future is eager, as it has a spawned task inside
-                dag_restore.extend(loc.versions.values().cloned());
-                None::<()>
-            });
-            _ = iter.collect::<Vec<_>>();
-        }
-        while !dag_restore.is_empty() {
-            _ = dag_restore.next().await;
-        }
 
         // to repeat broadcasts from two last determined consensus rounds
         // in case DB was deleted and point received - find and use it
 
         let mut last_broadcast = None;
+        // also last 3 rounds is enough to create point at last round with all witness deps
+        let head_min_round = dag_top_round.prev().prev(); // 3 DagHead rounds inclusive
         for round in (head_min_round.0..=dag_top_round.0).map(Round) {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
@@ -365,6 +317,73 @@ impl Engine {
         self.round_task.state.consensus_round.set_max(new_top_round);
 
         replay_bcasts
+    }
+
+    async fn preload_points(&self, range: RangeInclusive<Round>, round_ctx: &RoundCtx) {
+        let task = tokio::task::spawn_blocking({
+            let store = self.round_task.state.store.clone();
+            let peer_schedule = self.round_task.state.peer_schedule.clone();
+            let round_ctx = round_ctx.clone();
+            move || {
+                let _guard = round_ctx.span().enter();
+                let restores = store.load_restore(&range);
+                let (need_verify, ready): (Vec<_>, Vec<_>) =
+                    restores.into_iter().partition_map(|r| match r {
+                        PointRestore::Exists(info, _) => {
+                            Either::Left((info.round(), *info.digest()))
+                        }
+                        other => Either::Right(other),
+                    });
+                let verified = need_verify
+                    .chunks(1000) // seems enough for any case
+                    .flat_map(|keys| {
+                        use rayon::iter::ParallelIterator;
+                        store
+                            .multi_get_points(keys) // assume load result is sorted
+                            .par_iter()
+                            .map(|point| {
+                                let is_ok = point.verify_hash().is_ok()
+                                    && Verifier::verify(point, &peer_schedule).is_ok();
+                                if is_ok {
+                                    // return back as they were, now with prev_proof filled
+                                    PointRestore::Exists(point.into(), point.prev_proof())
+                                } else {
+                                    PointRestore::IllFormed(point.id(), Default::default())
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    });
+
+                let mut map = BTreeMap::<(Round, _), Vec<PointRestore>>::new();
+                for pre in verified.chain(ready) {
+                    let entry = map.entry((pre.round(), pre.restore_order_asc()));
+                    entry.or_default().push(pre);
+                }
+                map
+            }
+        });
+        let preloaded = match task.await {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => {
+                let _span = round_ctx.span().enter();
+                panic!("preload last rounds on init: {e}");
+            }
+        };
+
+        for ((round, _), point_restores) in preloaded {
+            let dag_round = self.dag.top().scan(round).expect("must exist");
+            let dag_restore = FuturesUnordered::new();
+            for point_restore in point_restores {
+                dag_restore.push(dag_round.restore(
+                    point_restore,
+                    &self.round_task.state.downloader,
+                    &self.round_task.state.store,
+                    round_ctx,
+                ));
+            }
+            dag_restore.collect::<Vec<DagPoint>>().await;
+        }
     }
 
     pub async fn run(mut self) {
