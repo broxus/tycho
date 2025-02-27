@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
+use anyhow::{anyhow, Context, Result};
+use everscale_types::models::{BlockIdShort, IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 
 use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
     InternalsRangeReaderState, MessagesReaderMetrics, MessagesReaderStage, ShardReaderState,
 };
+use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
@@ -375,7 +376,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         Ok(())
     }
 
-    fn create_append_next_range_reader(&mut self) -> Result<BlockSeqno> {
+    fn create_append_next_range_reader(&mut self) -> Result<BlockSeqno, CollatorError> {
         let range_max_messages = if self.msgs_exec_params.range_messages_limit == 0 {
             10_000
         } else {
@@ -400,7 +401,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     fn create_next_internals_range_reader(
         &self,
         range_max_messages: Option<u32>,
-    ) -> Result<InternalsRangeReader<V>> {
+    ) -> Result<InternalsRangeReader<V>, CollatorError> {
         let last_range_reader_info_opt = self
             .get_last_range_reader()
             .map(|(_, reader)| {
@@ -426,23 +427,36 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             last_range_block_seqno,
         } = last_range_reader_info_opt.unwrap_or_default();
 
-        let range_seqno = match range_max_messages {
-            None => self.block_seqno,
+        let (range_seqno, current_shard_range_to) = match range_max_messages {
+            None => (
+                self.block_seqno,
+                QueueKey::max_for_lt(self.prev_state_gen_lt),
+            ),
             Some(max_messages) => {
-                let mut current_block_seqno = last_range_block_seqno + 1;
+                let mut next_seqno = last_range_block_seqno + 1;
+                let mut range_to = QueueKey::max_for_lt(self.prev_state_gen_lt);
+
                 let mut messages_count = 0;
 
-                while current_block_seqno < self.block_seqno {
+                while next_seqno < self.block_seqno {
                     let diff = self
                         .mq_adapter
-                        .get_diff(&self.for_shard_id, current_block_seqno)
+                        .get_diff(&self.for_shard_id, next_seqno)
                         .ok_or_else(|| {
-                            anyhow!(
-                                "cannot get diff for block {}:{}",
-                                self.for_shard_id,
-                                current_block_seqno
-                            )
+                            let diff_block_id = BlockIdShort {
+                                shard: self.for_shard_id,
+                                seqno: next_seqno,
+                            };
+                            tracing::warn!(target: tracing_targets::COLLATOR,
+                                "check range limit: cannot get diff with stats from queue for block {}",
+                                diff_block_id,
+                            );
+                            CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
+                                diff_block_id,
+                            ))
                         })?;
+
+                    range_to = *diff.max_message();
 
                     messages_count += diff
                         .statistics()
@@ -452,9 +466,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                         break;
                     }
 
-                    current_block_seqno += 1;
+                    next_seqno += 1;
                 }
-                current_block_seqno
+
+                (next_seqno, range_to)
             }
         };
 
@@ -464,18 +479,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 last_to_lt_opt.map_or_else(|| QueueKey::min_for_lt(0), QueueKey::max_for_lt);
 
             let shard_range_to = if shard_id == self.for_shard_id {
-                if range_seqno != self.block_seqno {
-                    let diff = self
-                        .mq_adapter
-                        .get_diff(&shard_id, range_seqno)
-                        .ok_or_else(|| {
-                            anyhow!("cannot get diff for block {shard_id}:{range_seqno}")
-                        })?;
-
-                    *diff.max_message()
-                } else {
-                    QueueKey::max_for_lt(self.prev_state_gen_lt)
-                }
+                current_shard_range_to
             } else {
                 QueueKey::max_for_lt(end_lt)
             };
@@ -539,7 +543,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     pub fn read_existing_messages_into_buffers(
         &mut self,
         read_mode: GetNextMessageGroupMode,
-    ) -> Result<MessagesReaderMetrics> {
+    ) -> Result<MessagesReaderMetrics, CollatorError> {
         let mut metrics = MessagesReaderMetrics::default();
 
         // skip if all open ranges fully read
@@ -586,7 +590,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
                 // read into buffer from the range
                 let Some(iterator) = range_reader.iterator_opt.as_mut() else {
-                    bail!("not fully read range should have iterator");
+                    return Err(CollatorError::Anyhow(anyhow!(
+                        "not fully read range should have iterator"
+                    )));
                 };
 
                 'read_range: loop {
@@ -607,7 +613,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                             let Some(shard_reader_state) =
                                 range_reader.reader_state.shards.get_mut(&shard_id)
                             else {
-                                bail!("shard reader state for existing iterator should exist")
+                                return Err(CollatorError::Anyhow(anyhow!(
+                                    "shard reader state for existing iterator should exist"
+                                )));
                             };
                             shard_reader_state.current_position = curr_pos;
                         }
@@ -735,7 +743,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         Ok(metrics)
     }
 
-    pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
+    pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool, CollatorError> {
         let mut last_seqno = 0;
 
         for (seqno, range_reader) in self.range_readers.iter_mut() {
@@ -759,7 +767,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
             // check if has pending internals in iterator
             let Some(iterator) = range_reader.iterator_opt.as_mut() else {
-                bail!("not fully read range should have iterator");
+                return Err(CollatorError::Anyhow(anyhow!(
+                    "not fully read range should have iterator"
+                )));
             };
 
             match iterator.next(false)? {
@@ -794,7 +804,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
                 // check if has pending internals in iterator
                 let Some(iterator) = range_reader.iterator_opt.as_mut() else {
-                    bail!("not fully read range should have iterator");
+                    return Err(CollatorError::Anyhow(anyhow!(
+                        "not fully read range should have iterator"
+                    )));
                 };
 
                 if iterator.next(false)?.is_some() {

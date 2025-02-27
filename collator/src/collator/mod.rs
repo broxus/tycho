@@ -1124,6 +1124,13 @@ impl CollatorStdImpl {
                     processed_to_anchor_exists_in_cache = true;
                 }
 
+                // NOTE: in case when we collated block 1 and now collating block 2
+                //      and block 1 mismatched with received from bc,
+                //      then we will collate block 2 again based on received block 1,
+                //      but we may already have removed processed_to anchor
+                //      from cache during the previous collation attempt of block 2,
+                //      so we cannot use cache and should fully refill it
+
                 // use anchors from cache only when processed_to anchor exists in cache
                 if !processed_to_anchor_exists_in_cache {
                     break;

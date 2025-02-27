@@ -12,6 +12,7 @@ use self::externals_reader::*;
 use self::internals_reader::*;
 use self::new_messages::*;
 pub(super) use self::reader_state::*;
+use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
@@ -708,7 +709,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         self.check_has_non_zero_processed_offset()
     }
 
-    pub fn refill_buffers_upto_offsets(&mut self) -> Result<()> {
+    pub fn refill_buffers_upto_offsets<F>(
+        &mut self,
+        mut is_cancelled: F,
+    ) -> Result<(), CollatorError>
+    where
+        F: FnMut() -> bool,
+    {
         tracing::debug!(target: tracing_targets::COLLATOR,
             internals_processed_offsets = ?DebugIter(self.internals_partition_readers
                 .iter()
@@ -725,6 +732,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         );
 
         loop {
+            // stop refill when collation cancelled
+            if is_cancelled() {
+                return Ok(());
+            }
+
             let msg_group = self.get_next_message_group(
                 GetNextMessageGroupMode::Refill,
                 0, // can pass 0 because new messages reader was not initialized in this case
@@ -752,7 +764,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         &mut self,
         read_mode: GetNextMessageGroupMode,
         current_next_lt: u64,
-    ) -> Result<Option<MessageGroup>> {
+    ) -> Result<Option<MessageGroup>, CollatorError> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             ?read_mode,
             current_next_lt,

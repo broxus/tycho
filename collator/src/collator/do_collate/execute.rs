@@ -7,6 +7,7 @@ use super::execution_wrapper::ExecutorWrapper;
 use super::finalize::FinalizeState;
 use super::phase::{Phase, PhaseState};
 use super::work_units::PrepareMsgGroupsWu;
+use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_reader::{GetNextMessageGroupMode, MessagesReader};
 use crate::collator::types::{BlockCollationData, BlockLimitsLevel, ExecuteResult};
 use crate::internal_queue::types::EnqueuedMessage;
@@ -50,7 +51,7 @@ impl Phase<ExecuteState> {
         Ok(())
     }
 
-    pub fn run(&mut self) -> Result<()> {
+    pub fn run(&mut self) -> Result<(), CollatorError> {
         let labels = [(
             "workchain",
             self.extra.executor.shard_id.workchain().to_string(),
@@ -63,6 +64,13 @@ impl Phase<ExecuteState> {
 
         let mut executed_groups_count = 0;
         loop {
+            // exit collation if cancelled
+            if self.state.collation_is_cancelled.check() {
+                return Err(CollatorError::Cancelled(
+                    CollationCancelReason::ExternalCancel,
+                ));
+            }
+
             let mut timer = std::time::Instant::now();
             let msg_group_opt = self.extra.messages_reader.get_next_message_group(
                 GetNextMessageGroupMode::Continue,
