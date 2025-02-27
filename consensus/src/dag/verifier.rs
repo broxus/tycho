@@ -17,7 +17,7 @@ use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PointStatusInvalid,
-    PointStatusValid, PrevPointProof, Round, ValidPoint,
+    PointStatusValid, PrevPointProof, Round,
 };
 
 // Note on equivocation.
@@ -276,87 +276,6 @@ impl Verifier {
         };
 
         ctx.validated(status)
-    }
-
-    /// During sync (e.g. after reboot) there is no evidence map in `PointInfo`
-    /// as point is already stored as successfully validated or certified,
-    /// so prev point's evidence won't be re-checked, even if it exists.
-    /// So this method **does not enforce or rely on** next well-formedness invariant:
-    /// "if point includes own prev point, then it has evidence for it".
-    /// Instead, this method exploits reversed conclusion from point being well-formed:
-    /// "if point has evidence, then it lists own prev point in includes map",
-    /// so it can be accessed as a direct dependency.
-    pub async fn restore_dependencies(
-        valid: ValidPoint, // @ r+0
-        r_0: WeakDagRound, // r+0
-        downloader: Downloader,
-        store: MempoolStore,
-        mut certified_rx: oneshot::Receiver<()>,
-        ctx: ValidateCtx,
-    ) {
-        let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
-        let span_guard = ctx.span().enter();
-
-        let Some(r_0) = r_0.upgrade() else {
-            tracing::info!("cannot restore point, no round in local DAG");
-            return;
-        };
-
-        assert_eq!(
-            r_0.round(),
-            valid.info.round(),
-            "Coding error: dag round mismatches point round"
-        );
-
-        let Some(r_1) = r_0.prev().upgrade() else {
-            tracing::info!("cannot restore point's 'includes', no round in local DAG");
-            return;
-        };
-
-        let direct_deps = Self::spawn_direct_deps(
-            &valid.info,
-            &r_1,
-            r_1.prev().upgrade(),
-            &downloader,
-            &store,
-            &ctx,
-        );
-
-        let mut is_certified =
-            valid.is_certified || certified_rx.try_recv() != Err(TryRecvError::Empty);
-        if is_certified {
-            for shared in &direct_deps {
-                shared.mark_certified(); // all dependencies
-            }
-        } else if let Some(digest) = valid.info.data().prev_digest() {
-            // point is valid, so it contained evidence for prev digest
-            r_1.view(&valid.info.data().author, |loc| {
-                loc.versions
-                    .get(digest)
-                    .map(|vertex| vertex.mark_certified())
-            });
-        }
-
-        let mut deps_fut = direct_deps.iter().cloned().collect::<FuturesUnordered<_>>();
-
-        drop(span_guard);
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut certified_rx, if !is_certified => {
-                    is_certified = true; // oneshot cannot be lagged, only closed
-                    for shared in &direct_deps {
-                        shared.mark_certified();
-                    }
-                },
-                next = &mut deps_fut.next() => {
-                    if next.is_none() {
-                        break;
-                    }
-                },
-            }
-        }
     }
 
     fn is_self_links_ok(

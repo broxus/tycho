@@ -23,6 +23,7 @@ impl PointRestore {
             let mut priority = 1;
             priority |= (status.is_first_resolved() as u8) << 7;
             priority |= (status.is_first_valid() as u8) << 6;
+            priority |= (T::is_valid() as u8) << 5;
             priority
         }
         let desc = match self {
