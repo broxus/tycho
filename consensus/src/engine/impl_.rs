@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
+use std::mem;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{cmp, mem};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt, StreamExt};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
+use rayon::prelude::IntoParallelRefIterator;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
@@ -21,16 +23,18 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
-use crate::engine::round_watch::{Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
+use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis, MempoolConfig};
 use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
-use crate::models::{AnchorData, MempoolOutput, Point, PointInfo, Round};
+use crate::models::{
+    AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointRestoreSelect,
+    PointStatusStoredRef, Round,
+};
 
 pub struct Engine {
     dag: DagFront,
     committer_run: JoinHandle<Committer>,
     committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-    consensus_round: RoundWatch<Consensus>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     ctx: EngineCtx,
@@ -99,7 +103,7 @@ impl Engine {
         let store = MempoolStore::new(mempool_adapter_store);
         let db_cleaner = DbCleaner::new(mempool_adapter_store);
 
-        // Dag, created at genesis, will at first extend up to it's greatest length
+        // Dag, created at genesis, will at first extend up to its greatest length
         // (in case last broadcast is within it) without data,
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
@@ -113,13 +117,11 @@ impl Engine {
 
         let init_task = JoinTask::new({
             let store = store.clone();
-            let genesis_dag_round = dag.top().clone();
             async move {
                 let init_storage_task = tokio::task::spawn_blocking({
                     move || {
                         store.init_storage(&overlay_id);
-                        // may be overwritten or left unused until next clean task, does not matter
-                        genesis_dag_round.insert_exact_sign(&genesis, Some(&key_pair), &store);
+                        store.insert_point(&genesis, PointStatusStoredRef::Exists);
                     }
                 });
                 match init_storage_task.await {
@@ -151,7 +153,6 @@ impl Engine {
             dag,
             committer_run,
             committed_info_tx,
-            consensus_round,
             db_cleaner,
             round_task,
             ctx: engine_ctx,
@@ -211,148 +212,180 @@ impl Engine {
 
         // get ready to commit and return deduplicated top known anchor's history to collator
 
-        let consensus_round = last_db_round
+        let dag_top_round = last_db_round
             .max(top_known_anchor)
             .max(Genesis::id().round.next());
-        self.consensus_round.set_max(consensus_round);
-        let round_ctx = RoundCtx::new(&self.ctx, consensus_round);
-        let dag_bottom_round = (Genesis::id().round)
-            .max(top_known_anchor - CachedConfig::get().consensus.replay_anchor_rounds());
+        self.round_task.state.consensus_round.set_max(dag_top_round);
+        let round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
 
         let mut committer = take_committer(&mut self.committer_run).expect("init");
         (self.dag).fill_to_top(
-            consensus_round,
+            dag_top_round,
             Some(&mut committer),
             &self.round_task.state.peer_schedule,
         );
-        committer.drop_upto(dag_bottom_round).ok();
+        _ = committer.drop_upto(
+            (top_known_anchor - CachedConfig::get().consensus.replay_anchor_rounds())
+                .max(Genesis::id().round),
+        );
+        let dag_bottom_round = committer.bottom_round();
         self.committer_run = tokio::spawn(future::ready(committer));
 
         // preload and sign last rounds if node may still participate in consensus
 
-        let preloaded_ids = if top_known_anchor < last_db_round && dag_bottom_round < last_db_round
-        {
-            let task = tokio::task::spawn_blocking({
-                // last 3 rounds is enough to create point at last round with all witness deps
-                let preload_bottom = Genesis::id().round.max(last_db_round - 2_u8);
-                let store = self.round_task.state.store.clone();
-                move || {
-                    let mut map = BTreeMap::<cmp::Reverse<Round>, Vec<PointInfo>>::new();
-                    for (round, group) in &store
-                        .load_info_rounds(preload_bottom, last_db_round)
-                        .into_iter()
-                        .group_by(|info| info.round())
-                    {
-                        map.insert(cmp::Reverse(round), group.collect());
-                    }
-                    map
-                }
-            });
-            match task.await {
-                Ok(result) => result,
-                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                Err(e) => panic!("preload last rounds on init: {e}"),
-            }
+        if dag_bottom_round <= last_db_round {
+            tracing::info!(
+                parent: round_ctx.span(),
+                dag_bottom_round = dag_bottom_round.0,
+                last_db_round = last_db_round.0,
+                dag_top_round = dag_top_round.0,
+                "will restore points from DB",
+            );
+            let range = RangeInclusive::new(dag_bottom_round, last_db_round);
+            self.preload_points(range, &round_ctx).await;
         } else {
-            Default::default()
+            tracing::info!(
+                parent: round_ctx.span(),
+                last_db_round = last_db_round.0,
+                dag_bottom_round = dag_bottom_round.0,
+                dag_top_round = dag_top_round.0,
+                "will not restore points from DB",
+            );
         };
 
-        let mut dag_restore = FuturesUnordered::new();
-        let mut broadcasts = Vec::new();
-        for (cmp::Reverse(round), infos) in preloaded_ids {
+        // to repeat broadcasts from two last determined consensus rounds
+        // in case DB was deleted and point received - find and use it
+
+        let mut last_broadcast = None;
+        // also last 3 rounds is enough to create point at last round with all witness deps
+        let head_min_round = dag_top_round.prev().prev(); // 3 DagHead rounds inclusive
+        for round in (head_min_round.0..=dag_top_round.0).map(Round) {
             let dag_round = self.dag.top().scan(round).expect("must exist");
-            for info in &infos {
-                dag_round.add_evicted_broadcast_exact(
-                    &info.data().author,
-                    info.digest(),
+            let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
+            let first_valid = keys
+                .to_produce
+                .as_deref()
+                .map(|k| PeerId::from(k.public_key))
+                .and_then(|local_id| dag_round.view(&local_id, |loc| loc.first_valid()))
+                .flatten()
+                .and_then(|dag_point_fut| dag_point_fut.now_or_never())
+                .map(|dag_point| dag_point.id());
+            if let Some(last_id) = first_valid {
+                tracing::info!(
+                    parent: round_ctx.span(),
+                    "found stored broadcast {:?}", last_id.alt()
+                );
+                last_broadcast = Some(last_id);
+            }
+        }
+
+        // determine current round to place broadcasts
+        let (new_top_round, replay_bcasts) = match last_broadcast {
+            None => (dag_top_round, None),
+            Some(last_id) if last_id.round == head_min_round => {
+                // do not repeat such bcast @ r+0 because
+                // * collected evidence are not stored so cannot produce point @ r+1
+                // * not need to produce point @ r+1 because consensus moved to r+2
+                (dag_top_round.next(), None)
+            }
+            Some(last_id) => {
+                let task = tokio::task::spawn_blocking({
+                    let store = self.round_task.state.store.clone();
+                    move || {
+                        let last = store
+                            .get_point(last_id.round, &last_id.digest)
+                            .expect("last bcast by id");
+                        let prev = last.prev_id().map(|id| {
+                            store
+                                .get_point(id.round, &id.digest)
+                                .expect("prev bcast by id")
+                        });
+                        (last, prev)
+                    }
+                });
+                // if there's a broadcast at two last DB rounds - then it's round will be current
+                match task.await {
+                    Ok((last, prev)) => (last.round().next(), Some((last, prev))),
+                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                    Err(e) => {
+                        let _span = round_ctx.span().enter();
+                        panic!("loading broadcasts on init: {e}")
+                    }
+                }
+            }
+        };
+        self.round_task.state.consensus_round.set_max(new_top_round);
+
+        replay_bcasts
+    }
+
+    async fn preload_points(&self, range: RangeInclusive<Round>, round_ctx: &RoundCtx) {
+        let task = tokio::task::spawn_blocking({
+            let store = self.round_task.state.store.clone();
+            let peer_schedule = self.round_task.state.peer_schedule.clone();
+            let round_ctx = round_ctx.clone();
+            move || {
+                let _guard = round_ctx.span().enter();
+                let restores = store.load_restore(&range);
+                let (need_verify, ready): (Vec<_>, Vec<_>) =
+                    restores.into_iter().partition_map(|r| match r {
+                        PointRestoreSelect::NeedsVerify(round, digest) => {
+                            Either::Left((round, digest))
+                        }
+                        PointRestoreSelect::Ready(ready) => Either::Right(ready),
+                    });
+                let verified = need_verify
+                    .chunks(1000) // seems enough for any case
+                    .flat_map(|keys| {
+                        use rayon::iter::ParallelIterator;
+                        store
+                            .multi_get_points(keys) // assume load result is sorted
+                            .par_iter()
+                            .map(|point| {
+                                let is_ok = point.verify_hash().is_ok()
+                                    && Verifier::verify(point, &peer_schedule).is_ok();
+                                if is_ok {
+                                    // return back as they were, now with prev_proof filled
+                                    PointRestore::Exists(point.into(), point.prev_proof())
+                                } else {
+                                    PointRestore::IllFormed(point.id(), Default::default())
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    });
+
+                let mut map = BTreeMap::<(Round, _), Vec<PointRestore>>::new();
+                let by_round_ordered = verified
+                    .chain(ready)
+                    .group_by(|pre| (pre.round(), pre.restore_order_asc()));
+                for (key, group) in &by_round_ordered {
+                    map.insert(key, group.collect());
+                }
+                map
+            }
+        });
+        let preloaded = match task.await {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => {
+                let _span = round_ctx.span().enter();
+                panic!("preload last rounds on init: {e}");
+            }
+        };
+
+        for ((round, _), point_restores) in preloaded {
+            let dag_round = self.dag.top().scan(round).expect("must exist");
+            let dag_restore = FuturesUnordered::new();
+            for point_restore in point_restores {
+                dag_restore.push(dag_round.restore(
+                    point_restore,
                     &self.round_task.state.downloader,
                     &self.round_task.state.store,
-                    &round_ctx,
-                );
+                    round_ctx,
+                ));
             }
-
-            _ = dag_round.select(|(_, loc)| {
-                // each restore future is eager, as it has a spawned task inside
-                dag_restore.extend(loc.versions.values().cloned());
-                None::<()>
-            });
-
-            // to repeat broadcasts from two last determined consensus rounds
-            if round >= last_db_round.prev() {
-                let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
-                let mut found = keys
-                    .to_produce
-                    .as_deref()
-                    .map(|k| PeerId::from(k.public_key))
-                    .iter()
-                    .flat_map(|local_id| {
-                        infos
-                            .iter()
-                            .filter(|info| info.data().author == *local_id)
-                            .map(|info| info.id())
-                    })
-                    .collect::<Vec<_>>();
-                assert!(
-                    found.len() <= 1,
-                    "created non-unique broadcasts at {round:?}: {found:?}"
-                );
-                if let Some(id) = found.pop() {
-                    broadcasts.push(id);
-                }
-            }
+            dag_restore.collect::<Vec<DagPoint>>().await;
         }
-
-        broadcasts.sort_unstable_by_key(|a| cmp::Reverse(a.round));
-        let replay_bcasts_ids = match broadcasts.as_slice() {
-            [last] if last.round >= consensus_round.prev() => Some((*last, None)),
-            [last, prev] if prev.round >= consensus_round.prev() => Some((*last, Some(*prev))),
-            [] => None,
-            _ => unreachable!(
-                "need only 2 last broadcasts up to {consensus_round:?}, got {:?}",
-                broadcasts.iter().map(|id| id.alt()).collect::<Vec<_>>()
-            ),
-        };
-
-        let replay_bcasts = if let Some((last_bcast, prev_bcast)) = replay_bcasts_ids {
-            // if there's a broadcast at last DB round - then it's round will be current for Engine
-            let task = tokio::task::spawn_blocking({
-                let store = self.round_task.state.store.clone();
-                move || {
-                    let last = store
-                        .get_point(last_bcast.round, &last_bcast.digest)
-                        .expect("last bcast by id");
-                    if let Some(prev_id) = prev_bcast.as_ref() {
-                        assert_eq!(
-                            last.data().prev_digest(),
-                            Some(&prev_id.digest),
-                            "broadcasted ids mismatch: last {:?} has proof for {:?} but found prev {:?}",
-                            last.id().alt(),
-                            last.prev_id().as_ref().map(|id| id.alt()),
-                            prev_id.alt()
-                        );
-                    };
-                    let prev = prev_bcast.map(|id| {
-                        store
-                            .get_point(id.round, &id.digest)
-                            .expect("prev bcast by id")
-                    });
-                    Some((last, prev))
-                }
-            });
-            match task.await {
-                Ok(result) => result,
-                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                Err(e) => panic!("loading broadcasts on init: {e}"),
-            }
-        } else {
-            None
-        };
-
-        while !dag_restore.is_empty() {
-            _ = dag_restore.next().await;
-        }
-        // last broadcast may belong to any of the last 2 dag rounds
-        replay_bcasts
     }
 
     pub async fn run(mut self) {
@@ -375,18 +408,17 @@ impl Engine {
                 let old_dag_top_round = self.dag.top().round();
 
                 let next_round = if let Some((start_point, _)) = &replay_bcasts {
-                    assert!(
-                        start_point.round() == old_dag_top_round
-                            || start_point.round() == old_dag_top_round.prev(),
-                        "can repeat broadcast only from last two dag rounds, \
-                         top {old_dag_top_round:?}, {:?}",
-                        start_point.id().alt()
+                    let consensus_round = self.round_task.state.consensus_round.get();
+                    let new_top_round = consensus_round.max(old_dag_top_round);
+                    assert_eq!(
+                        start_point.round(),
+                        new_top_round.prev(),
+                        "start point must be at current round"
                     );
-                    // start point must be at current round
-                    start_point.round().next().max(old_dag_top_round)
+                    new_top_round
                 } else {
                     // do not repeat the `get()` - it can give non-reproducible result
-                    let consensus_round = self.consensus_round.get();
+                    let consensus_round = self.round_task.state.consensus_round.get();
                     assert!(
                         old_dag_top_round <= consensus_round,
                         "consensus round {} cannot be less than old top dag round {}",
@@ -459,7 +491,7 @@ impl Engine {
             let own_point_fut = match replay_bcasts.take() {
                 Some((point, prev_bcast)) => {
                     if let Some(prev) = prev_bcast {
-                        self.round_task.init_prev_broadcast(prev, round_ctx.clone());
+                        self.round_task.init_prev_broadcast(prev, &round_ctx);
                     }
                     future::ready(Some(point)).boxed()
                 }
