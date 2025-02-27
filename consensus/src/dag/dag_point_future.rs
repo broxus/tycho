@@ -8,7 +8,7 @@ use future::Either;
 use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
@@ -33,11 +33,8 @@ impl Future for DagPointFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
             DagPointFutureType::Validate { task, .. }
-            | DagPointFutureType::Download { task, .. } => match task.poll_unpin(cx) {
-                Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
-                Poll::Pending => Poll::Pending,
-            },
-            DagPointFutureType::Store(task) => match task.poll_unpin(cx) {
+            | DagPointFutureType::Download { task, .. }
+            | DagPointFutureType::Simple(task) => match task.poll_unpin(cx) {
                 Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
                 Poll::Pending => Poll::Pending,
             },
@@ -48,19 +45,19 @@ impl Future for DagPointFuture {
 #[derive(Clone)]
 enum DagPointFutureType {
     Validate {
-        task: Shared<JoinTask<DagPoint>>,
+        task: Shared<BoxFuture<'static, DagPoint>>,
         // normally, if we are among the last nodes to validate some broadcast point,
         // we can receive its proof from author, check its signatures and skip validation of the vertex and its deps
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
     },
     Download {
-        task: Shared<JoinTask<DagPoint>>,
+        task: Shared<BoxFuture<'static, DagPoint>>,
         // this could be a `Notify`, but both sender and receiver must be used only once
         certified: Arc<OnceTake<oneshot::Sender<()>>>,
         dependers_tx: mpsc::UnboundedSender<PeerId>,
         resolve: Arc<OnceTake<oneshot::Sender<DownloadResult>>>,
     },
-    Store(Shared<BoxFuture<'static, DagPoint>>),
+    Simple(Shared<BoxFuture<'static, DagPoint>>),
 }
 
 impl DagPointFuture {
@@ -106,7 +103,7 @@ impl DagPointFuture {
         };
         let boxed = Self::box_blocking(handle, point, round_ctx, "new_local_valid()");
 
-        Self(DagPointFutureType::Store(Shared::new(boxed)))
+        Self(DagPointFutureType::Simple(Shared::new(boxed)))
     }
 
     pub fn new_ill_formed_broadcast(
@@ -139,7 +136,7 @@ impl DagPointFuture {
         };
         let boxed = Self::box_blocking(handle, point, round_ctx, "new_ill_formed_broadcast()");
 
-        Self(DagPointFutureType::Store(Shared::new(boxed)))
+        Self(DagPointFutureType::Simple(Shared::new(boxed)))
     }
 
     fn box_blocking(
@@ -191,14 +188,15 @@ impl DagPointFuture {
 
         let (certified_tx, certified_rx) = oneshot::channel();
 
-        let task = async move {
+        #[allow(clippy::async_yields_async, reason = "spawn blocking task in async")]
+        let future = async move {
             let point_id = point.id();
             let prev_proof = point.prev_proof();
             let stored_fut = tokio::task::spawn_blocking({
                 let store = store.clone();
                 move || store.insert_point(&point, PointStatusStoredRef::Exists)
             });
-            let validated_fut = Verifier::validate(
+            let validated = Verifier::validate(
                 info.clone(),
                 prev_proof,
                 point_dag_round,
@@ -206,25 +204,21 @@ impl DagPointFuture {
                 store.clone(),
                 certified_rx,
                 validate_ctx,
-            );
-            // do not abort store if not valid
-            let validated = match tokio::join!(stored_fut, validated_fut) {
-                (Ok(_), validated) => validated,
-                (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-                (Err(e), _) => panic!("store point was cancelled: {e:?}"),
-            };
+            )
+            .await;
+            unwrap_blocking(stored_fut.await);
             let (dag_point, status) = Self::acquire_validated(&state, info, validated);
             tokio::task::spawn_blocking(move || {
                 store.set_status(point_id.round, &point_id.digest, status.as_ref());
                 state.resolve(&dag_point);
                 dag_point
             })
-            .await
-            .expect("db set point status")
         };
 
+        let nested = JoinTask::new(future.instrument(round_ctx.span().clone()));
+
         DagPointFuture(DagPointFutureType::Validate {
-            task: Shared::new(JoinTask::new(task.instrument(round_ctx.span().clone()))),
+            task: Shared::new((async move { unwrap_blocking(nested.await.await) }).boxed()),
             certified: Arc::new(OnceTake::new(certified_tx)),
         })
     }
@@ -264,57 +258,26 @@ impl DagPointFuture {
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let (certified_tx, certified_rx) = oneshot::channel();
 
-        let task = async move {
-            let validate_or_ready = {
-                let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
-                let store = store.clone();
-                let downloaded = downloader
-                    .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
-                    .await;
-                match downloaded {
-                    Some(DownloadResult::Verified(point)) => {
-                        let info = PointInfo::from(&point);
-                        let prev_prof = point.prev_proof();
-                        let storage_fut = tokio::task::spawn_blocking(move || {
+        #[allow(clippy::async_yields_async, reason = "spawn blocking task in async")]
+        let future = async move {
+            let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
+            let store = store.clone();
+            let downloaded = downloader
+                .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
+                .await;
+            match downloaded {
+                Some(DownloadResult::Verified(point)) => {
+                    let info = PointInfo::from(&point);
+                    let prev_proof = point.prev_proof();
+                    let storage_task = tokio::task::spawn_blocking({
+                        let store = store.clone();
+                        move || {
                             store.insert_point(&point, PointStatusStoredRef::Exists);
-                        });
-                        Either::Left((info, prev_prof, storage_fut))
-                    }
-                    Some(DownloadResult::IllFormed(point, reason)) => {
-                        let mut status = PointStatusIllFormed::default();
-                        state.acquire(&point_id, &mut status);
-                        let dag_point = DagPoint::new_ill_formed(point.id(), &status, reason);
-                        let storage_fut = tokio::task::spawn_blocking(move || {
-                            store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
-                        });
-                        Either::Right((dag_point, storage_fut))
-                    }
-                    None => {
-                        let mut status = PointStatusNotFound {
-                            is_first_resolved: false,
-                            is_certified: false,
-                            author: point_id.author,
-                        };
-                        state.acquire(&point_id, &mut status);
-                        let dag_point =
-                            DagPoint::new_not_found(point_id.round, &point_id.digest, &status);
-                        let storage_fut = tokio::task::spawn_blocking(move || {
-                            store.set_status(
-                                point_id.round,
-                                &point_id.digest,
-                                PointStatusStoredRef::NotFound(&status),
-                            );
-                        });
-                        Either::Right((dag_point, storage_fut))
-                    }
-                }
-            };
-
-            match validate_or_ready {
-                Either::Left((verified, prev_proof, storage_fut)) => {
-                    let validate_ctx = ValidateCtx::new(&into_round_ctx, &verified);
+                        }
+                    });
+                    let validate_ctx = ValidateCtx::new(&into_round_ctx, &info);
                     let validated = Verifier::validate(
-                        verified.clone(),
+                        info.clone(),
                         prev_proof,
                         point_dag_round,
                         downloader,
@@ -323,26 +286,53 @@ impl DagPointFuture {
                         validate_ctx,
                     )
                     .await;
-                    let (dag_point, status) = Self::acquire_validated(&state, verified, validated);
-                    storage_fut.await.expect("spawned store point");
+                    unwrap_blocking(storage_task.await);
+                    let (dag_point, status) =
+                        Self::acquire_validated(&state, info.clone(), validated);
                     tokio::task::spawn_blocking(move || {
+                        let _guard = into_round_ctx.span().enter();
                         store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
                         state.resolve(&dag_point);
                         dag_point
                     })
-                    .await
-                    .expect("spawned update point status")
                 }
-                Either::Right((dag_point, storage_fut)) => {
-                    storage_fut.await.expect("spawned store point");
-                    state.resolve(&dag_point);
-                    dag_point
+                Some(DownloadResult::IllFormed(point, reason)) => {
+                    let mut status = PointStatusIllFormed::default();
+                    state.acquire(&point_id, &mut status);
+                    let dag_point = DagPoint::new_ill_formed(point.id(), &status, reason);
+                    tokio::task::spawn_blocking(move || {
+                        let _guard = into_round_ctx.span().enter();
+                        store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
+                        state.resolve(&dag_point);
+                        dag_point
+                    })
+                }
+                None => {
+                    let mut status = PointStatusNotFound {
+                        is_first_resolved: false,
+                        is_certified: false,
+                        author: point_id.author,
+                    };
+                    state.acquire(&point_id, &mut status);
+                    let dag_point =
+                        DagPoint::new_not_found(point_id.round, &point_id.digest, &status);
+                    tokio::task::spawn_blocking(move || {
+                        let _guard = into_round_ctx.span().enter();
+                        store.set_status(
+                            point_id.round,
+                            &point_id.digest,
+                            PointStatusStoredRef::NotFound(&status),
+                        );
+                        state.resolve(&dag_point);
+                        dag_point
+                    })
                 }
             }
         };
+        let nested = JoinTask::new(future.instrument(span));
 
         DagPointFuture(DagPointFutureType::Download {
-            task: Shared::new(JoinTask::new(task.instrument(span))),
+            task: Shared::new((async move { unwrap_blocking(nested.await.await) }).boxed()),
             certified: Arc::new(OnceTake::new(certified_tx)),
             dependers_tx,
             resolve: Arc::new(OnceTake::new(broadcast_tx)),
@@ -357,15 +347,6 @@ impl DagPointFuture {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
-        let point_dag_round = point_dag_round.downgrade();
-        let state = state.clone();
-        let downloader = downloader.clone();
-        let store = store.clone();
-        let span = round_ctx.span().clone();
-        let round_ctx = round_ctx.clone();
-
-        let (certified_tx, certified_rx) = oneshot::channel();
-
         // keep this section sync so that call site may not wait for each result to resolve
         let validate_or_restore = match point_restore {
             PointRestore::Exists(info, prev_proof) => Either::Left((info, prev_proof)),
@@ -392,9 +373,18 @@ impl DagPointFuture {
             }
         };
 
-        let task = async move {
-            let dag_point = match validate_or_restore {
-                Either::Left((verified, prev_proof)) => {
+        match validate_or_restore {
+            Either::Left((verified, prev_proof)) => {
+                let point_dag_round = point_dag_round.downgrade();
+                let state = state.clone();
+                let downloader = downloader.clone();
+                let store = store.clone();
+                let round_ctx = round_ctx.clone();
+
+                let (certified_tx, certified_rx) = oneshot::channel();
+
+                #[allow(clippy::async_yields_async, reason = "spawn blocking task in async")]
+                let future = async move {
                     let validate_ctx = ValidateCtx::new(&round_ctx, &verified);
                     let validated = Verifier::validate(
                         verified.clone(),
@@ -408,22 +398,25 @@ impl DagPointFuture {
                     .await;
                     let (dag_point, status) = Self::acquire_validated(&state, verified, validated);
                     tokio::task::spawn_blocking(move || {
+                        let _guard = round_ctx.span().enter();
                         store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
+                        state.resolve(&dag_point);
                         dag_point
                     })
-                    .await
-                    .expect("spawned update point status")
-                }
-                Either::Right(dag_point) => dag_point,
-            };
-            state.resolve(&dag_point);
-            dag_point
-        };
-
-        DagPointFuture(DagPointFutureType::Validate {
-            task: Shared::new(JoinTask::new(task.instrument(span))),
-            certified: Arc::new(OnceTake::new(certified_tx)),
-        })
+                };
+                let lazy =
+                    (async move { unwrap_blocking(JoinTask::new(future).await.await) }).boxed();
+                DagPointFuture(DagPointFutureType::Validate {
+                    task: Shared::new(lazy),
+                    certified: Arc::new(OnceTake::new(certified_tx)),
+                })
+            }
+            Either::Right(dag_point) => {
+                state.resolve(&dag_point);
+                let ready = future::ready(dag_point).boxed();
+                DagPointFuture(DagPointFutureType::Simple(Shared::new(ready)))
+            }
+        }
     }
 
     fn acquire_validated(
@@ -489,5 +482,13 @@ impl DagPointFuture {
                 _ = oneshot.send(());
             }
         }
+    }
+}
+
+fn unwrap_blocking<T>(result: Result<T, JoinError>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => panic!("blocking thread error: {e}"), // do not hang for some time
     }
 }
