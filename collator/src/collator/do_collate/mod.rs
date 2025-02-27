@@ -14,6 +14,7 @@ use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
@@ -25,6 +26,7 @@ use super::types::{
 };
 use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
+use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::types::RandSeed;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
@@ -77,6 +79,7 @@ impl CollatorStdImpl {
             ..
         } = *working_state;
 
+        let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
@@ -116,15 +119,11 @@ impl CollatorStdImpl {
             mc_data,
             prev_shard_data,
             shard_id: self.shard_id,
+            collation_is_cancelled: CancellationFlag::new(),
         });
+        let collation_is_cancelled = state.collation_is_cancelled.clone();
 
-        let CollationResult {
-            finalized,
-            reader_state,
-            anchors_cache,
-            execute_result,
-            final_result,
-        } = tycho_util::sync::rayon_run_fifo({
+        let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
             let mq_adapter = self.mq_adapter.clone();
@@ -143,8 +142,42 @@ impl CollatorStdImpl {
                     usage_tree,
                 )
             }
-        })
-        .await?;
+        });
+
+        let collation_cancelled = self.cancel_collation.notified();
+
+        let mut do_collate_res = None;
+        tokio::select! {
+            res = do_collate_fut => {
+                do_collate_res =  Some(res);
+            },
+            _ = async move {
+                collation_cancelled.await;
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was cancelled by manager on do_collate",
+                );
+                collation_is_cancelled.cancel();
+                std::future::pending::<()>().await;
+            } => {}
+        }
+        let do_collate_res = do_collate_res.unwrap();
+
+        let CollationResult {
+            finalized,
+            reader_state,
+            anchors_cache,
+            execute_result,
+            final_result,
+        } = match do_collate_res {
+            Err(CollatorError::Cancelled(reason)) => {
+                // cancel collation
+                self.listener
+                    .on_cancelled(mc_block_id, next_block_id_short, reason)
+                    .await?;
+                return Ok(());
+            }
+            res => res?,
+        };
 
         self.anchors_cache = anchors_cache;
 
@@ -233,10 +266,12 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
-    ) -> Result<CollationResult> {
+    ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
+
+        let collation_is_cancelled = state.collation_is_cancelled.clone();
 
         // prepare execution
         let histogram_prepare =
@@ -345,6 +380,13 @@ impl CollatorStdImpl {
             &mc_data.shards,
             &mc_data.shards_processed_to,
         );
+
+        // exit collation if cancelled and do not trim diffs
+        if collation_is_cancelled.check() {
+            return Err(CollatorError::Cancelled(
+                CollationCancelReason::ExternalCancel,
+            ));
+        }
 
         // trim outdated diffs and calc queue diffs tail lenght
         if let Some(value) = min_processed_to {

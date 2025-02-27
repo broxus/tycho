@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use everscale_types::models::GlobalCapability;
 use ton_executor::{ExecuteParams, PreloadedBlockchainConfig};
 
@@ -8,9 +8,11 @@ use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
 use crate::collator::do_collate::phase::ActualState;
+use crate::collator::error::CollatorError;
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{MessagesReader, MessagesReaderContext, ReaderState};
 use crate::collator::types::AnchorsCache;
+use crate::collator::CollationCancelReason;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -40,7 +42,7 @@ impl Phase<PrepareState> {
         }
     }
 
-    pub fn run(self) -> Result<Phase<ExecuteState>> {
+    pub fn run(self) -> Result<Phase<ExecuteState>, CollatorError> {
         // log initial processed upto
         tracing::debug!(target: tracing_targets::COLLATOR,
             "initial processed_upto = {:?}",
@@ -48,10 +50,13 @@ impl Phase<PrepareState> {
         );
 
         // init executor
-        let preloaded_bc_config = Arc::new(PreloadedBlockchainConfig::with_config(
-            self.state.mc_data.config.clone(),
-            self.state.mc_data.global_id,
-        )?);
+        let preloaded_bc_config = Arc::new(
+            PreloadedBlockchainConfig::with_config(
+                self.state.mc_data.config.clone(),
+                self.state.mc_data.global_id,
+            )
+            .map_err(|e| anyhow!(e))?,
+        );
         let block_version = preloaded_bc_config.global_version().version;
         let signature_with_id = if preloaded_bc_config
             .global_version()
@@ -131,10 +136,20 @@ impl Phase<PrepareState> {
             // metrics - refill is running
             metrics::gauge!("tycho_collator_refill_messages_is_running", &labels).set(1);
 
-            messages_reader.refill_buffers_upto_offsets()?;
+            let mut collation_is_cancelled_debounce = self.state.collation_is_cancelled.debounce(5);
+
+            messages_reader
+                .refill_buffers_upto_offsets(|| collation_is_cancelled_debounce.check())?;
 
             // metrics - refill finished
             metrics::gauge!("tycho_collator_refill_messages_is_running", &labels).set(0);
+
+            // exit collation if cancelled
+            if collation_is_cancelled_debounce.check() {
+                return Err(CollatorError::Cancelled(
+                    CollationCancelReason::ExternalCancel,
+                ));
+            }
         }
 
         Ok(Phase::<ExecuteState> {

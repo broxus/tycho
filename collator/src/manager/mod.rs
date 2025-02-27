@@ -571,7 +571,8 @@ where
         match cancel_reason {
             CollationCancelReason::AnchorNotFound(_)
             | CollationCancelReason::NextAnchorNotFound(_)
-            | CollationCancelReason::ExternalCancel => {
+            | CollationCancelReason::ExternalCancel
+            | CollationCancelReason::DiffNotFoundInQueue(_) => {
                 // sync cache and collator state access
                 self.ready_to_sync.notified().await;
                 scopeguard::defer!(self.ready_to_sync.notify_one());
@@ -1285,7 +1286,7 @@ where
                             ac.state == CollatorState::Active
                                 || ac.state == CollatorState::CancelPending
                         }) {
-                            active_collator.cancel_collation.notify_waiters();
+                            active_collator.cancel_collation.notify_one();
                         }
                     }
 

@@ -630,7 +630,7 @@ where
     #[tracing::instrument(skip_all)]
     fn refill_secondary(secondary_messages_reader: &mut MessagesReader<V>) -> Result<()> {
         if secondary_messages_reader.check_need_refill() {
-            secondary_messages_reader.refill_buffers_upto_offsets()?;
+            secondary_messages_reader.refill_buffers_upto_offsets(|| false)?;
         }
         Ok(())
     }
