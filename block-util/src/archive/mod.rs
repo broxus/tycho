@@ -6,6 +6,7 @@
 //!  * Archive entry data
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -90,19 +91,39 @@ impl Archive {
         }
     }
 
-    // TODO: Make async
-    pub fn get_entry_by_id(
-        &self,
+    /// NOTE: Takes up to a magnitude of seconds to run on large blocks.
+    pub async fn get_entry_by_id(
+        self: &Arc<Self>,
         id: &BlockId,
     ) -> Result<(BlockStuffAug, BlockProofStuffAug, QueueDiffStuffAug), ArchiveError> {
-        // TODO: Rayon go brr
-        let block = self.get_block_by_id(id)?;
-        let proof = self.get_proof_by_id(id)?;
-        let queue_diff = self.get_queue_diff_by_id(id)?;
+        let this = self.clone();
+        let id = *id;
 
-        Ok((block, proof, queue_diff))
+        let (block, proof, queue_diff) = tycho_util::sync::rayon_run(move || {
+            let mut block_res = None;
+            let mut proof_res = None;
+            let mut diff_res = None;
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    proof_res = Some(this.get_proof_by_id(&id));
+                    diff_res = Some(this.get_queue_diff_by_id(&id));
+                });
+
+                block_res = Some(this.get_block_by_id(&id));
+            });
+
+            (
+                block_res.expect("scope must finish"),
+                proof_res.expect("scope must finish"),
+                diff_res.expect("scope must finish"),
+            )
+        })
+        .await;
+
+        Ok((block?, proof?, queue_diff?))
     }
 
+    /// NOTE: Takes up to a magnitude of seconds to run on large blocks.
     pub fn get_block_by_id(&self, id: &BlockId) -> Result<BlockStuffAug, ArchiveError> {
         let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
         entry

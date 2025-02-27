@@ -66,6 +66,8 @@ function ensure_exists() {
 
     echo "[$1]: Downloading checksum file..."
     curl --request GET -sL --url "${checksum_url}" --output "${checksum_path}"
+    # Rename file in checksum to match the custom name
+    sed -i -e "s/$1/$2/g" "${checksum_path}"
 
     # Check if file exists
     if [ -f "$file_path" ]; then

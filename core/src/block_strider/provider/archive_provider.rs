@@ -125,11 +125,11 @@ impl ArchiveBlockProvider {
 
     async fn checked_get_entry_by_id(
         &self,
-        archive: &Archive,
+        archive: &Arc<Archive>,
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<BlockStuffAug> {
-        let (block, ref proof, ref queue_diff) = match archive.get_entry_by_id(block_id) {
+        let (block, ref proof, ref queue_diff) = match archive.get_entry_by_id(block_id).await {
             Ok(entry) => entry,
             Err(e) => anyhow::bail!("archive is corrupted: {e:?}"),
         };
