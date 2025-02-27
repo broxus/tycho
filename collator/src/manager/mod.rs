@@ -485,7 +485,7 @@ where
             )
         }
 
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "message queue diff was committed",
         );
 
@@ -520,7 +520,7 @@ where
         // skip diff below min processed to
         if let Some(min_pt) = min_processed_to {
             if queue_diff.as_ref().max_message <= *min_pt {
-                tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     "Skipping diff for block {}: max_message {} <= min_processed_to {}",
                     block_entry.block_id.as_short_id(),
                     queue_diff.as_ref().max_message,
@@ -564,7 +564,7 @@ where
         next_block_id_short: BlockIdShort,
         cancel_reason: CollationCancelReason,
     ) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             ?cancel_reason,
             "start handle collation cancelled",
         );
@@ -586,7 +586,7 @@ where
                     ac.state == CollatorState::Active || ac.state == CollatorState::CancelPending
                 });
                 if !has_active {
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         "no active collators in shards and masterchain, \
                         will run sync to last applied mc block",
                     );
@@ -791,12 +791,13 @@ where
         let collator_cancelled = updated_collator_state == Some(CollatorState::Cancelled);
 
         let store_res = if collator_cancelled {
-            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 shard_id = %block_id.shard,
                 "collator was cancelled before",
             );
 
             self.mq_adapter.clear_uncommitted_state()?;
+
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
                 .get_last_collated_block_and_applied_mc_queue_range();
@@ -808,7 +809,7 @@ where
                 applied_mc_queue_range,
             };
 
-            tracing::debug!(
+            tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
                 "block candidate was not saved to cache",
@@ -843,13 +844,19 @@ where
                 }
 
                 self.mq_adapter.clear_uncommitted_state()?;
-            }
 
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                ?store_res,
-                "saved block candidate to cache",
-            );
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    ?store_res,
+                    "saved block candidate to cache",
+                );
+            } else {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    ?store_res,
+                    "saved block candidate to cache",
+                );
+            }
 
             store_res
         };
@@ -972,7 +979,7 @@ where
                 .await?;
             } else {
                 // cancel further collation of blocks in the current shard because we need to sync
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     "sync_to_applied_mc_block: mark shard collator Cancelled for shard",
                 );
 
@@ -1177,12 +1184,17 @@ where
             }
 
             self.mq_adapter.clear_uncommitted_state()?;
-        }
 
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            ?store_res,
-            "saved block from bc to cache",
-        );
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                ?store_res,
+                "saved block from bc to cache",
+            );
+        } else {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                ?store_res,
+                "saved block from bc to cache",
+            );
+        }
 
         if !block_id.is_masterchain() {
             return Ok(());
@@ -1410,7 +1422,7 @@ where
                 .blocks_cache
                 .get_consensus_info_for_mc_block(&last_applied_mc_block_key)?;
             if (mp_cfg_override.genesis_info).overrides(&last_consesus_info.genesis_info) {
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     prev_genesis_start_round = last_consesus_info.genesis_info.start_round,
                     prev_genesis_time_millis = last_consesus_info.genesis_info.genesis_millis,
                     new_genesis_start_round = mp_cfg_override.genesis_info.start_round,
