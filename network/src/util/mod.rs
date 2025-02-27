@@ -4,7 +4,9 @@ pub use self::router::{Routable, Router, RouterBuilder};
 #[cfg(test)]
 pub use self::test::make_peer_info_stub;
 pub use self::traits::{NetworkExt, UnknownPeerError};
+use crate::proto::overlay::{PublicEntry, PublicEntryToSign};
 use crate::types::PeerId;
+use crate::{Network, OverlayId};
 
 mod router;
 mod traits;
@@ -77,4 +79,22 @@ where
 
     let constructor = std::convert::identity(body).get_u32_le();
     Ok((constructor, &body[4..]))
+}
+
+pub fn make_local_public_overlay_entry(
+    local_id: PeerId,
+    network: &Network,
+    overlay_id: &OverlayId,
+    now: u32,
+) -> PublicEntry {
+    let signature = Box::new(network.sign_tl(PublicEntryToSign {
+        overlay_id: overlay_id.as_bytes(),
+        peer_id: &local_id,
+        created_at: now,
+    }));
+    PublicEntry {
+        peer_id: local_id,
+        created_at: now,
+        signature,
+    }
 }

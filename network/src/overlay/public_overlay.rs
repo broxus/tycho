@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -10,7 +10,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use rand::Rng;
 use tokio::sync::Notify;
 use tycho_util::futures::BoxFutureOrNoop;
-use tycho_util::{FastDashSet, FastHasherState};
+use tycho_util::{FastDashMap, FastDashSet, FastHasherState};
 
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
@@ -98,8 +98,10 @@ impl PublicOverlayBuilder {
                 entries_added: Notify::new(),
                 entries_changed: Notify::new(),
                 entries_removed: Notify::new(),
+                unknown_peer_added: Notify::new(),
                 entry_count: AtomicUsize::new(0),
                 banned_peer_ids: self.banned_peer_ids,
+                unknown_peer_ids: FastDashMap::default(),
                 service: service.boxed(),
                 request_prefix: request_prefix.into_boxed_slice(),
                 metrics: self
@@ -178,6 +180,44 @@ impl PublicOverlay {
         self.inner.banned_peer_ids.remove(peer_id).is_some()
     }
 
+    pub fn add_unknown_peer(&self, peer_id: &PeerId) {
+        let now = Instant::now();
+
+        let count = self
+            .inner
+            .unknown_peer_ids
+            .entry(*peer_id)
+            .and_modify(|entry| {
+                entry.count += 1;
+                entry.last_update = now;
+            })
+            .or_insert(UnknownPeerEntry {
+                count: 1,
+                last_update: now,
+            })
+            .count;
+
+        // TODO: move to config
+        const REQUESTS_THRESHOLD: u32 = 20;
+
+        if count > REQUESTS_THRESHOLD {
+            self.inner.unknown_peer_added.notify_waiters();
+        }
+    }
+
+    pub fn remove_unknown_peer(&self, peer_id: &PeerId) {
+        self.inner.unknown_peer_ids.remove(peer_id);
+    }
+
+    pub fn cleanup_unknown_peers(&self) {
+        // TODO: move to config
+        let timeout = Duration::from_secs(300);
+
+        self.inner
+            .unknown_peer_ids
+            .retain(|_, entry| entry.last_update.elapsed() < timeout);
+    }
+
     pub fn read_entries(&self) -> PublicOverlayEntriesReadGuard<'_> {
         PublicOverlayEntriesReadGuard {
             entries: self.inner.entries.read(),
@@ -194,13 +234,36 @@ impl PublicOverlay {
         &self.inner.entries_changed
     }
 
+    /// Notifies when entries are removed from the overlay.
     pub fn entries_removed(&self) -> &Notify {
         &self.inner.entries_removed
+    }
+
+    /// Notifies when unknown peer made enough requests.
+    pub fn unknown_peer_added(&self) -> &Notify {
+        &self.inner.unknown_peer_added
+    }
+
+    pub fn unknown_peer_ids(&self) -> Vec<PeerId> {
+        // TODO: move to config
+        const REQUESTS_THRESHOLD: u32 = 20;
+
+        self.inner
+            .unknown_peer_ids
+            .iter()
+            .filter(|x| x.count > REQUESTS_THRESHOLD)
+            .map(|x| *x.key())
+            .collect::<Vec<_>>()
     }
 
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
         self.inner.metrics.record_rx(req.body.len());
         if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
+            //
+            if !self.read_entries().contains(&req.metadata.peer_id) {
+                self.add_unknown_peer(&req.metadata.peer_id);
+            }
+
             // TODO: add peer from metadata to the overlay
             BoxFutureOrNoop::future(self.inner.service.on_query(req))
         } else {
@@ -221,7 +284,7 @@ impl PublicOverlay {
     /// Adds the given entries to the overlay.
     ///
     /// NOTE: Will deadlock if called while `PublicOverlayEntriesReadGuard` is held.
-    pub(crate) fn add_untrusted_entries(
+    pub fn add_untrusted_entries(
         &self,
         local_id: &PeerId,
         entries: &[Arc<PublicEntry>],
@@ -379,7 +442,9 @@ struct Inner {
     entries_added: Notify,
     entries_changed: Notify,
     entries_removed: Notify,
+    unknown_peer_added: Notify,
     banned_peer_ids: FastDashSet<PeerId>,
+    unknown_peer_ids: FastDashMap<PeerId, UnknownPeerEntry>,
     service: BoxService<ServiceRequest, Response>,
     request_prefix: Box<[u8]>,
     metrics: Metrics,
@@ -560,6 +625,11 @@ impl ExactSizeIterator for ChooseMultiplePublicOverlayEntries<'_> {
     fn len(&self) -> usize {
         self.indices.len()
     }
+}
+
+struct UnknownPeerEntry {
+    count: u32,
+    last_update: Instant,
 }
 
 type OverlayItems = IndexMap<PeerId, PublicOverlayEntryData, FastHasherState>;

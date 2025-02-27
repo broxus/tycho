@@ -21,7 +21,7 @@ pub use self::public_overlay::{
 };
 use crate::dht::DhtService;
 use crate::network::Network;
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry};
+use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry, PublicEntryToSign};
 use crate::types::{PeerId, Response, Service, ServiceRequest};
 use crate::util::Routable;
 
@@ -48,6 +48,7 @@ impl OverlayServiceBackgroundTasks {
 
 pub struct OverlayServiceBuilder {
     local_id: PeerId,
+    secret_key: [u8; 32],
     config: Option<OverlayConfig>,
     dht: Option<DhtService>,
 }
@@ -66,9 +67,14 @@ impl OverlayServiceBuilder {
     pub fn build(self) -> (OverlayServiceBackgroundTasks, OverlayService) {
         let config = self.config.unwrap_or_default();
 
+        let keypair = everscale_crypto::ed25519::KeyPair::from(
+            &everscale_crypto::ed25519::SecretKey::from_bytes(self.secret_key),
+        );
+
         let inner = Arc::new(OverlayServiceInner {
             local_id: self.local_id,
             config,
+            keypair,
             private_overlays: Default::default(),
             public_overlays: Default::default(),
             public_overlays_changed: Arc::new(Notify::new()),
@@ -89,9 +95,10 @@ impl OverlayServiceBuilder {
 pub struct OverlayService(Arc<OverlayServiceInner>);
 
 impl OverlayService {
-    pub fn builder(local_id: PeerId) -> OverlayServiceBuilder {
+    pub fn builder(local_id: PeerId, secret_key: [u8; 32]) -> OverlayServiceBuilder {
         OverlayServiceBuilder {
             local_id,
+            secret_key,
             config: None,
             dht: None,
         }
@@ -247,6 +254,7 @@ impl Routable for OverlayService {
 struct OverlayServiceInner {
     local_id: PeerId,
     config: OverlayConfig,
+    keypair: everscale_crypto::ed25519::KeyPair,
     public_overlays: FastDashMap<OverlayId, PublicOverlay>,
     private_overlays: FastDashMap<OverlayId, PrivateOverlay>,
     public_overlays_changed: Arc<Notify>,
@@ -326,7 +334,7 @@ impl OverlayServiceInner {
             .map(|id| id.peer_id)
             .collect::<FastHashSet<_>>();
 
-        let entries = {
+        let mut entries = {
             let entries = overlay.read_entries();
 
             // Choose additional random entries to ensure we have enough new entries to send back
@@ -337,10 +345,35 @@ impl OverlayServiceInner {
                     let is_new = !requested_ids.contains(&item.entry.peer_id);
                     is_new.then(|| item.entry.clone())
                 })
-                .take(n)
+                .take(n - 1)
                 .collect::<Vec<_>>()
         };
 
+        entries.push(Arc::new(make_local_public_overlay_entry(
+            self.local_id,
+            &self.keypair,
+            overlay.overlay_id(),
+            now_sec(),
+        )));
+
         PublicEntriesResponse::PublicEntries(entries)
+    }
+}
+
+fn make_local_public_overlay_entry(
+    local_id: PeerId,
+    keypair: &everscale_crypto::ed25519::KeyPair,
+    overlay_id: &OverlayId,
+    now: u32,
+) -> PublicEntry {
+    let signature = Box::new(keypair.sign(PublicEntryToSign {
+        overlay_id: overlay_id.as_bytes(),
+        peer_id: &local_id,
+        created_at: now,
+    }));
+    PublicEntry {
+        peer_id: local_id,
+        created_at: now,
+        signature,
     }
 }

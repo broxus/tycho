@@ -11,7 +11,7 @@ use crate::network::{KnownPeerHandle, Network, WeakNetwork};
 use crate::overlay::tasks_stream::TasksStream;
 use crate::overlay::{OverlayId, OverlayServiceInner, PublicEntry, PublicOverlayEntries};
 use crate::proto::dht::{MergedValueKeyName, MergedValueKeyRef, Value};
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntryToSign};
+use crate::proto::overlay::{rpc, PublicEntriesResponse};
 use crate::types::Request;
 use crate::util::NetworkExt;
 
@@ -250,6 +250,8 @@ impl OverlayServiceInner {
         network: &Network,
         overlay_id: &OverlayId,
     ) -> Result<()> {
+        use crate::make_local_public_overlay_entry;
+
         let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
             overlay.value().clone()
         } else {
@@ -263,7 +265,8 @@ impl OverlayServiceInner {
         let mut entries = Vec::with_capacity(n);
 
         // Always include us in the response
-        entries.push(Arc::new(self.make_local_public_overlay_entry(
+        entries.push(Arc::new(make_local_public_overlay_entry(
+            self.local_id,
             network,
             overlay_id,
             now_sec(),
@@ -397,6 +400,7 @@ impl OverlayServiceInner {
         dht_client: &DhtClient,
         overlay_id: &OverlayId,
     ) -> Result<()> {
+        use crate::make_local_public_overlay_entry;
         use crate::proto::dht;
 
         const DEFAULT_TTL: u32 = 3600; // 1 hour
@@ -417,7 +421,8 @@ impl OverlayServiceInner {
             let mut entries = Vec::<Arc<PublicEntry>>::with_capacity(n);
 
             // Always include us in the list
-            entries.push(Arc::new(self.make_local_public_overlay_entry(
+            entries.push(Arc::new(make_local_public_overlay_entry(
+                self.local_id,
                 dht_client.network(),
                 overlay_id,
                 now,
@@ -452,24 +457,6 @@ impl OverlayServiceInner {
 
         tracing::debug!(count = n, "stored public entries in the DHT");
         Ok(())
-    }
-
-    fn make_local_public_overlay_entry(
-        &self,
-        network: &Network,
-        overlay_id: &OverlayId,
-        now: u32,
-    ) -> PublicEntry {
-        let signature = Box::new(network.sign_tl(PublicEntryToSign {
-            overlay_id: overlay_id.as_bytes(),
-            peer_id: &self.local_id,
-            created_at: now,
-        }));
-        PublicEntry {
-            peer_id: self.local_id,
-            created_at: now,
-            signature,
-        }
     }
 }
 
