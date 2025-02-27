@@ -90,10 +90,11 @@ impl Node {
             .with_config(node_config.dht)
             .build();
 
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_config(node_config.overlay)
-            .with_dht_service(dht_service.clone())
-            .build();
+        let (overlay_tasks, overlay_service) =
+            OverlayService::builder(local_id, keys.as_secret().to_bytes())
+                .with_config(node_config.overlay)
+                .with_dht_service(dht_service.clone())
+                .build();
 
         let router = Router::builder()
             .route(dht_service.clone())
@@ -178,6 +179,7 @@ impl Node {
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_config(node_config.blockchain_rpc_client)
             .with_public_overlay_client(PublicOverlayClient::new(
+                local_id,
                 network.clone(),
                 public_overlay,
                 node_config.public_overlay_client,
