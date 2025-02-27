@@ -147,7 +147,7 @@ impl Phase<FinalizeState> {
         .serialize();
 
         let queue_diff_hash = *queue_diff.hash();
-        tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
+        tracing::info!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
 
         let queue_diff_messages_count = queue_diff_with_msgs.messages.len();
 
@@ -444,7 +444,7 @@ impl Phase<FinalizeState> {
                 .saturating_add(self.extra.execute_result.execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
+            tracing::info!(target: tracing_targets::COLLATOR,
                 "wu_used_from_last_anchor: old={}, new={}, \
                 prepare_msg_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
                 wu_used_from_last_anchor,
@@ -598,7 +598,7 @@ impl Phase<FinalizeState> {
         let new_block_id = *new_block.id();
 
         // log block debug info
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_info: {:?}",
             BlockDebugInfo {
                 block_id: &new_block_id,
