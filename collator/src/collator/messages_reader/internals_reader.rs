@@ -441,7 +441,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 while next_seqno < self.block_seqno {
                     let diff = self
                         .mq_adapter
-                        .get_diff(&self.for_shard_id, next_seqno)
+                        .get_diff(&self.for_shard_id, next_seqno)?
                         .ok_or_else(|| {
                             let diff_block_id = BlockIdShort {
                                 shard: self.for_shard_id,
@@ -451,16 +451,14 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                                 "check range limit: cannot get diff with stats from queue for block {}",
                                 diff_block_id,
                             );
-                            CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
+                            return CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
                                 diff_block_id,
                             ))
                         })?;
 
-                    range_to = *diff.max_message();
+                    range_to = diff.max_message;
 
-                    messages_count += diff
-                        .statistics()
-                        .get_messages_count_by_shard(&self.for_shard_id);
+                    messages_count += diff.get_messages_count_by_shard(&self.for_shard_id);
 
                     if messages_count > max_messages as u64 {
                         break;

@@ -1,14 +1,16 @@
 use std::fs::File;
 
 use anyhow::Result;
-use everscale_types::models::{IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
+use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{DBRawIterator, WriteBatch};
-use weedb::{BoundedCfHandle, ColumnFamily, OwnedRawIterator, OwnedSnapshot, Table};
+use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, OwnedRawIterator, OwnedSnapshot, Table};
 
 use crate::db::*;
-use crate::model::{QueueRange, ShardsInternalMessagesKey, StatKey};
+use crate::model::{
+    DiffInfo, DiffInfoKey, DiffTailKey, QueueRange, ShardsInternalMessagesKey, StatKey,
+};
 use crate::util::StoredValue;
 use crate::QueueStateReader;
 
@@ -18,6 +20,8 @@ pub mod model;
 pub struct InternalQueueStorage {
     db: BaseDb,
 }
+// Constant for the last applied mc block id key
+const INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY: &[u8] = b"last_applied_mc_block_id";
 
 impl InternalQueueStorage {
     pub fn new(db: BaseDb) -> Self {
@@ -41,9 +45,9 @@ impl InternalQueueStorage {
 
     pub async fn import_from_file(
         &self,
-        shard_ident: ShardIdent,
         top_update: &OutMsgQueueUpdates,
         file: File,
+        block_id: BlockId,
     ) -> Result<()> {
         use everscale_types::boc::ser::BocHeader;
 
@@ -69,6 +73,9 @@ impl InternalQueueStorage {
 
             let messages_cf = this.db.shard_internal_messages.cf();
             let stats_cf = this.db.internal_message_stats.cf();
+            let var_cf = this.db.internal_message_var.cf();
+            let diffs_tail_cf = this.db.internal_message_diffs_tail.cf();
+            let diff_infos_cf = this.db.internal_message_diff_info.cf();
 
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
@@ -76,6 +83,8 @@ impl InternalQueueStorage {
             let mut statistics: FastHashMap<QueuePartitionIdx, FastHashMap<RouterAddr, u64>> =
                 FastHashMap::default();
             while let Some(mut part) = reader.read_next_queue_diff()? {
+                let mut shards_messages_count = FastHashMap::default();
+
                 while let Some(cell) = part.read_next_message()? {
                     let msg_hash = cell.repr_hash();
                     let msg = cell.parse::<Message<'_>>()?;
@@ -101,6 +110,14 @@ impl InternalQueueStorage {
                         account: dest.address,
                     };
 
+                    // TODO after split/merge implementation we should use detailed counter for 256 shards
+                    let dest_shard = ShardIdent::new_full(dest_addr.workchain as i32);
+
+                    shards_messages_count
+                        .entry(dest_shard)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+
                     let queue_diff = part.queue_diff();
                     let partition = get_partition(&queue_diff.router_partitions_dst, &dest_addr)
                         .or_else(|| get_partition(&queue_diff.router_partitions_src, &src_addr))
@@ -108,7 +125,7 @@ impl InternalQueueStorage {
 
                     let key = ShardsInternalMessagesKey {
                         partition,
-                        shard_ident,
+                        shard_ident: block_id.shard,
                         internal_message_key: QueueKey {
                             lt: int_msg_info.created_lt,
                             hash: *msg_hash,
@@ -126,10 +143,45 @@ impl InternalQueueStorage {
                 }
 
                 let queue_diff = part.queue_diff();
+
+                // insert diff tail
+                let diff_tail_key = DiffTailKey {
+                    shard_ident: queue_diff.shard_ident,
+                    max_message: queue_diff.max_message,
+                };
+
+                batch.put_cf(
+                    &diffs_tail_cf,
+                    diff_tail_key.to_vec(),
+                    queue_diff.seqno.to_le_bytes(),
+                );
+
+                // insert diff info
+                let diff_info_key = DiffInfoKey {
+                    shard_ident: queue_diff.shard_ident,
+                    seqno: queue_diff.seqno,
+                };
+
+                let diff_info = DiffInfo {
+                    min_message: queue_diff.min_message,
+                    max_message: queue_diff.max_message,
+                    shards_messages_count,
+                    hash: queue_diff.hash,
+                    processed_to: queue_diff.processed_to.clone(),
+                    router_partitions_src: queue_diff.router_partitions_src.clone(),
+                    router_partitions_dst: queue_diff.router_partitions_dst.clone(),
+                };
+
+                batch.put_cf(
+                    &diff_infos_cf,
+                    diff_info_key.to_vec(),
+                    tl_proto::serialize(diff_info),
+                );
+
                 for (partition, statistics) in statistics.drain() {
                     for (dest, count) in statistics.iter() {
                         let key = StatKey {
-                            shard_ident,
+                            shard_ident: queue_diff.shard_ident,
                             partition,
                             min_message: queue_diff.min_message,
                             max_message: queue_diff.max_message,
@@ -141,118 +193,19 @@ impl InternalQueueStorage {
                 }
             }
 
+            // insert last applied diff
+            batch.put_cf(
+                &var_cf,
+                INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
+                block_id.to_vec(),
+            );
+
             reader.finish()?;
 
             this.db.rocksdb().write(batch)?;
             Ok(())
         })
         .await?
-    }
-
-    pub fn commit<I: IntoIterator<Item = QueueRange>>(&self, ranges: I) -> Result<()> {
-        let snapshot = self.db.rocksdb().snapshot();
-
-        let db = self.db.rocksdb().as_ref();
-        let mut batch = WriteBatch::default();
-
-        let mut commit_range = |source_iter: &mut DBRawIterator<'_>,
-                                from_key: &[u8],
-                                to_key: &[u8],
-                                source_cf: &BoundedCfHandle<'_>,
-                                target_cf: &BoundedCfHandle<'_>| {
-            source_iter.seek(from_key);
-
-            loop {
-                let (key, value) = match source_iter.item() {
-                    Some(item) => item,
-                    None => return source_iter.status(),
-                };
-
-                if key > to_key {
-                    break;
-                }
-
-                batch.delete_cf(source_cf, key);
-                batch.put_cf(target_cf, key, value);
-
-                source_iter.next();
-            }
-
-            Ok(())
-        };
-
-        let messages = &self.db.shard_internal_messages;
-        let messages_cf = &messages.cf();
-
-        let uncommited_messages = &self.db.shard_internal_messages_uncommitted;
-        let uncommited_messages_cf = &uncommited_messages.cf();
-
-        let mut uncommited_messages_iter = {
-            let mut readopts = uncommited_messages.new_read_config();
-            readopts.set_snapshot(&snapshot);
-            db.raw_iterator_cf_opt(uncommited_messages_cf, readopts)
-        };
-
-        let stats = &self.db.internal_message_stats;
-        let stats_cf = &stats.cf();
-
-        let uncommited_stats = &self.db.internal_message_stats_uncommitted;
-        let uncommited_stats_cf = &uncommited_stats.cf();
-
-        let mut uncommited_stats_iter = {
-            let mut readopts = uncommited_stats.new_read_config();
-            readopts.set_snapshot(&snapshot);
-            db.raw_iterator_cf_opt(uncommited_stats_cf, readopts)
-        };
-
-        for range in ranges {
-            // Commit messages for one range
-            let from_message_key = ShardsInternalMessagesKey {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                internal_message_key: range.from,
-            };
-            let to_message_key = ShardsInternalMessagesKey {
-                partition: range.partition,
-                shard_ident: range.shard_ident,
-                internal_message_key: range.to,
-            };
-
-            commit_range(
-                &mut uncommited_messages_iter,
-                &from_message_key.to_vec(),
-                &to_message_key.to_vec(),
-                uncommited_messages_cf,
-                messages_cf,
-            )?;
-
-            // Commit stats for one range
-            let from_stat_key = StatKey {
-                shard_ident: range.shard_ident,
-                partition: range.partition,
-                min_message: range.from,
-                max_message: QueueKey::MIN,
-                dest: RouterAddr::MIN,
-            };
-            let to_stat_key = StatKey {
-                shard_ident: range.shard_ident,
-                partition: range.partition,
-                min_message: range.to,
-                max_message: QueueKey::MAX,
-                dest: RouterAddr::MAX,
-            };
-
-            commit_range(
-                &mut uncommited_stats_iter,
-                &from_stat_key.to_vec(),
-                &to_stat_key.to_vec(),
-                uncommited_stats_cf,
-                stats_cf,
-            )?;
-        }
-
-        // Apply batch
-        self.db.rocksdb().write(batch).map_err(Into::into)
     }
 
     pub fn delete<I: IntoIterator<Item = QueueRange>>(&self, ranges: I) -> Result<()> {
@@ -278,9 +231,13 @@ impl InternalQueueStorage {
 
         let mut msgs_to_compact = Vec::new();
         let mut stats_to_compact = Vec::new();
+        let mut diffs_tail_to_compact = Vec::new();
+        let mut diff_info_to_compact = Vec::new();
 
         let messages_cf = &self.db.shard_internal_messages.cf();
         let stats_cf = &self.db.internal_message_stats.cf();
+        let diffs_tail_cf = &self.db.internal_message_diffs_tail.cf();
+        let diff_info_cf = &self.db.internal_message_diff_info.cf();
 
         for range in ranges {
             // Delete messages in one range
@@ -324,6 +281,57 @@ impl InternalQueueStorage {
                 &bump,
                 &mut stats_to_compact,
             );
+
+            // delete tail and info
+            let start_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.from,
+            };
+
+            let end_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.to,
+            };
+
+            let from_diff_tail_bytes = start_diff_tail_key.to_vec();
+            let to_diff_tail_bytes = end_diff_tail_key.to_vec();
+
+            let (min_seqno, max_seqno) = delete_diff_tails_and_collect_seqno(
+                &mut batch,
+                self.db.rocksdb().as_ref(),
+                &self.db.internal_message_diffs_tail,
+                range.shard_ident,
+                &from_diff_tail_bytes,
+                &to_diff_tail_bytes,
+            )?;
+
+            diffs_tail_to_compact.push((
+                bump.alloc_slice_copy(&from_diff_tail_bytes),
+                bump.alloc_slice_copy(&to_diff_tail_bytes),
+            ));
+
+            // if we found some valid seqnos, also delete the [min_seqno .. max_seqno] from diff_info
+            if min_seqno != u32::MAX && max_seqno != 0 {
+                let from_diff_info = DiffInfoKey {
+                    shard_ident: range.shard_ident,
+                    seqno: min_seqno,
+                }
+                .to_vec();
+                let to_diff_info = DiffInfoKey {
+                    shard_ident: range.shard_ident,
+                    seqno: max_seqno,
+                }
+                .to_vec();
+
+                // Range-delete for diff_info
+                batch.delete_range_cf(diff_info_cf, &from_diff_info, &to_diff_info);
+                batch.delete_cf(diff_info_cf, &to_diff_info);
+
+                diff_info_to_compact.push((
+                    bump.alloc_slice_copy(&from_diff_info),
+                    bump.alloc_slice_copy(&to_diff_info),
+                ));
+            }
         }
 
         let db = self.db.rocksdb().as_ref();
@@ -334,6 +342,12 @@ impl InternalQueueStorage {
         }
         for (start_key, end_key) in stats_to_compact {
             db.compact_range_cf(stats_cf, Some(start_key), Some(end_key));
+        }
+        for (start_key, end_key) in diffs_tail_to_compact {
+            db.compact_range_cf(diffs_tail_cf, Some(start_key), Some(end_key));
+        }
+        for (start_key, end_key) in diff_info_to_compact {
+            db.compact_range_cf(diff_info_cf, Some(start_key), Some(end_key));
         }
 
         Ok(())
@@ -361,12 +375,42 @@ impl InternalQueueStorage {
             &[0xff; StatKey::SIZE_HINT],
         );
 
+        let diffs_tail_cf = &self.db.internal_message_diffs_tail_uncommitted.cf();
+        clear_table(
+            diffs_tail_cf,
+            &[0x00; StatKey::SIZE_HINT],
+            &[0xff; StatKey::SIZE_HINT],
+        );
+
+        let diffs_info_cf = &self.db.internal_message_diff_info_uncommitted.cf();
+        clear_table(
+            diffs_info_cf,
+            &[0x00; StatKey::SIZE_HINT],
+            &[0xff; StatKey::SIZE_HINT],
+        );
+
         let db = self.db.rocksdb().as_ref();
         db.write(batch)?;
 
         db.compact_range_cf(messages_cf, None::<[u8; 0]>, None::<[u8; 0]>);
         db.compact_range_cf(stats_cf, None::<[u8; 0]>, None::<[u8; 0]>);
+        db.compact_range_cf(diffs_tail_cf, None::<[u8; 0]>, None::<[u8; 0]>);
+        db.compact_range_cf(diffs_info_cf, None::<[u8; 0]>, None::<[u8; 0]>);
         Ok(())
+    }
+
+    /// Retrieves the queue version from the `internal_message_version` column family under the key `mc_version`
+    pub fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+        let cf = self.db.internal_message_var.cf();
+        let data = self
+            .db
+            .rocksdb()
+            .get_cf(&cf, INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY)?;
+        if let Some(bytes) = data {
+            return Ok(Some(BlockId::from_slice(&bytes)));
+        }
+
+        Ok(None)
     }
 }
 
@@ -389,6 +433,16 @@ impl InternalQueueTransaction {
         self.batch.put_cf(&cf, key.to_vec(), count.to_le_bytes());
     }
 
+    pub fn insert_diff_tail_uncommitted(&mut self, key: &DiffTailKey, value: &[u8]) {
+        let cf = self.db.internal_message_diffs_tail_uncommitted.cf();
+        self.batch.put_cf(&cf, key.to_vec(), value);
+    }
+
+    pub fn insert_diff_info_uncommitted(&mut self, key: &DiffInfoKey, value: &[u8]) {
+        let cf = self.db.internal_message_diff_info_uncommitted.cf();
+        self.batch.put_cf(&cf, key.to_vec(), value);
+    }
+
     pub fn insert_message_uncommitted(
         &mut self,
         key: &ShardsInternalMessagesKey,
@@ -405,6 +459,229 @@ impl InternalQueueTransaction {
         self.buffer.extend_from_slice(value);
 
         self.batch.put_cf(&cf, key.to_vec(), self.buffer.as_slice());
+    }
+
+    fn commit_range(
+        batch: &mut WriteBatch,
+        source_iter: &mut DBRawIterator<'_>,
+        from_key: &[u8],
+        to_key: &[u8],
+        source_cf: &BoundedCfHandle<'_>,
+        target_cf: &BoundedCfHandle<'_>,
+    ) -> Result<()> {
+        source_iter.seek(from_key);
+
+        loop {
+            let (key, value) = match source_iter.item() {
+                Some(item) => item,
+                None => return source_iter.status().map_err(Into::into),
+            };
+
+            if key > to_key {
+                break;
+            }
+
+            // Move from uncommitted => committed
+            batch.delete_cf(source_cf, key);
+            batch.put_cf(target_cf, key, value);
+
+            source_iter.next();
+        }
+
+        Ok(())
+    }
+
+    pub fn commit_messages<I: IntoIterator<Item = QueueRange>>(
+        &mut self,
+        snapshot: &InternalQueueSnapshot,
+        ranges: I,
+    ) -> Result<()> {
+        let db = self.db.rocksdb().as_ref();
+
+        // -- Prepare CF handles --
+        let messages_cf = self.db.shard_internal_messages.cf();
+        let uncommited_messages_cf = self.db.shard_internal_messages_uncommitted.cf();
+
+        let stats_cf = self.db.internal_message_stats.cf();
+        let uncommited_stats_cf = self.db.internal_message_stats_uncommitted.cf();
+
+        let diff_tail_committed_cf = self.db.internal_message_diffs_tail.cf();
+        let diff_tail_uncommitted_cf = self.db.internal_message_diffs_tail_uncommitted.cf();
+
+        let diff_info_committed_cf = self.db.internal_message_diff_info.cf();
+        let diff_info_uncommitted_cf = self.db.internal_message_diff_info_uncommitted.cf();
+
+        // -- Prepare iterators --
+        let mut uncommited_messages_iter = {
+            let mut readopts = self
+                .db
+                .shard_internal_messages_uncommitted
+                .new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(&uncommited_messages_cf, readopts)
+        };
+
+        let mut uncommited_stats_iter = {
+            let mut readopts = self.db.internal_message_stats_uncommitted.new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(&uncommited_stats_cf, readopts)
+        };
+
+        let mut uncommited_diff_tail_iter = {
+            let mut readopts = self
+                .db
+                .internal_message_diff_info_uncommitted
+                .new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(&diff_tail_uncommitted_cf, readopts)
+        };
+
+        let mut uncommited_diff_info_iter = {
+            let mut readopts = self
+                .db
+                .internal_message_diff_info_uncommitted
+                .new_read_config();
+            readopts.set_snapshot(&snapshot.snapshot);
+            db.raw_iterator_cf_opt(&diff_info_uncommitted_cf, readopts)
+        };
+
+        // -- Process each range --
+        for range in ranges {
+            // 1) Commit messages in [from..to]
+            let from_message_key = ShardsInternalMessagesKey {
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.from,
+            };
+            let to_message_key = ShardsInternalMessagesKey {
+                partition: range.partition,
+                shard_ident: range.shard_ident,
+                internal_message_key: range.to,
+            };
+
+            Self::commit_range(
+                &mut self.batch,
+                &mut uncommited_messages_iter,
+                &from_message_key.to_vec(),
+                &to_message_key.to_vec(),
+                &uncommited_messages_cf,
+                &messages_cf,
+            )?;
+
+            // 2) Commit stats in [from..to]
+            let from_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.from,
+                max_message: QueueKey::MIN,
+                dest: RouterAddr::MIN,
+            };
+            let to_stat_key = StatKey {
+                shard_ident: range.shard_ident,
+                partition: range.partition,
+                min_message: range.to,
+                max_message: QueueKey::MAX,
+                dest: RouterAddr::MAX,
+            };
+
+            Self::commit_range(
+                &mut self.batch,
+                &mut uncommited_stats_iter,
+                &from_stat_key.to_vec(),
+                &to_stat_key.to_vec(),
+                &uncommited_stats_cf,
+                &stats_cf,
+            )?;
+
+            // 3) Collect diff tails in [from..to]
+            let from_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.from,
+            };
+            let to_diff_tail_key = DiffTailKey {
+                shard_ident: range.shard_ident,
+                max_message: range.to,
+            };
+
+            let from_diff_tail_bytes = from_diff_tail_key.to_vec();
+            let to_diff_tail_bytes = to_diff_tail_key.to_vec();
+
+            // Track min/max seqno encountered
+            uncommited_diff_tail_iter.seek(&from_diff_tail_bytes);
+
+            let mut min_seqno = u32::MAX;
+            let mut max_seqno = 0;
+
+            loop {
+                let Some((raw_key, raw_value)) = uncommited_diff_tail_iter.item() else {
+                    match uncommited_diff_tail_iter.status() {
+                        Ok(()) => break,
+                        Err(e) => return Err(e.into()),
+                    }
+                };
+
+                if raw_key > &to_diff_tail_bytes[..] {
+                    break;
+                }
+
+                // block_seqno is stored in the first 4 bytes
+                if raw_value.len() < 4 {
+                    return Err(anyhow::anyhow!("Invalid diff tail value length"));
+                }
+                let block_seqno = u32::from_le_bytes(raw_value[..4].try_into()?);
+
+                if block_seqno < min_seqno {
+                    min_seqno = block_seqno;
+                }
+                if block_seqno > max_seqno {
+                    max_seqno = block_seqno;
+                }
+
+                self.batch.delete_cf(&diff_tail_uncommitted_cf, raw_key);
+                self.batch
+                    .put_cf(&diff_tail_committed_cf, raw_key, raw_value);
+
+                uncommited_diff_tail_iter.next();
+            }
+
+            // 4) Commit diff info [min_seqno..max_seqno]
+            if min_seqno != u32::MAX && max_seqno != 0 {
+                let from_diff_info_key = DiffInfoKey {
+                    shard_ident: range.shard_ident,
+                    seqno: min_seqno,
+                }
+                .to_vec();
+                let to_diff_info_key = DiffInfoKey {
+                    shard_ident: range.shard_ident,
+                    seqno: max_seqno,
+                }
+                .to_vec();
+
+                // Move the diff info
+                Self::commit_range(
+                    &mut self.batch,
+                    &mut uncommited_diff_info_iter,
+                    &from_diff_info_key,
+                    &to_diff_info_key,
+                    &diff_info_uncommitted_cf,
+                    &diff_info_committed_cf,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stores the queue version in the `internal_message_version` column family under the key `mc_version`
+    pub fn set_last_applied_mc_block_id(&mut self, mc_block_id: &BlockId) {
+        // Retrieve the column family handle for "internal_message_version"
+        let cf = self.db.internal_message_var.cf();
+        // Convert the version into a little-endian byte array and store it
+        self.batch.put_cf(
+            &cf,
+            INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
+            mc_block_id.to_vec(),
+        );
     }
 }
 
@@ -430,6 +707,71 @@ impl InternalQueueSnapshot {
         self.iter_messages(&self.db.shard_internal_messages_uncommitted, from, to)
     }
 
+    pub fn calc_diffs_tail_committed(&self, from: &DiffTailKey) -> u32 {
+        self.calc_diffs_tail(&self.db.internal_message_diffs_tail, from)
+    }
+
+    pub fn calc_diffs_tail_uncommitted(&self, from: &DiffTailKey) -> u32 {
+        self.calc_diffs_tail(&self.db.internal_message_diffs_tail_uncommitted, from)
+    }
+
+    pub fn get_diff_info_committed(&self, key: &DiffInfoKey) -> Result<Option<Vec<u8>>> {
+        self.get_diff_info(&self.db.internal_message_diff_info, key)
+    }
+
+    pub fn get_diff_info_uncommitted(&self, key: &DiffInfoKey) -> Result<Option<Vec<u8>>> {
+        self.get_diff_info(&self.db.internal_message_diff_info_uncommitted, key)
+    }
+
+    pub fn get_last_applied_diff_info<T: ColumnFamily>(
+        &self,
+        table: &Table<T>,
+        shard_ident: &ShardIdent,
+    ) -> Result<Option<u32>> {
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(&self.snapshot);
+
+        // Set the range to iterate over all the keys in the table for the given shard
+        let from = DiffInfoKey::new(*shard_ident, 0);
+        read_config.set_iterate_lower_bound(from.to_vec().to_vec());
+
+        let to = DiffInfoKey::new(*shard_ident, u32::MAX);
+        read_config.set_iterate_upper_bound(to.to_vec().to_vec());
+
+        let cf = table.cf();
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+
+        let key = DiffInfoKey::new(*shard_ident, u32::MAX);
+
+        iter.seek_for_prev(key.to_vec().as_slice());
+
+        let value = match iter.key() {
+            Some(mut value) => {
+                let key = DiffInfoKey::deserialize(&mut value);
+                key.seqno
+            }
+            None => return Ok(None),
+        };
+
+        Ok(Some(value))
+    }
+
+    pub fn get_last_applied_block_seqno_uncommitted(
+        &self,
+        shard_ident: &ShardIdent,
+    ) -> Result<Option<u32>> {
+        let table = &self.db.internal_message_diff_info_uncommitted;
+        self.get_last_applied_diff_info(table, shard_ident)
+    }
+
+    pub fn get_last_applied_block_seqno_committed(
+        &self,
+        shard_ident: &ShardIdent,
+    ) -> Result<Option<u32>> {
+        let table = &self.db.internal_message_diff_info;
+        self.get_last_applied_diff_info(table, shard_ident)
+    }
+
     fn iter_messages<T: ColumnFamily>(
         &self,
         table: &Table<T>,
@@ -450,6 +792,46 @@ impl InternalQueueSnapshot {
             inner: unsafe { OwnedRawIterator::new(db.clone(), iter) },
             first: true,
         }
+    }
+
+    fn calc_diffs_tail<T: ColumnFamily>(&self, table: &Table<T>, from: &DiffTailKey) -> u32 {
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(&self.snapshot);
+
+        let from_bytes = from.to_vec();
+        read_config.set_iterate_lower_bound(from_bytes.as_slice());
+        let to = DiffTailKey {
+            shard_ident: from.shard_ident,
+            max_message: QueueKey::MAX,
+        };
+        read_config.set_iterate_upper_bound(to.to_vec().to_vec());
+
+        let cf = table.cf();
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+
+        iter.seek(&from_bytes);
+
+        let mut count = 0;
+        while let Some((_, _)) = iter.item() {
+            count += 1;
+            iter.next();
+        }
+
+        count
+    }
+
+    pub fn get_diff_info<T: ColumnFamily>(
+        &self,
+        table: &Table<T>,
+        key: &DiffInfoKey,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(&self.snapshot);
+
+        let cf = table.cf();
+        let data = self.db.rocksdb().get_cf(&cf, key.to_vec().as_slice())?;
+
+        Ok(data)
     }
 
     pub fn collect_committed_stats_in_range(
@@ -577,4 +959,62 @@ pub struct InternalQueueMessage<'a> {
     pub workchain: i8,
     pub prefix: u64,
     pub message_boc: &'a [u8],
+}
+
+fn delete_diff_tails_and_collect_seqno<T: ColumnFamily>(
+    batch: &mut WriteBatch,
+    db: &rocksdb::DB,
+    diffs_tail_table: &Table<T>,
+    shard_ident: ShardIdent,
+    from_key: &[u8],
+    to_key: &[u8],
+) -> Result<(u32, u32)> {
+    let read_opts = diffs_tail_table.new_read_config();
+    let mut iter = db.raw_iterator_cf_opt(&diffs_tail_table.cf(), read_opts);
+
+    iter.seek(from_key);
+
+    let mut min_seqno = u32::MAX;
+    let mut max_seqno = 0;
+
+    loop {
+        let Some((raw_key, raw_value)) = iter.item() else {
+            match iter.status() {
+                Ok(()) => break,
+                Err(e) => return Err(e.into()),
+            }
+        };
+
+        if raw_key > to_key {
+            break;
+        }
+
+        let current_tail_key = DiffTailKey::from_slice(raw_key);
+        if current_tail_key.shard_ident != shard_ident {
+            break;
+        }
+
+        if raw_value.len() < 4 {
+            return Err(anyhow::anyhow!(
+                "Invalid diff tail value length: {} < 4",
+                raw_value.len()
+            ));
+        }
+        let block_seqno = u32::from_le_bytes(raw_value[..4].try_into()?);
+
+        if block_seqno < min_seqno {
+            min_seqno = block_seqno;
+        }
+        if block_seqno > max_seqno {
+            max_seqno = block_seqno;
+        }
+
+        // Delete this tail
+        batch.delete_cf(&diffs_tail_table.cf(), raw_key);
+
+        // Move to next
+        iter.next();
+    }
+
+    Ok((min_seqno, max_seqno))
 }

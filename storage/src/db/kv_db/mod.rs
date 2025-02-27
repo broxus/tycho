@@ -136,6 +136,11 @@ weedb::tables! {
         pub shard_internal_messages_uncommitted: tables::ShardInternalMessagesUncommited,
         pub internal_message_stats: tables::InternalMessageStats,
         pub internal_message_stats_uncommitted: tables::InternalMessageStatsUncommited,
+        pub internal_message_var: tables::InternalMessageVar,
+        pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
+        pub internal_message_diffs_tail_uncommitted: tables::InternalMessageDiffsTailUncommitted,
+        pub internal_message_diff_info: tables::InternalMessageDiffInfo,
+        pub internal_message_diff_info_uncommitted: tables::InternalMessageDiffInfoUncommitted,
     }
 }
 
