@@ -278,11 +278,12 @@ impl Node {
             mempool_adapter
                 .set_config(|config| {
                     if let Some(consensus_config) = &global.consensus_config {
-                        config.set_consensus_config(consensus_config);
+                        config.set_consensus_config(consensus_config)?;
                     } // else: will be set from mc state after sync
                     config.set_genesis(global.genesis_info);
+                    Ok::<_, anyhow::Error>(())
                 })
-                .await;
+                .await?;
         };
 
         // Create RPC

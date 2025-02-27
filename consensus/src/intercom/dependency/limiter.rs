@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use everscale_types::models::ConsensusConfig;
 use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
+use crate::engine::MempoolConfig;
 use crate::models::Round;
 
 #[derive(Default)]
@@ -23,14 +23,10 @@ struct Waiter {
 
 impl Limiter {
     #[must_use]
-    pub async fn enter(
-        &self,
-        round: Round,
-        consensus_config: &ConsensusConfig,
-    ) -> LimiterGuard<'_> {
+    pub async fn enter(&self, round: Round, conf: &MempoolConfig) -> LimiterGuard<'_> {
         let semaphore_opt = {
             let mut inner = self.0.lock();
-            let bypass = inner.inflight_bypassed <= consensus_config.download_tasks;
+            let bypass = inner.inflight_bypassed <= conf.consensus.download_tasks;
             // cannot be strict equality: at least one is always allowed, others are concurrent to it
             let result = if bypass {
                 tracing::trace!("{round:?} bypass");
@@ -157,9 +153,9 @@ mod tests {
     }
 
     async fn order() -> Result<()> {
-        let mut config = default_test_config().consensus;
+        let mut conf = default_test_config().conf;
 
-        config.download_tasks = 0; // Note feature of this test: sequential execution
+        conf.consensus.download_tasks = 0; // Note feature of this test: sequential execution
 
         let limiter = Arc::new(Limiter::default());
 
@@ -183,11 +179,11 @@ mod tests {
         for i in values {
             let all_spawned = all_spawned.clone();
             let limiter = limiter.clone();
-            let config = config.clone();
+            let conf = conf.clone();
             let sender = sender.clone();
             spawned.push(tokio::spawn(async move {
                 all_spawned.wait().await;
-                let _guard = limiter.enter(Round(i), &config).await;
+                let _guard = limiter.enter(Round(i), &conf).await;
                 tracing::debug!("{i} guard entered");
                 // no ctx switch here
                 sender.try_send(i)?;
@@ -230,9 +226,9 @@ mod tests {
         test_logger::spans("liveness", "info");
         test_logger::set_print_panic_hook(true);
 
-        let mut config = default_test_config().consensus;
+        let mut conf = default_test_config().conf;
 
-        config.download_tasks = 37;
+        conf.consensus.download_tasks = 37;
         let extra = 300;
         let sleep_duration = Duration::from_millis(10);
 
@@ -240,7 +236,7 @@ mod tests {
 
         let mut futs = Vec::new();
 
-        let values = (0..config.download_tasks as u32 + extra)
+        let values = (0..conf.consensus.download_tasks as u32 + extra)
             .sorted_by_cached_key(|_| rand::thread_rng().next_u32())
             .collect::<Vec<_>>();
 
@@ -248,9 +244,9 @@ mod tests {
 
         for i in values.clone() {
             let limiter = limiter.clone();
-            let config = config.clone();
+            let conf = conf.clone();
             futs.push(tokio::spawn(async move {
-                let _guard = limiter.enter(Round(i / 5), &config).await;
+                let _guard = limiter.enter(Round(i / 5), &conf).await;
                 tracing::debug!("{i} guard entered");
                 tokio::time::sleep(sleep_duration).await;
                 i

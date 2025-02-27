@@ -10,9 +10,9 @@ use rand::SeedableRng;
 use tycho_network::PeerId;
 
 use crate::dag::commit::SyncError;
-use crate::dag::{DagRound, EnqueuedAnchor};
-use crate::effects::{AltFmt, AltFormat};
-use crate::engine::{CachedConfig, Genesis};
+use crate::dag::{DagRound, EnqueuedAnchor, HistoryConflict};
+use crate::effects::{AltFmt, AltFormat, Cancelled};
+use crate::engine::MempoolConfig;
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
@@ -117,7 +117,7 @@ impl DagBack {
         &self,
         last_proof_round_or_bottom: Round,
         up_to: Round,
-    ) -> Result<VecDeque<PointInfo>, Round> {
+    ) -> Result<VecDeque<PointInfo>, HistoryConflict> {
         let mut triggers = VecDeque::new();
         // let mut string = String::new();
         let rev_iter = self
@@ -142,7 +142,7 @@ impl DagBack {
                     triggers.push_front(trigger.info().clone());
                 }
                 Err(SyncError::TryLater) => {} // skip
-                Err(SyncError::Impossible(round)) => return Err(round),
+                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
             }
         }
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
@@ -394,6 +394,7 @@ impl DagBack {
         &self,
         full_history_bottom: Round,
         anchor: &PointInfo, // @ r+1
+        conf: &MempoolConfig,
     ) -> Result<VecDeque<ValidPoint>, SyncError> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
             if to.is_empty() {
@@ -406,8 +407,8 @@ impl DagBack {
         }
         // do not commit genesis - we may place some arbitrary payload in it,
         // also mempool adapter does not expect it, and collator cannot use it too
-        let history_limit = (Genesis::id().round.next())
-            .max(anchor.round() - CachedConfig::get().consensus.commit_history_rounds);
+        let history_limit =
+            (conf.genesis_round.next()).max(anchor.round() - conf.consensus.commit_history_rounds);
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], &anchor.data().includes); // points @ r+0
@@ -478,8 +479,12 @@ impl DagBack {
                     .values()
                     // better try later than wait now if some point is still downloading
                     .filter_map(|version| version.clone().now_or_never())
+                    .map(|task_result| match task_result {
+                        Ok(dag_point) => Ok(dag_point),
+                        Err(Cancelled()) => Err(SyncError::HistoryConflict(dag_round.round())),
+                    })
                     // take any suitable
-                    .filter_map(move |dag_point| match dag_point {
+                    .filter_map_ok(move |dag_point| match dag_point {
                         DagPoint::Valid(valid) => {
                             if valid.info().data().anchor_trigger == Link::ToSelf {
                                 Some(Ok(valid))
@@ -488,15 +493,16 @@ impl DagBack {
                             }
                         }
                         DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                            Some(Err(SyncError::Impossible(invalid.info().round())))
+                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                            Some(Err(SyncError::Impossible(not_found.id().round)))
+                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
                             None
                         }
                     })
+                    .flatten()
                     .find_or_first(|result| result.is_ok())
             })
             .flatten()
@@ -511,20 +517,24 @@ impl DagBack {
         digest: &Digest,
         point_kind: &'static str,
     ) -> Result<ValidPoint, SyncError> {
-        let Some(dag_point) = dag_round
+        let Some(dag_point_result) = dag_round
             .view(author, |loc| loc.versions.get(digest).cloned()) // not yet created
             .flatten()
             .and_then(|p| p.now_or_never())
         else {
             return Err(SyncError::TryLater);
         }; // not yet resolved;
+        let dag_point = match dag_point_result {
+            Ok(dag_point) => dag_point,
+            Err(Cancelled()) => return Err(SyncError::HistoryConflict(dag_round.round())),
+        };
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
             DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                Err(SyncError::Impossible(invalid.info().round()))
+                Err(SyncError::HistoryConflict(dag_round.round()))
             }
             DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                Err(SyncError::Impossible(not_found.id().round))
+                Err(SyncError::HistoryConflict(dag_round.round()))
             }
             dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
                 panic!("{point_kind} {}: {:?}", dp.alt(), dp.id().alt())

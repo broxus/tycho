@@ -11,12 +11,17 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::commit::back::DagBack;
 use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
-use crate::engine::{CachedConfig, Genesis};
+use crate::engine::MempoolConfig;
 use crate::models::{AnchorData, AnchorStageRole, Round};
 
+#[derive(thiserror::Error, Debug)]
+#[error("Committer encountered local history conflict at round {}", .0.0)]
+pub struct HistoryConflict(pub Round);
+type CommitterResult<T> = std::result::Result<T, HistoryConflict>;
+// private error type
 enum SyncError {
     TryLater,
-    Impossible(Round),
+    HistoryConflict(Round),
 }
 
 pub struct Committer {
@@ -39,15 +44,14 @@ impl Default for Committer {
 }
 
 impl Committer {
-    pub fn init(&mut self, bottom_round: &DagRound) -> Round {
+    pub fn init(&mut self, bottom_round: &DagRound, conf: &MempoolConfig) -> Round {
         assert_eq!(
             self.full_history_bottom,
             Round::BOTTOM,
             "already initialized"
         );
         self.dag.init(bottom_round);
-        self.full_history_bottom =
-            bottom_round.round() + CachedConfig::get().consensus.commit_history_rounds;
+        self.full_history_bottom = bottom_round.round() + conf.consensus.commit_history_rounds;
         self.full_history_bottom // hidden in other cases
     }
 
@@ -66,13 +70,16 @@ impl Committer {
 
     /// returns new full history bottom
     /// as `Ok` if successfully dropped all given range, otherwise as `Err`
-    pub fn drop_upto(&mut self, new_bottom_round: Round) -> Result<Round, Round> {
+    pub fn drop_upto(
+        &mut self,
+        new_bottom_round: Round,
+        conf: &MempoolConfig,
+    ) -> Result<Round, Round> {
         // cannot leave dag empty
         let actual_bottom = new_bottom_round.min(self.dag.top().round());
         self.dag.drop_upto(actual_bottom);
         self.anchor_chain.drop_upto(actual_bottom);
-        self.full_history_bottom =
-            actual_bottom + CachedConfig::get().consensus.commit_history_rounds;
+        self.full_history_bottom = actual_bottom + conf.consensus.commit_history_rounds;
         if actual_bottom == new_bottom_round {
             Ok(self.full_history_bottom)
         } else {
@@ -80,17 +87,21 @@ impl Committer {
         }
     }
 
-    pub fn commit(&mut self) -> Result<Vec<AnchorData>, Round> {
+    pub fn commit(&mut self, conf: &MempoolConfig) -> CommitterResult<Vec<AnchorData>> {
         // may run for long several times in a row and commit nothing, because of missed points
         let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
 
         // Note that it's always engine round in production, but may differ in local tests
         let current_round = self.dag.top().round().prev();
 
-        self.commit_up_to(current_round)
+        self.commit_up_to(current_round, conf)
     }
 
-    fn commit_up_to(&mut self, current_round: Round) -> Result<Vec<AnchorData>, Round> {
+    fn commit_up_to(
+        &mut self,
+        current_round: Round,
+        conf: &MempoolConfig,
+    ) -> CommitterResult<Vec<AnchorData>> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -120,10 +131,10 @@ impl Committer {
             return Ok(Vec::new());
         };
 
-        self.dequeue_anchors()
+        self.dequeue_anchors(conf)
     }
 
-    fn enqueue_new_anchors(&mut self, current_round: Round) -> Result<(), Round> {
+    fn enqueue_new_anchors(&mut self, current_round: Round) -> CommitterResult<()> {
         // some state may have restored from db or resolved from download
 
         // take all ready triggers, skipping not ready ones
@@ -150,13 +161,13 @@ impl Committer {
                     // init chain after each gap
                     Ok(last_unusable_proof_round) => last_unusable_proof_round,
                     Err(SyncError::TryLater) => return Ok(()), // cannot init
-                    Err(SyncError::Impossible(round)) => return Err(round),
+                    Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
                 },
             };
             let chain_part = match self.dag.anchor_chain(last_proof_round, &trigger) {
                 Ok(chain_part) => chain_part,
                 Err(SyncError::TryLater) => break, // some dag point future is not yet resolved
-                Err(SyncError::Impossible(round)) => return Err(round),
+                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
             };
             for next in chain_part {
                 if let Some(back) = self.anchor_chain.top() {
@@ -172,30 +183,30 @@ impl Committer {
         Ok(())
     }
 
-    fn dequeue_anchors(&mut self) -> Result<Vec<AnchorData>, Round> {
+    fn dequeue_anchors(&mut self, conf: &MempoolConfig) -> CommitterResult<Vec<AnchorData>> {
         let mut ordered = Vec::new();
 
         // tracing::warn!("anchor_chain {:?}", self.anchor_chain.alt());
 
         while let Some(next) = self.anchor_chain.next() {
             // in case previous anchor was triggered directly - rounds are already dropped
-            self.dag.drop_upto(
-                next.anchor.round() - CachedConfig::get().consensus.commit_history_rounds,
-            );
-            let uncommitted = match self
-                .dag
-                .gather_uncommitted(self.full_history_bottom, &next.anchor)
-            {
-                Ok(uncommitted) => uncommitted,
-                Err(SyncError::TryLater) => {
-                    self.anchor_chain.undo_next(next);
-                    break; // will continue at the next call if now some point isn't ready
-                }
-                Err(SyncError::Impossible(round)) => {
-                    self.anchor_chain.undo_next(next);
-                    return Err(round);
-                }
-            };
+            self.dag
+                .drop_upto(next.anchor.round() - conf.consensus.commit_history_rounds);
+            let uncommitted =
+                match self
+                    .dag
+                    .gather_uncommitted(self.full_history_bottom, &next.anchor, conf)
+                {
+                    Ok(uncommitted) => uncommitted,
+                    Err(SyncError::TryLater) => {
+                        self.anchor_chain.undo_next(next);
+                        break; // will continue at the next call if now some point isn't ready
+                    }
+                    Err(SyncError::HistoryConflict(round)) => {
+                        self.anchor_chain.undo_next(next);
+                        return Err(HistoryConflict(round));
+                    }
+                };
 
             match self
                 .dag
@@ -232,7 +243,7 @@ impl Committer {
                 .collect::<Vec<_>>();
             ordered.push(AnchorData {
                 prev_anchor: Some(next.anchor.anchor_round(AnchorStageRole::Proof))
-                    .filter(|r| *r > Genesis::id().round)
+                    .filter(|r| *r > conf.genesis_round)
                     .map(|r| r.prev()),
                 anchor: next.anchor,
                 history: committed,
@@ -281,10 +292,9 @@ mod test {
     use super::*;
     use crate::dag::dag_location::DagLocation;
     use crate::dag::DagFront;
-    use crate::effects::{AltFormat, EngineCtx, MempoolStore, RoundCtx};
+    use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
     use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::test_utils;
-    use crate::test_utils::default_test_config;
 
     const PEER_COUNT: usize = 3;
 
@@ -292,38 +302,38 @@ mod test {
     async fn test_commit_with_gap() {
         let stub_store = MempoolStore::no_read_stub();
 
-        let (genesis, _) = CachedConfig::init(&default_test_config());
-
-        let engine_ctx = EngineCtx::new(genesis.round());
-
         let peers: [(PeerId, Arc<KeyPair>); PEER_COUNT] = array::from_fn(|i| {
             let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));
             (PeerId::from(keys.public_key), Arc::new(keys))
         });
         let local_keys = &peers[0].1;
 
-        let mut round_ctx = RoundCtx::new(&engine_ctx, genesis.round());
+        let (peer_schedule, stub_downloader, genesis, engine_ctx) =
+            test_utils::make_engine_parts(&peers, local_keys.clone());
+        let conf = engine_ctx.conf();
 
-        let (peer_schedule, stub_downloader) =
-            test_utils::make_dag_parts(&peers, local_keys, &genesis);
+        let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
 
-        let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
+        let genesis_round = DagRound::new_bottom(conf.genesis_round, &peer_schedule, conf);
         genesis_round
             .add_local(&genesis, Some(local_keys), &stub_store, &round_ctx)
-            .await;
+            .await
+            .expect("cannot be closed");
 
         let mut dag = DagFront::default();
-        let mut committer = dag.init(genesis_round);
+        let mut committer = dag.init(genesis_round, conf);
 
         for round in (0..100).map(Round) {
             // println!("{}", round.0);
 
-            if round <= genesis.round() {
+            if round <= conf.genesis_round {
                 continue;
             }
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
-            if let Some(skip_to) = dag.fill_to_top(round, Some(&mut committer), &peer_schedule) {
+            if let Some(skip_to) =
+                dag.fill_to_top(round, Some(&mut committer), &peer_schedule, conf)
+            {
                 println!("gap: next anchor with full history not earlier than {skip_to:?}");
             };
 
@@ -344,10 +354,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 7);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 7);
             }
             if round.0 == 66 {
-                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 4);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 4);
             }
         }
 
@@ -372,21 +382,21 @@ mod test {
 
         let r_round = remove_round(&mut committer.dag, Round(70));
 
-        assert_eq!(commit(&mut committer, None).len(), 1);
+        assert_eq!(commit(&mut committer, None, conf).len(), 1);
 
         for pack in r_points {
             restore_point(&mut committer.dag, pack);
         }
 
-        assert_eq!(commit(&mut committer, None).len(), 2);
+        assert_eq!(commit(&mut committer, None, conf).len(), 2);
 
         restore_point(&mut committer.dag, r_leader);
 
-        assert_eq!(commit(&mut committer, None).len(), 2);
+        assert_eq!(commit(&mut committer, None, conf).len(), 2);
 
         restore_round(&mut committer.dag, r_round);
 
-        assert_eq!(commit(&mut committer, None).len(), 7);
+        assert_eq!(commit(&mut committer, None, conf).len(), 7);
 
         std::io::stderr().flush().ok();
         std::io::stdout().flush().ok();
@@ -462,14 +472,18 @@ mod test {
         }
     }
 
-    fn commit(committer: &mut Committer, up_to: Option<Round>) -> Vec<AnchorData> {
+    fn commit(
+        committer: &mut Committer,
+        up_to: Option<Round>,
+        conf: &MempoolConfig,
+    ) -> Vec<AnchorData> {
         let committed = if let Some(up_to) = up_to {
             committer
-                .commit_up_to(up_to)
+                .commit_up_to(up_to, conf)
                 .expect("no certified NotFound or Invalid points")
         } else {
             committer
-                .commit()
+                .commit(conf)
                 .expect("no certified NotFound or Invalid points")
         };
         for data in &committed {

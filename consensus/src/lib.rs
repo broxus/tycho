@@ -8,9 +8,12 @@ pub mod test_utils;
 
 pub mod prelude {
     pub use crate::effects::MempoolAdapterStore;
-    pub use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
+    pub use crate::engine::lifecycle::{
+        EngineBinding, EngineHandle, EngineNetworkArgs, EngineRunning,
+    };
+    pub use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
     pub use crate::engine::{
-        ConsensusConfigExt, Engine, EngineHandle, InputBuffer, MempoolConfig, MempoolConfigBuilder,
+        ConsensusConfigExt, InputBuffer, MempoolConfigBuilder, MempoolMergedConfig,
         MempoolNodeConfig,
     };
     pub use crate::models::{AnchorData, MempoolOutput, PointInfo};

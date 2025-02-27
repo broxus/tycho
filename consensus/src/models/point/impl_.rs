@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
+use everscale_types::models::ConsensusConfig;
 use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PeerId;
 
+use crate::engine::MempoolConfig;
 use crate::models::point::body::{PointBody, ShortPointBody};
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
@@ -70,7 +72,7 @@ impl Point {
         ShortPoint::read_from_bytes(data.as_ref())
     }
 
-    pub fn max_byte_size(payload_batch_bytes: usize) -> usize {
+    pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
         // 4 bytes of Point tag
         // 32 bytes of Digest
         // 64 bytes of Signature
@@ -79,7 +81,7 @@ impl Point {
 
         4 + Digest::MAX_TL_BYTES
             + Signature::MAX_TL_BYTES
-            + PointBody::max_byte_size(payload_batch_bytes)
+            + PointBody::max_byte_size(consensus_config)
     }
 
     pub fn new(
@@ -88,6 +90,7 @@ impl Point {
         evidence: BTreeMap<PeerId, Signature>,
         payload: Vec<Bytes>,
         data: PointData,
+        conf: &MempoolConfig,
     ) -> Self {
         assert_eq!(
             data.author,
@@ -101,7 +104,7 @@ impl Point {
             payload,
         };
 
-        let digest = body.make_digest();
+        let digest = body.make_digest(conf);
         Self(Arc::new(PointInner {
             signature: Signature::new(local_keypair, &digest),
             digest,
@@ -165,8 +168,8 @@ impl Point {
 
     /// blame author and every dependent point's author
     /// must be checked right after integrity, before any manipulations with the point
-    pub fn is_well_formed(&self) -> bool {
-        self.0.body.is_well_formed()
+    pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
+        self.0.body.is_well_formed(conf)
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
@@ -244,7 +247,6 @@ mod tests {
     use tycho_util::sync::rayon_run;
 
     use super::*;
-    use crate::engine::CachedConfig;
     use crate::models::{PointInfo, Through, UnixTime};
     use crate::test_utils::default_test_config;
     const PEERS: usize = 100;
@@ -318,11 +320,11 @@ mod tests {
 
     #[test]
     pub fn check_serialize() {
-        CachedConfig::init(&default_test_config());
+        let merged_conf = default_test_config();
 
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest();
+        let digest = point_body.make_digest(&merged_conf.conf);
         let point = Point(Arc::new(PointInner {
             signature: Signature::new(&point_key_pair, &digest),
             digest,
@@ -348,7 +350,7 @@ mod tests {
 
     #[test]
     pub fn check_sig() {
-        CachedConfig::init(&default_test_config());
+        let _merged_conf = default_test_config();
 
         let (digest, data) = sig_data();
 
@@ -377,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     pub async fn check_sig_on_rayon() {
-        CachedConfig::init(&default_test_config());
+        let _merged_conf = default_test_config();
 
         let (digest, data) = sig_data();
 
@@ -404,11 +406,11 @@ mod tests {
 
     #[test]
     pub fn check_new_point() {
-        CachedConfig::init(&default_test_config());
+        let merged_conf = default_test_config();
 
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest();
+        let digest = point_body.make_digest(&merged_conf.conf);
         let point = Point(Arc::new(PointInner {
             signature: Signature::new(&point_key_pair, &digest),
             digest,
@@ -451,20 +453,20 @@ mod tests {
 
     #[test]
     pub fn massive_point_deserialization() {
-        CachedConfig::init(&default_test_config());
+        let merged_conf = default_test_config();
 
         let point_key_pair = new_key_pair();
         let point_payload = MSG_COUNT * MSG_BYTES;
 
         let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest();
+        let digest = point_body.make_digest(&merged_conf.conf);
         let point = Point(Arc::new(PointInner {
             signature: Signature::new(&point_key_pair, &digest),
             digest,
             body: point_body.clone(),
         }));
 
-        let mut data = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
+        let mut data = Vec::<u8>::with_capacity(merged_conf.conf.point_max_bytes);
         point.write_to(&mut data);
         let byte_size = data.len();
 
@@ -486,11 +488,11 @@ mod tests {
 
     #[test]
     pub fn point_to_short_point() {
-        CachedConfig::init(&default_test_config());
+        let merged_conf = default_test_config();
 
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest();
+        let digest = point_body.make_digest(&merged_conf.conf);
         let point = Point(Arc::new(PointInner {
             signature: Signature::new(&point_key_pair, &digest),
             digest,
@@ -507,7 +509,7 @@ mod tests {
 
     #[test]
     pub fn massive_point_serialization() {
-        CachedConfig::init(&default_test_config());
+        let merged_conf = default_test_config();
 
         let point_key_pair = new_key_pair();
         let timer = Instant::now();
@@ -515,7 +517,7 @@ mod tests {
         let mut byte_size = 0;
 
         let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest();
+        let digest = point_body.make_digest(&merged_conf.conf);
         let point = Point(Arc::new(PointInner {
             signature: Signature::new(&point_key_pair, &digest),
             digest,
@@ -524,7 +526,7 @@ mod tests {
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
             let point = point.clone();
-            let mut data = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
+            let mut data = Vec::<u8>::with_capacity(merged_conf.conf.point_max_bytes);
             point.write_to(&mut data);
             byte_size = data.len();
             // data.freeze();
