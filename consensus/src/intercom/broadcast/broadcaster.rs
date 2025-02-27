@@ -8,6 +8,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
+use tokio::time::MissedTickBehavior;
 use tycho_network::{PeerId, Request};
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -173,7 +174,8 @@ impl Broadcaster {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             CachedConfig::get().consensus.broadcast_retry_millis as _,
         ));
-        retry_interval.reset_immediately();
+        retry_interval.reset(); // query signatures after time passes, just to resend broadcast
+        retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         for peer in mem::take(&mut self.bcast_peers) {
             self.broadcast(&peer);
         }
