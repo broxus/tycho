@@ -3,7 +3,7 @@ pub mod point_status;
 use std::fmt::{Display, Formatter};
 
 use tycho_util::metrics::HistogramGuard;
-use weedb::rocksdb::{IteratorMode, ReadOptions, WriteBatch};
+use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::MempoolDb;
 
@@ -109,6 +109,14 @@ impl MempoolStorage {
         rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
 
         Ok(first.zip(last))
+    }
+
+    /// Use when no reads/writes are possible, and this should finish prior other ops
+    pub fn wait_for_compact(&self) -> anyhow::Result<()> {
+        let mut opt = WaitForCompactOptions::default();
+        opt.set_flush(true);
+        self.db.rocksdb().wait_for_compact(&opt)?;
+        Ok(())
     }
 
     /// returns `true` if only one value existed and was equal to provided arg

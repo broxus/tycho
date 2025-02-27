@@ -280,8 +280,7 @@ impl DagRound {
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
-        restore_dependencies: bool,
-    ) {
+    ) -> DagPointFuture {
         let _guard = round_ctx.span().enter();
         assert_eq!(
             point_restore.round(),
@@ -306,10 +305,10 @@ impl DagRound {
                         downloader,
                         store,
                         round_ctx,
-                        restore_dependencies,
                     )
-                });
-        });
+                })
+                .clone()
+        })
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {
