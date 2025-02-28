@@ -124,7 +124,7 @@ where
     ready_to_sync: Arc<Notify>,
 
     /// block id of last processed master state (after collation or on sync)
-    last_processed_mc_block_id: Mutex<Option<BlockId>>,
+    last_processed_mc_block_id: Arc<Mutex<Option<BlockId>>>,
 
     /// state to sync collation between master and shard chains
     collation_sync_state: Arc<Mutex<CollationSyncState>>,
@@ -134,6 +134,9 @@ where
 
     /// Mempool config override for a new genesis
     mempool_config_override: Option<MempoolGlobalConfig>,
+
+    /// `McData` which processing was delayed until block is validated.
+    delayed_mc_state_update: Arc<Mutex<Option<Arc<McData>>>>,
 }
 
 #[async_trait]
@@ -350,6 +353,8 @@ where
             validator_set_cache: Default::default(),
 
             mempool_config_override,
+
+            delayed_mc_state_update: Arc::new(Mutex::new(None)),
         };
         let collation_manager = Arc::new(collation_manager);
 
@@ -750,6 +755,7 @@ where
 
         let block_id = *collation_result.candidate.block.id();
         let candidate_chain_time = collation_result.candidate.chain_time;
+        let consensus_config_changed = collation_result.candidate.consensus_config_changed;
 
         debug_assert_eq!(
             block_id.is_masterchain(),
@@ -930,16 +936,10 @@ where
         if block_id.is_masterchain() && !collation_cancelled {
             // run validation or commit block
             if store_res.received_and_collated {
-                // here commit will not cause on_block_accepted event
-                // because block already exist in bc state
-                // so we can report top processed anchor here
-                let mc_data = collation_result
-                    .mc_data
-                    .as_ref()
-                    .expect("should not be None for master block");
-                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
+                // NOTE: here commit will not cause on_block_accepted event
+                //      because block already exist in bc state
 
-                self.commit_valid_master_block(&block_id)?;
+                self.commit_valid_master_block(&block_id).await?;
             } else {
                 let validator = self.validator.clone();
                 let session_seqno = session_info.seqno();
@@ -1008,14 +1008,20 @@ where
         } else if block_id.is_masterchain() {
             // when candidate is master
 
-            // execute master state update processing routines
-            self.process_mc_state_update(
-                collation_result.mc_data.unwrap(),
-                ProcessMcStateUpdateMode::StartCollation {
-                    reset_collators: false,
-                },
-            )
-            .await?;
+            // if consensus config was changed we should wait until master block is validated
+            if consensus_config_changed == Some(true) {
+                let mut delayed_mc_state_update = self.delayed_mc_state_update.lock();
+                *delayed_mc_state_update = collation_result.mc_data;
+            } else {
+                // otherwise we can execute master state update processing routines right now
+                self.process_mc_state_update(
+                    collation_result.mc_data.unwrap(),
+                    ProcessMcStateUpdateMode::StartCollation {
+                        reset_collators: false,
+                    },
+                )
+                .await?;
+            }
         } else {
             // when candidate is shard
 
@@ -1327,24 +1333,14 @@ where
         } else {
             // try to commit block if it was collated first
             if store_res.received_and_collated {
-                // here commit will not cause on_block_accepted event
-                // because block already exist in bc state
-                // so we can report top processed anchor here
-                self.detect_top_processed_to_anchor_and_notify_mempool_impl(
-                    state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
-                    state
-                        .state()
-                        .processed_upto
-                        .load()?
-                        .get_min_externals_processed_to()?
-                        .0,
-                )?;
+                // NOTE: here commit will not cause on_block_accepted event
+                //      because block already exist in bc state
 
                 // NOTE: here master block subgraph could be already extracted,
                 //      sent to sync, and removed from cache, because validation task
                 //      could be finished after `store_received()` but before this point.
 
-                self.commit_valid_master_block(&block_id)?;
+                self.commit_valid_master_block(&block_id).await?;
             }
         }
 
@@ -1850,7 +1846,7 @@ where
     ) -> (i32, bool) {
         let (seqno_delta, is_equal) = match other_mc_block_id_opt {
             None => {
-                tracing::debug!(
+                tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "other mc block is None: current {} other ({:?}): is_equal = false, seqno_delta = 0",
                     mc_block_id.as_short_id(),
@@ -1864,7 +1860,7 @@ where
             ),
         };
         if seqno_delta < 0 || is_equal {
-            tracing::debug!(
+            tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "mc block is NOT AHEAD of other: current {} other ({:?}): is_equal = {}, seqno_delta = {}",
                 mc_block_id.as_short_id(),
@@ -1893,6 +1889,31 @@ where
                 .await?;
         }
 
+        Ok(())
+    }
+
+    async fn process_delayed_mc_state_update(&self, block_id: &BlockId) -> Result<()> {
+        let mut delayed_mc_data = None;
+        {
+            let mut guard = self.delayed_mc_state_update.lock();
+            if let Some(mc_data) = guard.clone() {
+                if mc_data.block_id <= *block_id {
+                    // process delayed mc state only if committed block is equal
+                    if mc_data.block_id == *block_id {
+                        delayed_mc_data = Some(mc_data);
+                    }
+
+                    // remove delayed mc state even if committed block is ahead
+                    *guard = None;
+                }
+            }
+        }
+        if let Some(mc_data) = delayed_mc_data {
+            self.process_mc_state_update(mc_data, ProcessMcStateUpdateMode::StartCollation {
+                reset_collators: false,
+            })
+            .await?;
+        }
         Ok(())
     }
 
@@ -2713,7 +2734,7 @@ where
         self.ready_to_sync.notified().await;
 
         // process valid block
-        self.commit_valid_master_block(&block_id)?;
+        self.commit_valid_master_block(&block_id).await?;
 
         self.ready_to_sync.notify_one();
 
@@ -2727,7 +2748,9 @@ where
     /// 3. Send to sync
     /// 4. Commit queue diff
     /// 5. Clean up from cache
-    fn commit_valid_master_block(&self, block_id: &BlockId) -> Result<()> {
+    /// 6. Process delayed master state update if exists
+    /// 7. Notify top processed anchor to mempool if block commited by received from bc
+    async fn commit_valid_master_block(&self, block_id: &BlockId) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start to commit validated and valid master block ({})...",
@@ -2739,6 +2762,11 @@ where
             HistogramGuard::begin("tycho_collator_extract_master_block_subgraph_time");
         let mut extract_elapsed = Default::default();
         let mut sync_elapsed = Default::default();
+
+        // if current block was committed by received one
+        // then `on_block_accepted` will not be called further
+        // so we need to notify mempool here strongly after state update is notified
+        let mut top_processed_to_anchor_to_notify = None;
 
         // extract master block with all shard blocks if valid, and process them
         match self
@@ -2770,6 +2798,8 @@ where
                         total = sync_elapsed.as_millis(),
                         "send_blocks_to_sync timings",
                     );
+                } else {
+                    top_processed_to_anchor_to_notify = master_block.top_processed_to_anchor;
                 }
 
                 let _histogram =
@@ -2796,6 +2826,14 @@ where
             "commit_valid_master_block timings",
         );
 
+        // we can process delayed master state update now
+        self.process_delayed_mc_state_update(block_id).await?;
+
+        // report last processed anchor to mempool
+        if let Some(top_processed_to_anchor) = top_processed_to_anchor_to_notify {
+            self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)?;
+        }
+
         Ok(())
     }
 
@@ -2819,39 +2857,6 @@ where
             block_id,
         );
         Ok(())
-    }
-
-    /// Try find master block and execute post validation routines
-    #[expect(unused)]
-    fn commit_valid_shard_block(&self, block_id: &BlockId) -> Result<()> {
-        match self.blocks_cache.find_containing_mc_block(block_id) {
-            Some((mc_block_id, true)) => {
-                tracing::debug!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "Found containing master block ({}) for just validated shard block ({}) in cache",
-                    mc_block_id.as_short_id(),
-                    block_id.as_short_id(),
-                );
-                self.commit_valid_master_block(&mc_block_id)
-            }
-            Some((mc_block_id, false)) => {
-                tracing::debug!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "Containing master block ({}) for just validated shard block ({}) is not validated yet. Will wait for master block validation",
-                    mc_block_id.as_short_id(),
-                    block_id.as_short_id(),
-                );
-                Ok(())
-            }
-            None => {
-                tracing::debug!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "There is no containing master block for just validated shard block ({}) in cache. Will wait for master block collation",
-                    block_id.as_short_id(),
-                );
-                Ok(())
-            }
-        }
     }
 
     /// Collect top blocks seqno from all shards by master block id.
