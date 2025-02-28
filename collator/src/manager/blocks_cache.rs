@@ -127,29 +127,6 @@ impl BlocksCache {
         }
     }
 
-    /// Find shard block in cache and then get containing master block id if link exists
-    pub fn find_containing_mc_block(&self, shard_block_id: &BlockId) -> Option<(BlockId, bool)> {
-        let mc_block_seqno = {
-            let guard = self.shards.get(&shard_block_id.shard)?;
-            guard
-                .value()
-                .blocks
-                .get(&shard_block_id.seqno)
-                .map(|sbc| sbc.ref_by_mc_seqno)?
-        };
-
-        let guard = self.masters.lock();
-        guard.blocks.get(&mc_block_seqno).map(|block_container| {
-            // NOTE: Assume the all collated shard blocks are valid since the
-            // containing master block will be different otherwise and will be
-            // discarded (stuck then cancelled) during the validation process.
-            // FIXME: `is_valid` might have a different meaning like "validation finished"
-            let is_valid = true;
-
-            (block_container.block_id, is_valid)
-        })
-    }
-
     pub fn get_last_collated_block_and_applied_mc_queue_range(
         &self,
     ) -> (Option<BlockId>, Option<(BlockSeqno, BlockSeqno)>) {

@@ -123,7 +123,9 @@ pub struct McData {
     pub global_id: i32,
     pub block_id: BlockId,
 
+    /// Last known key block seqno. Will be equal to `McData.block_id.seqno` if it is a key block.
     pub prev_key_block_seqno: u32,
+
     pub gen_lt: u64,
     pub gen_chain_time: u64,
     pub libraries: Dict<HashBytes, LibDescr>,
@@ -215,6 +217,9 @@ pub struct BlockCandidate {
     pub ref_by_mc_seqno: u32,
     pub block: BlockStuffAug,
     pub is_key_block: bool,
+    /// If current block is a key master block and `ConsensusConfig` was changed.
+    /// `None` - if it is a shard block or not a key master block.
+    pub consensus_config_changed: Option<bool>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
     pub collated_data: Vec<u8>,
