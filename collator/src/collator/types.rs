@@ -316,6 +316,7 @@ impl BlockCollationDataBuilder {
             mint_msg: None,
             recover_create_msg: None,
             mempool_config_override: self.mempool_config_override,
+            consensus_config_changed: None,
             #[cfg(feature = "block-creator-stats")]
             block_create_count: self.block_create_count,
             diff_tail_len: 0,
@@ -380,6 +381,10 @@ pub(super) struct BlockCollationData {
 
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,
+
+    /// If current block is a key master block and `ConsensusConfig` was changed.
+    /// `None` - if it is a shard block or not a key master block.
+    pub consensus_config_changed: Option<bool>,
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
