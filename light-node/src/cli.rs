@@ -126,11 +126,10 @@ impl<C> Node<C> {
             .with_config(node_config.dht)
             .build();
 
-        let (overlay_tasks, overlay_service) =
-            OverlayService::builder(local_id, keys.as_secret().to_bytes())
-                .with_config(node_config.overlay)
-                .with_dht_service(dht_service.clone())
-                .build();
+        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
+            .with_config(node_config.overlay)
+            .with_dht_service(dht_service.clone())
+            .build();
 
         let router = Router::builder()
             .route(dht_service.clone())

@@ -21,6 +21,8 @@ impl OverlayServiceInner {
         network: WeakNetwork,
         dht_service: Option<DhtService>,
     ) {
+        use crate::make_local_public_overlay_entry;
+
         enum Action<'a> {
             UpdatePublicOverlaysList(&'a mut PublicOverlaysState),
             ExchangePublicOverlayEntries {
@@ -36,12 +38,16 @@ impl OverlayServiceInner {
                 overlay_id: OverlayId,
                 tasks: &'a mut TasksStream,
             },
+            SignLocalPublicEntry {
+                overlay_id: OverlayId,
+            },
         }
 
         struct PublicOverlaysState {
             exchange: TasksStream,
             discover: TasksStream,
             store: TasksStream,
+            sign: TasksStream,
         }
 
         let public_overlays_notify = self.public_overlays_changed.clone();
@@ -69,6 +75,7 @@ impl OverlayServiceInner {
                             exchange: TasksStream::new("exchange public overlay peers"),
                             discover: TasksStream::new("discover public overlay entries in DHT"),
                             store: TasksStream::new("store public overlay entries in DHT"),
+                            sign: TasksStream::new("sign local public overlay entr"),
                         },
                     )),
                     // Default actions
@@ -100,6 +107,12 @@ impl OverlayServiceInner {
                                 },
                                 None => continue,
                             },
+                            overlay_id = public_overlays_state.sign.next() => match overlay_id {
+                                Some(id) => Action::SignLocalPublicEntry {
+                                    overlay_id: id,
+                                },
+                                None => continue,
+                            },
                             _ = dht_peer_added.notified(), if !empty_overlays.is_empty() => {
                                 let Some(id) = empty_overlays.pop() else {
                                     continue;
@@ -127,6 +140,7 @@ impl OverlayServiceInner {
                         exchange,
                         discover,
                         store,
+                        sign,
                     }) => {
                         let iter = this.public_overlays.iter().map(|item| *item.key());
                         exchange.rebuild(iter.clone(), |_| {
@@ -143,7 +157,7 @@ impl OverlayServiceInner {
                             )
                         });
                         store.rebuild_ext(
-                            iter,
+                            iter.clone(),
                             |overlay_id| {
                                 // Insert merger for new overlays
                                 if let Some(dht) = &dht_service {
@@ -166,6 +180,9 @@ impl OverlayServiceInner {
                                 }
                             },
                         );
+                        sign.rebuild(iter, |_| {
+                            tokio::time::interval(this.config.public_overlay_peer_sign_period)
+                        });
                     }
                     Action::ExchangePublicOverlayEntries { overlay_id, tasks } => {
                         tasks.spawn(&overlay_id, move || async move {
@@ -232,6 +249,15 @@ impl OverlayServiceInner {
                             )
                             .await
                         });
+                    }
+                    Action::SignLocalPublicEntry { overlay_id } => {
+                        let public_entry = make_local_public_overlay_entry(
+                            this.local_id,
+                            &network,
+                            &overlay_id,
+                            now_sec(),
+                        );
+                        this.add_signed_local_overlay(&overlay_id, public_entry);
                     }
                 }
             }
