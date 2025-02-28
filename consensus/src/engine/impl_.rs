@@ -229,7 +229,6 @@ impl Engine {
                 .max(Genesis::id().round),
         );
         let dag_bottom_round = committer.bottom_round();
-        self.committer_run = tokio::spawn(future::ready(committer));
 
         // preload and sign last rounds if node may still participate in consensus
 
@@ -315,6 +314,15 @@ impl Engine {
             }
         };
         self.round_task.state.consensus_round.set_max(new_top_round);
+        (self.dag).fill_to_top(
+            new_top_round,
+            Some(&mut committer),
+            &self.round_task.state.peer_schedule,
+        );
+        let head = self.dag.head(&self.round_task.state.peer_schedule);
+        self.round_task.init_responder(&head, &round_ctx);
+
+        self.committer_run = tokio::spawn(future::ready(committer));
 
         replay_bcasts
     }
@@ -408,14 +416,12 @@ impl Engine {
                 let old_dag_top_round = self.dag.top().round();
 
                 let next_round = if let Some((start_point, _)) = &replay_bcasts {
-                    let consensus_round = self.round_task.state.consensus_round.get();
-                    let new_top_round = consensus_round.max(old_dag_top_round);
                     assert_eq!(
                         start_point.round(),
-                        new_top_round.prev(),
+                        old_dag_top_round.prev(),
                         "start point must be at current round"
                     );
-                    new_top_round
+                    old_dag_top_round
                 } else {
                     // do not repeat the `get()` - it can give non-reproducible result
                     let consensus_round = self.round_task.state.consensus_round.get();

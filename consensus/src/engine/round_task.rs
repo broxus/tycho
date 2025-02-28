@@ -69,6 +69,16 @@ impl RoundTaskReady {
         }
     }
 
+    pub fn init_responder(&self, head: &DagHead, round_ctx: &RoundCtx) {
+        self.state.responder.update(
+            &self.state.broadcast_filter,
+            head,
+            &self.state.downloader,
+            &self.state.store,
+            round_ctx,
+        );
+    }
+
     pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
         assert!(
             self.prev_broadcast.is_none(),
@@ -190,13 +200,7 @@ impl RoundTaskReady {
 
         // Signer must stop making new signatures for witness round before new point is produced
         // own point future must do nothing until polled (must not be spawned)
-        self.state.responder.update(
-            &self.state.broadcast_filter,
-            head,
-            &self.state.downloader,
-            &self.state.store,
-            round_ctx,
-        );
+        self.init_responder(head, round_ctx);
 
         let broadcaster_run = tokio::spawn({
             let own_point_round = head.current().downgrade();
