@@ -72,8 +72,12 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
             base.overlay_service.add_public_overlay(&public_overlay);
 
             let dht_client = base.dht_service.make_client(&base.network);
-            let client =
-                PublicOverlayClient::new(base.network.clone(), public_overlay, Default::default());
+            let client = PublicOverlayClient::new(
+                base.overlay_service.local_id(),
+                base.network.clone(),
+                public_overlay,
+                Default::default(),
+            );
 
             let blockchain_client = BlockchainRpcClient::builder()
                 .with_public_overlay_client(client.clone())
@@ -170,6 +174,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     let client = BlockchainRpcClient::builder()
         .with_public_overlay_client(PublicOverlayClient::new(
+            node.local_id(),
             node.network().clone(),
             node.public_overlay().clone(),
             Default::default(),
@@ -232,6 +237,7 @@ async fn overlay_server_blocks() -> Result<()> {
 
     let client = BlockchainRpcClient::builder()
         .with_public_overlay_client(PublicOverlayClient::new(
+            node.local_id(),
             node.network().clone(),
             node.public_overlay().clone(),
             Default::default(),
@@ -331,6 +337,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
 
     let client = BlockchainRpcClient::builder()
         .with_public_overlay_client(PublicOverlayClient::new(
+            node.local_id(),
             node.network().clone(),
             node.public_overlay().clone(),
             Default::default(),

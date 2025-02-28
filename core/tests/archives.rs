@@ -427,6 +427,7 @@ async fn heavy_archives() -> Result<()> {
 
     let client = BlockchainRpcClient::builder()
         .with_public_overlay_client(PublicOverlayClient::new(
+            node.local_id(),
             node.network().clone(),
             node.public_overlay().clone(),
             Default::default(),
