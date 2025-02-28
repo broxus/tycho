@@ -81,12 +81,17 @@ fn make_fast_overlay_config() -> OverlayConfig {
 }
 
 pub struct Node {
+    local_id: PeerId,
     network: Network,
     public_overlay: PublicOverlay,
     dht_client: DhtClient,
 }
 
 impl Node {
+    pub fn local_id(&self) -> PeerId {
+        self.local_id
+    }
+
     pub fn network(&self) -> &Network {
         &self.network
     }
@@ -102,6 +107,8 @@ impl Node {
             overlay_service,
             peer_resolver,
         } = NodeBase::with_random_key();
+        let local_id = overlay_service.local_id();
+
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
             .with_peer_resolver(peer_resolver.clone())
             .build(
@@ -115,6 +122,7 @@ impl Node {
         let dht_client = dht_service.make_client(&network);
 
         Self {
+            local_id,
             network,
             public_overlay,
             dht_client,

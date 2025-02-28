@@ -439,7 +439,7 @@ impl Inner {
     }
 
     async fn exchange_public_entries(&self, target_peer_id: &PeerId) -> Result<()> {
-        // TODO: take from OverlayConfig
+        // TODO: take from OverlayConfig?
         const EXCHANGE_PUBLIC_ENTRIES_BATCH: usize = 20;
 
         let n = EXCHANGE_PUBLIC_ENTRIES_BATCH;

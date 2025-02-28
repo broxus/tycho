@@ -117,6 +117,10 @@ impl OverlayService {
     pub fn add_signed_local_overlay(&self, overlay_id: &OverlayId, entry: PublicEntry) -> bool {
         self.0.add_signed_local_overlay(overlay_id, entry)
     }
+
+    pub fn local_id(&self) -> PeerId {
+        self.0.local_id
+    }
 }
 
 impl Service<ServiceRequest> for OverlayService {

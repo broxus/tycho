@@ -692,8 +692,8 @@ mod test {
     use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_network::{
-        service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
-        Response, ServiceExt, ServiceRequest,
+        service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PeerId,
+        PublicOverlay, Response, ServiceExt, ServiceRequest,
     };
     use tycho_storage::{Storage, StorageConfig};
 
@@ -772,8 +772,11 @@ mod test {
                 .build(),
         );
 
+        let local_id = PeerId([0u8; 32]);
+
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_public_overlay_client(PublicOverlayClient::new(
+                local_id,
                 network,
                 public_overlay,
                 PublicOverlayClientConfig::default(),
@@ -841,8 +844,11 @@ mod test {
                 .build(),
         );
 
+        let local_id = PeerId([0u8; 32]);
+
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_public_overlay_client(PublicOverlayClient::new(
+                local_id,
                 network,
                 public_overlay,
                 PublicOverlayClientConfig::default(),
