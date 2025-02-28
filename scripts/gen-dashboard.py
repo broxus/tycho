@@ -840,6 +840,12 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
         ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_split_block_available_permits",
+            "Split block available permits",
+            UNITS.NUMBER_FORMAT,
+            "0.999",
+        ),
         create_heatmap_panel(
             "tycho_storage_batch_write_time", "Time to write merge in write batch"
         ),

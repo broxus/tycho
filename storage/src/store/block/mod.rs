@@ -1032,6 +1032,9 @@ impl BlockStorage {
         self.db.rocksdb().write(batch)?;
 
         // Start splitting block data
+        metrics::histogram!("tycho_storage_split_block_available_permits")
+            .record(self.split_block_semaphore.available_permits() as f64);
+
         let permit = self.split_block_semaphore.clone().acquire_owned().await?;
         let _handle = self.spawn_split_block_data(&id.block_id, data, permit);
 
