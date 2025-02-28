@@ -21,7 +21,7 @@ pub use self::public_overlay::{
 };
 use crate::dht::DhtService;
 use crate::network::Network;
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry, PublicEntryToSign};
+use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry};
 use crate::types::{PeerId, Response, Service, ServiceRequest};
 use crate::util::Routable;
 
@@ -48,7 +48,6 @@ impl OverlayServiceBackgroundTasks {
 
 pub struct OverlayServiceBuilder {
     local_id: PeerId,
-    secret_key: [u8; 32],
     config: Option<OverlayConfig>,
     dht: Option<DhtService>,
 }
@@ -67,19 +66,15 @@ impl OverlayServiceBuilder {
     pub fn build(self) -> (OverlayServiceBackgroundTasks, OverlayService) {
         let config = self.config.unwrap_or_default();
 
-        let keypair = everscale_crypto::ed25519::KeyPair::from(
-            &everscale_crypto::ed25519::SecretKey::from_bytes(self.secret_key),
-        );
-
         let inner = Arc::new(OverlayServiceInner {
             local_id: self.local_id,
             config,
-            keypair,
             private_overlays: Default::default(),
             public_overlays: Default::default(),
             public_overlays_changed: Arc::new(Notify::new()),
             private_overlays_changed: Arc::new(Notify::new()),
             public_entries_merger: Arc::new(PublicOverlayEntriesMerger),
+            signed_local_entries: Default::default(),
         });
 
         let background_tasks = OverlayServiceBackgroundTasks {
@@ -95,10 +90,9 @@ impl OverlayServiceBuilder {
 pub struct OverlayService(Arc<OverlayServiceInner>);
 
 impl OverlayService {
-    pub fn builder(local_id: PeerId, secret_key: [u8; 32]) -> OverlayServiceBuilder {
+    pub fn builder(local_id: PeerId) -> OverlayServiceBuilder {
         OverlayServiceBuilder {
             local_id,
-            secret_key,
             config: None,
             dht: None,
         }
@@ -118,6 +112,10 @@ impl OverlayService {
 
     pub fn remove_public_overlay(&self, overlay_id: &OverlayId) -> bool {
         self.0.remove_public_overlay(overlay_id)
+    }
+
+    pub fn add_signed_local_overlay(&self, overlay_id: &OverlayId, entry: PublicEntry) -> bool {
+        self.0.add_signed_local_overlay(overlay_id, entry)
     }
 }
 
@@ -254,12 +252,12 @@ impl Routable for OverlayService {
 struct OverlayServiceInner {
     local_id: PeerId,
     config: OverlayConfig,
-    keypair: everscale_crypto::ed25519::KeyPair,
     public_overlays: FastDashMap<OverlayId, PublicOverlay>,
     private_overlays: FastDashMap<OverlayId, PrivateOverlay>,
     public_overlays_changed: Arc<Notify>,
     private_overlays_changed: Arc<Notify>,
     public_entries_merger: Arc<PublicOverlayEntriesMerger>,
+    signed_local_entries: FastDashMap<OverlayId, Arc<PublicEntry>>,
 }
 
 impl OverlayServiceInner {
@@ -311,6 +309,12 @@ impl OverlayServiceInner {
         removed
     }
 
+    fn add_signed_local_overlay(&self, overlay_id: &OverlayId, entry: PublicEntry) -> bool {
+        self.signed_local_entries
+            .insert(*overlay_id, Arc::new(entry))
+            .is_some()
+    }
+
     fn handle_exchange_public_entries(
         &self,
         req: &rpc::ExchangeRandomPublicEntries,
@@ -349,31 +353,11 @@ impl OverlayServiceInner {
                 .collect::<Vec<_>>()
         };
 
-        entries.push(Arc::new(make_local_public_overlay_entry(
-            self.local_id,
-            &self.keypair,
-            overlay.overlay_id(),
-            now_sec(),
-        )));
+        // Should exist
+        if let Some(signed_entry) = self.signed_local_entries.get(overlay.overlay_id()) {
+            entries.push(signed_entry.clone());
+        }
 
         PublicEntriesResponse::PublicEntries(entries)
-    }
-}
-
-fn make_local_public_overlay_entry(
-    local_id: PeerId,
-    keypair: &everscale_crypto::ed25519::KeyPair,
-    overlay_id: &OverlayId,
-    now: u32,
-) -> PublicEntry {
-    let signature = Box::new(keypair.sign(PublicEntryToSign {
-        overlay_id: overlay_id.as_bytes(),
-        peer_id: &local_id,
-        created_at: now,
-    }));
-    PublicEntry {
-        peer_id: local_id,
-        created_at: now,
-        signature,
     }
 }

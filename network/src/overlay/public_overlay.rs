@@ -197,10 +197,7 @@ impl PublicOverlay {
             })
             .count;
 
-        // TODO: move to config
-        const REQUESTS_THRESHOLD: u32 = 20;
-
-        if count > REQUESTS_THRESHOLD {
+        if count > UNKNOWN_PEER_REQUESTS_THRESHOLD {
             self.inner.unknown_peer_added.notify_waiters();
         }
     }
@@ -210,12 +207,9 @@ impl PublicOverlay {
     }
 
     pub fn cleanup_unknown_peers(&self) {
-        // TODO: move to config
-        let timeout = Duration::from_secs(300);
-
         self.inner
             .unknown_peer_ids
-            .retain(|_, entry| entry.last_update.elapsed() < timeout);
+            .retain(|_, entry| entry.last_update.elapsed() < UNKNOWN_PEER_EXPIRED_PERIOD);
     }
 
     pub fn read_entries(&self) -> PublicOverlayEntriesReadGuard<'_> {
@@ -245,13 +239,10 @@ impl PublicOverlay {
     }
 
     pub fn unknown_peer_ids(&self) -> Vec<PeerId> {
-        // TODO: move to config
-        const REQUESTS_THRESHOLD: u32 = 20;
-
         self.inner
             .unknown_peer_ids
             .iter()
-            .filter(|x| x.count > REQUESTS_THRESHOLD)
+            .filter(|x| x.count > UNKNOWN_PEER_REQUESTS_THRESHOLD)
             .map(|x| *x.key())
             .collect::<Vec<_>>()
     }
@@ -631,6 +622,9 @@ struct UnknownPeerEntry {
     count: u32,
     last_update: Instant,
 }
+
+const UNKNOWN_PEER_REQUESTS_THRESHOLD: u32 = 20;
+const UNKNOWN_PEER_EXPIRED_PERIOD: Duration = Duration::from_secs(5 * 60);
 
 type OverlayItems = IndexMap<PeerId, PublicOverlayEntryData, FastHasherState>;
 
