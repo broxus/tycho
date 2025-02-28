@@ -682,6 +682,7 @@ impl Phase<FinalizeState> {
             ref_by_mc_seqno,
             block: new_block,
             is_key_block: new_block_info.key_block,
+            consensus_config_changed: self.state.collation_data.consensus_config_changed,
             prev_blocks_ids: self.state.prev_shard_data.blocks_ids().clone(),
             top_shard_blocks_ids: self
                 .state
@@ -867,6 +868,8 @@ impl Phase<FinalizeState> {
             let prev_consensus_config = prev_config.get_consensus_config()?;
             let is_consensus_config_changed =
                 prev_consensus_config != config.get_consensus_config()?;
+            // remember if consensus config changed
+            collation_data.consensus_config_changed = Some(is_consensus_config_changed);
 
             let is_curr_switch_applied =
                 consensus_info.vset_switch_round <= prev_processed_to_anchor;
