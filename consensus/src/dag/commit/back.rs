@@ -9,8 +9,9 @@ use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
 
+use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::commit::SyncError;
-use crate::dag::{DagRound, EnqueuedAnchor};
+use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{CachedConfig, Genesis};
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
@@ -128,6 +129,8 @@ impl DagBack {
             ))
             .rev();
 
+        let mut max_conflict_round = None;
+
         for (_, dag_round) in rev_iter {
             let stage = match dag_round.anchor_stage() {
                 Some(stage) if stage.role == AnchorStageRole::Trigger => stage,
@@ -142,12 +145,17 @@ impl DagBack {
                     triggers.push_front(trigger.info().clone());
                 }
                 Err(SyncError::TryLater) => {} // skip
-                Err(SyncError::Impossible(round)) => return Err(round),
+                Err(SyncError::Impossible(round)) => {
+                    max_conflict_round = max_conflict_round.or(Some(round));
+                }
             }
         }
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
 
-        Ok(triggers)
+        match max_conflict_round {
+            Some(round) if triggers.is_empty() => Err(round),
+            _ => Ok(triggers),
+        }
     }
 
     pub(super) fn last_unusable_proof_round(
