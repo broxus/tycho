@@ -1,6 +1,3 @@
-use anchor_chain::AnchorChain;
-pub use anchor_chain::EnqueuedAnchor;
-
 mod anchor_chain;
 mod back;
 
@@ -8,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use tycho_util::metrics::HistogramGuard;
 
+use crate::dag::commit::anchor_chain::{AnchorChain, EnqueuedAnchor};
 use crate::dag::commit::back::DagBack;
 use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
@@ -105,22 +103,29 @@ impl Committer {
 
         self.enqueue_new_anchors(current_round)?;
 
-        let _span = if let Some(top) = self.anchor_chain.top() {
+        let mut committed = Vec::new();
+
+        while let Some(next) = self.anchor_chain.next() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
-                .set(current_round - top.proof.round());
+                .set(current_round - next.proof.round());
 
-            tracing::error_span!(
-                "last anchor proof",
-                author = display(&top.proof.data().author.alt()),
-                round = top.proof.round().0,
-                digest = display(&top.proof.digest().alt()),
+            let _span = tracing::error_span!(
+                "anchor",
+                author = display(&next.anchor.data().author.alt()),
+                round = next.anchor.round().0,
+                digest = display(&next.anchor.digest().alt()),
+                proof = display(&next.proof.digest().alt()),
+                trigger = (next.direct_trigger.as_ref()).map(|p| display(p.digest().alt())),
             )
-            .entered()
-        } else {
-            return Ok(Vec::new());
-        };
+            .entered();
 
-        self.dequeue_anchors()
+            match self.dequeue_anchor(next) {
+                Ok(data) => committed.push(data),
+                Err(SyncError::Impossible(round)) if committed.is_empty() => return Err(round),
+                Err(_) => break,
+            }
+        }
+        Ok(committed)
     }
 
     fn enqueue_new_anchors(&mut self, current_round: Round) -> Result<(), Round> {
@@ -172,73 +177,59 @@ impl Committer {
         Ok(())
     }
 
-    fn dequeue_anchors(&mut self) -> Result<Vec<AnchorData>, Round> {
-        let mut ordered = Vec::new();
-
-        // tracing::warn!("anchor_chain {:?}", self.anchor_chain.alt());
-
-        while let Some(next) = self.anchor_chain.next() {
-            // in case previous anchor was triggered directly - rounds are already dropped
-            self.dag.drop_upto(
-                next.anchor.round() - CachedConfig::get().consensus.commit_history_rounds,
-            );
-            let uncommitted = match self
-                .dag
-                .gather_uncommitted(self.full_history_bottom, &next.anchor)
-            {
+    fn dequeue_anchor(&mut self, next: EnqueuedAnchor) -> Result<AnchorData, SyncError> {
+        // in case previous anchor was triggered directly - rounds are already dropped
+        self.dag
+            .drop_upto(next.anchor.round() - CachedConfig::get().consensus.commit_history_rounds);
+        let uncommitted =
+            match (self.dag).gather_uncommitted(self.full_history_bottom, &next.anchor) {
                 Ok(uncommitted) => uncommitted,
-                Err(SyncError::TryLater) => {
+                Err(sync_error) => {
                     self.anchor_chain.undo_next(next);
-                    break; // will continue at the next call if now some point isn't ready
-                }
-                Err(SyncError::Impossible(round)) => {
-                    self.anchor_chain.undo_next(next);
-                    return Err(round);
+                    return Err(sync_error);
                 }
             };
 
-            match self
-                .dag
-                .get(next.proof.round())
-                .and_then(|r| r.anchor_stage())
-            {
-                Some(stage) if stage.role == AnchorStageRole::Proof => {
-                    stage.is_used.store(true, Ordering::Relaxed);
-                }
-                _ => panic!("expected AnchorStage::Proof"),
-            };
+        match self
+            .dag
+            .get(next.proof.round())
+            .and_then(|r| r.anchor_stage())
+        {
+            Some(stage) if stage.role == AnchorStageRole::Proof => {
+                stage.is_used.store(true, Ordering::Relaxed);
+            }
+            _ => panic!("expected AnchorStage::Proof"),
+        };
 
-            // Note a proof may be marked as used while it is fired by a future tigger, which
-            //   may be left unmarked at the current run until upcoming points become ready
-            match next
-                .direct_trigger
-                .as_ref()
-                .map(|tr| self.dag.get(tr.round()).and_then(|r| r.anchor_stage()))
-            {
-                Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {
-                    stage.is_used.store(true, Ordering::Relaxed);
-                }
-                Some(_) => panic!("expected AnchorStage::Trigger"),
-                None => {} // anchor triplet without direct trigger (not ready/valid/exists)
-            };
+        // Note a proof may be marked as used while it is fired by a future tigger, which
+        //   may be left unmarked at the current run until upcoming points become ready
+        match next
+            .direct_trigger
+            .as_ref()
+            .map(|tr| self.dag.get(tr.round()).and_then(|r| r.anchor_stage()))
+        {
+            Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {
+                stage.is_used.store(true, Ordering::Relaxed);
+            }
+            Some(_) => panic!("expected AnchorStage::Trigger"),
+            None => {} // anchor triplet without direct trigger (not ready/valid/exists)
+        };
 
-            // Note every iteration marks committed points before next uncommitted are gathered
-            let committed = uncommitted
-                .into_iter()
-                .map(|valid| {
-                    valid.is_committed().store(true, Ordering::Relaxed);
-                    valid.info().clone()
-                })
-                .collect::<Vec<_>>();
-            ordered.push(AnchorData {
-                prev_anchor: Some(next.anchor.anchor_round(AnchorStageRole::Proof))
-                    .filter(|r| *r > Genesis::id().round)
-                    .map(|r| r.prev()),
-                anchor: next.anchor,
-                history: committed,
-            });
-        }
-        Ok(ordered)
+        // Note every iteration marks committed points before next uncommitted are gathered
+        let committed = uncommitted
+            .into_iter()
+            .map(|valid| {
+                valid.is_committed().store(true, Ordering::Relaxed);
+                valid.info().clone()
+            })
+            .collect::<Vec<_>>();
+        Ok(AnchorData {
+            prev_anchor: Some(next.anchor.anchor_round(AnchorStageRole::Proof))
+                .filter(|r| *r > Genesis::id().round)
+                .map(|r| r.prev()),
+            anchor: next.anchor,
+            history: committed,
+        })
     }
 }
 
