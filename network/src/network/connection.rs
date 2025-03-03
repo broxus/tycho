@@ -2,8 +2,10 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
+use metrics::Label;
 use quinn::{ConnectionError, SendDatagramError};
 use webpki::types::CertificateDer;
 
@@ -16,16 +18,114 @@ pub struct Connection {
     request_meta: Arc<InboundRequestMeta>,
 }
 
+macro_rules! emit_gauges {
+    ($prefix:literal, $stats:expr, $labels:expr, [ $($field:ident),* $(,)? ]) => {
+        $(
+            metrics::gauge!(concat!($prefix, stringify!($field)), $labels.clone())
+                .set($stats.$field as f64);
+        )*
+    };
+}
+
 impl Connection {
     pub fn with_peer_id(inner: quinn::Connection, origin: Direction, peer_id: PeerId) -> Self {
-        Self {
+        let connection = Self {
             request_meta: Arc::new(InboundRequestMeta {
                 peer_id,
                 origin,
                 remote_address: inner.remote_address(),
             }),
             inner,
-        }
+        };
+
+        let conn = connection.inner.clone();
+        let peer_id = peer_id.to_string();
+        let remote_addr = connection.remote_address().to_string();
+
+        // we can't use `spawn_metrics_loop` here because we can't get arc reference to connection
+        tokio::spawn(async move {
+            let peer_id = peer_id.clone();
+            let remote_addr = remote_addr.clone();
+            let labels = vec![
+                Label::new("peer_id", peer_id),
+                Label::new("peer_addr", remote_addr),
+            ];
+
+            loop {
+                let stats = conn.stats();
+
+                metrics::gauge!("tycho_network_connection_rtt_ms", labels.clone())
+                    .set(stats.path.rtt.as_millis() as f64);
+
+                metrics::gauge!("tycho_network_connection_invalid_messages", labels.clone()).set(
+                    stats.frame_rx.connection_close as f64 + stats.frame_rx.reset_stream as f64,
+                );
+
+                emit_gauges!("tycho_network_connection_", stats.path, labels, [
+                    cwnd,              // Congestion window size
+                    congestion_events, // Network congestion indicators
+                    lost_packets,      // Total packet loss
+                    sent_packets       // Baseline for loss calculations
+                ]);
+
+                emit_gauges!("tycho_network_connection_rx_", stats.udp_rx, labels, [
+                    datagrams, bytes
+                ]);
+
+                emit_gauges!("tycho_network_connection_tx_", stats.udp_tx, labels, [
+                    datagrams, bytes
+                ]);
+
+                // Frame RX
+                emit_gauges!(
+                    "tycho_network_connection_rx_",
+                    stats.frame_rx,
+                    labels.clone(),
+                    [
+                        acks,
+                        crypto,
+                        connection_close,
+                        data_blocked,
+                        datagram,
+                        max_data,
+                        max_stream_data,
+                        ping,
+                        reset_stream,
+                        stream_data_blocked,
+                        streams_blocked_bidi,
+                        stop_sending,
+                        stream
+                    ]
+                );
+
+                // Frame TX
+                emit_gauges!("tycho_network_connection_tx_", stats.frame_tx, labels, [
+                    acks,
+                    crypto,
+                    connection_close,
+                    data_blocked,
+                    datagram,
+                    max_data,
+                    max_stream_data,
+                    ping,
+                    reset_stream,
+                    stream_data_blocked,
+                    streams_blocked_bidi,
+                    stop_sending,
+                    stream
+                ]);
+
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = conn.closed() => {
+                        tracing::info!(peer_address = %conn.remote_address(), "Connection closed");
+                        return;
+                    },
+                }
+            }
+        });
+
+        connection
     }
 
     pub fn request_meta(&self) -> &Arc<InboundRequestMeta> {
@@ -80,6 +180,10 @@ impl Connection {
 
     pub async fn read_datagram(&self) -> Result<Bytes, ConnectionError> {
         self.inner.read_datagram().await
+    }
+
+    pub fn stats(&self) -> quinn::ConnectionStats {
+        self.inner.stats()
     }
 }
 

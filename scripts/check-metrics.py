@@ -64,6 +64,9 @@ def process_metric_arg(
     blacklisted_dirs: [str],
 ):
     arg = arg.split(",")[0].strip()  # Remove labels
+    if "$" in arg:
+        # It's a macro
+        return
     if arg.startswith('"') and arg.endswith('"'):
         # It's a string literal
         metric_names.add(arg[1:-1])
