@@ -420,15 +420,9 @@ impl Phase<FinalizeState> {
             (None, Some(self.state.mc_data.make_block_ref()))
         };
 
-        let version = if self.state.collation_data.block_id_short.seqno % 3 == 0 {
-            0
-        } else {
-            1
-        };
-
         // build block info
         let mut new_block_info = BlockInfo {
-            version,
+            version: 0,
             key_block: matches!(&mc_state_extra, Some(extra) if extra.after_key_block),
             shard: self.state.collation_data.block_id_short.shard,
             seqno: self.state.collation_data.block_id_short.seqno,

@@ -451,7 +451,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                                 "check range limit: cannot get diff with stats from queue for block {}",
                                 diff_block_id,
                             );
-                            return CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
+                            CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
                                 diff_block_id,
                             ))
                         })?;

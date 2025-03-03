@@ -2,15 +2,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, IntAddr, ShardIdent};
-use everscale_types::prelude::HashBytes;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_storage::model::{
-    DiffInfo, DiffInfoKey, DiffTailKey, QueueRange, ShardsInternalMessagesKey, StatKey,
+    CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey, StatKey,
 };
 use tycho_storage::{InternalQueueSnapshot, InternalQueueTransaction, Storage};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{
@@ -19,53 +19,55 @@ use crate::internal_queue::types::{
 use crate::types::ProcessedTo;
 // CONFIG
 
-pub struct UncommittedStateConfig {
+pub struct QueueStateConfig {
     pub storage: Storage,
 }
 
 // FACTORY
 
-impl<F, R, V> UncommittedStateFactory<V> for F
+impl<F, R, V> QueueStateFactory<V> for F
 where
     F: Fn() -> R,
-    R: UncommittedState<V>,
+    R: QueueState<V>,
     V: InternalMessageValue,
 {
-    type UncommittedState = R;
+    type QueueState = R;
 
-    fn create(&self) -> Self::UncommittedState {
+    fn create(&self) -> Self::QueueState {
         self()
     }
 }
 
-pub struct UncommittedStateImplFactory {
+pub struct QueueStateImplFactory {
     pub storage: Storage,
 }
 
-impl UncommittedStateImplFactory {
+impl QueueStateImplFactory {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
 }
 
-impl<V: InternalMessageValue> UncommittedStateFactory<V> for UncommittedStateImplFactory {
-    type UncommittedState = UncommittedStateStdImpl;
+impl<V: InternalMessageValue> QueueStateFactory<V> for QueueStateImplFactory {
+    type QueueState = QueueStateStdImpl;
 
-    fn create(&self) -> Self::UncommittedState {
-        UncommittedStateStdImpl::new(self.storage.clone())
+    fn create(&self) -> Self::QueueState {
+        QueueStateStdImpl::new(self.storage.clone())
     }
 }
 
-pub trait UncommittedStateFactory<V: InternalMessageValue> {
-    type UncommittedState: LocalUncommittedState<V>;
+pub trait QueueStateFactory<V: InternalMessageValue> {
+    type QueueState: QueueState<V>;
 
-    fn create(&self) -> Self::UncommittedState;
+    fn create(&self) -> Self::QueueState;
 }
 
 // TRAIT
 
-#[trait_variant::make(UncommittedState: Send)]
-pub trait LocalUncommittedState<V: InternalMessageValue> {
+pub trait QueueState<V: InternalMessageValue>: Send + Sync {
+    /// Create snapshot
+    fn snapshot(&self) -> InternalQueueSnapshot;
+
     /// Create iterator for given partition and ranges
     fn iterator(
         &self,
@@ -75,16 +77,33 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         ranges: &[QueueShardRange],
     ) -> Result<Box<dyn StateIterator<V>>>;
 
-    /// Move messages and statistics from uncommitted to committed state with given partitions and ranges
+    /// Delete messages in given partition and ranges
+    fn delete(&self, partition: QueuePartitionIdx, ranges: &[QueueShardRange]) -> Result<()>;
+    /// Set commit pointers and last applied mc block id
     fn commit(
         &self,
-        partitions: FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
+        commit_pointers: &FastHashMap<ShardIdent, QueueKey>,
         mc_block_id: &BlockId,
     ) -> Result<()>;
 
-    /// Delete all uncommitted messages and statistics
-    fn truncate(&self) -> Result<()>;
+    /// Load statistics for given partition and ranges
+    fn load_statistics(
+        &self,
+        partition: QueuePartitionIdx,
+        range: &[QueueShardRange],
+    ) -> Result<FastHashMap<IntAddr, u64>>;
+
+    /// Get last applied mc block id
+    /// Returns None if no block was applied
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Get length of diffs tail
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
+    /// Get diff info by diff seqno
+    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
+    /// Get last applied block seqno by shard ident from committed and uncommited zone
+    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
+    /// Get commit pointers
+    fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>>;
 
     fn write_diff(
         &self,
@@ -93,39 +112,27 @@ pub trait LocalUncommittedState<V: InternalMessageValue> {
         hash: HashBytes,
         diff: QueueDiffWithMessages<V>,
     ) -> Result<()>;
-
-    /// Load statistics for given partition and ranges
-    fn load_statistics(
-        &self,
-        result: &mut FastHashMap<IntAddr, u64>,
-        snapshot: &InternalQueueSnapshot,
-        partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
-    ) -> Result<()>;
-
-    /// Get diffs tail length
-    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
-
-    /// Get diff info
-    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
-
-    /// Get last applied block seqno by shard ident
-    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
+    fn clear_uncommitted(&self, partitions: &[QueuePartitionIdx]) -> Result<()>;
 }
 
 // IMPLEMENTATION
 
-pub struct UncommittedStateStdImpl {
+pub struct QueueStateStdImpl {
     storage: Storage,
 }
 
-impl UncommittedStateStdImpl {
+impl QueueStateStdImpl {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
 }
 
-impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
+impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
+    fn snapshot(&self) -> InternalQueueSnapshot {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_snapshot_time");
+        self.storage.internal_queue_storage().make_snapshot()
+    }
+
     fn iterator(
         &self,
         snapshot: &InternalQueueSnapshot,
@@ -136,47 +143,107 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
         let mut shards_iters = Vec::new();
 
         for range in ranges {
-            let from_key = range.from.next_value();
             // exclude from key
+            let from_key = range.from.next_value();
             let from = ShardsInternalMessagesKey::new(partition, range.shard_ident, from_key);
             // include to key
             let to_key = range.to.next_value();
             let to = ShardsInternalMessagesKey::new(partition, range.shard_ident, to_key);
-            shards_iters.push((
-                snapshot.iter_messages_uncommited(from, to),
-                range.shard_ident,
-            ));
+            shards_iters.push((snapshot.iter_messages(from, to), range.shard_ident));
         }
 
         let iterator = StateIteratorImpl::new(shards_iters, receiver)?;
         Ok(Box::new(iterator))
     }
 
-    fn commit(
-        &self,
-        partitions: FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
-        mc_block_id: &BlockId,
-    ) -> Result<()> {
-        let ranges = partitions.iter().flat_map(|&partition| {
-            ranges.iter().map(move |range| QueueRange {
+    fn delete(&self, partition: QueuePartitionIdx, ranges: &[QueueShardRange]) -> Result<()> {
+        let mut queue_ranges = vec![];
+        for range in ranges {
+            queue_ranges.push(tycho_storage::model::QueueRange {
                 partition,
                 shard_ident: range.shard_ident,
                 from: range.from,
                 to: range.to,
-            })
-        });
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        let mut tx = self.storage.internal_queue_storage().begin_transaction();
+            });
+        }
 
-        tx.commit_messages(&snapshot, ranges)?;
-        tx.set_last_applied_mc_block_id(mc_block_id);
-
+        let tx = self.storage.internal_queue_storage().begin_transaction();
+        tx.delete(&queue_ranges)?;
         tx.write()
     }
 
-    fn truncate(&self) -> Result<()> {
-        self.storage.internal_queue_storage().clear_uncommited()
+    fn commit(
+        &self,
+        commit_pointers: &FastHashMap<ShardIdent, QueueKey>,
+        mc_block_id: &BlockId,
+    ) -> Result<()> {
+        let mut tx = self.storage.internal_queue_storage().begin_transaction();
+        tx.commit_messages(commit_pointers)?;
+        tx.set_last_applied_mc_block_id(mc_block_id);
+        tx.write()
+    }
+
+    fn load_statistics(
+        &self,
+        partition: QueuePartitionIdx,
+        ranges: &[QueueShardRange],
+    ) -> Result<FastHashMap<IntAddr, u64>> {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let mut result = FastHashMap::default();
+
+        for range in ranges {
+            snapshot.collect_stats_in_range(
+                range.shard_ident,
+                partition,
+                &range.from,
+                &range.to,
+                &mut result,
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+        self.storage
+            .internal_queue_storage()
+            .get_last_applied_mc_block_id()
+    }
+
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        snapshot.calc_diffs_tail(&DiffTailKey {
+            shard_ident: *shard_ident,
+            max_message: *from,
+        })
+    }
+
+    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let diff_info_bytes = snapshot.get_diff_info(&DiffInfoKey {
+            shard_ident: *shard_ident,
+            seqno,
+        })?;
+
+        if let Some(diff_info_bytes) = diff_info_bytes {
+            let diff_info = tl_proto::deserialize(&diff_info_bytes)?;
+            Ok(Some(diff_info))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        snapshot.get_last_applied_block_seqno(shard_ident)
+    }
+
+    fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>> {
+        self.storage
+            .internal_queue_storage()
+            .make_snapshot()
+            .read_commit_pointers()
     }
 
     fn write_diff(
@@ -210,64 +277,21 @@ impl<V: InternalMessageValue> UncommittedState<V> for UncommittedStateStdImpl {
             dst_router_partition,
         );
 
-        let _histogram = HistogramGuard::begin("tycho_internal_queue_write_diff_write_time");
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_write_diff_time");
 
         tx.write()
     }
 
-    fn load_statistics(
-        &self,
-        result: &mut FastHashMap<IntAddr, u64>,
-        snapshot: &InternalQueueSnapshot,
-        partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
-    ) -> Result<()> {
-        let _histogram =
-            HistogramGuard::begin("tycho_internal_queue_uncommitted_statistics_load_time");
-
-        for range in ranges {
-            snapshot.collect_uncommitted_stats_in_range(
-                range.shard_ident,
-                partition,
-                &range.from,
-                &range.to,
-                result,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
+    fn clear_uncommitted(&self, partitions: &[QueuePartitionIdx]) -> Result<()> {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        snapshot.calc_diffs_tail_uncommitted(&DiffTailKey {
-            shard_ident: *shard_ident,
-            max_message: *from,
-        })
-    }
-
-    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        let diff_info_bytes = snapshot.get_diff_info_uncommitted(&DiffInfoKey {
-            shard_ident: *shard_ident,
-            seqno,
-        })?;
-
-        if let Some(diff_info_bytes) = diff_info_bytes {
-            let diff_info = tl_proto::deserialize(&diff_info_bytes)?;
-            Ok(Some(diff_info))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        snapshot.get_last_applied_block_seqno_uncommitted(shard_ident)
+        let pointers = snapshot.read_commit_pointers()?;
+        let tx = self.storage.internal_queue_storage().begin_transaction();
+        tx.clear_uncommitted(partitions, &pointers)?;
+        tx.write()
     }
 }
 
-impl UncommittedStateStdImpl {
+impl QueueStateStdImpl {
     /// write new messages to storage
     fn add_messages<V: InternalMessageValue>(
         internal_queue_tx: &mut InternalQueueTransaction,
@@ -284,12 +308,8 @@ impl UncommittedStateStdImpl {
             buffer.clear();
             message.serialize(&mut buffer);
 
-            internal_queue_tx.insert_message_uncommitted(
-                &tycho_storage::model::ShardsInternalMessagesKey::new(
-                    partition,
-                    source,
-                    *internal_message_key,
-                ),
+            internal_queue_tx.insert_message(
+                &ShardsInternalMessagesKey::new(partition, source, *internal_message_key),
                 destination,
                 &buffer,
             );
@@ -323,7 +343,7 @@ impl UncommittedStateStdImpl {
                     dest,
                 };
 
-                internal_queue_tx.insert_statistics_uncommitted(&key, *count);
+                internal_queue_tx.insert_statistics(&key, *count);
             }
             metrics::counter!(
                 "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
@@ -340,7 +360,7 @@ impl UncommittedStateStdImpl {
         block_id_short: &BlockIdShort,
         max_message: &QueueKey,
     ) {
-        internal_queue_tx.insert_diff_tail_uncommitted(
+        internal_queue_tx.insert_diff_tail(
             &DiffTailKey {
                 shard_ident: block_id_short.shard,
                 max_message: *max_message,
@@ -373,10 +393,11 @@ impl UncommittedStateStdImpl {
             processed_to,
             router_partitions_src,
             router_partitions_dst,
+            seqno: block_id_short.seqno,
         };
 
         let serialized_diff_info = tl_proto::serialize(diff_info);
 
-        internal_queue_tx.insert_diff_info_uncommitted(&key, &serialized_diff_info);
+        internal_queue_tx.insert_diff_info(&key, &serialized_diff_info);
     }
 }

@@ -1,6 +1,5 @@
-use std::cmp::max;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -10,15 +9,12 @@ use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{serde_helpers, FastHashMap, FastHashSet};
+use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
 use crate::internal_queue::gc::GcManager;
-use crate::internal_queue::state::commited_state::{
-    CommittedState, CommittedStateFactory, CommittedStateImplFactory, CommittedStateStdImpl,
-};
 use crate::internal_queue::state::state_iterator::StateIterator;
-use crate::internal_queue::state::uncommitted_state::{
-    UncommittedState, UncommittedStateFactory, UncommittedStateImplFactory, UncommittedStateStdImpl,
+use crate::internal_queue::state::storage::{
+    QueueState, QueueStateFactory, QueueStateImplFactory, QueueStateStdImpl,
 };
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
@@ -26,8 +22,6 @@ use crate::internal_queue::types::{
 };
 use crate::types::ProcessedTo;
 use crate::{internal_queue, tracing_targets};
-
-// FACTORY
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
@@ -63,8 +57,7 @@ where
 }
 
 pub struct QueueFactoryStdImpl {
-    pub uncommitted_state_factory: UncommittedStateImplFactory,
-    pub committed_state_factory: CommittedStateImplFactory,
+    pub state: QueueStateImplFactory,
     pub config: QueueConfig,
 }
 
@@ -81,8 +74,8 @@ where
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
         for_shard_id: ShardIdent,
-    ) -> Result<Vec<Box<dyn StateIterator<V>>>>;
-    /// Add messages to uncommitted state from `diff.messages` and add diff to the cache
+    ) -> Result<Box<dyn StateIterator<V>>>;
+    /// Add messages to state from `diff.messages` and add diff to the cache
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -90,14 +83,14 @@ where
         hash: &HashBytes,
         statistics: DiffStatistics,
     ) -> Result<()>;
-    /// Move messages from uncommitted state to committed state and update gc ranges
+    /// Commit diffs to the state and update GC
     fn commit_diff(
         &self,
         mc_top_blocks: &[(BlockId, bool)],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
-    /// remove all data in uncommitted state storage
-    fn clear_uncommitted_state(&self) -> Result<()>;
+    /// remove all data in uncommitted zone storage
+    fn clear_uncommitted_state(&self, _partitions: &[QueuePartitionIdx]) -> Result<()>;
     /// Returns the diffs tail len for the given shard
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
@@ -106,34 +99,26 @@ where
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
-    /// Get diff for the given blocks from committed and uncommitted state
+    /// Get diff for the given block from committed and uncommitted zones
     fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
-    /// Get last applied mc block id from committed state
+    /// Get last applied and committed mc block id
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
 }
 
-// IMPLEMENTATION
-
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
-    type Queue = QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>;
+    type Queue = QueueImpl<QueueStateStdImpl, V>;
 
     fn create(&self) -> Self::Queue {
-        let uncommitted_state = <UncommittedStateImplFactory as UncommittedStateFactory<V>>::create(
-            &self.uncommitted_state_factory,
-        );
-        let committed_state = <CommittedStateImplFactory as CommittedStateFactory<V>>::create(
-            &self.committed_state_factory,
-        );
-        let committed_state = Arc::new(committed_state);
-        let gc = GcManager::start::<V>(committed_state.clone(), self.config.gc_interval);
+        let state = <QueueStateImplFactory as QueueStateFactory<V>>::create(&self.state);
+        let state = Arc::new(state);
+        let gc = GcManager::start::<V>(state.clone(), self.config.gc_interval);
         QueueImpl {
-            uncommitted_state: Arc::new(uncommitted_state),
-            committed_state,
-            // uncommitted_diffs: Default::default(),
-            // committed_diffs: Default::default(),
+            state,
             gc,
+            global_lock: RwLock::new(()),
+            shard_locks: FastDashMap::default(),
             _phantom_data: Default::default(),
         }
     }
@@ -193,24 +178,21 @@ pub struct ShortQueueDiffInner {
     pub statistics: DiffStatistics,
 }
 
-pub struct QueueImpl<S, P, V>
+pub struct QueueImpl<P, V>
 where
-    S: UncommittedState<V>,
-    P: CommittedState<V>,
+    P: QueueState<V>,
     V: InternalMessageValue,
 {
-    uncommitted_state: Arc<S>,
-    committed_state: Arc<P>,
-    // uncommitted_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
-    // committed_diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
+    state: Arc<P>,
     gc: GcManager,
+    global_lock: RwLock<()>,
+    shard_locks: FastDashMap<ShardIdent, Arc<Mutex<()>>>,
     _phantom_data: PhantomData<V>,
 }
 
-impl<S, P, V> Queue<V> for QueueImpl<S, P, V>
+impl<P, V> Queue<V> for QueueImpl<P, V>
 where
-    S: UncommittedState<V> + Send + Sync,
-    P: CommittedState<V> + Send + Sync + 'static,
+    P: QueueState<V> + Send + Sync + 'static,
     V: InternalMessageValue + Send + Sync,
 {
     fn iterator(
@@ -218,25 +200,17 @@ where
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
         for_shard_id: ShardIdent,
-    ) -> Result<Vec<Box<dyn StateIterator<V>>>> {
-        let snapshot = self.committed_state.snapshot();
+    ) -> Result<Box<dyn StateIterator<V>>> {
+        let snapshot = self.state.snapshot();
 
-        let committed_state_iterator = {
+        let state_iterator = {
             let _histogram =
                 HistogramGuard::begin("tycho_internal_queue_commited_state_iterator_create_time");
-            self.committed_state
+            self.state
                 .iterator(&snapshot, for_shard_id, partition, ranges)?
         };
 
-        let uncommitted_state_iterator = {
-            let _histogram =
-                HistogramGuard::begin("tycho_internal_queue_uncommited_state_iterator_create_time");
-
-            self.uncommitted_state
-                .iterator(&snapshot, for_shard_id, partition, ranges)?
-        };
-
-        Ok(vec![committed_state_iterator, uncommitted_state_iterator])
+        Ok(state_iterator)
     }
 
     fn apply_diff(
@@ -246,6 +220,13 @@ where
         hash: &HashBytes,
         statistics: DiffStatistics,
     ) -> Result<()> {
+        // Take global lock. Lock commit and clear uncommitted state for execution
+        let _global_read_guard = self.global_lock.read().unwrap_or_else(|e| e.into_inner());
+
+        // Take specific shard lock
+        let shard_lock = self.shard_locks.entry(block_id_short.shard).or_default();
+        let _shard_guard = shard_lock.lock().unwrap_or_else(|e| e.into_inner());
+
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = internal_queue::queue::Queue::get_diff(
             self,
@@ -266,15 +247,9 @@ where
             return Ok(());
         }
 
-        let last_applied_seqno_uncommitted = self
-            .uncommitted_state
+        let last_applied_seqno = self
+            .state
             .get_last_applied_block_seqno(&block_id_short.shard)?;
-
-        let last_applied_seqno_committed = self
-            .committed_state
-            .get_last_applied_block_seqno(&block_id_short.shard)?;
-
-        let last_applied_seqno = max(last_applied_seqno_uncommitted, last_applied_seqno_committed);
 
         if let Some(last_applied_seqno) = last_applied_seqno {
             // Check if the diff is already applied
@@ -292,8 +267,21 @@ where
             }
         }
 
-        // Add messages to uncommitted_state if there are any
-        self.uncommitted_state
+        // Check that applied diff is greater than committed pointer
+        let committed_pointer = self.state.get_commit_pointers()?;
+        if let Some(committed_pointer) = committed_pointer.get(&block_id_short.shard) {
+            if let Some(min_message) = diff.min_message() {
+                if min_message <= &committed_pointer.queue_key {
+                    bail!(
+                        "Diff min_message is less than committed_pointer: block_id={}, diff_min_message={}, committed_pointer={}",
+                        block_id_short.seqno,
+                        min_message,
+                        committed_pointer.queue_key
+                    );
+                }
+            }
+        }
+        self.state
             .write_diff(&block_id_short, &statistics, *hash, diff)?;
 
         Ok(())
@@ -304,6 +292,9 @@ where
         mc_top_blocks: &[(BlockId, bool)],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
+        // Take global lock
+        let _global_write_guard = self.global_lock.write().unwrap_or_else(|e| e.into_inner());
+
         let mc_block_id = mc_top_blocks
             .iter()
             .find(|(block_id, _)| block_id.is_masterchain())
@@ -312,30 +303,30 @@ where
 
         let mut gc_ranges = FastHashMap::default();
 
-        let mut commit_ranges: Vec<QueueShardRange> = vec![];
+        let mut commit_pointer = FastHashMap::default();
 
         for (block_id, top_shard_block_changed) in mc_top_blocks {
-            let diff = self
-                .uncommitted_state
-                .get_diff_info(&block_id.shard, block_id.seqno)?;
-
+            // Check if the diff is already applied
+            let diff = self.state.get_diff_info(&block_id.shard, block_id.seqno)?;
             let diff = match diff {
-                None => {
-                    if *top_shard_block_changed && mc_block_id.seqno != 0 {
-                        bail!("Uncommitted diff not found for block_id: {}", block_id);
-                    } else {
-                        continue;
-                    }
+                // If top shard block changed and diff not found, then bail
+                None if *top_shard_block_changed && mc_block_id.seqno != 0 => {
+                    bail!("Diff not found for block_id: {}", block_id)
                 }
+                // If top shard block not changed and diff not found, then continue
+                None => continue,
                 Some(diff) => diff,
             };
 
-            commit_ranges.push(QueueShardRange {
-                shard_ident: block_id.shard,
-                from: QueueKey::default(),
-                to: diff.max_message,
-            });
+            // Check for duplicate shard in commit_diff
+            if commit_pointer
+                .insert(block_id.shard, diff.max_message)
+                .is_some()
+            {
+                bail!("Duplicate shard in commit_diff: {}", block_id.shard);
+            }
 
+            // Update gc ranges
             if *top_shard_block_changed {
                 for (shard_ident, processed_to_key) in diff.processed_to.iter() {
                     let last_key = gc_ranges
@@ -349,9 +340,8 @@ where
             }
         }
 
-        // move all uncommitted diffs messages to committed state
-        self.uncommitted_state
-            .commit(partitions.clone(), &commit_ranges, mc_block_id)?;
+        // change pointer position
+        self.state.commit(&commit_pointer, mc_block_id)?;
 
         // run GC for each found partition in routers
         for partition in partitions {
@@ -363,8 +353,13 @@ where
         Ok(())
     }
 
-    fn clear_uncommitted_state(&self) -> Result<()> {
-        self.uncommitted_state.truncate()?;
+    fn clear_uncommitted_state(&self, _partitions: &[QueuePartitionIdx]) -> Result<()> {
+        // Take global lock
+        let _global_write_guard = self.global_lock.write().unwrap_or_else(|e| e.into_inner());
+
+        // TODO use dynamic partitions
+        let partitions = [0, 1];
+        self.state.clear_uncommitted(&partitions)?;
         tracing::info!(
             target: tracing_targets::MQ,
              "Cleared uncommitted diffs.",
@@ -377,16 +372,7 @@ where
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics> {
-        let snapshot = self.committed_state.snapshot();
-        let mut statistics = FastHashMap::default();
-
-        // load from committed state
-        self.committed_state
-            .load_statistics(&mut statistics, &snapshot, partition, ranges)?;
-
-        // load from uncommitted state and add to the statistics
-        self.uncommitted_state
-            .load_statistics(&mut statistics, &snapshot, partition, ranges)?;
+        let statistics = self.state.load_statistics(partition, ranges)?;
 
         let statistics = QueueStatistics::with_statistics(statistics);
 
@@ -394,35 +380,20 @@ where
     }
 
     fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
-        if let Some(diff) = self.uncommitted_state.get_diff_info(shard_ident, seqno)? {
-            return Ok(Some(diff));
-        }
-
-        if let Some(diff) = self.committed_state.get_diff_info(shard_ident, seqno)? {
-            return Ok(Some(diff));
-        }
-
-        Ok(None)
+        self.state.get_diff_info(shard_ident, seqno)
     }
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
-        let uncommitted_tail_len = self
-            .uncommitted_state
-            .get_diffs_tail_len(shard_ident, max_message_from);
-
-        let committed_tail_len = self
-            .committed_state
-            .get_diffs_tail_len(shard_ident, max_message_from);
+        let tail_len = self.state.get_diffs_tail_len(shard_ident, max_message_from);
 
         tracing::info!(
             target: tracing_targets::MQ,
             shard_ident = ?shard_ident,
-            uncommitted_tail_len,
-            committed_tail_len,
+            tail_len,
             "Get diffs tail len",
         );
 
-        uncommitted_tail_len + committed_tail_len
+        tail_len
     }
 
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool> {
@@ -435,6 +406,6 @@ where
     }
 
     fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
-        self.committed_state.get_last_applied_mc_block_id()
+        self.state.get_last_applied_mc_block_id()
     }
 }

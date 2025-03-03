@@ -807,7 +807,7 @@ where
                 "collator was cancelled before",
             );
 
-            self.mq_adapter.clear_uncommitted_state()?;
+            self.mq_adapter.clear_uncommitted_state(&[])?;
 
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
@@ -854,7 +854,7 @@ where
                     }
                 }
 
-                self.mq_adapter.clear_uncommitted_state()?;
+                self.mq_adapter.clear_uncommitted_state(&[])?;
 
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1213,7 +1213,7 @@ where
                 }
             }
 
-            self.mq_adapter.clear_uncommitted_state()?;
+            self.mq_adapter.clear_uncommitted_state(&[])?;
 
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
@@ -1459,7 +1459,7 @@ where
                     new_genesis_time_millis = mp_cfg_override.genesis_info.genesis_millis,
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
-                self.mq_adapter.clear_uncommitted_state()?;
+                self.mq_adapter.clear_uncommitted_state(&[])?;
             }
         }
 
@@ -1724,7 +1724,7 @@ where
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
                 // to avoid panics if next block was already collated before an it is incorrect
-                self.mq_adapter.clear_uncommitted_state()?;
+                self.mq_adapter.clear_uncommitted_state(&[])?;
 
                 let state = mc_block_entry.cached_state()?;
 

@@ -563,6 +563,21 @@ impl ColumnFamilyOptions<Caches> for InternalMessageDiffInfo {
     }
 }
 
+pub struct InternalMessageCommitPointer;
+impl ColumnFamily for InternalMessageCommitPointer {
+    const NAME: &'static str = "int_msg_commit_pointer";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for InternalMessageCommitPointer {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
 pub struct InternalMessageDiffInfoUncommitted;
 impl ColumnFamily for InternalMessageDiffInfoUncommitted {
     const NAME: &'static str = "int_msg_diff_info_uncommitted";
