@@ -115,10 +115,6 @@ def create_counter_panel(
 
     Returns:
         Panel: A timeseries panel object.
-
-    Raises:
-        ValueError: If the list elements in expr are not all strings or all Expr objects.
-        TypeError: If expr is not a string, a list of strings, or a list of Expr objects.
     """
     if legend_format is None:
         legend_format = generate_legend_format(labels_selectors)
@@ -136,7 +132,9 @@ def create_counter_panel(
         if all(isinstance(e, str) for e in expr):
             targets = [
                 target(
-                    expr_sum_rate(e, label_selectors=labels_selectors),
+                    expr_sum_rate(
+                        e, label_selectors=labels_selectors, by_labels=by_labels
+                    ),
                     legend_format=legend_format,
                 )
                 for e in expr
@@ -878,9 +876,7 @@ def storage() -> RowPanel:
         create_gauge_panel(
             "tycho_core_mc_blocks_gc_lag", "Blocks GC lag", unit_format="Blocks"
         ),
-        create_gauge_panel(
-            "tycho_core_blocks_gc_tail_len", "GC diffs tail len"
-        ),
+        create_gauge_panel("tycho_core_blocks_gc_tail_len", "GC diffs tail len"),
         create_heatmap_panel(
             "tycho_storage_move_into_archive_time", "Time to move into archive"
         ),
@@ -1120,7 +1116,7 @@ def collation_metrics() -> RowPanel:
             "tycho_last_block_seqno",
             "Last received/synced_to/collated block seqno",
             labels=['workchain=~"$workchain"'],
-            legend_format = "{{instance}} workchain: {{workchain}} src: {{src}}",
+            legend_format="{{instance}} workchain: {{workchain}} src: {{src}}",
         ),
         create_counter_panel(
             "tycho_collator_sync_to_applied_mc_block_count",
@@ -1289,7 +1285,7 @@ def collator_message_metrics() -> RowPanel:
             "tycho_do_collate_msgs_read_count_ext_by_partitions",
             "Read Ext msgs count (by partitions)",
             labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
-            by_labels=['instance', 'par_id'],
+            by_labels=["instance", "par_id"],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_ext",
@@ -1319,7 +1315,7 @@ def collator_message_metrics() -> RowPanel:
             "tycho_do_collate_msgs_read_count_int_by_partitions",
             "Read Int msgs count (by partitions)",
             labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
-            by_labels=['instance', 'par_id'],
+            by_labels=["instance", "par_id"],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_int",
@@ -1349,7 +1345,7 @@ def collator_message_metrics() -> RowPanel:
             "tycho_do_collate_msgs_read_count_new_int_by_partitions",
             "Read NewInt msgs count (by partitions)",
             labels_selectors=['workchain=~"$workchain"', 'par_id=~"$partition"'],
-            by_labels=['instance', 'par_id'],
+            by_labels=["instance", "par_id"],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_new_int",
@@ -1385,22 +1381,28 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
         create_gauge_panel(
-            "tycho_internal_queue_gc_state_size", "Total GC state size",
+            "tycho_internal_queue_gc_state_size",
+            "Total GC state size",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_commited_state_iterator_create_time", "Commited iterator init time"
+            "tycho_internal_queue_commited_state_iterator_create_time",
+            "Commited iterator init time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_uncommited_state_iterator_create_time", "Uncommitted iterator init time"
+            "tycho_internal_queue_uncommited_state_iterator_create_time",
+            "Uncommitted iterator init time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_uncommitted_statistics_load_time", "Uncommited statistics load time"
+            "tycho_internal_queue_uncommitted_statistics_load_time",
+            "Uncommited statistics load time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_committed_statistics_load_time", "Committed statistics load time"
+            "tycho_internal_queue_committed_statistics_load_time",
+            "Committed statistics load time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_apply_diff_add_statistics_time", "Apply statistics time"
+            "tycho_internal_queue_apply_diff_add_statistics_time",
+            "Apply statistics time",
         ),
         create_heatmap_panel(
             "tycho_internal_queue_apply_diff_add_messages_time", "Apply messages time"
@@ -1409,16 +1411,15 @@ def collator_queue_metrics() -> RowPanel:
             "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
             "Statistics accounts count",
             legend_format=legend_format_partition,
-            by_labels=["instance", "partition"]
+            by_labels=["instance", "partition"],
         ),
-        create_heatmap_panel(
-            "tycho_internal_queue_snapshot_time", "Snapshot time"
-        ),
+        create_heatmap_panel("tycho_internal_queue_snapshot_time", "Snapshot time"),
         create_heatmap_panel(
             "tycho_internal_queue_create_iterator_time", "Create iterator time"
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_add_messages_with_statistics_write_time", "Write uncommited data time"
+            "tycho_internal_queue_add_messages_with_statistics_write_time",
+            "Write uncommited data time",
         ),
         create_counter_panel(
             "tycho_collator_queue_adapter_iterators_count", "Iterators count"
@@ -2293,6 +2294,127 @@ def rayon_stats() -> RowPanel:
     return create_row("Rayon Stats", metrics)
 
 
+def quic_network_panels() -> list[RowPanel]:
+    """Panels for QUIC network performance monitoring"""
+    common_labels = ['peer_id=~"$peer_id"', 'peer_addr=~"$remote_addr"']
+    legend = "{{instance}} ->  {{peer_addr}}"
+    by_labels = ["instance", "peer_addr"]
+
+    def counter_with_defaults(metric, title, unit=UNITS.PACKETS_SEC):
+        return create_counter_panel(
+            metric,
+            title,
+            labels_selectors=common_labels,
+            legend_format=legend,
+            by_labels=by_labels,
+            unit_format=unit,
+        )
+
+    def gauge_with_defaults(metric, title, unit=UNITS.PACKETS_SEC):
+        return create_gauge_panel(
+            metric, title, labels=common_labels, legend_format=legend, unit_format=unit
+        )
+
+    # Core network metrics
+    network_perf_panels = [
+        gauge_with_defaults(
+            "tycho_network_connection_rtt_ms", "RTT", UNITS.MILLI_SECONDS
+        ),
+        gauge_with_defaults(
+            "tycho_network_connection_cwnd", "Congestion Window", "packets"
+        ),
+        counter_with_defaults(
+            "tycho_network_connection_invalid_messages", "Invalid Messages"
+        ),
+        counter_with_defaults(
+            "tycho_network_connection_congestion_events", "Congestion Events"
+        ),
+        create_percent_panel(
+            "tycho_network_connection_lost_packets",
+            "tycho_network_connection_sent_packets",
+            "Packet Loss Rate",
+            label_selectors=common_labels,
+        ),
+    ]
+
+    # Throughput metrics
+    data_movement_panels = [
+        counter_with_defaults(
+            "tycho_network_connection_rx_bytes", "Bytes Received/s", UNITS.BYTES_IEC
+        ),
+        counter_with_defaults(
+            "tycho_network_connection_tx_bytes", "Bytes Sent/s", UNITS.BYTES_IEC
+        ),
+    ]
+
+    def frame_panel_pair(frame_type, display_name):
+        return [
+            counter_with_defaults(
+                f"tycho_network_connection_rx_{frame_type}", f"RX {display_name}"
+            ),
+            counter_with_defaults(
+                f"tycho_network_connection_tx_{frame_type}", f"TX {display_name}"
+            ),
+        ]
+
+    protocol_panels = []
+    for frame_type, name in [
+        ("stream", "Stream Frames"),
+        ("acks", "ACK Frames"),
+        ("datagram", "Datagram Frames"),
+        ("max_data", "Max Data Frames"),
+        ("max_stream_data", "Max Stream Data"),
+        ("ping", "Ping Frames"),
+        ("crypto", "Crypto Handshake"),
+    ]:
+        protocol_panels.extend(frame_panel_pair(frame_type, name))
+
+    error_panels = [
+        counter_with_defaults(
+            [
+                "tycho_network_connection_rx_connection_close",
+                "tycho_network_connection_tx_connection_close",
+            ],
+            "Connection Close Frames",
+        ),
+        counter_with_defaults(
+            [
+                "tycho_network_connection_rx_reset_stream",
+                "tycho_network_connection_tx_reset_stream",
+            ],
+            "Reset Stream Frames",
+        ),
+        counter_with_defaults(
+            [
+                "tycho_network_connection_rx_stop_sending",
+                "tycho_network_connection_tx_stop_sending",
+            ],
+            "Stop Sending Frames",
+        ),
+        counter_with_defaults(
+            [
+                "tycho_network_connection_rx_data_blocked",
+                "tycho_network_connection_tx_data_blocked",
+            ],
+            "Data Blocked Frames",
+        ),
+        counter_with_defaults(
+            [
+                "tycho_network_connection_rx_stream_data_blocked",
+                "tycho_network_connection_tx_stream_data_blocked",
+            ],
+            "Stream Data Blocked Frames",
+        ),
+    ]
+
+    return [
+        create_row("quinn: Network Performance", network_perf_panels),
+        create_row("quinn: Data Movement", data_movement_panels),
+        create_row("quinn: Protocol Operations", protocol_panels),
+        create_row("quinn: Error Conditions", error_panels),
+    ]
+
+
 def templates() -> Templating:
     return Templating(
         list=[
@@ -2351,6 +2473,26 @@ def templates() -> Templating:
                 include_all=True,
                 all_value=".*",
             ),
+            template(
+                name="peer_id",
+                query="label_values(tycho_network_connection_rtt_ms, peer_id)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
+                name="remote_addr",
+                query="label_values(tycho_network_connection_rtt_ms, addr)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
         ]
     )
 
@@ -2358,7 +2500,7 @@ def templates() -> Templating:
 dashboard = Dashboard(
     "Tycho Node Metrics",
     templating=templates(),
-    refresh="5s",
+    refresh="30s",
     panels=[
         blockchain_stats(),
         core_bc(),
@@ -2391,6 +2533,7 @@ dashboard = Dashboard(
         net_request_handler(),
         net_peer(),
         net_dht(),
+        *quic_network_panels(),
         allocator_stats(),
         rayon_stats(),
         jrpc(),
