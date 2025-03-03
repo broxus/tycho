@@ -9,8 +9,9 @@ use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
 
+use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::commit::SyncError;
-use crate::dag::{DagRound, EnqueuedAnchor};
+use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{CachedConfig, Genesis};
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
