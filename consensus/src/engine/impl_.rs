@@ -185,9 +185,8 @@ impl Engine {
         .await
         .expect("load last round from db");
 
-        tracing::info!("found last db round {}", last_db_round.0);
-
         self.ctx = EngineCtx::new(last_db_round);
+        tracing::info!(parent: self.ctx.span(), "rounds set since found last db round");
 
         // wait collator to load blocks and update peer schedule
 
@@ -201,6 +200,7 @@ impl Engine {
             let mut top_known_anchor = top_known_anchor_recv.get();
             while top_known_anchor < min_top_known_anchor {
                 tracing::info!(
+                    parent: self.ctx.span(),
                     ?top_known_anchor,
                     ?min_top_known_anchor,
                     "waiting collator to load up to last top known anchor"
@@ -217,6 +217,7 @@ impl Engine {
             .max(Genesis::id().round.next());
         self.round_task.state.consensus_round.set_max(dag_top_round);
         let round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
+        tracing::info!(parent: round_ctx.span(), "current round set to dag top");
 
         let mut committer = take_committer(&mut self.committer_run).expect("init");
         (self.dag).fill_to_top(
@@ -229,7 +230,6 @@ impl Engine {
                 .max(Genesis::id().round),
         );
         let dag_bottom_round = committer.bottom_round();
-        self.committer_run = tokio::spawn(future::ready(committer));
 
         // preload and sign last rounds if node may still participate in consensus
 
@@ -279,7 +279,7 @@ impl Engine {
             }
         }
 
-        // determine current round to place broadcasts
+        // determine current round to place broadcasts (or produce if none found)
         let (new_top_round, replay_bcasts) = match last_broadcast {
             None => (dag_top_round, None),
             Some(last_id) if last_id.round == head_min_round => {
@@ -314,6 +314,13 @@ impl Engine {
                 }
             }
         };
+        (self.dag).fill_to_top(
+            new_top_round,
+            Some(&mut committer),
+            &self.round_task.state.peer_schedule,
+        );
+        self.committer_run = tokio::spawn(future::ready(committer));
+
         self.round_task.state.consensus_round.set_max(new_top_round);
 
         replay_bcasts
@@ -387,7 +394,8 @@ impl Engine {
     }
 
     pub async fn run(mut self) {
-        let mut replay_bcasts = self.pre_run().await;
+        // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
+        let mut start_replay_bcasts = Some(self.pre_run().await);
         let _db_clean_task = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
@@ -400,21 +408,14 @@ impl Engine {
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
-            let mut ready_committer = take_committer(&mut self.committer_run);
 
             {
-                let old_dag_top_round = self.dag.top().round();
-
-                let next_round = if let Some((start_point, _)) = &replay_bcasts {
-                    let consensus_round = self.round_task.state.consensus_round.get();
-                    let new_top_round = consensus_round.max(old_dag_top_round);
-                    assert_eq!(
-                        start_point.round(),
-                        new_top_round.prev(),
-                        "start point must be at current round"
-                    );
-                    new_top_round
+                let (old_dag_top_round, next_round) = if start_replay_bcasts.is_some() {
+                    let dag_top_round = self.dag.top().round();
+                    // dag top round is already set; Note first round is never paused
+                    (dag_top_round.prev(), dag_top_round)
                 } else {
+                    let old_dag_top_round = self.dag.top().round();
                     // do not repeat the `get()` - it can give non-reproducible result
                     let consensus_round = self.round_task.state.consensus_round.get();
                     assert!(
@@ -426,23 +427,20 @@ impl Engine {
                     metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
                         .increment(consensus_round - old_dag_top_round);
                     // if received from BcastFilter - produce point at round before it
-                    consensus_round.max(old_dag_top_round.next())
+                    let next_round = consensus_round.max(old_dag_top_round.next());
+                    (old_dag_top_round, next_round)
                 };
 
-                match collator_feedback(
+                let mut ready_committer = take_committer(&mut self.committer_run);
+
+                let dag_top_round = match collator_feedback(
                     self.round_task.state.top_known_anchor.receiver(),
                     old_dag_top_round,
                     &mut is_paused,
                     &self.committed_info_tx,
                     &round_ctx,
                 ) {
-                    Ok(pause_at) => {
-                        *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
-                            next_round.min(pause_at),
-                            ready_committer.as_mut(),
-                            &self.round_task.state.peer_schedule,
-                        ));
-                    }
+                    Ok(pause_at) => next_round.min(pause_at),
                     Err(collator_sync) => {
                         collator_sync.await;
                         if let Some(committer) = ready_committer {
@@ -455,9 +453,28 @@ impl Engine {
                         }
                         continue;
                     }
+                };
+
+                if old_dag_top_round < dag_top_round.prev() {
+                    self.ctx = EngineCtx::new(dag_top_round.prev());
                 }
 
-                let dag_top_round = self.dag.top().round();
+                round_ctx = RoundCtx::new(&self.ctx, dag_top_round.prev());
+
+                *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+                    dag_top_round,
+                    ready_committer.as_mut(),
+                    &self.round_task.state.peer_schedule,
+                ));
+
+                if let Some(committer) = ready_committer {
+                    self.committer_run = committer_task(
+                        committer,
+                        full_history_bottom.take(),
+                        self.committed_info_tx.clone(),
+                        round_ctx.clone(),
+                    );
+                }
 
                 assert!(
                     dag_top_round <= next_round,
@@ -466,60 +483,64 @@ impl Engine {
                     next_round.0,
                 );
 
-                if replay_bcasts.is_none() {
-                    assert!(
-                        old_dag_top_round < dag_top_round,
-                        "new dag round {} must be greater than old one {}",
-                        dag_top_round.0,
-                        old_dag_top_round.0,
-                    );
-                }
-
-                if old_dag_top_round < dag_top_round.prev() {
-                    self.ctx = EngineCtx::new(dag_top_round);
-                }
+                assert!(
+                    old_dag_top_round < dag_top_round,
+                    "new dag round {} must be greater than old one {}",
+                    dag_top_round.0,
+                    old_dag_top_round.0,
+                );
             };
 
             let head = self.dag.head(&self.round_task.state.peer_schedule);
-            round_ctx = RoundCtx::new(&self.ctx, head.current().round());
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
             let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
 
-            let own_point_fut = match replay_bcasts.take() {
+            let own_point_fut = match start_replay_bcasts.take().flatten() {
                 Some((point, prev_bcast)) => {
                     if let Some(prev) = prev_bcast {
                         self.round_task.init_prev_broadcast(prev, &round_ctx);
                     }
                     future::ready(Some(point)).boxed()
                 }
-                None => self.round_task.own_point_task(
+                None => (self.round_task).own_point_task(
                     &head,
                     collector_signal_tx.subscribe(),
                     &round_ctx,
                 ),
             };
 
-            let round_task_run = self
+            let mut retry_interval = collector_signal_tx.subscribe();
+
+            let mut round_task_run = std::pin::pin!(self
                 .round_task
                 .run(own_point_fut, collector_signal_tx, &head, &round_ctx)
-                .until_ready();
+                .until_ready());
 
-            if let Some(committer) = ready_committer {
-                self.committer_run = committer_task(
-                    committer,
-                    full_history_bottom.take(),
-                    self.committed_info_tx.clone(),
-                    round_ctx.clone(),
-                );
-            }
-
-            match round_task_run.await {
-                Ok(round_task) => {
-                    self.round_task = round_task;
+            loop {
+                let heart_beat = retry_interval.changed();
+                tokio::select! {
+                    _ = heart_beat => {
+                        if let Some(committer) = take_committer(&mut self.committer_run) {
+                            self.committer_run = committer_task(
+                                committer,
+                                full_history_bottom.take(),
+                                self.committed_info_tx.clone(),
+                                round_ctx.clone(),
+                            );
+                        }
+                    }
+                    round_task = &mut round_task_run => {
+                        match round_task {
+                            Ok(round_task) => {
+                                self.round_task = round_task;
+                                break;
+                            }
+                            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                            Err(e) => panic!("mempool engine failed: {e:?}"),
+                        }
+                    }
                 }
-                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                Err(e) => panic!("mempool engine failed: {e:?}"),
             }
         }
     }
