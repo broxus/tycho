@@ -7,8 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::commited_state::CommittedStateImplFactory;
-use tycho_collator::internal_queue::state::uncommitted_state::UncommittedStateImplFactory;
+use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
@@ -94,12 +93,10 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let uncommitted_state_factory = UncommittedStateImplFactory::new(storage.clone());
-    let committed_state_factory = CommittedStateImplFactory::new(storage.clone());
+    let committed_state_factory = QueueStateImplFactory::new(storage.clone());
 
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory,
-        committed_state_factory,
+        state: committed_state_factory,
         config: Default::default(),
     };
     let queue = queue_factory.create();

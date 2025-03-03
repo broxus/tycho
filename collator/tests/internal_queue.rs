@@ -14,13 +14,8 @@ use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartitio
 use tycho_collator::internal_queue::queue::{
     Queue, QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
 };
-use tycho_collator::internal_queue::state::commited_state::{
-    CommittedStateImplFactory, CommittedStateStdImpl,
-};
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use tycho_collator::internal_queue::state::uncommitted_state::{
-    UncommittedStateImplFactory, UncommittedStateStdImpl,
-};
+use tycho_collator::internal_queue::state::storage::{QueueStateImplFactory, QueueStateStdImpl};
 use tycho_collator::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
 };
@@ -109,7 +104,7 @@ fn create_stored_object(key: u64, dest_addr: RouterAddr) -> anyhow::Result<Arc<S
 }
 
 fn test_statistics_check_statistics(
-    queue: &QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject>,
+    queue: &QueueImpl<QueueStateStdImpl, StoredObject>,
     dest_1_low_priority: RouterAddr,
     dest_2_low_priority: RouterAddr,
     dest_3_normal_priority: RouterAddr,
@@ -217,10 +212,7 @@ async fn test_queue() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory: UncommittedStateImplFactory {
-            storage: storage.clone(),
-        },
-        committed_state_factory: CommittedStateImplFactory {
+        state: QueueStateImplFactory {
             storage: storage.clone(),
         },
         config: QueueConfig {
@@ -228,8 +220,7 @@ async fn test_queue() -> anyhow::Result<()> {
         },
     };
 
-    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
-        queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
 
     let mc_block = BlockId {
         shard: ShardIdent::MASTERCHAIN,
@@ -637,7 +628,7 @@ async fn test_queue() -> anyhow::Result<()> {
         dest_2_low_priority,
         dest_3_normal_priority,
     )?;
-    queue.clear_uncommitted_state()?;
+    queue.clear_uncommitted_state(&[])?;
     test_statistics_check_statistics(
         &queue,
         dest_1_low_priority,
@@ -653,10 +644,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory: UncommittedStateImplFactory {
-            storage: storage.clone(),
-        },
-        committed_state_factory: CommittedStateImplFactory {
+        state: QueueStateImplFactory {
             storage: storage.clone(),
         },
         config: QueueConfig {
@@ -664,8 +652,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         },
     };
 
-    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
-        queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
 
     // create first block with queue diff
     let block1 = BlockIdShort {
@@ -867,17 +854,13 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory: UncommittedStateImplFactory {
-            storage: storage.clone(),
-        },
-        committed_state_factory: CommittedStateImplFactory { storage },
+        state: QueueStateImplFactory { storage },
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
-        queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
     let block = BlockIdShort {
         shard: ShardIdent::new_full(0),
         seqno: 0,
@@ -942,7 +925,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next().ok().is_some());
 
-    queue.clear_uncommitted_state()?;
+    queue.clear_uncommitted_state(&[])?;
 
     let iterators = queue.iterator(partition, &ranges, ShardIdent::new_full(1))?;
 
@@ -1169,17 +1152,13 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory: UncommittedStateImplFactory {
-            storage: storage.clone(),
-        },
-        committed_state_factory: CommittedStateImplFactory { storage },
+        state: QueueStateImplFactory { storage },
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
-        queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
 
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
@@ -1300,7 +1279,6 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
         .get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?
         .unwrap();
     assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
-
     // -- test case 3
     // exclude committed diff by range
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
@@ -1309,7 +1287,8 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // -- test case 4
     // clear uncommitted state with second diff
-    queue.clear_uncommitted_state()?;
+    queue.clear_uncommitted_state(&[])?;
+
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
     // uncommitted: 0; committed: 1
     assert_eq!(diff_len_mc, 1);
@@ -1338,10 +1317,7 @@ async fn test_version() -> anyhow::Result<()> {
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory: UncommittedStateImplFactory {
-            storage: storage.clone(),
-        },
-        committed_state_factory: CommittedStateImplFactory { storage },
+        state: QueueStateImplFactory { storage },
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
@@ -1352,8 +1328,7 @@ async fn test_version() -> anyhow::Result<()> {
     partitions.insert(1);
     partitions.insert(QueuePartitionIdx::default());
 
-    let queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, StoredObject> =
-        queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
 
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
@@ -1373,7 +1348,7 @@ async fn test_version() -> anyhow::Result<()> {
     let mut diff_mc1 = QueueDiffWithMessages::new();
     let mut diff_mc2 = QueueDiffWithMessages::new();
 
-    let stored_objects = vec![create_stored_object(1, RouterAddr {
+    let stored_objects = [create_stored_object(1, RouterAddr {
         workchain: -1,
         account: HashBytes::from([1; 32]),
     })?];
@@ -1383,6 +1358,11 @@ async fn test_version() -> anyhow::Result<()> {
             .messages
             .insert(stored_object.key(), stored_object.clone());
     }
+
+    let stored_objects = [create_stored_object(2, RouterAddr {
+        workchain: -1,
+        account: HashBytes::from([1; 32]),
+    })?];
 
     for stored_object in &stored_objects {
         diff_mc2

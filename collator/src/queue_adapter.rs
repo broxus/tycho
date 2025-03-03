@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
@@ -11,9 +9,8 @@ use tycho_util::FastHashSet;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
-use crate::internal_queue::state::commited_state::CommittedStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::state::uncommitted_state::UncommittedStateStdImpl;
+use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueShardRange, QueueStatistics,
 };
@@ -21,7 +18,7 @@ use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
-    queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>,
+    queue: QueueImpl<QueueStateStdImpl, V>,
 }
 
 pub trait MessageQueueAdapter<V>: Send + Sync
@@ -75,7 +72,7 @@ where
         messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()>;
 
-    fn clear_uncommitted_state(&self) -> Result<()>;
+    fn clear_uncommitted_state(&self, partitions: &[QueuePartitionIdx]) -> Result<()>;
     /// Get diff for the given block from committed and uncommitted state
     fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
     /// Check if diff exists in the cache
@@ -87,7 +84,7 @@ where
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
-    pub fn new(queue: QueueImpl<UncommittedStateStdImpl, CommittedStateStdImpl, V>) -> Self {
+    pub fn new(queue: QueueImpl<QueueStateStdImpl, V>) -> Self {
         Self { queue }
     }
 }
@@ -100,22 +97,22 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         partition: QueuePartitionIdx,
         ranges: &[QueueShardRange],
     ) -> Result<Box<dyn QueueIterator<V>>> {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
+
         let start_time = std::time::Instant::now();
 
         metrics::counter!("tycho_collator_queue_adapter_iterators_count").increment(1);
 
-        let states_iterators = self.queue.iterator(partition, ranges, for_shard_id)?;
-        let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
+        let state_iterator = self.queue.iterator(partition, ranges, for_shard_id)?;
+        let states_iterators_manager = StatesIteratorsManager::new(state_iterator);
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
 
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "create_iterator completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "create_iterator completed"
+        );
         Ok(Box::new(iterator))
     }
 
@@ -130,13 +127,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let stats = self.queue.load_statistics(partition, ranges)?;
 
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "get_statistics completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "get_statistics completed"
+        );
 
         Ok(stats)
     }
@@ -156,18 +151,17 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             .apply_diff(diff, block_id_short, diff_hash, statistics)?;
 
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                new_messages_len = len,
-                elapsed = %humantime::format_duration(elapsed),
-                processed_to = ?processed_to,
-                "apply_diff completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            new_messages_len = len,
+            elapsed = %humantime::format_duration(elapsed),
+            processed_to = ?processed_to,
+            "apply_diff completed"
+        );
         Ok(())
     }
 
+    #[instrument(skip_all, fields(?partitions))]
     fn commit_diff(
         &self,
         mc_top_blocks: Vec<(BlockId, bool)>,
@@ -178,15 +172,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.commit_diff(&mc_top_blocks, partitions)?;
 
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                mc_top_blocks = %DisplayIter(mc_top_blocks.iter().map(DisplayTupleRef)),
-                elapsed = %humantime::format_duration(elapsed),
-                partitions = ?partitions,
-                "commit_diff completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            mc_top_blocks = %DisplayIter(mc_top_blocks.iter().map(DisplayTupleRef)),
+            elapsed = %humantime::format_duration(elapsed),
+            "commit_diff completed"
+        );
         Ok(())
     }
 
@@ -198,13 +189,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let start_time = std::time::Instant::now();
         iterator.add_message(message)?;
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "add_message_to_iterator completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "add_message_to_iterator completed"
+        );
         Ok(())
     }
 
@@ -214,63 +203,55 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
-        tracing::info!(
-            target: "local_debug",
-            messages_len = messages.len(),
-            "commit_messages_to_iterator started"
-        );
         iterator.commit(messages)?;
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "commit_messages_to_iterator completed"
-            );
-        }
+
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "commit_messages_to_iterator completed"
+        );
         Ok(())
     }
 
-    fn clear_uncommitted_state(&self) -> Result<()> {
+    #[instrument(skip_all, fields(?partitions))]
+    fn clear_uncommitted_state(&self, partitions: &[QueuePartitionIdx]) -> Result<()> {
         let start_time = std::time::Instant::now();
-        tracing::info!(target: "local_debug", "clear_uncommitted_state started");
-        self.queue.clear_uncommitted_state()?;
+        self.queue.clear_uncommitted_state(partitions)?;
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "clear_uncommitted_state completed"
-            );
-        }
+
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "clear_uncommitted_state completed"
+        );
         Ok(())
     }
 
+    #[instrument(skip_all, fields(%shard_ident, seqno))]
     fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
         let start_time = std::time::Instant::now();
         let diff = self.queue.get_diff(shard_ident, seqno)?;
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "get_diff completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "get_diff completed"
+        );
         Ok(diff)
     }
 
+    #[instrument(skip_all, fields(%block_id_short))]
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool> {
         let start_time = std::time::Instant::now();
         let exists = self.queue.is_diff_exists(block_id_short)?;
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "is_diff_exists completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            exists,
+            "is_diff_exists completed"
+        );
         Ok(exists)
     }
 
@@ -278,13 +259,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let start_time = std::time::Instant::now();
         let block_id = self.queue.get_last_applied_mc_block_id()?;
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "get_last_applied_mc_block_id completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "get_last_applied_mc_block_id completed"
+        );
         Ok(block_id)
     }
 
@@ -292,13 +271,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let start_time = std::time::Instant::now();
         let tail_len = self.queue.get_diffs_tail_len(shard_ident, max_message_from);
         let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(1) {
-            tracing::info!(
-                target: "local_debug",
-                elapsed = %humantime::format_duration(elapsed),
-                "get_diffs_tail_len completed"
-            );
-        }
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "get_diffs_tail_len completed"
+        );
         tail_len
     }
 }

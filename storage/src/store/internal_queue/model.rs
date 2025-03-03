@@ -318,6 +318,7 @@ pub struct DiffInfo {
     pub processed_to: BTreeMap<ShardIdent, QueueKey>,
     pub router_partitions_src: RouterPartitions,
     pub router_partitions_dst: RouterPartitions,
+    pub seqno: u32,
 }
 
 impl DiffInfo {
@@ -356,6 +357,7 @@ impl TlWrite for DiffInfo {
         processed_to_map::write(&self.processed_to, packet);
         router_partitions_map::write(&self.router_partitions_src, packet);
         router_partitions_map::write(&self.router_partitions_dst, packet);
+        packet.write_u32(self.seqno);
     }
 }
 
@@ -385,6 +387,7 @@ impl<'tl> TlRead<'tl> for DiffInfo {
         let processed_to = processed_to_map::read(data)?;
         let router_partitions_src = router_partitions_map::read(data)?;
         let router_partitions_dst = router_partitions_map::read(data)?;
+        let seqno = u32::read_from(data)?;
 
         Ok(DiffInfo {
             min_message,
@@ -394,6 +397,63 @@ impl<'tl> TlRead<'tl> for DiffInfo {
             processed_to,
             router_partitions_src,
             router_partitions_dst,
+            seqno,
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitPointerKey {
+    pub shard_ident: ShardIdent,
+}
+
+#[derive(Debug, Clone, Default)]
+
+pub struct CommitPointerValue {
+    pub queue_key: QueueKey,
+    // pub seqno: u32,
+}
+
+impl StoredValue for CommitPointerKey {
+    const SIZE_HINT: usize = ShardIdent::SIZE_HINT;
+
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        self.shard_ident.serialize(buffer);
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let shard_ident = ShardIdent::deserialize(reader);
+
+        Self { shard_ident }
+    }
+}
+
+impl StoredValue for CommitPointerValue {
+    const SIZE_HINT: usize = QueueKey::SIZE_HINT;
+
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
+        self.queue_key.serialize(buffer);
+        // buffer.write_raw_slice(&self.seqno.to_be_bytes());
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let queue_key = QueueKey::deserialize(reader);
+        // let mut seqno_bytes = [0u8; 4];
+        // seqno_bytes.copy_from_slice(&reader[..4]);
+        // let seqno = u32::from_be_bytes(seqno_bytes);
+
+        Self { queue_key }
     }
 }

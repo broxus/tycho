@@ -24,8 +24,7 @@ use super::{
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
-use crate::internal_queue::state::commited_state::CommittedStateImplFactory;
-use crate::internal_queue::state::uncommitted_state::UncommittedStateImplFactory;
+use crate::internal_queue::state::storage::QueueStateImplFactory;
 use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, InternalMessageValue};
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
@@ -1484,11 +1483,9 @@ impl std::fmt::Debug for TestInternalMessageType {
 async fn create_test_queue_adapter<V: InternalMessageValue>(
 ) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp().await?;
-    let uncommitted_state_factory = UncommittedStateImplFactory::new(storage.clone());
-    let committed_state_factory = CommittedStateImplFactory::new(storage.clone());
+    let committed_state_factory = QueueStateImplFactory::new(storage.clone());
     let queue_factory = QueueFactoryStdImpl {
-        uncommitted_state_factory,
-        committed_state_factory,
+        state: committed_state_factory,
         config: Default::default(),
     };
     let queue = queue_factory.create();

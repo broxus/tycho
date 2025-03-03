@@ -538,6 +538,12 @@ impl DiffStatistics {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CommitPointer {
+    pub shard_ident: ShardIdent,
+    pub queue_key: QueueKey,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -642,6 +648,7 @@ mod tests {
                 hash: HashBytes::from([0xBB; 32]),
             },
             router_partitions_dst,
+            seqno: 123,
         };
 
         // 2) Serialize
