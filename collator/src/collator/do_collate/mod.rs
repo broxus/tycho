@@ -113,6 +113,9 @@ impl CollatorStdImpl {
         )?;
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
+
+        let mq_adapter = self.mq_adapter.clone();
+
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
@@ -126,7 +129,7 @@ impl CollatorStdImpl {
         let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
-            let mq_adapter = self.mq_adapter.clone();
+
             let span = tracing::Span::current();
             move || {
                 let _span = span.enter();
@@ -388,11 +391,10 @@ impl CollatorStdImpl {
             ));
         }
 
-        // trim outdated diffs and calc queue diffs tail lenght
-        if let Some(value) = min_processed_to {
-            mq_adapter.trim_diffs(&shard_id, &value)?;
-        };
-        let diff_tail_len = mq_adapter.get_diffs_count_by_shard(&shard_id) as u32 + 1;
+        let diff_tail_len = mq_adapter.get_diffs_tail_len(
+            &shard_id,
+            &min_processed_to.unwrap_or_default().next_value(),
+        ) + 1;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
