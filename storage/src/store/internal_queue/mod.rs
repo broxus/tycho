@@ -118,7 +118,7 @@ impl InternalQueueStorage {
                     buffer.clear();
                     buffer.push(dest.workchain as u8);
                     buffer.extend_from_slice(&dest.prefix().to_le_bytes());
-                    BocHeader::<ahash::RandomState>::with_root(cell.as_ref()).encode(&mut buffer);
+                    BocHeader::with_root(cell.as_ref()).encode(&mut buffer);
                     batch.put_cf(&messages_cf, key.to_vec(), &buffer);
 
                     let partition_stats = statistics.entry(partition).or_default();

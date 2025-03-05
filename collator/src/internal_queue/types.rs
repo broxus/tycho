@@ -265,8 +265,7 @@ impl InternalMessageValue for EnqueuedMessage {
     where
         Self: Sized,
     {
-        everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(self.cell.as_ref())
-            .encode(buffer);
+        everscale_types::boc::ser::BocHeader::with_root(self.cell.as_ref()).encode(buffer);
     }
 
     fn source(&self) -> &IntAddr {

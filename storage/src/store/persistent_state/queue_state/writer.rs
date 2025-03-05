@@ -8,7 +8,6 @@ use everscale_types::models::BlockId;
 use tycho_block_util::queue::{QueueDiffMessagesIter, QueueState, QueueStateHeader};
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::FastHasherState;
 
 use crate::db::FileDb;
 
@@ -108,7 +107,7 @@ impl<'a> QueueStateWriter<'a> {
         loop {
             bump.reset();
 
-            let mut boc = boc::ser::BocHeader::<FastHasherState>::with_capacity(cell_count);
+            let mut boc = boc::ser::BocHeader::with_capacity(cell_count);
 
             let mut message_count = 0usize;
             let mut total_size = 0u64;

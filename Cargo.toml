@@ -107,7 +107,7 @@ tokio-stream = "0.1.15"
 tokio-util = { version = "0.7.10", default-features = false, features = ["codec"] }
 tower = "0.5"
 tower-http = "0.6"
-tracing = "0.1"
+tracing = { version = "0.1", features = ["max_level_info"] }
 tracing-appender = "0.2.3"
 tracing-flame = "0.2"
 tracing-stackdriver = "0.10.0"
@@ -134,7 +134,7 @@ tycho-storage = { path = "./storage", version = "0.2.5" }
 tycho-util = { path = "./util", version = "0.2.5" }
 
 [patch.crates-io]
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "adada6e6539abd798dbbc5a7fc1d17cc31fa7eff" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "f54f16aed828" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
