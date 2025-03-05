@@ -69,7 +69,7 @@ pub struct Task<R> {
 }
 
 impl<R> Task<R> {
-    pub fn aborted() -> Self
+    fn aborted() -> Self
     where
         R: Send + 'static,
     {
