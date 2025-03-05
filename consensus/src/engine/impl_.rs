@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::mem;
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
@@ -12,23 +11,23 @@ use tokio::sync::{mpsc, watch};
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
+use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
 use crate::effects::{
     AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult, TaskTracker,
 };
+use crate::engine::committer_task::CommitterTask;
 use crate::engine::lifecycle::EngineHandle;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::ConsensusConfigExt;
 use crate::intercom::CollectorSignal;
 use crate::models::{
-    AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointRestoreSelect,
-    PointStatusStoredRef, Round,
+    DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
 
 pub struct Engine {
     dag: DagFront,
-    committer_run: Task<Committer>,
+    committer_run: CommitterTask,
     output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
@@ -77,7 +76,7 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run = engine_ctx.task().spawn_blocking(|| committer);
+        let committer_run = CommitterTask::new(committer, engine_ctx.conf());
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
@@ -163,19 +162,20 @@ impl Engine {
         let round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
         tracing::info!(parent: round_ctx.span(), "current round set to dag top");
 
-        let mut committer = take_committer(&mut self.committer_run, &round_ctx)?.expect("init");
-        (self.dag).fill_to_top(
-            dag_top_round,
-            Some(&mut committer),
-            &self.round_task.state.peer_schedule,
-            &round_ctx,
-        );
-        _ = committer.drop_upto(
-            (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
-            conf,
-        );
-        let dag_bottom_round = committer.bottom_round();
-
+        let dag_bottom_round = {
+            let committer = self.committer_run.ready_mut().await?.expect("ready");
+            (self.dag).fill_to_top(
+                dag_top_round,
+                Some(committer),
+                &self.round_task.state.peer_schedule,
+                &round_ctx,
+            );
+            _ = committer.drop_upto(
+                (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
+                conf,
+            );
+            committer.bottom_round()
+        };
         // preload and sign last rounds if node may still participate in consensus
 
         if dag_bottom_round <= last_db_round {
@@ -256,11 +256,10 @@ impl Engine {
         };
         (self.dag).fill_to_top(
             new_top_round,
-            Some(&mut committer),
+            Some(self.committer_run.ready_mut().await?.expect("ready")),
             &self.round_task.state.peer_schedule,
             &round_ctx,
         );
-        self.committer_run = round_ctx.task().spawn(future::ready(committer));
 
         self.round_task.state.consensus_round.set_max(new_top_round);
 
@@ -374,8 +373,6 @@ impl Engine {
                     (old_dag_top_round, next_round)
                 };
 
-                let mut ready_committer = take_committer(&mut self.committer_run, &round_ctx)?;
-
                 let dag_top_round = match collator_feedback(
                     self.round_task.state.top_known_anchor.receiver(),
                     old_dag_top_round,
@@ -386,14 +383,12 @@ impl Engine {
                     Ok(pause_at) => next_round.min(pause_at),
                     Err(collator_sync) => {
                         collator_sync.await;
-                        if let Some(committer) = ready_committer {
-                            self.committer_run = committer_task(
-                                committer,
-                                full_history_bottom.take(),
-                                self.output.clone(),
-                                &round_ctx,
-                            );
-                        }
+                        let committer_update = self.committer_run.update_task(
+                            full_history_bottom.take(),
+                            self.output.clone(),
+                            &round_ctx,
+                        );
+                        committer_update.await?;
                         continue;
                     }
                 };
@@ -406,19 +401,10 @@ impl Engine {
 
                 *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
                     dag_top_round,
-                    ready_committer.as_mut(),
+                    self.committer_run.ready_mut().await?,
                     &self.round_task.state.peer_schedule,
                     &round_ctx,
                 ));
-
-                if let Some(committer) = ready_committer {
-                    self.committer_run = committer_task(
-                        committer,
-                        full_history_bottom.take(),
-                        self.output.clone(),
-                        &round_ctx,
-                    );
-                }
 
                 assert!(
                     dag_top_round <= next_round,
@@ -454,26 +440,19 @@ impl Engine {
                 ),
             };
 
-            let mut retry_interval = collector_signal_tx.subscribe();
-
             let mut round_task_run = std::pin::pin!(self
                 .round_task
                 .run(own_point_fut, collector_signal_tx, &head, &round_ctx)
                 .until_ready());
 
             loop {
-                let heart_beat = retry_interval.changed();
                 tokio::select! {
-                    _ = heart_beat => match take_committer(&mut self.committer_run, &round_ctx)? {
-                        None => {},
-                        Some(committer) => {
-                            self.committer_run = committer_task(
-                                committer,
-                                full_history_bottom.take(),
-                                self.output.clone(),
-                                &round_ctx,
-                            );
-                        }
+                    _ = self.committer_run.interval.tick() => {
+                        self.committer_run.update_task(
+                            full_history_bottom.take(),
+                            self.output.clone(),
+                            &round_ctx,
+                        ).await?;
                     },
                     round_task = &mut round_task_run => {
                         self.round_task = round_task?;
@@ -544,122 +523,5 @@ fn collator_feedback(
         Ok(pause_at)
     } else {
         Ok(pause_at)
-    }
-}
-
-fn take_committer(
-    committer_run: &mut Task<Committer>,
-    round_ctx: &RoundCtx,
-) -> TaskResult<Option<Committer>> {
-    if !committer_run.is_finished() {
-        return Ok(None);
-    };
-    let taken = mem::replace(committer_run, Task::aborted());
-    let Some(committer_result) = taken.now_or_never() else {
-        let _guard = round_ctx.span().enter();
-        panic!("committer task is finished and can be taken only once")
-    };
-    committer_result.map(Some)
-}
-
-fn committer_task(
-    mut committer: Committer,
-    full_history_bottom: Option<Round>,
-    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-    round_ctx: &RoundCtx,
-) -> Task<Committer> {
-    let task_ctx = round_ctx.task();
-    let round_ctx = round_ctx.clone();
-    task_ctx.spawn_blocking(move || {
-        // may run for long several times in a row and commit nothing, because of missed points
-        let _span = round_ctx.span().enter();
-
-        let mut committed = None;
-        let mut new_full_history_bottom = None;
-
-        let start_bottom = committer.bottom_round();
-        let start_dag_len = committer.dag_len();
-
-        for attempt in 0.. {
-            match committer.commit(round_ctx.conf()) {
-                Ok(data) => {
-                    committed = Some(data);
-                    break;
-                }
-                Err(round) => {
-                    let result = committer.drop_upto(round.next(), round_ctx.conf());
-                    new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
-                    tracing::info!(
-                        ?start_bottom,
-                        start_dag_len,
-                        current_bottom = ?committer.bottom_round(),
-                        current_dag_len = committer.dag_len(),
-                        attempt,
-                        "comitter rounds were dropped as impossible to sync"
-                    );
-                    if result.is_err() {
-                        break;
-                    } else if attempt > start_dag_len {
-                        panic!(
-                            "infinite loop on dropping dag rounds: \
-                             start dag len {start_dag_len}, start bottom {start_bottom:?} \
-                             resulting {:?}",
-                            committer.alt()
-                        )
-                    };
-                }
-            }
-        }
-
-        if let Some(new_bottom) = new_full_history_bottom.or(full_history_bottom) {
-            committed_info_tx
-                .send(MempoolOutput::NewStartAfterGap(new_bottom)) // not recoverable
-                .expect("Failed to send anchor history info to mpsc channel");
-        }
-
-        if let Some(committed) = committed {
-            round_ctx.log_committed(&committed);
-            for data in committed {
-                round_ctx.commit_metrics(&data.anchor);
-                committed_info_tx
-                    .send(MempoolOutput::NextAnchor(data)) // not recoverable
-                    .expect("Failed to send anchor history info to mpsc channel");
-            }
-        }
-
-        EngineCtx::meter_dag_len(committer.dag_len());
-
-        committer
-    })
-}
-
-impl RoundCtx {
-    fn commit_metrics(&self, anchor: &PointInfo) {
-        metrics::counter!("tycho_mempool_commit_anchors").increment(1);
-        metrics::gauge!("tycho_mempool_commit_latency_rounds").set(self.depth(anchor.round()));
-    }
-
-    fn log_committed(&self, committed: &[AnchorData]) {
-        if !committed.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
-            let committed = committed
-                .iter()
-                .map(|data| {
-                    let history = data
-                        .history
-                        .iter()
-                        .map(|point| format!("{:?}", point.id().alt()))
-                        .join(", ");
-                    format!(
-                        "anchor {:?} time {} : [ {history} ]",
-                        data.anchor.id().alt(),
-                        data.anchor.data().time
-                    )
-                })
-                .join("  ;  ");
-            tracing::debug!(
-                parent: self.span(),
-                "committed {committed}"
-            );
-        }
     }
 }
