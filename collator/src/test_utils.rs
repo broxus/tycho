@@ -3,6 +3,9 @@ use std::str::FromStr;
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::CellBuilder;
 use everscale_types::models::{Block, BlockId, ShardStateUnsplit};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
@@ -10,20 +13,13 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{NewBlockMeta, Storage};
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {
-    use std::io::IsTerminal;
-    tracing_subscriber::fmt()
-        .with_ansi(std::io::stdout().is_terminal())
-        .with_writer(std::io::stdout)
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::builder()
                 .with_default_directive(level_filter.into())
                 .from_env_lossy(),
         )
-        .with_file(true)
-        .with_line_number(true)
-        .with_target(true)
-        //.with_thread_ids(true)
-        .compact()
+        .with(tracing_subscriber::fmt::layer().with_ansi(true).boxed())
         .try_init()
         .ok();
 }
