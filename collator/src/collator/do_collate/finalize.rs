@@ -26,9 +26,7 @@ use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
     PreparedInMsg, PreparedOutMsg,
 };
-use crate::internal_queue::types::{
-    DiffStatistics, EnqueuedMessage, PartitionRouter, QueueShardRange,
-};
+use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
@@ -107,43 +105,10 @@ impl Phase<FinalizeState> {
                 continue;
             }
 
-            let diff = mq_adapter
-                .get_diff(&top_shard_block.shard, top_shard_block.seqno)?
-                .ok_or_else(|| anyhow!("Diff for block {} not found", top_shard_block))?;
-
-            let partition_router = PartitionRouter::with_partitions(
-                &diff.router_partitions_src,
-                &diff.router_partitions_dst,
-            );
-
-            // TODO use dynamic shards
-            let range_mc = QueueShardRange {
-                shard_ident: ShardIdent::MASTERCHAIN,
-                from: diff.min_message,
-                to: diff.max_message,
-            };
-
-            let range_shard = QueueShardRange {
-                shard_ident: ShardIdent::new_full(0),
-                from: diff.min_message,
-                to: diff.max_message,
-            };
-
-            let ranges = vec![range_mc, range_shard];
-            let queue_statistic = mq_adapter.get_statistics(0, &ranges)?;
-
-            let mut diff_statistics = FastHashMap::default();
-            diff_statistics.insert(0, queue_statistic.statistics().clone());
-
-            let diff_statistic = DiffStatistics::new(
+            diffs_info.insert(
                 top_shard_block.shard,
-                diff.min_message,
-                diff.max_message,
-                diff_statistics,
-                queue_statistic.shard_messages_count(),
+                mq_adapter.get_router_and_statistics(&top_shard_block.as_short_id(), 0)?,
             );
-
-            diffs_info.insert(top_shard_block.shard, (partition_router, diff_statistic));
         }
 
         // get queue diff and check for pending internals
@@ -220,12 +185,12 @@ impl Phase<FinalizeState> {
                     "tycho_do_collate_apply_queue_diff_time",
                     &labels,
                 );
-
                 mq_adapter.apply_diff(
                     queue_diff_with_msgs,
                     block_id_short,
                     &queue_diff_hash,
                     statistics,
+                    false,
                 )?;
                 let apply_queue_diff_elapsed = histogram.finish();
 

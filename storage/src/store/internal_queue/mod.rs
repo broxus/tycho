@@ -4,7 +4,7 @@ use std::fs::File;
 use anyhow::{bail, ensure, Result};
 use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, OwnedRawIterator, OwnedSnapshot, Table};
 
@@ -22,8 +22,8 @@ pub mod model;
 pub struct InternalQueueStorage {
     db: BaseDb,
 }
-// Constant for the last applied mc block id key
-const INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY: &[u8] = b"last_applied_mc_block_id";
+// Constant for the last committed mc block id key
+const INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY: &[u8] = b"last_committed_mc_block_id";
 
 impl InternalQueueStorage {
     pub fn new(db: BaseDb) -> Self {
@@ -51,6 +51,7 @@ impl InternalQueueStorage {
         file: File,
         block_id: BlockId,
     ) -> Result<()> {
+        tracing::info!("Importing internal queue from file for block {block_id}");
         use everscale_types::boc::ser::BocHeader;
 
         let top_update = top_update.clone();
@@ -78,6 +79,7 @@ impl InternalQueueStorage {
             let var_cf = this.db.internal_message_var.cf();
             let diffs_tail_cf = this.db.internal_message_diffs_tail.cf();
             let diff_infos_cf = this.db.internal_message_diff_info.cf();
+            let commit_pointers_cf = this.db.internal_message_commit_pointer.cf();
 
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
@@ -191,7 +193,7 @@ impl InternalQueueStorage {
                 };
 
                 batch.put_cf(
-                    &this.db.internal_message_commit_pointer.cf(),
+                    &commit_pointers_cf,
                     commit_pointer_key.to_vec(),
                     commit_pointer_value.to_vec(),
                 );
@@ -214,7 +216,7 @@ impl InternalQueueStorage {
             // insert last applied diff
             batch.put_cf(
                 &var_cf,
-                INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
+                INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
                 block_id.to_vec(),
             );
 
@@ -226,13 +228,13 @@ impl InternalQueueStorage {
         .await?
     }
 
-    /// Retrieves the queue version from the `internal_message_version` column family under the key `mc_version`
-    pub fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+    /// Retrieves the queue version from the `internal_message_version` column family under the key `last_committed_mc_block_id`
+    pub fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>> {
         let cf = self.db.internal_message_var.cf();
         let data = self
             .db
             .rocksdb()
-            .get_cf(&cf, INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY)?;
+            .get_cf(&cf, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY)?;
         if let Some(bytes) = data {
             return Ok(Some(BlockId::from_slice(&bytes)));
         }
@@ -328,7 +330,7 @@ impl InternalQueueTransaction {
     /// - `partitions`: a list of partitions (e.g. 0..255) to clear
     pub fn clear_uncommitted(
         &self,
-        partitions: &[QueuePartitionIdx],
+        partitions: &FastHashSet<QueuePartitionIdx>,
         commit_pointers: &FastHashMap<ShardIdent, CommitPointerValue>,
     ) -> Result<()> {
         let mut ranges = Vec::new();
@@ -489,7 +491,7 @@ impl InternalQueueTransaction {
         // Convert the version into a little-endian byte array and store it
         self.batch.put_cf(
             &cf,
-            INT_QUEUE_LAST_APPLIED_MC_BLOCK_ID_KEY,
+            INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
             mc_block_id.to_vec(),
         );
     }

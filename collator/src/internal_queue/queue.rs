@@ -11,17 +11,17 @@ use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
+use crate::internal_queue;
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::state::storage::{
     QueueState, QueueStateFactory, QueueStateImplFactory, QueueStateStdImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
-    QueueStatistics,
+    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
+    QueueShardRange, QueueStatistics,
 };
 use crate::types::ProcessedTo;
-use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
@@ -82,6 +82,7 @@ where
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
+        skip_check_sequence: bool,
     ) -> Result<()>;
     /// Commit diffs to the state and update GC
     fn commit_diff(
@@ -90,7 +91,7 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
     /// remove all data in uncommitted zone storage
-    fn clear_uncommitted_state(&self, _partitions: &[QueuePartitionIdx]) -> Result<()>;
+    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
     /// Returns the diffs tail len for the given shard
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
@@ -100,11 +101,16 @@ where
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
     /// Get diff for the given block from committed and uncommitted zones
-    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
+    fn get_diff(
+        &self,
+        shard_ident: &ShardIdent,
+        seqno: u32,
+        zone: DiffZone,
+    ) -> Result<Option<DiffInfo>>;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
-    /// Get last applied and committed mc block id
-    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Get last committed mc block id
+    fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
 }
 
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
@@ -219,6 +225,7 @@ where
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
+        skip_check_sequence: bool,
     ) -> Result<()> {
         // Take global lock. Lock commit and clear uncommitted state for execution
         let _global_read_guard = self.global_lock.read().unwrap_or_else(|e| e.into_inner());
@@ -232,6 +239,7 @@ where
             self,
             &block_id_short.shard,
             block_id_short.seqno,
+            DiffZone::Uncommitted,
         )?;
 
         // Check if the diff is already applied
@@ -251,19 +259,21 @@ where
             .state
             .get_last_applied_block_seqno(&block_id_short.shard)?;
 
-        if let Some(last_applied_seqno) = last_applied_seqno {
-            // Check if the diff is already applied
-            if block_id_short.seqno <= last_applied_seqno {
-                return Ok(());
-            }
+        if !skip_check_sequence {
+            if let Some(last_applied_seqno) = last_applied_seqno {
+                // Check if the diff is already applied
+                if block_id_short.seqno <= last_applied_seqno {
+                    return Ok(());
+                }
 
-            // Check if the diff is sequential
-            if block_id_short.seqno != last_applied_seqno + 1 {
-                bail!(
-                    "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
-                    block_id_short.seqno,
-                    last_applied_seqno
-                );
+                // Check if the diff is sequential
+                if block_id_short.seqno != last_applied_seqno + 1 {
+                    bail!(
+                        "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
+                        block_id_short.seqno,
+                        last_applied_seqno
+                    );
+                }
             }
         }
 
@@ -307,7 +317,9 @@ where
 
         for (block_id, top_shard_block_changed) in mc_top_blocks {
             // Check if the diff is already applied
-            let diff = self.state.get_diff_info(&block_id.shard, block_id.seqno)?;
+            let diff = self
+                .state
+                .get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?;
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
                 None if *top_shard_block_changed && mc_block_id.seqno != 0 => {
@@ -353,18 +365,10 @@ where
         Ok(())
     }
 
-    fn clear_uncommitted_state(&self, _partitions: &[QueuePartitionIdx]) -> Result<()> {
+    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {
         // Take global lock
         let _global_write_guard = self.global_lock.write().unwrap_or_else(|e| e.into_inner());
-
-        // TODO use dynamic partitions
-        let partitions = [0, 1];
-        self.state.clear_uncommitted(&partitions)?;
-        tracing::info!(
-            target: tracing_targets::MQ,
-             "Cleared uncommitted diffs.",
-        );
-        Ok(())
+        self.state.clear_uncommitted(partitions)
     }
 
     fn load_statistics(
@@ -379,21 +383,17 @@ where
         Ok(statistics)
     }
 
-    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
-        self.state.get_diff_info(shard_ident, seqno)
+    fn get_diff(
+        &self,
+        shard_ident: &ShardIdent,
+        seqno: u32,
+        zone: DiffZone,
+    ) -> Result<Option<DiffInfo>> {
+        self.state.get_diff_info(shard_ident, seqno, zone)
     }
 
-    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
-        let tail_len = self.state.get_diffs_tail_len(shard_ident, max_message_from);
-
-        tracing::info!(
-            target: tracing_targets::MQ,
-            shard_ident = ?shard_ident,
-            tail_len,
-            "Get diffs tail len",
-        );
-
-        tail_len
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
+        self.state.get_diffs_tail_len(shard_ident, from)
     }
 
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool> {
@@ -401,11 +401,12 @@ where
             self,
             &block_id_short.shard,
             block_id_short.seqno,
+            DiffZone::Both,
         )?
         .is_some())
     }
 
-    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
-        self.state.get_last_applied_mc_block_id()
+    fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>> {
+        self.state.get_last_committed_mc_block_id()
     }
 }

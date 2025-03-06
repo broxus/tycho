@@ -558,6 +558,7 @@ where
             },
             &queue_diff_hash,
             statistics.clone(),
+            false,
         )?;
         self.secondary_mq_adapter.apply_diff(
             queue_diff_with_msgs,
@@ -567,6 +568,7 @@ where
             },
             &queue_diff_hash,
             statistics,
+            false,
         )?;
 
         // update working state
@@ -1483,9 +1485,9 @@ impl std::fmt::Debug for TestInternalMessageType {
 async fn create_test_queue_adapter<V: InternalMessageValue>(
 ) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp().await?;
-    let committed_state_factory = QueueStateImplFactory::new(storage.clone());
+    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
     let queue_factory = QueueFactoryStdImpl {
-        state: committed_state_factory,
+        state: queue_state_factory,
         config: Default::default(),
     };
     let queue = queue_factory.create();

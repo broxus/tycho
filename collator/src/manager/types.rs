@@ -2,13 +2,15 @@ use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ShardIdent};
+use everscale_types::models::{
+    BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
+};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tycho_block_util::queue::QueueDiffStuff;
+use tycho_block_util::queue::{QueueDiffStuff, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
@@ -188,7 +190,7 @@ pub(super) enum BlockCacheEntryData {
 }
 
 impl BlockCacheEntryData {
-    pub fn additional_shard_block_cache_info(
+    pub fn get_additional_shard_block_cache_info(
         &self,
     ) -> Result<Option<AdditionalShardBlockCacheInfo>> {
         Ok(match self {
@@ -370,11 +372,35 @@ impl BlockCacheEntry {
             BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_to,
         }
     }
+
+    pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
+        match &self.data {
+            BlockCacheEntryData::Received { processed_upto, .. }
+            | BlockCacheEntryData::Collated { processed_upto, .. } => processed_upto,
+        }
+    }
 }
 
 pub(super) struct McBlockSubgraph {
     pub master_block: BlockCacheEntry,
     pub shard_blocks: Vec<BlockCacheEntry>,
+}
+
+impl McBlockSubgraph {
+    pub(crate) fn get_partitions(&self) -> FastHashSet<QueuePartitionIdx> {
+        let mut partitions = FastHashSet::default();
+
+        for block in self
+            .shard_blocks
+            .iter()
+            .chain(std::iter::once(&self.master_block))
+        {
+            for partition in block.data.processed_upto().partitions.keys() {
+                partitions.insert(*partition);
+            }
+        }
+        partitions
+    }
 }
 
 pub(super) enum McBlockSubgraphExtract {
@@ -389,4 +415,9 @@ impl std::fmt::Display for McBlockSubgraphExtract {
             Self::AlreadyExtracted => write!(f, "AlreadyExtracted"),
         }
     }
+}
+
+pub struct HandledBlockFromBcCtx {
+    pub state: ShardStateStuff,
+    pub processed_upto: ProcessedUptoInfo,
 }

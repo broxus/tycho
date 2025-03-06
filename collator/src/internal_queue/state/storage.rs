@@ -10,11 +10,12 @@ use tycho_storage::model::{
 };
 use tycho_storage::{InternalQueueSnapshot, InternalQueueTransaction, Storage};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
+    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
+    QueueShardRange,
 };
 use crate::types::ProcessedTo;
 // CONFIG
@@ -93,13 +94,18 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         range: &[QueueShardRange],
     ) -> Result<FastHashMap<IntAddr, u64>>;
 
-    /// Get last applied mc block id
+    /// Get last committed mc block id
     /// Returns None if no block was applied
-    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get length of diffs tail
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Get diff info by diff seqno
-    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
+    fn get_diff_info(
+        &self,
+        shard_ident: &ShardIdent,
+        seqno: u32,
+        zone: DiffZone,
+    ) -> Result<Option<DiffInfo>>;
     /// Get last applied block seqno by shard ident from committed and uncommited zone
     fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
     /// Get commit pointers
@@ -112,7 +118,7 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         hash: HashBytes,
         diff: QueueDiffWithMessages<V>,
     ) -> Result<()>;
-    fn clear_uncommitted(&self, partitions: &[QueuePartitionIdx]) -> Result<()>;
+    fn clear_uncommitted(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -205,10 +211,10 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         Ok(result)
     }
 
-    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+    fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>> {
         self.storage
             .internal_queue_storage()
-            .get_last_applied_mc_block_id()
+            .get_last_committed_mc_block_id()
     }
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
@@ -219,19 +225,51 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         })
     }
 
-    fn get_diff_info(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
+    fn get_diff_info(
+        &self,
+        shard_ident: &ShardIdent,
+        seqno: u32,
+        zone: DiffZone,
+    ) -> Result<Option<DiffInfo>> {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
+
         let diff_info_bytes = snapshot.get_diff_info(&DiffInfoKey {
             shard_ident: *shard_ident,
             seqno,
         })?;
 
-        if let Some(diff_info_bytes) = diff_info_bytes {
-            let diff_info = tl_proto::deserialize(&diff_info_bytes)?;
-            Ok(Some(diff_info))
-        } else {
-            Ok(None)
+        let diff_info_bytes = match diff_info_bytes {
+            Some(bytes) => bytes,
+            None => return Ok(None),
+        };
+
+        let diff_info: DiffInfo = tl_proto::deserialize(&diff_info_bytes)?;
+
+        match zone {
+            DiffZone::Both => {}
+            DiffZone::Committed => {
+                let commit_pointers = snapshot.read_commit_pointers()?;
+                if let Some(commit_pointer) = commit_pointers.get(shard_ident) {
+                    // if true then diff is in uncommitted zone
+                    if commit_pointer.queue_key < diff_info.max_message {
+                        return Ok(None);
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            DiffZone::Uncommitted => {
+                let commit_pointers = snapshot.read_commit_pointers()?;
+                if let Some(commit_pointer) = commit_pointers.get(shard_ident) {
+                    // if true then diff is in committed zone
+                    if commit_pointer.queue_key >= diff_info.max_message {
+                        return Ok(None);
+                    }
+                }
+            }
         }
+
+        Ok(Some(diff_info))
     }
 
     fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
@@ -282,7 +320,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         tx.write()
     }
 
-    fn clear_uncommitted(&self, partitions: &[QueuePartitionIdx]) -> Result<()> {
+    fn clear_uncommitted(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
         let pointers = snapshot.read_commit_pointers()?;
         let tx = self.storage.internal_queue_storage().begin_transaction();
