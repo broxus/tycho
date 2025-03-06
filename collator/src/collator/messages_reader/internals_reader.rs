@@ -16,7 +16,9 @@ use crate::collator::messages_buffer::{
 };
 use crate::collator::types::{MsgsExecutionParamsExtension, ParsedMessage};
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{InternalMessageValue, QueueShardRange, QueueStatistics};
+use crate::internal_queue::types::{
+    DiffZone, InternalMessageValue, QueueShardRange, QueueStatistics,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};
@@ -441,7 +443,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 while next_seqno < self.block_seqno {
                     let diff = self
                         .mq_adapter
-                        .get_diff(&self.for_shard_id, next_seqno)?
+                        .get_diff(&self.for_shard_id, next_seqno, DiffZone::Both)?
                         .ok_or_else(|| {
                             let diff_block_id = BlockIdShort {
                                 shard: self.for_shard_id,

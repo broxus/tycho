@@ -6,9 +6,9 @@ use everscale_types::models::{
     BlockId, BlockIdShort, ConsensusInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
-use tycho_block_util::queue::QueueDiffStuff;
+use tycho_block_util::queue::{QueueDiffStuff, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_util::{FastDashMap, FastHashMap};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use super::types::{
     BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult, BlockSeqno, CandidateStatus,
@@ -58,7 +58,9 @@ impl BlocksCache {
                         .map(|(shard, queue_key)| (*shard, *queue_key))
                         .collect();
 
-                    if let Some(additional_info) = entry.data.additional_shard_block_cache_info()? {
+                    if let Some(additional_info) =
+                        entry.data.get_additional_shard_block_cache_info()?
+                    {
                         result.push(TopBlockDescription {
                             block_id: entry.block_id,
                             block_info: additional_info.block_info,
@@ -209,6 +211,41 @@ impl BlocksCache {
         }
 
         Ok(all_processed_to)
+    }
+
+    pub fn get_all_partitions_to_by_mc_block_from_cache(
+        &self,
+        mc_block_key: &BlockCacheKey,
+    ) -> Result<FastHashSet<QueuePartitionIdx>> {
+        let mut partitions = FastHashSet::default();
+
+        if mc_block_key.seqno == 0 {
+            return Ok(partitions);
+        }
+
+        {
+            let master_cache = self.masters.lock();
+            let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
+                bail!(
+                    "get_all_partitions_to_by_mc_block_from_cache: Master block not found in cache! ({})",
+                    mc_block_key,
+                )
+            };
+
+            let processed_upto = mc_block_entry.processed_upto().clone();
+
+            partitions.extend(processed_upto.get_partitions());
+
+            for (top_sc_block_id, _) in &mc_block_entry.top_shard_blocks_info {
+                if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
+                    if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
+                        partitions.extend(sc_block_entry.processed_upto().get_partitions());
+                    }
+                }
+            }
+        }
+
+        Ok(partitions)
     }
 
     pub fn read_before_tail_ids_of_mc_block(

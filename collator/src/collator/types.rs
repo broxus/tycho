@@ -940,7 +940,6 @@ pub struct FinalizeMessagesReaderResult {
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
-
     pub create_queue_diff_elapsed: Duration,
 }
 

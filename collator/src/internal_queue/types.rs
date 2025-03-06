@@ -544,6 +544,13 @@ pub struct CommitPointer {
     pub queue_key: QueueKey,
 }
 
+#[derive(Debug)]
+pub enum DiffZone {
+    Committed,
+    Uncommitted,
+    Both,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};

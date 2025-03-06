@@ -411,7 +411,6 @@ pub struct CommitPointerKey {
 
 pub struct CommitPointerValue {
     pub queue_key: QueueKey,
-    // pub seqno: u32,
 }
 
 impl StoredValue for CommitPointerKey {

@@ -17,7 +17,8 @@ use tycho_collator::internal_queue::queue::{
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use tycho_collator::internal_queue::state::storage::{QueueStateImplFactory, QueueStateStdImpl};
 use tycho_collator::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
+    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
+    QueueShardRange,
 };
 use tycho_storage::Storage;
 use tycho_util::FastHashSet;
@@ -349,6 +350,7 @@ async fn test_queue() -> anyhow::Result<()> {
         block1.as_short_id(),
         &HashBytes::from([1; 32]),
         diff_statistics,
+        false,
     )?;
     // end block 1 diff
 
@@ -469,6 +471,7 @@ async fn test_queue() -> anyhow::Result<()> {
         block2.as_short_id(),
         &HashBytes::from([1; 32]),
         diff_statistics,
+        false,
     )?;
 
     let mc_diff_with_messages = QueueDiffWithMessages {
@@ -495,6 +498,7 @@ async fn test_queue() -> anyhow::Result<()> {
         mc_block.as_short_id(),
         &HashBytes::from([1; 32]),
         mc_diff_statistics,
+        false,
     )?;
 
     // end block 2 diff
@@ -619,6 +623,7 @@ async fn test_queue() -> anyhow::Result<()> {
         mc_block2.as_short_id(),
         &HashBytes::from([2; 32]),
         mc2_diff_statistics,
+        false,
     )?;
 
     queue.commit_diff(&[(mc_block2, true), (block2, true)], &partitions)?;
@@ -628,7 +633,7 @@ async fn test_queue() -> anyhow::Result<()> {
         dest_2_low_priority,
         dest_3_normal_priority,
     )?;
-    queue.clear_uncommitted_state(&[])?;
+    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect())?;
     test_statistics_check_statistics(
         &queue,
         dest_1_low_priority,
@@ -711,6 +716,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         block1,
         &HashBytes::from([1; 32]),
         diff_statistics,
+        false,
     )?;
     // end block 1 diff
 
@@ -764,6 +770,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         block2,
         &HashBytes::from([1; 32]),
         diff_statistics,
+        false,
     )?;
     // end block 2 diff
 
@@ -901,6 +908,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
         block,
         &HashBytes::from([1; 32]),
         statistics,
+        false,
     )?;
 
     let mut ranges = Vec::new();
@@ -925,7 +933,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     assert!(iterator_manager.next().ok().is_some());
 
-    queue.clear_uncommitted_state(&[])?;
+    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect())?;
 
     let iterators = queue.iterator(partition, &ranges, ShardIdent::new_full(1))?;
 
@@ -1176,7 +1184,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     let mut diff_mc1 = QueueDiffWithMessages::new();
     let mut diff_mc2 = QueueDiffWithMessages::new();
 
-    let stored_objects = vec![
+    let stored_objects = [
         create_stored_object(1, RouterAddr {
             workchain: -1,
             account: HashBytes::from([1; 32]),
@@ -1195,13 +1203,13 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
         })?,
     ];
 
-    if let Some(stored_object) = stored_objects.first() {
+    for stored_object in &stored_objects[..2] {
         diff_mc1
             .messages
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    for stored_object in &stored_objects {
+    for stored_object in &stored_objects[2..] {
         diff_mc2
             .messages
             .insert(stored_object.key(), stored_object.clone());
@@ -1232,6 +1240,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
         block_mc1.as_short_id(),
         &HashBytes::from([1; 32]),
         statistics_mc1,
+        false,
     )?;
 
     queue.apply_diff(
@@ -1239,6 +1248,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
         block_mc2.as_short_id(),
         &HashBytes::from([2; 32]),
         statistics_mc2,
+        false,
     )?;
 
     // -- test case 1
@@ -1248,15 +1258,35 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // first diff has only one message with lt=1
     let diff_info_mc1 = queue
-        .get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno)?
+        .get_diff(
+            &ShardIdent::MASTERCHAIN,
+            block_mc1.seqno,
+            DiffZone::Uncommitted,
+        )?
         .unwrap();
-    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(1));
+    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(2));
 
     // second diff has three messages with lt=2,3,4
     let diff_info_mc2 = queue
-        .get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?
+        .get_diff(
+            &ShardIdent::MASTERCHAIN,
+            block_mc2.seqno,
+            DiffZone::Uncommitted,
+        )?
         .unwrap();
     assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
+
+    // should be none because it is not committed
+    let res = queue.get_diff(
+        &ShardIdent::MASTERCHAIN,
+        block_mc1.seqno,
+        DiffZone::Committed,
+    )?;
+    assert!(res.is_none());
+
+    // should be some because it is in uncommitted zone
+    let res = queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno, DiffZone::Both)?;
+    assert!(res.is_some());
 
     // -- test case 2
     // commit first diff
@@ -1269,14 +1299,34 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // first diff has only one message with lt=1
     let diff_info_mc1 = queue
-        .get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno)?
+        .get_diff(
+            &ShardIdent::MASTERCHAIN,
+            block_mc1.seqno,
+            DiffZone::Committed,
+        )?
         .unwrap();
 
-    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(1));
+    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(2));
+
+    // should be some because it is committed
+    let res = queue.get_diff(
+        &ShardIdent::MASTERCHAIN,
+        block_mc1.seqno,
+        DiffZone::Uncommitted,
+    )?;
+    assert!(res.is_none());
+
+    // should be some because it is in committed zone
+    let res = queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno, DiffZone::Both)?;
+    assert!(res.is_some());
 
     // second diff has three messages with lt=2,3,4
     let diff_info_mc2 = queue
-        .get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?
+        .get_diff(
+            &ShardIdent::MASTERCHAIN,
+            block_mc2.seqno,
+            DiffZone::Uncommitted,
+        )?
         .unwrap();
     assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
     // -- test case 3
@@ -1287,7 +1337,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // -- test case 4
     // clear uncommitted state with second diff
-    queue.clear_uncommitted_state(&[])?;
+    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect())?;
 
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
     // uncommitted: 0; committed: 1
@@ -1295,12 +1345,17 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // first diff has only one message with lt=1
     let diff_info_mc1 = queue
-        .get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno)?
+        .get_diff(
+            &ShardIdent::MASTERCHAIN,
+            block_mc1.seqno,
+            DiffZone::Committed,
+        )?
         .unwrap();
-    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(1));
+    assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(2));
 
     // second diff removed because it was located in uncommitted state
-    let diff_info_mc2 = queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno)?;
+    let diff_info_mc2 =
+        queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno, DiffZone::Both)?;
     assert!(diff_info_mc2.is_none());
 
     // -- test case 5
@@ -1384,7 +1439,7 @@ async fn test_version() -> anyhow::Result<()> {
         diff_mc2.max_message().cloned().unwrap_or_default(),
     );
 
-    let version = queue.get_last_applied_mc_block_id()?;
+    let version = queue.get_last_committed_mc_block_id()?;
     assert_eq!(version, None);
 
     queue.apply_diff(
@@ -1392,14 +1447,15 @@ async fn test_version() -> anyhow::Result<()> {
         block_mc1.as_short_id(),
         &HashBytes::from([1; 32]),
         statistics_mc1,
+        false,
     )?;
 
-    let version = queue.get_last_applied_mc_block_id()?;
+    let version = queue.get_last_committed_mc_block_id()?;
     assert_eq!(version, None);
 
     queue.commit_diff(&[(block_mc1, true)], &partitions)?;
 
-    let version = queue.get_last_applied_mc_block_id()?;
+    let version = queue.get_last_committed_mc_block_id()?;
     assert_eq!(version, Some(block_mc1));
 
     queue.apply_diff(
@@ -1407,10 +1463,11 @@ async fn test_version() -> anyhow::Result<()> {
         block_mc2.as_short_id(),
         &HashBytes::from([2; 32]),
         statistics_mc2,
+        false,
     )?;
     queue.commit_diff(&[(block_mc2, true)], &partitions)?;
 
-    let version = queue.get_last_applied_mc_block_id()?;
+    let version = queue.get_last_committed_mc_block_id()?;
     assert_eq!(version, Some(block_mc2));
 
     Ok(())

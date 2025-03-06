@@ -1,18 +1,19 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, QueueDiffWithMessages, QueueShardRange, QueueStatistics,
+    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
+    QueueShardRange, QueueStatistics,
 };
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTupleRef};
@@ -48,6 +49,7 @@ where
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
+        skip_check_sequence: bool,
     ) -> Result<()>;
 
     /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
@@ -72,15 +74,26 @@ where
         messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()>;
 
-    fn clear_uncommitted_state(&self, partitions: &[QueuePartitionIdx]) -> Result<()>;
+    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
     /// Get diff for the given block from committed and uncommitted state
-    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>>;
+    fn get_diff(
+        &self,
+        shard_ident: &ShardIdent,
+        seqno: u32,
+        zone: DiffZone,
+    ) -> Result<Option<DiffInfo>>;
     /// Check if diff exists in the cache
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
-    /// Get last applied mc block id from committed state
-    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Get last committed mc block id
+    fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get diffs tail len from uncommitted state and committed state
-    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32;
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
+    /// Get partition router and statistics for the specified block
+    fn get_router_and_statistics(
+        &self,
+        block_id_short: &BlockIdShort,
+        partition: QueuePartitionIdx,
+    ) -> Result<(PartitionRouter, DiffStatistics)>;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -136,19 +149,25 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(stats)
     }
 
-    #[instrument(skip_all, fields(%block_id_short, %diff_hash))]
+    #[instrument(skip_all, fields(%block_id_short, %diff_hash, skip_check_sequence))]
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
+        skip_check_sequence: bool,
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_to = diff.processed_to.clone();
-        self.queue
-            .apply_diff(diff, block_id_short, diff_hash, statistics)?;
+        self.queue.apply_diff(
+            diff,
+            block_id_short,
+            diff_hash,
+            statistics,
+            skip_check_sequence,
+        )?;
 
         let elapsed = start_time.elapsed();
         tracing::info!(
@@ -215,7 +234,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all, fields(?partitions))]
-    fn clear_uncommitted_state(&self, partitions: &[QueuePartitionIdx]) -> Result<()> {
+    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {
+        if partitions.is_empty() {
+            tracing::warn!(target: tracing_targets::MQ_ADAPTER, "clear_uncommitted_state: partitions is empty");
+        }
+
         let start_time = std::time::Instant::now();
         self.queue.clear_uncommitted_state(partitions)?;
         let elapsed = start_time.elapsed();
@@ -229,9 +252,14 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all, fields(%shard_ident, seqno))]
-    fn get_diff(&self, shard_ident: &ShardIdent, seqno: u32) -> Result<Option<DiffInfo>> {
+    fn get_diff(
+        &self,
+        shard_ident: &ShardIdent,
+        seqno: u32,
+        zone: DiffZone,
+    ) -> Result<Option<DiffInfo>> {
         let start_time = std::time::Instant::now();
-        let diff = self.queue.get_diff(shard_ident, seqno)?;
+        let diff = self.queue.get_diff(shard_ident, seqno, zone)?;
         let elapsed = start_time.elapsed();
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
@@ -255,27 +283,73 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(exists)
     }
 
-    fn get_last_applied_mc_block_id(&self) -> Result<Option<BlockId>> {
+    fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>> {
         let start_time = std::time::Instant::now();
-        let block_id = self.queue.get_last_applied_mc_block_id()?;
+        let block_id = self.queue.get_last_committed_mc_block_id()?;
         let elapsed = start_time.elapsed();
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
-            "get_last_applied_mc_block_id completed"
+            "get_last_commited_mc_block_id completed"
         );
         Ok(block_id)
     }
 
-    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, max_message_from: &QueueKey) -> u32 {
+    fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
         let start_time = std::time::Instant::now();
-        let tail_len = self.queue.get_diffs_tail_len(shard_ident, max_message_from);
+        let tail_len = self.queue.get_diffs_tail_len(shard_ident, from);
         let elapsed = start_time.elapsed();
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
+            tail_len,
             "get_diffs_tail_len completed"
         );
         tail_len
+    }
+
+    fn get_router_and_statistics(
+        &self,
+        block_id_short: &BlockIdShort,
+        partition: QueuePartitionIdx,
+    ) -> Result<(PartitionRouter, DiffStatistics)> {
+        let start_time = std::time::Instant::now();
+        let diff = self
+            .get_diff(&block_id_short.shard, block_id_short.seqno, DiffZone::Both)?
+            .ok_or_else(|| anyhow!("Diff for block {} not found", block_id_short))?;
+
+        let partition_router = PartitionRouter::with_partitions(
+            &diff.router_partitions_src,
+            &diff.router_partitions_dst,
+        );
+
+        let statistics_range = QueueShardRange {
+            shard_ident: block_id_short.shard,
+            from: diff.min_message,
+            to: diff.max_message,
+        };
+
+        let queue_statistics = self.get_statistics(partition, &[statistics_range])?;
+
+        let mut diff_statistics = FastHashMap::default();
+        diff_statistics.insert(partition, queue_statistics.statistics().clone());
+
+        let diff_statistics = DiffStatistics::new(
+            block_id_short.shard,
+            diff.min_message,
+            diff.max_message,
+            diff_statistics,
+            queue_statistics.shard_messages_count(),
+        );
+
+        let elapsed = start_time.elapsed();
+
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(elapsed),
+            "get_router_and_statistics completed"
+        );
+
+        Ok((partition_router, diff_statistics))
     }
 }

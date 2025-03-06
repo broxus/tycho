@@ -6,6 +6,7 @@ use everscale_types::models::{
     ProcessedUptoPartition, ShardIdent, ShardIdentFull, ShardRange,
 };
 use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_util::FastHashSet;
 
 use super::ProcessedTo;
 use crate::mempool::MempoolAnchorId;
@@ -46,6 +47,10 @@ impl ProcessedUptoInfoStuff {
             }
         }
         shards_processed_to
+    }
+
+    pub fn get_partitions(&self) -> FastHashSet<QueuePartitionIdx> {
+        self.partitions.keys().copied().collect()
     }
 }
 

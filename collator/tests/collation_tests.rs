@@ -93,10 +93,10 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let committed_state_factory = QueueStateImplFactory::new(storage.clone());
+    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
 
     let queue_factory = QueueFactoryStdImpl {
-        state: committed_state_factory,
+        state: queue_state_factory,
         config: Default::default(),
     };
     let queue = queue_factory.create();
