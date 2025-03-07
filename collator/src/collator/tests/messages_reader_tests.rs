@@ -145,6 +145,8 @@ async fn test_refill_messages() -> Result<()> {
         create_int_msg_value_func: |info, cell| EnqueuedMessage { info, cell },
 
         one_to_many_counter: 0,
+
+        dex_pairs,
     };
 
     // queue adapter
@@ -176,7 +178,7 @@ async fn test_refill_messages() -> Result<()> {
 
     // test master collator
     let mc_collator = TestCollator {
-        msgs_exec_params,
+        msgs_exec_params: msgs_exec_params.clone(),
 
         shard_id: ShardIdent::MASTERCHAIN,
         block_seqno: 0,
@@ -342,10 +344,9 @@ async fn test_refill_messages() -> Result<()> {
     tracing::trace!("TEST CASE 005: RUN SWAPS");
 
     for _ in 0..10 {
-        let messages =
-            test_adapter
-                .msgs_factory
-                .create_swap_messages(&dex_pairs, &dex_wallets, 10)?;
+        let messages = test_adapter
+            .msgs_factory
+            .create_swap_messages(&dex_wallets, 10)?;
         test_adapter.import_anchor_with_messages(messages);
         test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
     }
@@ -356,14 +357,16 @@ async fn test_refill_messages() -> Result<()> {
     tracing::trace!("TEST CASE 006: RUN SWAPS AND TRANSFERS");
 
     for _ in 0..20 {
-        // we create 30 externals per anchor so that they do not fit one buffer limit
-        let mut messages =
-            test_adapter
-                .msgs_factory
-                .create_swap_messages(&dex_pairs, &dex_wallets, 10)?;
+        // we create such amout of externals per anchor so that they do not fit one buffer limit
+        let target_total_msgs_count = (msgs_exec_params.buffer_limit + 10) as usize;
+        let target_swap_msgs_count = target_total_msgs_count / 3;
+        let target_transfer_msgs_count = target_total_msgs_count - target_swap_msgs_count;
+        let mut messages = test_adapter
+            .msgs_factory
+            .create_swap_messages(&dex_wallets, target_swap_msgs_count)?;
         let mut transfer_messages = test_adapter
             .msgs_factory
-            .create_transfer_messages(&transfers_wallets, 20)?;
+            .create_transfer_messages(&transfers_wallets, target_transfer_msgs_count)?;
         messages.append(&mut transfer_messages);
         test_adapter.import_anchor_with_messages(messages);
         test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
@@ -903,6 +906,8 @@ where
     create_int_msg_value_func: F,
 
     one_to_many_counter: usize,
+
+    dex_pairs: BTreeMap<u8, IntAddr>,
 }
 
 const DEVIATION_PERCENT: usize = 10;
@@ -943,17 +948,13 @@ where
                                     self.create_one_to_many_int_messages(&mut account_lt, dst)?;
                                 created_messages.append(&mut new_messages);
                             }
-                            TestExternalMessageType::Swap {
-                                route,
-                                step,
-                                pair_addr,
-                            } => {
+                            TestExternalMessageType::Swap { route } => {
                                 if let Some(message) = self.create_swap_int_message(
                                     &mut account_lt,
-                                    pair_addr,
-                                    dst,
+                                    dst.clone(),
                                     route,
-                                    step,
+                                    dst,
+                                    None,
                                 )? {
                                     created_messages.push(message);
                                 }
@@ -978,6 +979,8 @@ where
                     }
                     // exec internal message
                     TestMessageInfo::Int(msg_info) => {
+                        let dst = msg_info.dst.clone();
+
                         match msg_info.msg_type {
                             TestInternalMessageType::OneToMany => {
                                 let mut new_messages = self.create_one_to_many_int_messages(
@@ -986,13 +989,20 @@ where
                                 )?;
                                 created_messages.append(&mut new_messages);
                             }
-                            #[allow(unused)]
                             TestInternalMessageType::Swap {
                                 route,
-                                step,
                                 target_addr,
+                                step,
                             } => {
-                                // TODO exec internal swap message
+                                if let Some(message) = self.create_swap_int_message(
+                                    &mut account_lt,
+                                    dst,
+                                    route,
+                                    target_addr,
+                                    Some(step),
+                                )? {
+                                    created_messages.push(message);
+                                }
                             }
                             TestInternalMessageType::Transfer => {
                                 // transfer completed
@@ -1072,17 +1082,66 @@ where
         Ok(res)
     }
 
-    #[allow(unused, clippy::unused_self)]
+    /// Create next cross swap step internal message or nothing if finished.
+    /// * `route` - target route (eg. USDT/BTC)
+    /// * `target_addr` - wallet, that init swap and should receive swap result
+    /// * `curr_step` - current cross swap step (eg. USDT/USDC, or `Finish`)
+    /// * `curr_step_addr` - address for current swap step. It could be a pair addres (eg. USDC/USDT),
+    ///     or the `target_address` at the end of cross swap.
     fn create_swap_int_message(
         &mut self,
         account_lt: &mut Lt,
-        pair_addr: IntAddr,
-        target_addr: IntAddr,
+        src: IntAddr,
         route: SwapRoute,
-        step: SwapRoute,
+        target_addr: IntAddr,
+        curr_step: Option<SwapRoute>,
     ) -> Result<Option<TestInternalMessage<V>>> {
-        // TODO
-        Ok(None)
+        // if current step is final in cross swap then do not produce any more internal messages
+        if curr_step == Some(SwapRoute::Finish) {
+            return Ok(None);
+        }
+
+        let idx = self.next_int_idx;
+        self.next_int_idx += 1;
+
+        let (next_step, pair_addr) =
+            Self::calc_next_swap_step_and_dex_pair(&route, curr_step.as_ref(), &self.dex_pairs);
+
+        // Address for next swap step. It could be a pair address (eg. USDC/USDT),
+        // or the `target_addr` at the end of cross swap.
+        let next_step_addr = if next_step == SwapRoute::Finish {
+            target_addr.clone()
+        } else {
+            pair_addr.unwrap()
+        };
+
+        let msg_type = TestInternalMessageType::Swap {
+            route,
+            target_addr: target_addr.clone(),
+            step: next_step,
+        };
+
+        let body = {
+            let mut builder = CellBuilder::new();
+            builder.store_u64(idx)?;
+            builder.store_u32(msg_type.as_u32())?;
+            builder.store_u32(route as u32)?;
+            target_addr.store_into(&mut builder, Cell::empty_context())?;
+            builder.store_u32(next_step as u32)?;
+            builder.build()?
+        };
+
+        *account_lt += 1;
+
+        tracing::trace!(
+            idx, created_lt = %account_lt, %src, dst = %next_step_addr, ?msg_type,
+            "created swap int message"
+        );
+
+        let test_int_msg =
+            self.create_test_int_message(idx, src, next_step_addr, *account_lt, msg_type, body)?;
+
+        Ok(Some(test_int_msg))
     }
 
     fn create_transfer_int_message(
@@ -1290,7 +1349,6 @@ where
 
     fn create_swap_messages(
         &mut self,
-        dex_pairs: &BTreeMap<u8, IntAddr>,
         dex_wallets: &BTreeMap<u8, IntAddr>,
         count: usize,
     ) -> Result<Vec<TestExternalMessage>> {
@@ -1307,25 +1365,16 @@ where
             let dex_wallet = dex_wallets.get(dex_wallet_key).unwrap().clone();
 
             // get random swap route
-            let route_u32: u32 = self.rng.gen_range(0..12);
+            let route_u32: u32 = self.rng.gen_range(1..13);
             let route: SwapRoute = unsafe { std::mem::transmute(route_u32) };
 
-            // detect swap step and dex pair for it
-            let (step, pair_addr) = Self::calc_swap_step_and_dex_pair(&route, dex_pairs);
-
-            let msg_type = TestExternalMessageType::Swap {
-                route,
-                step,
-                pair_addr: pair_addr.clone(),
-            };
+            let msg_type = TestExternalMessageType::Swap { route };
 
             let body = {
                 let mut builder = CellBuilder::new();
                 builder.store_u64(idx)?;
                 builder.store_u32(msg_type.as_u32())?;
                 builder.store_u32(route as u32)?;
-                builder.store_u32(step as u32)?;
-                pair_addr.store_into(&mut builder, Cell::empty_context())?;
                 builder.build()?
             };
 
@@ -1341,38 +1390,93 @@ where
         Ok(res)
     }
 
-    fn calc_swap_step_and_dex_pair(
+    fn calc_next_swap_step_and_dex_pair(
         route: &SwapRoute,
+        curr_step: Option<&SwapRoute>,
         dex_pairs: &BTreeMap<u8, IntAddr>,
-    ) -> (SwapRoute, IntAddr) {
-        match route {
-            SwapRoute::UsdcNative
-            | SwapRoute::UsdcEth
-            | SwapRoute::UsdcBtc
-            | SwapRoute::UsdcUsdt
-            | SwapRoute::UsdcBnb => (
-                SwapRoute::UsdcNative,
-                dex_pairs.get(&DEX_PAIR_USDC_NATIVE).unwrap().clone(),
-            ),
-            SwapRoute::UsdtNative
-            | SwapRoute::UsdtEth
-            | SwapRoute::UsdtBtc
-            | SwapRoute::UsdtUsdc => (
-                SwapRoute::UsdcUsdt,
-                dex_pairs.get(&DEX_PAIR_USDC_USDT).unwrap().clone(),
-            ),
-            SwapRoute::UsdtBnb => (
-                SwapRoute::UsdtBnb,
-                dex_pairs.get(&DEX_PAIR_USDT_BNB).unwrap().clone(),
-            ),
-            SwapRoute::NativeEth => (
-                SwapRoute::NativeEth,
-                dex_pairs.get(&DEX_PAIR_NATIVE_ETH).unwrap().clone(),
-            ),
-            SwapRoute::NativeBtc => (
-                SwapRoute::NativeBtc,
-                dex_pairs.get(&DEX_PAIR_NATIVE_BTC).unwrap().clone(),
-            ),
+    ) -> (SwapRoute, Option<IntAddr>) {
+        match (curr_step, route) {
+            (None, route) => match route {
+                SwapRoute::UsdcNative | SwapRoute::UsdcEth | SwapRoute::UsdcBtc => (
+                    SwapRoute::UsdcNative,
+                    dex_pairs.get(&DEX_PAIR_USDC_NATIVE).cloned(),
+                ),
+                SwapRoute::UsdcUsdt
+                | SwapRoute::UsdcBnb
+                | SwapRoute::UsdtNative
+                | SwapRoute::UsdtEth
+                | SwapRoute::UsdtBtc
+                | SwapRoute::UsdtUsdc => (
+                    SwapRoute::UsdcUsdt,
+                    dex_pairs.get(&DEX_PAIR_USDC_USDT).cloned(),
+                ),
+                SwapRoute::UsdtBnb => (
+                    SwapRoute::UsdtBnb,
+                    dex_pairs.get(&DEX_PAIR_USDT_BNB).cloned(),
+                ),
+                SwapRoute::NativeEth => (
+                    SwapRoute::NativeEth,
+                    dex_pairs.get(&DEX_PAIR_NATIVE_ETH).cloned(),
+                ),
+                SwapRoute::NativeBtc => (
+                    SwapRoute::NativeBtc,
+                    dex_pairs.get(&DEX_PAIR_NATIVE_BTC).cloned(),
+                ),
+                SwapRoute::Finish => unreachable!(),
+            },
+            (Some(SwapRoute::UsdcNative), route) => match route {
+                SwapRoute::UsdcNative | SwapRoute::UsdtNative => (SwapRoute::Finish, None),
+                SwapRoute::UsdcEth | SwapRoute::UsdtEth => (
+                    SwapRoute::NativeEth,
+                    dex_pairs.get(&DEX_PAIR_NATIVE_ETH).cloned(),
+                ),
+                SwapRoute::UsdcBtc | SwapRoute::UsdtBtc => (
+                    SwapRoute::NativeBtc,
+                    dex_pairs.get(&DEX_PAIR_NATIVE_BTC).cloned(),
+                ),
+                _ => unreachable!(),
+            },
+            (Some(SwapRoute::UsdcUsdt), route) => match route {
+                SwapRoute::UsdcUsdt | SwapRoute::UsdtUsdc => (SwapRoute::Finish, None),
+                SwapRoute::UsdcBnb => (
+                    SwapRoute::UsdtBnb,
+                    dex_pairs.get(&DEX_PAIR_USDT_BNB).cloned(),
+                ),
+                SwapRoute::UsdtNative | SwapRoute::UsdtEth | SwapRoute::UsdtBtc => (
+                    SwapRoute::UsdcNative,
+                    dex_pairs.get(&DEX_PAIR_USDC_NATIVE).cloned(),
+                ),
+                _ => unreachable!(),
+            },
+            (Some(SwapRoute::UsdtBnb), route) => match route {
+                SwapRoute::UsdtBnb | SwapRoute::UsdcBnb => (SwapRoute::Finish, None),
+                _ => unreachable!(),
+            },
+            (Some(SwapRoute::NativeEth), route) => match route {
+                SwapRoute::NativeEth | SwapRoute::UsdcEth | SwapRoute::UsdtEth => {
+                    (SwapRoute::Finish, None)
+                }
+                _ => unreachable!(),
+            },
+            (Some(SwapRoute::NativeBtc), route) => match route {
+                SwapRoute::NativeBtc | SwapRoute::UsdcBtc | SwapRoute::UsdtBtc => {
+                    (SwapRoute::Finish, None)
+                }
+                _ => unreachable!(),
+            },
+            (
+                Some(
+                    SwapRoute::Finish
+                    | SwapRoute::UsdcEth
+                    | SwapRoute::UsdcBtc
+                    | SwapRoute::UsdcBnb
+                    | SwapRoute::UsdtNative
+                    | SwapRoute::UsdtEth
+                    | SwapRoute::UsdtBtc
+                    | SwapRoute::UsdtUsdc,
+                ),
+                _,
+            ) => unreachable!(),
         }
     }
 
@@ -1546,7 +1650,7 @@ struct TestExternalMessageState {
     _secondary_exec_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct TestExternalMessageInfo {
     idx: u64,
     hash: HashBytes,
@@ -1554,13 +1658,23 @@ struct TestExternalMessageInfo {
     msg_type: TestExternalMessageType,
 }
 
+impl std::fmt::Debug for TestExternalMessageInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestExternalMessageInfo")
+            .field("idx", &self.idx)
+            .field("hash", &self.hash)
+            .field("dst", &DebugDisplay(&self.dst))
+            .field("msg_type", &self.msg_type)
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum TestExternalMessageType {
     OneToMany,
     Swap {
+        /// Target route (eg. USDT/BTC)
         route: SwapRoute,
-        step: SwapRoute,
-        pair_addr: IntAddr,
     },
     Transfer {
         target_addr: IntAddr,
@@ -1585,16 +1699,7 @@ impl std::fmt::Debug for TestExternalMessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OneToMany => write!(f, "OneToMany"),
-            Self::Swap {
-                route,
-                step,
-                pair_addr,
-            } => f
-                .debug_struct("Swap")
-                .field("route", &route)
-                .field("step", &step)
-                .field("pair_addr", &DebugDisplay(&pair_addr))
-                .finish(),
+            Self::Swap { route } => f.debug_struct("Swap").field("route", &route).finish(),
             Self::Transfer { target_addr } => f
                 .debug_struct("Transfer")
                 .field("target_addr", &DebugDisplay(&target_addr))
@@ -1614,7 +1719,8 @@ impl std::fmt::Debug for TestExternalMessageType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 enum SwapRoute {
-    UsdcNative = 0,
+    Finish = 0,
+    UsdcNative,
     UsdcEth,
     UsdcBtc,
     UsdcUsdt,
@@ -1639,7 +1745,7 @@ struct TestInternalMessageState {
     _secondary_exec_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct TestInternalMessageInfo {
     idx: u64,
     lt: Lt,
@@ -1649,14 +1755,29 @@ struct TestInternalMessageInfo {
     msg_type: TestInternalMessageType,
 }
 
-#[allow(unused)]
+impl std::fmt::Debug for TestInternalMessageInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestInternalMessageInfo")
+            .field("idx", &self.idx)
+            .field("lt", &self.lt)
+            .field("hash", &self.hash)
+            .field("src", &DebugDisplay(&self.src))
+            .field("dst", &DebugDisplay(&self.dst))
+            .field("msg_type", &self.msg_type)
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum TestInternalMessageType {
     OneToMany,
     Swap {
+        /// Target route (eg. USDT/BTC)
         route: SwapRoute,
-        step: SwapRoute,
+        /// Wallet, that init swap and should receive swap result.
         target_addr: IntAddr,
+        /// Current cross swap step (eg. USDT/USDC)
+        step: SwapRoute,
     },
     Transfer,
 }
@@ -1676,14 +1797,14 @@ impl std::fmt::Debug for TestInternalMessageType {
         match self {
             Self::OneToMany => write!(f, "OneToMany"),
             Self::Swap {
+                target_addr,
                 route,
                 step,
-                target_addr,
             } => f
                 .debug_struct("Swap")
                 .field("route", &route)
-                .field("step", &step)
                 .field("target_addr", &DebugDisplay(&target_addr))
+                .field("step", &step)
                 .finish(),
             Self::Transfer => write!(f, "Transfer"),
         }
