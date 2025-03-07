@@ -16,13 +16,13 @@ members = [
     "consensus",
     "control",
     "core",
-    "gen-protos",
     "network",
     "rpc",
     "simulator",
     "storage",
     "util",
     "light-node",
+    "xtask",
 ]
 
 [workspace.dependencies]

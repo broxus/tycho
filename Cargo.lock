@@ -1568,7 +1568,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3675,14 +3675,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tycho-gen-protos"
-version = "0.2.5"
-dependencies = [
- "anyhow",
- "prost-build",
-]
-
-[[package]]
 name = "tycho-light-node"
 version = "0.2.5"
 dependencies = [
@@ -4356,6 +4348,18 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "xtask"
+version = "0.2.5"
+dependencies = [
+ "anyhow",
+ "clap",
+ "prost-build",
+ "serde",
+ "serde_json",
+ "tycho-cli-models",
+]
 
 [[package]]
 name = "zerocopy"

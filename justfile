@@ -80,7 +80,7 @@ gen_dashboard:
     /usr/bin/env python ./scripts/gen-dashboard.py
 
 update_rpc_proto:
-    cargo run -p tycho-gen-protos
+    cargo xtask gen-proto
 
 # === Integration tests stuff ===
 
