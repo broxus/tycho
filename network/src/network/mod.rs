@@ -82,6 +82,7 @@ impl NetworkBuilder {
             .with_private_key(private_key)
             .with_0rtt_enabled(config.enable_0rtt)
             .with_transport_config(quic_config.make_transport_config())
+            .with_connection_metrics(config.connection_metrics)
             .build()?;
 
         let socket = bind_address.to_socket().map(socket2::Socket::from)?;

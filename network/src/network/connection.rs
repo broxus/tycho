@@ -9,6 +9,7 @@ use metrics::Label;
 use quinn::{ConnectionError, SendDatagramError};
 use webpki::types::CertificateDer;
 
+use crate::network::config::ConnectionMetricsLevel;
 use crate::network::crypto::peer_id_from_certificate;
 use crate::types::{Direction, InboundRequestMeta, PeerId};
 
@@ -28,7 +29,12 @@ macro_rules! emit_gauges {
 }
 
 impl Connection {
-    pub fn with_peer_id(inner: quinn::Connection, origin: Direction, peer_id: PeerId) -> Self {
+    pub fn with_peer_id(
+        inner: quinn::Connection,
+        origin: Direction,
+        peer_id: PeerId,
+        connection_metrics: Option<ConnectionMetricsLevel>,
+    ) -> Self {
         let connection = Self {
             request_meta: Arc::new(InboundRequestMeta {
                 peer_id,
@@ -39,17 +45,24 @@ impl Connection {
         };
 
         let conn = connection.inner.clone();
-        let peer_id = peer_id.to_string();
+
+        let Some(connection_metrics) = connection_metrics else {
+            return connection;
+        };
+
+        let peer_id = connection.request_meta.peer_id;
         let remote_addr = connection.remote_address().to_string();
 
         // we can't use `spawn_metrics_loop` here because we can't get arc reference to connection
         tokio::spawn(async move {
-            let peer_id = peer_id.clone();
-            let remote_addr = remote_addr.clone();
-            let labels = vec![
-                Label::new("peer_id", peer_id),
-                Label::new("peer_addr", remote_addr),
-            ];
+            const INTERVAL: Duration = Duration::from_secs(5);
+
+            let mut labels = vec![Label::new("peer_addr", remote_addr)];
+
+            if connection_metrics.should_export_peer_id() {
+                labels.push(Label::new("peer_id", peer_id.to_string()));
+                labels.shrink_to_fit();
+            }
 
             loop {
                 let stats = conn.stats();
@@ -116,9 +129,13 @@ impl Connection {
                 ]);
 
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = tokio::time::sleep(INTERVAL) => {}
                     _ = conn.closed() => {
-                        tracing::info!(peer_address = %conn.remote_address(), "Connection closed");
+                        tracing::debug!(
+                            %peer_id,
+                            addr = %conn.remote_address(),
+                            "connection metrics loop stopped",
+                        );
                         return;
                     },
                 }

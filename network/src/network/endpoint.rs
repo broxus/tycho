@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::network::config::EndpointConfig;
+use crate::network::config::{ConnectionMetricsLevel, EndpointConfig};
 use crate::network::connection::{extract_peer_id, parse_peer_identity, Connection};
 use crate::types::{Direction, PeerId};
 
@@ -88,9 +88,10 @@ impl Endpoint {
         config: quinn::ClientConfig,
         address: &SocketAddr,
     ) -> Result<Connecting, quinn::ConnectError> {
+        let metrics = self.config.connection_metrics;
         self.inner
             .connect_with(config, *address, "tycho")
-            .map(Connecting::new_outbound)
+            .map(|c| Connecting::new_outbound(c, metrics))
     }
 
     /// Get the next incoming connection attempt from a client
@@ -98,8 +99,10 @@ impl Endpoint {
     /// Yields [`Connecting`] futures that must be `await`ed to obtain the final `Connection`, or
     /// `None` if the endpoint is [`close`](Self::close)d.
     pub fn accept(&self) -> Accept<'_> {
+        let metrics = self.config.connection_metrics;
         Accept {
             inner: self.inner.accept(),
+            metrics,
         }
     }
 }
@@ -109,6 +112,7 @@ pin_project_lite::pin_project! {
     pub(crate) struct Accept<'a> {
         #[pin]
         inner: quinn::Accept<'a>,
+        metrics: Option<ConnectionMetricsLevel>,
     }
 }
 
@@ -116,11 +120,12 @@ impl Future for Accept<'_> {
     type Output = Option<Connecting>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let metrics = self.metrics;
         self.project().inner.poll(cx).map(|c| {
             c.and_then(|c| {
                 let remote_addr = c.remote_address();
                 match c.accept() {
-                    Ok(c) => Some(Connecting::new_inbound(c)),
+                    Ok(c) => Some(Connecting::new_inbound(c, metrics)),
                     Err(e) => {
                         tracing::warn!(%remote_addr, "failed to accept an incoming connection: {e:?}");
                         None
@@ -136,20 +141,23 @@ impl Future for Accept<'_> {
 pub(crate) struct Connecting {
     inner: quinn::Connecting,
     origin: Direction,
+    metrics: Option<ConnectionMetricsLevel>,
 }
 
 impl Connecting {
-    fn new_inbound(inner: quinn::Connecting) -> Self {
+    fn new_inbound(inner: quinn::Connecting, metrics: Option<ConnectionMetricsLevel>) -> Self {
         Self {
             inner,
             origin: Direction::Inbound,
+            metrics,
         }
     }
 
-    fn new_outbound(inner: quinn::Connecting) -> Self {
+    fn new_outbound(inner: quinn::Connecting, metrics: Option<ConnectionMetricsLevel>) -> Self {
         Self {
             inner,
             origin: Direction::Outbound,
+            metrics,
         }
     }
 
@@ -162,7 +170,7 @@ impl Connecting {
             Ok((c, accepted)) => match c.peer_identity() {
                 Some(identity) => match parse_peer_identity(identity) {
                     Some(peer_id) => Into0RttResult::Established(
-                        Connection::with_peer_id(c, self.origin, peer_id),
+                        Connection::with_peer_id(c, self.origin, peer_id, self.metrics),
                         accepted,
                     ),
                     None => Into0RttResult::InvalidCertificate,
@@ -171,11 +179,13 @@ impl Connecting {
                     inner: Some(c),
                     accepted,
                     origin: self.origin,
+                    metrics: self.metrics,
                 }),
             },
             Err(inner) => Into0RttResult::Unavailable(Self {
                 inner,
                 origin: self.origin,
+                metrics: self.metrics,
             }),
         }
     }
@@ -187,7 +197,12 @@ impl Future for Connecting {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.inner).poll(cx).map(|res| match res {
             Ok(c) => match extract_peer_id(&c) {
-                Some(peer_id) => Ok(Connection::with_peer_id(c, self.origin, peer_id)),
+                Some(peer_id) => Ok(Connection::with_peer_id(
+                    c,
+                    self.origin,
+                    peer_id,
+                    self.metrics,
+                )),
                 None => Err(ConnectionInitError::InvalidCertificate),
             },
             Err(e) => Err(ConnectionInitError::ConnectionFailed(e)),
@@ -200,6 +215,7 @@ pub(crate) struct ConnectingFallback {
     inner: Option<quinn::Connection>,
     accepted: quinn::ZeroRttAccepted,
     origin: Direction,
+    metrics: Option<ConnectionMetricsLevel>,
 }
 
 impl Drop for ConnectingFallback {
@@ -223,7 +239,12 @@ impl Future for ConnectingFallback {
             match c.close_reason() {
                 Some(e) => Err(ConnectionInitError::ConnectionFailed(e)),
                 None => match extract_peer_id(&c) {
-                    Some(peer_id) => Ok(Connection::with_peer_id(c, self.origin, peer_id)),
+                    Some(peer_id) => Ok(Connection::with_peer_id(
+                        c,
+                        self.origin,
+                        peer_id,
+                        self.metrics,
+                    )),
                     None => Err(ConnectionInitError::InvalidCertificate),
                 },
             }
