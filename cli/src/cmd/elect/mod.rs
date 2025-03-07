@@ -20,6 +20,7 @@ use serde::Serialize;
 use tycho_block_util::config::{
     apply_price_factor, build_elections_data_to_sign, compute_gas_price_factor,
 };
+use tycho_cli_models::FpTokens;
 use tycho_control::ControlClient;
 use tycho_network::PeerId;
 use tycho_util::cli::logger::init_logger_simple;
@@ -32,7 +33,6 @@ use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
 use crate::util::{elector, wallet};
-use tycho_cli_models::FpTokens;
 use crate::BaseArgs;
 
 /// Participate in validator elections.

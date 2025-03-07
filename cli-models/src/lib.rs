@@ -5,11 +5,11 @@ use everscale_types::abi::{AbiType, AbiValue, FromAbi, IntoAbi, WithAbiType};
 use everscale_types::num::Tokens;
 use serde::{Deserialize, Serialize};
 
-pub mod keypair;
 pub mod account;
 pub mod blockchain;
-pub mod election;
 pub mod config;
+pub mod election;
+pub mod keypair;
 
 /// Print value as JSON to stdout.
 ///

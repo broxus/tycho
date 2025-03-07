@@ -30,7 +30,7 @@ function set_clang_env {
     local prev_version=""
     for clang_version in "${clang_versions[@]}"; do
         if [ ! -z "$prev_version" ]; then
-            echo "WARN: Clang $prev_version not found, fallback to Clang $clang_version."
+            echo "WARN: Clang $prev_version not found, fallback to Clang $clang_version." >&2
         fi
 
         local cc_path=$(command -v "clang-$clang_version" 2>&1 || true)
@@ -57,7 +57,7 @@ function set_clang_env {
     done
 
     if [ -z "$require" ]; then
-        echo "WARN: No Clang versions found, fallback to default build."
+        echo "WARN: No Clang versions found, fallback to default build." >&2
         return 1
     else
         echo "ERROR: Clang is required but not found."

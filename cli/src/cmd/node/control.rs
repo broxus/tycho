@@ -8,12 +8,12 @@ use base64::prelude::{Engine as _, BASE64_STANDARD};
 use clap::{Args, Parser, Subcommand};
 use everscale_types::models::{BlockId, StdAddr};
 use serde::Serialize;
+use tycho_cli_models::print_json;
 use tycho_control::ControlClient;
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
-use tycho_cli_models::print_json;
 use crate::BaseArgs;
 
 #[derive(Subcommand)]

@@ -4,8 +4,7 @@ use everscale_types::models::{Account, AccountState, OptionalAccount, StateInit,
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use tycho_cli_models::account::AccountStateOutput;
-use tycho_cli_models::print_json;
-use tycho_cli_models::FpTokens;
+use tycho_cli_models::{print_json, FpTokens};
 
 use crate::util::{compute_storage_used, parse_public_key};
 

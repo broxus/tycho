@@ -2,49 +2,60 @@
 
 set -euo pipefail
 
-# Constants
 NODE_COUNT=3
 STABILIZE_DURATION=30
+SAVE_GIVER_KEYS=""
+GIVER_BALANCE=""
+SAVE_LOGS=false
 
-# Function to clean up and exit
 cleanup() {
     echo "Cleaning up..."
     pkill -f "just node" || true
     exit 0
 }
 
-# Set a trap to call cleanup function on Ctrl+C
-trap 'cleanup' INT
+trap cleanup INT
 
-start_nodes() {
-    # Remove temporary files
-    rm -rf .temp/*
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --save-giver-keys)
+            SAVE_GIVER_KEYS="$2"
+            shift 2
+            ;;
+        --giver-balance)
+            GIVER_BALANCE="$2"
+            shift 2
+            ;;
+        --save-logs)
+            SAVE_LOGS=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
 
-    # Generate network
-    if ! just gen_network "$NODE_COUNT"; then
-        echo "Failed to generate network."
-        exit 1
-    fi
+# Generate network configuration
+rm -rf .temp/*
+args=()
+$SAVE_LOGS && args+=(--save-logs)
+[ -n "$SAVE_GIVER_KEYS" ] && args+=(--save-giver-keys "$SAVE_GIVER_KEYS")
+[ -n "$GIVER_BALANCE" ] && args+=(--giver-balance "$GIVER_BALANCE")
 
-    # Start nodes in background
-    for i in $(seq 1 "$NODE_COUNT"); do
-        just node "$i" > /dev/null 2>&1 &
-    done
+if ! cargo xtask gen-network "${args[@]}" "$NODE_COUNT"; then
+    echo "Failed to generate network."
+    exit 1
+fi
 
-    echo "Waiting $STABILIZE_DURATION seconds for nodes to start and stabilize..."
-    sleep "$STABILIZE_DURATION"
-}
+# Start nodes in background
+for ((i=1; i<=NODE_COUNT; i++)); do
+    just node "$i" > /dev/null 2>&1 &
+done
 
-main() {
-    start_nodes
-    echo "Nodes are running. Press Ctrl+C to stop."
-    
-    # Wait indefinitely
-    while true; do
-        sleep 86400 &  # Sleep for 24 hours
-        wait $!        # Wait for the sleep command to finish or be interrupted
-    done
-}
+echo "Nodes started in background"
 
-main "$@"
-
+echo "Nodes are running. Press Ctrl+C to stop."
+sleep infinity
