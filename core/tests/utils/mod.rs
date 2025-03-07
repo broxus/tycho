@@ -36,9 +36,7 @@ pub(crate) fn parse_archive(data: &[u8]) -> Result<Archive> {
     let mut decompressed = Vec::new();
     decoder.write(data, &mut decompressed)?;
 
-    let archive = Archive::new(decompressed)?;
-
-    Ok(archive)
+    Archive::new(decompressed)
 }
 
 pub(crate) fn read_file(filename: &str) -> Result<Vec<u8>> {

@@ -25,6 +25,7 @@ bytes = { workspace = true }
 everscale-types = { workspace = true, features = ["blake3", "rayon"] }
 hex = { workspace = true }
 parking_lot = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
 
