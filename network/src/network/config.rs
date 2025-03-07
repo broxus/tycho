@@ -64,6 +64,9 @@ pub struct NetworkConfig {
 
     /// Default: no.
     pub enable_0rtt: bool,
+
+    /// Default: enabled, doesn't export peer id.
+    pub metrics: Metrics,
 }
 
 impl Default for NetworkConfig {
@@ -82,6 +85,32 @@ impl Default for NetworkConfig {
             active_peers_event_channel_capacity: 128,
             shutdown_idle_timeout: Duration::from_secs(60),
             enable_0rtt: false,
+            metrics: Metrics::Enabled {
+                export_peer_id: false,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Metrics {
+    Enabled {
+        #[serde(default)]
+        export_peer_id: bool,
+    },
+    Disabled,
+}
+
+impl Metrics {
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    pub fn should_export_peer_id(&self) -> bool {
+        match self {
+            Self::Enabled { export_peer_id } => *export_peer_id,
+            Self::Disabled => false,
         }
     }
 }
