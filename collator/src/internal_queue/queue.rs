@@ -101,7 +101,7 @@ where
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
     /// Get diff for the given block from committed and uncommitted zones
-    fn get_diff(
+    fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
@@ -235,11 +235,11 @@ where
         let _shard_guard = shard_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
-        let shard_diff = internal_queue::queue::Queue::get_diff(
+        let shard_diff = internal_queue::queue::Queue::get_diff_info(
             self,
             &block_id_short.shard,
             block_id_short.seqno,
-            DiffZone::Uncommitted,
+            DiffZone::Both,
         )?;
 
         // Check if the diff is already applied
@@ -383,7 +383,7 @@ where
         Ok(statistics)
     }
 
-    fn get_diff(
+    fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
@@ -397,7 +397,7 @@ where
     }
 
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool> {
-        Ok(internal_queue::queue::Queue::get_diff(
+        Ok(internal_queue::queue::Queue::get_diff_info(
             self,
             &block_id_short.shard,
             block_id_short.seqno,

@@ -1258,7 +1258,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // first diff has only one message with lt=1
     let diff_info_mc1 = queue
-        .get_diff(
+        .get_diff_info(
             &ShardIdent::MASTERCHAIN,
             block_mc1.seqno,
             DiffZone::Uncommitted,
@@ -1268,7 +1268,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // second diff has three messages with lt=2,3,4
     let diff_info_mc2 = queue
-        .get_diff(
+        .get_diff_info(
             &ShardIdent::MASTERCHAIN,
             block_mc2.seqno,
             DiffZone::Uncommitted,
@@ -1277,7 +1277,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
 
     // should be none because it is not committed
-    let res = queue.get_diff(
+    let res = queue.get_diff_info(
         &ShardIdent::MASTERCHAIN,
         block_mc1.seqno,
         DiffZone::Committed,
@@ -1285,7 +1285,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     assert!(res.is_none());
 
     // should be some because it is in uncommitted zone
-    let res = queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno, DiffZone::Both)?;
+    let res = queue.get_diff_info(&ShardIdent::MASTERCHAIN, block_mc1.seqno, DiffZone::Both)?;
     assert!(res.is_some());
 
     // -- test case 2
@@ -1299,7 +1299,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // first diff has only one message with lt=1
     let diff_info_mc1 = queue
-        .get_diff(
+        .get_diff_info(
             &ShardIdent::MASTERCHAIN,
             block_mc1.seqno,
             DiffZone::Committed,
@@ -1309,7 +1309,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     assert_eq!(diff_info_mc1.max_message, QueueKey::min_for_lt(2));
 
     // should be some because it is committed
-    let res = queue.get_diff(
+    let res = queue.get_diff_info(
         &ShardIdent::MASTERCHAIN,
         block_mc1.seqno,
         DiffZone::Uncommitted,
@@ -1317,12 +1317,12 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     assert!(res.is_none());
 
     // should be some because it is in committed zone
-    let res = queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc1.seqno, DiffZone::Both)?;
+    let res = queue.get_diff_info(&ShardIdent::MASTERCHAIN, block_mc1.seqno, DiffZone::Both)?;
     assert!(res.is_some());
 
     // second diff has three messages with lt=2,3,4
     let diff_info_mc2 = queue
-        .get_diff(
+        .get_diff_info(
             &ShardIdent::MASTERCHAIN,
             block_mc2.seqno,
             DiffZone::Uncommitted,
@@ -1345,7 +1345,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // first diff has only one message with lt=1
     let diff_info_mc1 = queue
-        .get_diff(
+        .get_diff_info(
             &ShardIdent::MASTERCHAIN,
             block_mc1.seqno,
             DiffZone::Committed,
@@ -1355,7 +1355,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // second diff removed because it was located in uncommitted state
     let diff_info_mc2 =
-        queue.get_diff(&ShardIdent::MASTERCHAIN, block_mc2.seqno, DiffZone::Both)?;
+        queue.get_diff_info(&ShardIdent::MASTERCHAIN, block_mc2.seqno, DiffZone::Both)?;
     assert!(diff_info_mc2.is_none());
 
     // -- test case 5

@@ -372,13 +372,6 @@ impl BlockCacheEntry {
             BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_to,
         }
     }
-
-    pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
-        match &self.data {
-            BlockCacheEntryData::Received { processed_upto, .. }
-            | BlockCacheEntryData::Collated { processed_upto, .. } => processed_upto,
-        }
-    }
 }
 
 pub(super) struct McBlockSubgraph {

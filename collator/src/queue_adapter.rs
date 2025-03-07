@@ -74,9 +74,9 @@ where
         messages: &[(ShardIdent, QueueKey)],
     ) -> Result<()>;
 
-    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
+    fn clear_uncommitted_state(&self) -> Result<()>;
     /// Get diff for the given block from committed and uncommitted state
-    fn get_diff(
+    fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
@@ -233,11 +233,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    #[instrument(skip_all, fields(?partitions))]
-    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {
-        if partitions.is_empty() {
-            tracing::warn!(target: tracing_targets::MQ_ADAPTER, "clear_uncommitted_state: partitions is empty");
-        }
+    #[instrument(skip_all)]
+    fn clear_uncommitted_state(&self) -> Result<()> {
+        let partitions = &vec![0, 1].into_iter().collect();
 
         let start_time = std::time::Instant::now();
         self.queue.clear_uncommitted_state(partitions)?;
@@ -252,14 +250,14 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all, fields(%shard_ident, seqno))]
-    fn get_diff(
+    fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>> {
         let start_time = std::time::Instant::now();
-        let diff = self.queue.get_diff(shard_ident, seqno, zone)?;
+        let diff = self.queue.get_diff_info(shard_ident, seqno, zone)?;
         let elapsed = start_time.elapsed();
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
@@ -315,7 +313,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     ) -> Result<(PartitionRouter, DiffStatistics)> {
         let start_time = std::time::Instant::now();
         let diff = self
-            .get_diff(&block_id_short.shard, block_id_short.seqno, DiffZone::Both)?
+            .get_diff_info(&block_id_short.shard, block_id_short.seqno, DiffZone::Both)?
             .ok_or_else(|| anyhow!("Diff for block {} not found", block_id_short))?;
 
         let partition_router = PartitionRouter::with_partitions(

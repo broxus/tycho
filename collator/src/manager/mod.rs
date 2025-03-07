@@ -765,20 +765,6 @@ where
             collation_result.mc_data.is_some(),
         );
 
-        let mut partitions = FastHashSet::default();
-        partitions.extend(
-            collation_result
-                .candidate
-                .processed_upto
-                .partitions
-                .keys()
-                .copied(),
-        );
-
-        if let Some(mc_data) = &collation_result.mc_data {
-            partitions.extend(mc_data.processed_upto.partitions.keys().copied());
-        }
-
         // sync cache and collator state access
         self.ready_to_sync.notified().await;
         scopeguard::defer!(self.ready_to_sync.notify_one());
@@ -820,7 +806,7 @@ where
                 "collator was cancelled before",
             );
 
-            self.mq_adapter.clear_uncommitted_state(&partitions)?;
+            self.mq_adapter.clear_uncommitted_state()?;
 
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
@@ -867,7 +853,7 @@ where
                     }
                 }
 
-                self.mq_adapter.clear_uncommitted_state(&partitions)?;
+                self.mq_adapter.clear_uncommitted_state()?;
 
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1125,14 +1111,13 @@ where
                         }
                     }
 
-                    for HandledBlockFromBcCtx {state, processed_upto} in batch {
+                    for ctx in batch {
                         let skip_sync = matches!(
-                            last_mc_block_id_opt, Some(last_mc_block_id) if state.block_id() != &last_mc_block_id
+                            last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() != &last_mc_block_id
                         );
 
-                        let processed_upto = ProcessedUptoInfoStuff::try_from(processed_upto)?;
                         // handle block from bc
-                        self.handle_block_from_bc(state, processed_upto, skip_sync).await.map_err(|err| {
+                        self.handle_block_from_bc(ctx, skip_sync).await.map_err(|err| {
                             tracing::error!(target: tracing_targets::COLLATION_MANAGER,
                                 "error handling block from bc: {err:?}",
                             );
@@ -1162,29 +1147,27 @@ where
     /// 3. Commit block if it was collated first
     /// 4. Notify mempool about new master block
     /// 5. Sync to received block if it is far ahead last collated and last synced_to
-    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
+    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id()))]
     async fn handle_block_from_bc(
         &self,
-        state: ShardStateStuff,
-        processed_upto: ProcessedUptoInfoStuff,
+        ctx: HandledBlockFromBcCtx,
         skip_sync: bool,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
         );
 
-        let block_id = *state.block_id();
+        let block_id = *ctx.state.block_id();
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
 
-        let mut partitions = processed_upto.get_partitions();
-        for partition in state.state().processed_upto.load()?.partitions.keys() {
-            partitions.insert(partition?);
-        }
+        let state = ctx.state;
 
         // sync cache and collator state access
         self.ready_to_sync.notified().await;
         scopeguard::defer!(self.ready_to_sync.notify_one());
+
+        let processed_upto = ProcessedUptoInfoStuff::try_from(ctx.processed_upto)?;
 
         let Some(store_res) = self
             .blocks_cache
@@ -1225,7 +1208,7 @@ where
                 }
             }
 
-            self.mq_adapter.clear_uncommitted_state(&partitions)?;
+            self.mq_adapter.clear_uncommitted_state()?;
 
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
@@ -1463,7 +1446,10 @@ where
             let last_consesus_info = self
                 .blocks_cache
                 .get_consensus_info_for_mc_block(&last_applied_mc_block_key)?;
-            if (mp_cfg_override.genesis_info).overrides(&last_consesus_info.genesis_info) {
+            if mp_cfg_override
+                .genesis_info
+                .overrides(&last_consesus_info.genesis_info)
+            {
                 tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     prev_genesis_start_round = last_consesus_info.genesis_info.start_round,
                     prev_genesis_time_millis = last_consesus_info.genesis_info.genesis_millis,
@@ -1472,10 +1458,7 @@ where
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
 
-                let partitions = self
-                    .blocks_cache
-                    .get_all_partitions_to_by_mc_block_from_cache(&last_applied_mc_block_key)?;
-                self.mq_adapter.clear_uncommitted_state(&partitions)?;
+                self.mq_adapter.clear_uncommitted_state()?;
             }
         }
 
@@ -1737,7 +1720,7 @@ where
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
                 // to avoid panics if next block was already collated before an it is incorrect
-                self.mq_adapter.clear_uncommitted_state(&partitions)?;
+                self.mq_adapter.clear_uncommitted_state()?;
 
                 let state = mc_block_entry.cached_state()?;
 
@@ -2790,23 +2773,15 @@ where
             .blocks_cache
             .extract_mc_block_subgraph_for_sync(block_id)
         {
-            McBlockSubgraphExtract::Extracted(McBlockSubgraph {
-                master_block,
-                shard_blocks,
-            }) => {
+            McBlockSubgraphExtract::Extracted(subgraph) => {
                 extract_elapsed = histogram_extract.finish();
 
-                let mut partitions = FastHashSet::default();
+                let partitions = subgraph.get_partitions();
 
-                for cached_block in shard_blocks.iter() {
-                    for partition in cached_block.data.processed_upto().partitions.keys() {
-                        partitions.insert(*partition);
-                    }
-                }
-
-                for partition in master_block.data.processed_upto().partitions.keys() {
-                    partitions.insert(*partition);
-                }
+                let McBlockSubgraph {
+                    master_block,
+                    shard_blocks,
+                } = subgraph;
 
                 // send to sync only if was not received from bc
                 if matches!(&master_block.data, BlockCacheEntryData::Collated {

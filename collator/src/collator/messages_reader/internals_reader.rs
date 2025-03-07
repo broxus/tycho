@@ -443,7 +443,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 while next_seqno < self.block_seqno {
                     let diff = self
                         .mq_adapter
-                        .get_diff(&self.for_shard_id, next_seqno, DiffZone::Both)?
+                        .get_diff_info(&self.for_shard_id, next_seqno, DiffZone::Both)?
                         .ok_or_else(|| {
                             let diff_block_id = BlockIdShort {
                                 shard: self.for_shard_id,
