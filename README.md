@@ -4,7 +4,9 @@ Reference implementation of Tycho protocol.
 
 ## About
 
-Tycho is a high-performance protocol designed for building L1/L2 TVM blockchain networks. By utilizing DAG (Directed Acyclic Graph) for consensus and TVM for parallel execution, Tycho works with high throughput and low latency.
+Tycho is a high-performance protocol designed for building L1/L2 TVM blockchain
+networks. By utilizing DAG (Directed Acyclic Graph) for consensus and TVM for
+parallel execution, Tycho works with high throughput and low latency.
 
 - **[Testnet Validators Guide](./docs/validator.md)**
 - **[CLI Reference](./docs/cli-reference.md)**
@@ -27,6 +29,10 @@ Tycho is a high-performance protocol designed for building L1/L2 TVM blockchain 
   ```bash
   just ci
   ```
+
+## To run prebuilt tests
+
+check [this](docs/testing.md) guide.
 
 ## Running a Local Network
 
@@ -95,13 +101,16 @@ export ROCKSDB_LIB_DIR=/path/to/rocksdb/build
 
 ## Contributing
 
-We welcome contributions to the project! If you notice any issues or errors, feel free to open an issue or submit a pull request.
+We welcome contributions to the project! If you notice any issues or errors,
+feel free to open an issue or submit a pull request.
 
 ## License
 
 Licensed under either of
 
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
-* MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)
+  or <https://www.apache.org/licenses/LICENSE-2.0>)
+* MIT license ([LICENSE-MIT](LICENSE-MIT)
+  or <https://opensource.org/licenses/MIT>)
 
 at your option.
