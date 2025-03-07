@@ -64,6 +64,9 @@ pub struct NetworkConfig {
 
     /// Default: no.
     pub enable_0rtt: bool,
+
+    /// Default: disabled.
+    pub connection_metrics: Option<ConnectionMetricsLevel>,
 }
 
 impl Default for NetworkConfig {
@@ -82,7 +85,20 @@ impl Default for NetworkConfig {
             active_peers_event_channel_capacity: 128,
             shutdown_idle_timeout: Duration::from_secs(60),
             enable_0rtt: false,
+            connection_metrics: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ConnectionMetricsLevel {
+    Brief,
+    Detailed,
+}
+
+impl ConnectionMetricsLevel {
+    pub fn should_export_peer_id(self) -> bool {
+        matches!(self, Self::Detailed)
     }
 }
 
@@ -160,6 +176,7 @@ pub(crate) struct EndpointConfig {
     pub quinn_endpoint_config: quinn::EndpointConfig,
     pub enable_early_data: bool,
     pub crypto_provider: Arc<CryptoProvider>,
+    pub connection_metrics: Option<ConnectionMetricsLevel>,
 }
 
 impl EndpointConfig {
@@ -198,6 +215,7 @@ pub(crate) struct EndpointConfigBuilder<MandatoryFields = ([u8; 32],)> {
 struct EndpointConfigBuilderFields {
     enable_0rtt: bool,
     transport_config: Option<quinn::TransportConfig>,
+    connection_metrics: Option<ConnectionMetricsLevel>,
 }
 
 impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
@@ -208,6 +226,11 @@ impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
 
     pub fn with_transport_config(mut self, transport_config: quinn::TransportConfig) -> Self {
         self.optional_fields.transport_config = Some(transport_config);
+        self
+    }
+
+    pub fn with_connection_metrics(mut self, metrics: Option<ConnectionMetricsLevel>) -> Self {
+        self.optional_fields.connection_metrics = metrics;
         self
     }
 }
@@ -268,6 +291,7 @@ impl EndpointConfigBuilder {
             quinn_endpoint_config,
             enable_early_data: self.optional_fields.enable_0rtt,
             crypto_provider,
+            connection_metrics: self.optional_fields.connection_metrics,
         })
     }
 }
