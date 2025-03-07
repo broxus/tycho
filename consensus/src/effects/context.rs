@@ -3,28 +3,47 @@ use std::sync::Arc;
 
 use tracing::Span;
 
-use crate::effects::AltFormat;
+use crate::effects::task::TaskTracker;
+use crate::effects::{AltFormat, TaskCtx};
+use crate::engine::MempoolConfig;
 use crate::models::{Point, PointId, PointInfo, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
 pub trait Ctx {
     fn span(&self) -> &Span;
+    fn conf(&self) -> &MempoolConfig;
+    fn task(&self) -> TaskCtx<'_>;
 }
 
 /// Root context for uninterrupted sequence of engine rounds
-pub struct EngineCtx {
+pub struct EngineCtx(Arc<EngineCtxInner>);
+#[derive(Clone)]
+pub struct EngineCtxInner {
     span: Span,
+    conf: MempoolConfig,
+    task_tracker: TaskTracker,
 }
 impl Ctx for EngineCtx {
     fn span(&self) -> &Span {
-        &self.span
+        &self.0.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        &self.0.conf
+    }
+    fn task(&self) -> TaskCtx<'_> {
+        self.0.task_tracker.ctx()
     }
 }
 impl EngineCtx {
-    pub fn new(since: Round) -> Self {
-        Self {
+    pub fn new(since: Round, conf: &MempoolConfig, task_tracker: &TaskTracker) -> Self {
+        Self(Arc::new(EngineCtxInner {
             span: tracing::error_span!("rounds", "since" = since.0),
-        }
+            conf: conf.clone(),
+            task_tracker: task_tracker.clone(),
+        }))
+    }
+    pub fn update(&mut self, since: Round) {
+        Arc::make_mut(&mut self.0).span = tracing::error_span!("rounds", "since" = since.0);
     }
     pub fn meter_dag_len(len: usize) {
         metrics::gauge!("tycho_mempool_rounds_dag_length").set(len as u32);
@@ -34,23 +53,33 @@ impl EngineCtx {
 #[derive(Clone)]
 pub struct RoundCtx(Arc<RoundCtxInner>);
 struct RoundCtxInner {
+    span: Span,
+    conf: MempoolConfig,
+    task_tracker: TaskTracker,
     current_round: Round,
     download_max_depth: AtomicU32,
-    span: Span,
 }
 impl Ctx for RoundCtx {
     fn span(&self) -> &Span {
         &self.0.span
     }
+    fn conf(&self) -> &MempoolConfig {
+        &self.0.conf
+    }
+    fn task(&self) -> TaskCtx<'_> {
+        self.0.task_tracker.ctx()
+    }
 }
 impl RoundCtx {
     pub fn new(parent: &EngineCtx, current_round: Round) -> Self {
         Self(Arc::new(RoundCtxInner {
-            current_round,
-            download_max_depth: Default::default(),
             span: parent
                 .span()
                 .in_scope(|| tracing::error_span!("round", "current" = current_round.0)),
+            conf: parent.conf().clone(),
+            task_tracker: parent.0.task_tracker.clone(),
+            current_round,
+            download_max_depth: Default::default(),
         }))
     }
     pub fn depth(&self, round: Round) -> f64 {
@@ -60,26 +89,41 @@ impl RoundCtx {
 
 pub struct CollectCtx {
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for CollectCtx {
     fn span(&self) -> &Span {
         &self.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.parent.conf()
+    }
+    fn task(&self) -> TaskCtx<'_> {
+        self.parent.task()
     }
 }
 impl CollectCtx {
     pub fn new(parent: &RoundCtx) -> Self {
         Self {
             span: parent.span().in_scope(|| tracing::error_span!("collect")),
+            parent: parent.clone(),
         }
     }
 }
 
 pub struct BroadcastCtx {
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for BroadcastCtx {
     fn span(&self) -> &Span {
         &self.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.parent.conf()
+    }
+    fn task(&self) -> TaskCtx<'_> {
+        self.parent.task()
     }
 }
 impl BroadcastCtx {
@@ -92,17 +136,24 @@ impl BroadcastCtx {
                     digest = display(point.digest().alt())
                 )
             }),
+            parent: parent.clone(),
         }
     }
 }
 
 pub struct DownloadCtx {
-    parent: RoundCtx,
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for DownloadCtx {
     fn span(&self) -> &Span {
         &self.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.parent.conf()
+    }
+    fn task(&self) -> TaskCtx<'_> {
+        self.parent.task()
     }
 }
 impl DownloadCtx {
@@ -148,12 +199,18 @@ impl From<&ValidateCtx> for RoundCtx {
 #[derive(Clone)]
 pub struct ValidateCtx(Arc<ValidateCtxInner>);
 struct ValidateCtxInner {
-    parent: RoundCtx,
     span: Span,
+    parent: RoundCtx,
 }
 impl Ctx for ValidateCtx {
     fn span(&self) -> &Span {
         &self.0.span
+    }
+    fn conf(&self) -> &MempoolConfig {
+        self.0.parent.conf()
+    }
+    fn task(&self) -> TaskCtx<'_> {
+        self.0.parent.task()
     }
 }
 impl ValidateCtx {
