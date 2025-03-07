@@ -11,7 +11,7 @@ use crate::network::{KnownPeerHandle, Network, WeakNetwork};
 use crate::overlay::tasks_stream::TasksStream;
 use crate::overlay::{OverlayId, OverlayServiceInner, PublicEntry, PublicOverlayEntries};
 use crate::proto::dht::{MergedValueKeyName, MergedValueKeyRef, Value};
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntryToSign};
+use crate::proto::overlay::{rpc, PublicEntriesResponse};
 use crate::types::Request;
 use crate::util::NetworkExt;
 
@@ -21,6 +21,8 @@ impl OverlayServiceInner {
         network: WeakNetwork,
         dht_service: Option<DhtService>,
     ) {
+        use crate::make_local_public_overlay_entry;
+
         enum Action<'a> {
             UpdatePublicOverlaysList(&'a mut PublicOverlaysState),
             ExchangePublicOverlayEntries {
@@ -36,12 +38,16 @@ impl OverlayServiceInner {
                 overlay_id: OverlayId,
                 tasks: &'a mut TasksStream,
             },
+            SignLocalPublicEntry {
+                overlay_id: OverlayId,
+            },
         }
 
         struct PublicOverlaysState {
             exchange: TasksStream,
             discover: TasksStream,
             store: TasksStream,
+            sign: TasksStream,
         }
 
         let public_overlays_notify = self.public_overlays_changed.clone();
@@ -69,6 +75,7 @@ impl OverlayServiceInner {
                             exchange: TasksStream::new("exchange public overlay peers"),
                             discover: TasksStream::new("discover public overlay entries in DHT"),
                             store: TasksStream::new("store public overlay entries in DHT"),
+                            sign: TasksStream::new("sign local public overlay entr"),
                         },
                     )),
                     // Default actions
@@ -100,6 +107,12 @@ impl OverlayServiceInner {
                                 },
                                 None => continue,
                             },
+                            overlay_id = public_overlays_state.sign.next() => match overlay_id {
+                                Some(id) => Action::SignLocalPublicEntry {
+                                    overlay_id: id,
+                                },
+                                None => continue,
+                            },
                             _ = dht_peer_added.notified(), if !empty_overlays.is_empty() => {
                                 let Some(id) = empty_overlays.pop() else {
                                     continue;
@@ -127,6 +140,7 @@ impl OverlayServiceInner {
                         exchange,
                         discover,
                         store,
+                        sign,
                     }) => {
                         let iter = this.public_overlays.iter().map(|item| *item.key());
                         exchange.rebuild(iter.clone(), |_| {
@@ -143,7 +157,7 @@ impl OverlayServiceInner {
                             )
                         });
                         store.rebuild_ext(
-                            iter,
+                            iter.clone(),
                             |overlay_id| {
                                 // Insert merger for new overlays
                                 if let Some(dht) = &dht_service {
@@ -166,6 +180,9 @@ impl OverlayServiceInner {
                                 }
                             },
                         );
+                        sign.rebuild(iter, |_| {
+                            tokio::time::interval(this.config.public_overlay_peer_sign_period)
+                        });
                     }
                     Action::ExchangePublicOverlayEntries { overlay_id, tasks } => {
                         tasks.spawn(&overlay_id, move || async move {
@@ -233,6 +250,15 @@ impl OverlayServiceInner {
                             .await
                         });
                     }
+                    Action::SignLocalPublicEntry { overlay_id } => {
+                        let public_entry = make_local_public_overlay_entry(
+                            this.local_id,
+                            &network,
+                            &overlay_id,
+                            now_sec(),
+                        );
+                        this.add_signed_local_overlay(&overlay_id, public_entry);
+                    }
                 }
             }
 
@@ -250,6 +276,8 @@ impl OverlayServiceInner {
         network: &Network,
         overlay_id: &OverlayId,
     ) -> Result<()> {
+        use crate::make_local_public_overlay_entry;
+
         let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
             overlay.value().clone()
         } else {
@@ -263,7 +291,8 @@ impl OverlayServiceInner {
         let mut entries = Vec::with_capacity(n);
 
         // Always include us in the response
-        entries.push(Arc::new(self.make_local_public_overlay_entry(
+        entries.push(Arc::new(make_local_public_overlay_entry(
+            self.local_id,
             network,
             overlay_id,
             now_sec(),
@@ -397,6 +426,7 @@ impl OverlayServiceInner {
         dht_client: &DhtClient,
         overlay_id: &OverlayId,
     ) -> Result<()> {
+        use crate::make_local_public_overlay_entry;
         use crate::proto::dht;
 
         const DEFAULT_TTL: u32 = 3600; // 1 hour
@@ -417,7 +447,8 @@ impl OverlayServiceInner {
             let mut entries = Vec::<Arc<PublicEntry>>::with_capacity(n);
 
             // Always include us in the list
-            entries.push(Arc::new(self.make_local_public_overlay_entry(
+            entries.push(Arc::new(make_local_public_overlay_entry(
+                self.local_id,
                 dht_client.network(),
                 overlay_id,
                 now,
@@ -452,24 +483,6 @@ impl OverlayServiceInner {
 
         tracing::debug!(count = n, "stored public entries in the DHT");
         Ok(())
-    }
-
-    fn make_local_public_overlay_entry(
-        &self,
-        network: &Network,
-        overlay_id: &OverlayId,
-        now: u32,
-    ) -> PublicEntry {
-        let signature = Box::new(network.sign_tl(PublicEntryToSign {
-            overlay_id: overlay_id.as_bytes(),
-            peer_id: &self.local_id,
-            created_at: now,
-        }));
-        PublicEntry {
-            peer_id: self.local_id,
-            created_at: now,
-            signature,
-        }
     }
 }
 

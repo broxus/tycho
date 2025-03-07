@@ -203,6 +203,7 @@ impl<C> Node<C> {
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_config(node_config.blockchain_rpc_client)
             .with_public_overlay_client(PublicOverlayClient::new(
+                local_id,
                 network.clone(),
                 public_overlay,
                 node_config.public_overlay_client,
