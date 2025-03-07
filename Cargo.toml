@@ -52,6 +52,7 @@ exponential-backoff = "1"
 fdlimit = "0.3.0"
 futures-util = "0.3"
 getip = "0.1"
+governor = "0.8.1"
 hex = "0.4"
 humantime = "2"
 indexmap = "2.2"
@@ -135,6 +136,7 @@ tycho-util = { path = "./util", version = "0.2.5" }
 
 [patch.crates-io]
 everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "adada6e6539abd798dbbc5a7fc1d17cc31fa7eff" }
+governor = { git = "https://github.com/0xdeafbeef/governor.git", branch = "0xdeafbeef/push-slkomxylzuym" } # https://github.com/boinkor-net/governor/pull/262
 
 [workspace.lints.rust]
 future_incompatible = "warn"
