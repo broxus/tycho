@@ -1,0 +1,45 @@
+name: Network Tests
+
+on:
+  merge_group:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CC: /usr/bin/clang
+  CXX: /usr/bin/clang++
+
+jobs:
+  network-tests:
+    name: Network Integration Tests - ${{ matrix.test_name }}
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - test_name: destroyable
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
+          - test_name: ping-pong
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
+          - test_name: one-to-many-internal-messages
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
+            env:
+                TYCHO_BUILD_PROFILE: release_check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/init
+        with:
+          fake-procfs: true
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
+      - name: Run network tests
+        run: ./scripts/run_network_tests.sh ${{ matrix.test_image }}
