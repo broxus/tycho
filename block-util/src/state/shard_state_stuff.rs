@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
@@ -16,8 +17,8 @@ pub struct ShardStateStuff {
 impl ShardStateStuff {
     pub fn construct_split_root(left: Cell, right: Cell) -> Result<Cell> {
         CellBuilder::build_from(ShardStateSplit {
-            left: Lazy::from_raw(left),
-            right: Lazy::from_raw(right),
+            left: Lazy::from_raw(left)?,
+            right: Lazy::from_raw(right)?,
         })
         .map_err(From::from)
     }

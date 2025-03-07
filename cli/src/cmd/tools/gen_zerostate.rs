@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
+use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
@@ -410,8 +411,6 @@ impl ZerostateConfig {
                 split_merge_at: None,
                 fees_collected: CurrencyCollection::ZERO,
                 funds_created: CurrencyCollection::ZERO,
-                copyleft_rewards: Dict::new(),
-                proof_chain: None,
             }));
         }
 
@@ -446,7 +445,6 @@ impl ZerostateConfig {
             last_key_block: None,
             block_create_stats: None,
             global_balance: state.total_balance.clone(),
-            copyleft_rewards: Dict::new(),
         })?);
 
         Ok(state)
@@ -852,7 +850,6 @@ fn build_config_account(
             data: Some(data),
             libraries: Dict::new(),
         }),
-        init_code_hash: None,
     };
 
     account.storage_stat.used = compute_storage_used(&account)?;
@@ -887,7 +884,6 @@ fn build_elector_code(address: &HashBytes, balance: Tokens) -> Result<Account> {
             data: Some(data),
             libraries: Dict::new(),
         }),
-        init_code_hash: None,
     };
 
     account.storage_stat.used = compute_storage_used(&account)?;
