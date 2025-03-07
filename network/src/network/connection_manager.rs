@@ -133,7 +133,7 @@ impl ConnectionManager {
                         }
                     }
                 }
-                connecting = self.endpoint.accept() => {
+                connecting = self.endpoint.accept(self.config.metrics) => {
                     if let Some(connecting) = connecting {
                         self.handle_incoming(connecting);
                     }
@@ -595,7 +595,7 @@ impl ConnectionManager {
                     .map_err(FullConnectionError::InvalidAddress)?;
 
                 let connecting = endpoint
-                    .connect_with_expected_id(&address, &peer_id)
+                    .connect_with_expected_id(&address, &peer_id, config.metrics)
                     .map_err(|e| FullConnectionError::InvalidAddress(std::io::Error::other(e)))?;
 
                 let connection = ConnectionClosedOnDrop::new(connecting.await?);

@@ -28,7 +28,12 @@ macro_rules! emit_gauges {
 }
 
 impl Connection {
-    pub fn with_peer_id(inner: quinn::Connection, origin: Direction, peer_id: PeerId) -> Self {
+    pub fn with_peer_id(
+        inner: quinn::Connection,
+        origin: Direction,
+        peer_id: PeerId,
+        metrics: super::config::Metrics,
+    ) -> Self {
         let connection = Self {
             request_meta: Arc::new(InboundRequestMeta {
                 peer_id,
@@ -39,17 +44,21 @@ impl Connection {
         };
 
         let conn = connection.inner.clone();
-        let peer_id = peer_id.to_string();
+
+        if metrics.is_disabled() {
+            return connection;
+        }
+        let peer_id = connection.request_meta.peer_id.to_string();
         let remote_addr = connection.remote_address().to_string();
 
         // we can't use `spawn_metrics_loop` here because we can't get arc reference to connection
         tokio::spawn(async move {
-            let peer_id = peer_id.clone();
-            let remote_addr = remote_addr.clone();
-            let labels = vec![
-                Label::new("peer_id", peer_id),
-                Label::new("peer_addr", remote_addr),
-            ];
+            let mut labels = vec![Label::new("peer_addr", remote_addr)];
+
+            if metrics.should_export_peer_id() {
+                labels.push(Label::new("peer_id", peer_id));
+                labels.shrink_to_fit();
+            }
 
             loop {
                 let stats = conn.stats();
