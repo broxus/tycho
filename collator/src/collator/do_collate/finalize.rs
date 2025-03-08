@@ -152,7 +152,7 @@ impl Phase<FinalizeState> {
 
         let queue_diff_messages_count = queue_diff_with_msgs.messages.len();
 
-        // start async update queue task
+        // create update queue task
         let update_queue_task = {
             let block_id_short = self.state.collation_data.block_id_short;
             let labels = labels.clone();
