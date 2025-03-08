@@ -746,7 +746,7 @@ impl CollatorStdImpl {
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
-        // TODO: need to generate unique for each block
+        // need to generate unique for each block
         // generate seed from the chain_time from the anchor
         let rand_seed = HashBytes(tl_proto::hash(RandSeed {
             shard: next_block_id_short.shard,
