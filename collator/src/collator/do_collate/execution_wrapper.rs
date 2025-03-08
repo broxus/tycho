@@ -323,6 +323,24 @@ fn new_transaction(
         }
     }
 
+    // Append minted/burned to value flow
+    // TODO: `executed.transaction` should contain:
+    //      * `minted` - amount of minted tokens sent in out messages from the minter,
+    //                  and `exported` amount should be grater on `minted`;
+    //      * `burned` - amount of burned tokens sent to the blackhole,
+    //                  and `imported` amount should be grater on `burned`.
+    let minted = CurrencyCollection::default();
+    let burned = CurrencyCollection::default();
+
+    assert!(
+        shard_id.is_masterchain() || minted.is_zero() && burned.is_zero(),
+        "Allowed to mint/burn only in masterchain (block_id={})",
+        collation_data.block_id_short,
+    );
+
+    collation_data.value_flow.minted.try_add_assign(&minted)?;
+    collation_data.value_flow.burned.try_add_assign(&burned)?;
+
     Ok(out_messages)
 }
 
