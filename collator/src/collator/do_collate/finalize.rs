@@ -962,6 +962,7 @@ impl Phase<FinalizeState> {
         let mut global_balance = prev_state_extra.global_balance.clone();
         global_balance.try_add_assign(&collation_data.value_flow.created)?;
         global_balance.try_add_assign(&collation_data.value_flow.minted)?;
+        global_balance.try_sub_assign(&collation_data.value_flow.burned)?;
         global_balance.try_add_assign(&collation_data.shard_fees.root_extra().create)?;
 
         // 9. update block creator stats
@@ -1317,6 +1318,16 @@ impl Phase<FinalizeState> {
                     value_flow.fees_collected.tokens, in_msgs_fees, transaction_fees.tokens,
                     value_flow.created.tokens, value_flow.fees_imported.tokens, expected_fees.tokens)
         }
+
+        if !value_flow.validate()? {
+            anyhow::bail!(
+                "ValueFlow for {} \
+                is invalid (incoming flow != outgoing flow): {:?}",
+                collation_data.block_id_short,
+                value_flow,
+            )
+        }
+
         Ok(())
     }
 }
