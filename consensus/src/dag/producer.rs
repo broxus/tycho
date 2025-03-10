@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
-use crate::effects::AltFormat;
+use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
@@ -73,14 +73,15 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        let (time, anchor_time) =
-            Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
             // it's not necessary to resend external messages from previous round
             // if at least 1F+1 peers (one reliable) signed previous point;
             // also notice that payload elems are deduplicated in mempool adapter
             last.evidence.len() >= last.signers.reliable_minority()
         }));
+
+        let (time, anchor_time) =
+            Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
 
         let includes = includes
             .into_iter()
@@ -281,6 +282,10 @@ impl Producer {
             Some(info) => anchor_time.max(info.data().time),
         };
 
-        (UnixTime::now().max(deps_time.next()), anchor_time)
+        let now = UnixTime::now();
+        let point_time = now.max(deps_time.next());
+        RoundCtx::own_point_time_skew(point_time.diff_f64(now));
+
+        (point_time, anchor_time)
     }
 }
