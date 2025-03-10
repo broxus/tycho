@@ -83,7 +83,7 @@ impl RoundCtx {
         }))
     }
     pub fn depth(&self, round: Round) -> f64 {
-        self.0.current_round - round
+        self.0.current_round.diff_f64(round)
     }
 }
 

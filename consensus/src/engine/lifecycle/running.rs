@@ -112,6 +112,11 @@ impl EngineRecoverLoop {
                 conf = ?self.handle.merged_conf.conf,
                 "mempool run"
             );
+            metrics::gauge!(
+                "tycho_mempool_engine_run_count",
+                "genesis_round" => self.handle.merged_conf.conf.genesis_round.0.to_string()
+            )
+            .increment(1);
 
             let never_ok = self.engine_run.await;
 

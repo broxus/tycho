@@ -200,13 +200,12 @@ impl PeerScheduleStateful {
                 to_forget.push(*peer_id);
                 if *state == PeerState::Resolved {
                     self.all_resolved.remove(peer_id);
-                    meter_all_resolved(self.all_resolved.len());
-
                     self.broadcast_receivers.remove(peer_id);
-                    meter_bcast_receivers(self.broadcast_receivers.len());
                 }
             }
         }
+        meter_all_resolved(self.all_resolved.len());
+        meter_bcast_receivers(self.broadcast_receivers.len());
         self.active_subset[0] = Default::default();
         to_forget
     }

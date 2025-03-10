@@ -101,19 +101,22 @@ impl Round {
             .map(Round)
             .expect("DAG round number overflow, inner type exhausted")
     }
+
+    // For metrics. Handle other subtraction cases individually. Addition is meaningless.
+    pub fn diff_f64(self, rhs: Self) -> f64 {
+        diff_f64(self.0, rhs.0)
+    }
 }
 
-// General `Sub` impl is intended for metrics, thus results in neither `u32` nor `i64`.
-// Have to handle every other subtraction case individually. Addition is meaningless.
-impl Sub for Round {
-    type Output = f64;
-    #[inline]
-    fn sub(self, rhs: Self) -> Self::Output {
-        if self >= rhs {
-            f64::from(self.0 - rhs.0)
-        } else {
-            -f64::from(rhs.0 - self.0)
-        }
+fn diff_f64<T>(lhs: T, rhs: T) -> f64
+where
+    T: Sub<Output = T> + Ord,
+    u32: TryFrom<T>,
+{
+    if lhs >= rhs {
+        u32::try_from(lhs - rhs).map_or(f64::INFINITY, f64::from)
+    } else {
+        -u32::try_from(rhs - lhs).map_or(f64::INFINITY, f64::from)
     }
 }
 
@@ -156,6 +159,10 @@ impl UnixTime {
 
     pub fn millis(&self) -> u64 {
         self.0
+    }
+
+    pub fn diff_f64(self, rhs: Self) -> f64 {
+        diff_f64(self.0, rhs.0)
     }
 }
 
