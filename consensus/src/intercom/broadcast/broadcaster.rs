@@ -156,8 +156,6 @@ impl Broadcaster {
                 }
             }
         }
-        metrics::counter!("tycho_mempool_collected_signatures_count")
-            .increment(self.signatures.len() as _);
         Arc::new(LastOwnPoint {
             digest: *self.point.digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
@@ -188,6 +186,7 @@ impl Broadcaster {
                     };
                 }
                 _ = retry_interval.tick() => {
+                    BroadcastCtx::retry(self.sig_peers.len());
                     for peer in mem::take(&mut self.sig_peers) {
                         self.request_signature(false, &peer);
                     }
@@ -226,6 +225,7 @@ impl Broadcaster {
                             _ = sender.send(BroadcasterSignal::Ok);
                         };
                     }
+                    BroadcastCtx::retry(self.sig_peers.len());
                     for peer in mem::take(&mut self.sig_peers) {
                         self.request_signature(false, &peer);
                     }
@@ -302,11 +302,16 @@ impl Broadcaster {
                         if self.signers.contains(peer_id) {
                             if signature.verifies(peer_id, self.point.digest()) {
                                 self.signatures.insert(*peer_id, signature);
+                                BroadcastCtx::sig_collected();
                             } else {
                                 // any invalid signature lowers our chances
                                 // to successfully finish current round
                                 self.rejections.insert(*peer_id);
+                                BroadcastCtx::sig_rejected();
+                                BroadcastCtx::sig_unreliable();
                             }
+                        } else {
+                            BroadcastCtx::sig_unreliable();
                         }
                     }
                     SignatureResponse::NoPoint => {
@@ -320,6 +325,9 @@ impl Broadcaster {
                     SignatureResponse::Rejected(_) => {
                         if self.signers.contains(peer_id) {
                             self.rejections.insert(*peer_id);
+                            BroadcastCtx::sig_rejected();
+                        } else {
+                            BroadcastCtx::sig_unreliable();
                         }
                     }
                 }
@@ -408,5 +416,20 @@ impl Broadcaster {
                 Err(())
             }
         }
+    }
+}
+
+impl BroadcastCtx {
+    fn retry(amount: usize) {
+        metrics::counter!("tycho_mempool_broadcaster_retry_count").increment(amount as u64);
+    }
+    fn sig_collected() {
+        metrics::counter!("tycho_mempool_signatures_collected_count").increment(1);
+    }
+    fn sig_rejected() {
+        metrics::counter!("tycho_mempool_signatures_rejected_count").increment(1);
+    }
+    fn sig_unreliable() {
+        metrics::counter!("tycho_mempool_signatures_unreliable_count").increment(1);
     }
 }
