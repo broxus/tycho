@@ -1875,6 +1875,11 @@ def mempool_rounds() -> RowPanel:
             "Consensus ahead of storage: history to keep",
         ),
         create_gauge_panel(
+            "tycho_mempool_engine_run_count",
+            "Engine: (re)start count at genesis round",
+            legend_format="{{instance}} - {{genesis_round}}",
+        ),
+        create_gauge_panel(
             "tycho_mempool_rounds_db_cleaned",
             "DB: deleted rounds",
             legend_format="{{instance}} - {{kind}}",
@@ -1925,6 +1930,10 @@ def mempool_payload_rates() -> RowPanel:
             "tycho_mempool_input_buffer_spent_time",
             "Input buffer: time msg spent in queue",
         ),
+        create_heatmap_panel(
+            "tycho_mempool_adapter_parse_anchor_history_time",
+            "Adapter: parse anchor history into cells",
+        ),
     ]
     return create_row("Mempool payload rates", metrics)
 
@@ -1940,7 +1949,7 @@ def mempool_engine_rates() -> RowPanel:
             "Engine: committed anchors",
         ),
         create_counter_panel(
-            "tycho_mempool_collected_signatures_count",
+            "tycho_mempool_signatures_collected_count",
             "Broadcaster: collected signatures in response",
         ),
         create_counter_panel(
@@ -1948,8 +1957,19 @@ def mempool_engine_rates() -> RowPanel:
             "Collector: timely received broadcasts",
         ),
         create_counter_panel(
+            "tycho_mempool_broadcaster_retry_count",
+            "Broadcaster: signature request retries",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_signatures_rejected_count",
+                range_selector="$__interval",
+            ),
+            "Broadcaster: rejections received (total at moment)",
+        ),
+        create_counter_panel(
             "tycho_mempool_signing_current_round_count",
-            "Current round broadcasts signed",
+            "Signer: current round broadcasts signed",
         ),
         create_counter_panel(
             "tycho_mempool_collected_includes_count",
@@ -1957,17 +1977,22 @@ def mempool_engine_rates() -> RowPanel:
         ),
         create_counter_panel(
             "tycho_mempool_signing_prev_round_count",
-            "Previous round broadcasts signed",
+            "Signer: previous round broadcasts signed",
         ),
         create_counter_panel(
             "tycho_mempool_signing_postponed",
-            "Signings postponed: point time or round are in future",
+            "Signer: postponed points - time or round are in future",
             legend_format="{{instance}} - {{kind}}",
         ),
         create_counter_panel(
             "tycho_mempool_signing_rejected",
-            "Signings rejected: point round too old or node not in v_set",
+            "Signer: rejected point - round too old or node not in v_set",
             legend_format="{{instance}} - {{kind}}",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_produced_point_time_skew",
+            "Producer: point time ahead of clock",
+            unit_format=UNITS.MILLI_SECONDS,
         ),
     ]
     return create_row("Mempool engine rates", metrics)
@@ -2020,8 +2045,9 @@ def mempool_engine() -> RowPanel:
         ),
         create_counter_panel(
             "tycho_mempool_points_resolved_ok",
-            "Engine: valid points resolved (rate)",
-            legend_format="{{instance}} - {{ord}}",
+            "Engine: first valid points resolved (rate)",
+            labels_selectors=['ord="first"'],
+            legend_format="{{instance}}",
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_verify_time",
@@ -2048,12 +2074,18 @@ def mempool_engine() -> RowPanel:
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
-            "Engine: resolved first point errors (total at moment)",
+            "Engine: first resolved point errors (total at moment)",
             legend_format="{{instance}} - {{kind}}",
         ),
-        create_heatmap_panel(
-            "tycho_mempool_adapter_parse_anchor_history_time",
-            "Adapter: parse anchor history into cells",
+        create_counter_panel(
+                expr_sum_increase(
+                    "tycho_mempool_points_resolved_ok",
+                    label_selectors=['ord="alt"'],
+                    range_selector="$__interval",
+                    by_labels=["instance"],
+                ),
+            "Engine: alt valid points resolved (total at moment)",
+            legend_format="{{instance}}",
         ),
         create_counter_panel(
             expr_sum_increase(
@@ -2062,7 +2094,7 @@ def mempool_engine() -> RowPanel:
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
-            "Engine: resolved alt point errors (total at moment)",
+            "Engine: alt resolved point errors (total at moment)",
             legend_format="{{instance}} - {{kind}}",
         ),
     ]
@@ -2141,33 +2173,70 @@ def mempool_intercom() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_download_unreliable_responses",
-                range_selector="$__interval",
-            ),
-            "Downloader: unreliable response (total at moment)",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
                 "tycho_mempool_download_query_failed_count",
                 range_selector="$__interval",
             ),
             "Downloader: queries network error (total at moment)",
         ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_download_unreliable_responses",
+                range_selector="$__interval",
+            ),
+            "Downloader: unreliable responses (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_signatures_unreliable_count",
+                range_selector="$__interval",
+            ),
+            "Broadcaster: unreliable signatures in response (total at moment)",
+        ),
+    ]
+    return create_row("Mempool communication", metrics)
+
+
+def mempool_peers() -> RowPanel:
+    metrics = [
         create_gauge_panel(
-            "tycho_mempool_bcast_receivers",
-            "Peers: broadcast receivers",
+            "tycho_mempool_peers_resolved",
+            "Peers: all resolved",
         ),
         create_gauge_panel(
             "tycho_mempool_peers_resolving",
             "Peers: resolving",
         ),
         create_gauge_panel(
-            "tycho_mempool_peers_resolved",
-            "Peers: all resolved",
+            "tycho_mempool_bcast_receivers",
+            "Peers: broadcast receivers",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peer_in_next_vset",
+            "Peer in next set",
+            unit_format=UNITS.YES_NO,
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peer_vsubset_change",
+            "Next subset start round (decrease to prev means unset)",
+            labels=['epoch="next"'],
+            legend_format="{{instance}}",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peer_in_next_vsubset",
+            "Next subset peer position (0 for not included)",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peer_vsubset_change",
+            "Current subset start round",
+            labels=['epoch="curr"'],
+            legend_format="{{instance}}",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_peer_in_curr_vsubset",
+            "Current subset peer position (0 for not included)",
         ),
     ]
-    return create_row("Mempool communication", metrics)
-
+    return create_row("Mempool peers", metrics)
 
 def mempool_storage() -> RowPanel:
     metrics = [
@@ -2528,6 +2597,7 @@ dashboard = Dashboard(
         mempool_engine_rates(),
         mempool_engine(),
         mempool_intercom(),
+        mempool_peers(),
         mempool_storage(),
         net_traffic(),
         net_conn_manager(),

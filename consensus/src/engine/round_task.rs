@@ -346,6 +346,10 @@ impl RoundTaskRunning {
 }
 
 impl RoundCtx {
+    pub fn own_point_time_skew(diff: f64) {
+        metrics::gauge!("tycho_mempool_produced_point_time_skew").set(diff);
+    }
+
     fn own_point(&self, own_point: Option<&Point>) {
         // refresh counters with zeros every round
         metrics::counter!("tycho_mempool_engine_produce_skipped")
@@ -361,6 +365,11 @@ impl RoundCtx {
             .map(|point| (point.payload().iter()).fold(0, |acc, bytes| acc + bytes.len()) as _);
         metrics::counter!("tycho_mempool_point_payload_bytes")
             .increment(payload_bytes.unwrap_or_default());
+
+        if own_point.is_none() {
+            // if point is produced, then method is called immediately when its time is known
+            Self::own_point_time_skew(0.0);
+        }
 
         if let Some(own_point) = own_point {
             tracing::info!(

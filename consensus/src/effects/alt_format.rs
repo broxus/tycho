@@ -32,7 +32,7 @@ impl Display for AltFmt<'_, PeerId> {
 impl AltFormat for [PeerId] {}
 impl Display for AltFmt<'_, [PeerId]> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        f.write_str("[")?;
+        write!(f, "len={} [", self.0.len())?;
         if let Some((last, others)) = self.0.split_last() {
             for el in others {
                 write!(f, " {},", &el.alt())?;
