@@ -383,7 +383,7 @@ impl Engine {
                         old_dag_top_round.0,
                     );
                     metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
-                        .increment(consensus_round - old_dag_top_round);
+                        .increment(consensus_round.diff_f64(old_dag_top_round));
                     // if received from BcastFilter - produce point at round before it
                     let next_round = consensus_round.max(old_dag_top_round.next());
                     (old_dag_top_round, next_round)

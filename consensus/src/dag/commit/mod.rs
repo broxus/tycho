@@ -119,7 +119,7 @@ impl Committer {
 
         while let Some(next) = self.anchor_chain.next() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
-                .set(current_round - next.proof.round());
+                .set(current_round.diff_f64(next.proof.round()));
 
             let _span = tracing::error_span!(
                 "anchor",
@@ -155,7 +155,7 @@ impl Committer {
 
         if let Some(last_trigger) = triggers.back() {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
-                .set(current_round - last_trigger.round());
+                .set(current_round.diff_f64(last_trigger.round()));
         }
 
         // traverse from oldest to newest;

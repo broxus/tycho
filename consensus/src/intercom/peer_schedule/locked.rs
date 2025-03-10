@@ -51,6 +51,9 @@ impl PeerScheduleLocked {
     }
 
     pub(super) fn forget_previous(&mut self, parent: WeakPeerSchedule) {
+        // because used simultaneously with rotate()
+        meter(false);
+
         let to_forget = self.data.forget_previous();
         self.resolve_peers_task = None;
         let resolved_waiters = {
@@ -65,6 +68,8 @@ impl PeerScheduleLocked {
 
     pub(super) fn set_next_set(&mut self, parent: WeakPeerSchedule, validator_set: &[PeerId]) {
         self.resolve_peers_task = None;
+
+        meter(validator_set.contains(&self.local_id));
 
         let resolved_waiters = {
             let mut write_entries = self.overlay.write_entries();
@@ -94,4 +99,8 @@ impl PeerScheduleLocked {
 
         self.resolve_peers_task = parent.new_resolve_task(resolved_waiters);
     }
+}
+
+fn meter(is_in_next_vset: bool) {
+    metrics::gauge!("tycho_mempool_peer_in_next_vset").set(is_in_next_vset as u8);
 }

@@ -270,16 +270,16 @@ impl DbCleaner {
 
                 metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_top_known")
-                    .set(consensus - top_known);
+                    .set(consensus.diff_f64(top_known));
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
-                    .set(consensus - committed);
+                    .set(consensus.diff_f64(committed));
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
-                    .set(committed - top_known);
+                    .set(committed.diff_f64(top_known));
 
                 let new_least_to_keep =
                     Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
-                    .set(consensus - new_least_to_keep);
+                    .set(consensus.diff_f64(new_least_to_keep));
 
                 if prev_least_to_keep < new_least_to_keep {
                     let storage = storage.clone();
