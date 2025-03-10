@@ -136,18 +136,6 @@ impl PeerSchedule {
         );
     }
 
-    /// after successful sync to current epoch
-    /// and validating all points from previous peer set
-    /// free some memory and ignore overlay updates
-    #[allow(dead_code)] // TODO use on change of validator set
-    pub fn forget_previous(&self) {
-        let mut locked = self.write();
-
-        locked.forget_previous(self.downgrade());
-        // atomic part is updated under lock too
-        self.update_atomic(|stateless| stateless.forget_previous());
-    }
-
     /// in-time snapshot if consistency with peer state is not needed;
     /// in case lock is taken - use this under lock too
     pub fn atomic(&self) -> Guard<Arc<PeerScheduleStateless>> {
