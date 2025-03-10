@@ -111,7 +111,7 @@ impl Parser {
             return None;
         }
 
-        let mut cs = cell.as_slice_allow_pruned();
+        let mut cs = cell.as_slice_allow_exotic();
         let MsgInfo::ExtIn(info) = MsgInfo::load_from(&mut cs).ok()? else {
             return None;
         };

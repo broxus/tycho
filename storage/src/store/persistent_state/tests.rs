@@ -1,9 +1,9 @@
 use anyhow::Result;
 use bytesize::ByteSize;
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, CellBuilder, CellSlice, HashBytes};
+use everscale_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
 use everscale_types::models::{
-    CurrencyCollection, IntMsgInfo, IntermediateAddr, Lazy, Message, MsgEnvelope, MsgInfo, OutMsg,
+    CurrencyCollection, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope, MsgInfo, OutMsg,
     OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent,
 };
 use everscale_types::num::Tokens;
@@ -227,9 +227,9 @@ async fn persistent_queue_state_read_write() -> Result<()> {
                         cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                         next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
                         fwd_fee_remaining: Tokens::ZERO,
-                        message: Lazy::from_raw(cell),
+                        message: Lazy::from_raw(cell)?,
                     })?,
-                    transaction: Lazy::from_raw(Cell::default()),
+                    transaction: Lazy::from_raw(Cell::default())?,
                 }),
             ));
         }

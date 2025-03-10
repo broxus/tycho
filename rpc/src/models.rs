@@ -59,8 +59,5 @@ pub fn serialize_account(account: &Account) -> Result<Cell, everscale_types::err
     account.last_trans_lt.store_into(&mut builder, cx)?;
     account.balance.store_into(&mut builder, cx)?;
     account.state.store_into(&mut builder, cx)?;
-    if account.init_code_hash.is_some() {
-        account.init_code_hash.store_into(&mut builder, cx)?;
-    }
     builder.build_ext(cx)
 }

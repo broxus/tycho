@@ -1,9 +1,9 @@
+use everscale_types::cell::Lazy;
 use everscale_types::dict::{
     aug_dict_insert, aug_dict_remove_owned, build_aug_dict_from_sorted_iter, AugDictExtra, DictKey,
     SetMode,
 };
 use everscale_types::error::Error;
-use everscale_types::models::Lazy;
 use everscale_types::prelude::*;
 
 pub struct RelaxedAugDict<K, A, V> {
@@ -56,7 +56,7 @@ where
             dict_root: build_aug_dict_from_sorted_iter(
                 iter.into_iter().map(|(k, a, v)| {
                     // SAFETY: We know that this cell is not a library cell.
-                    let value = v.inner().as_slice_allow_pruned();
+                    let value = v.inner().as_slice_allow_exotic();
                     (k, a, value)
                 }),
                 K::BITS,

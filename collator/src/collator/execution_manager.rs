@@ -8,16 +8,12 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use humantime::format_duration;
 use rayon::prelude::*;
-use ton_executor::{
-    ExecuteParams, ExecutedTransaction, ExecutorOutput, OrdinaryTransactionExecutor,
-    PreloadedBlockchainConfig, TickTockTransactionExecutor, TransactionExecutor,
-};
+use tycho_executor::{Executor, ExecutorParams, ParsedConfig, TxError};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
-use tycho_vm::{SafeRc, SmcInfoTonV6, Tuple};
 
 use super::messages_buffer::MessageGroup;
-use super::types::{AccountId, ParsedMessage, ShardAccountStuff};
+use super::types::{AccountId, ExecutedTransaction, ParsedMessage, ShardAccountStuff};
 use crate::tracing_targets;
 
 pub(super) struct MessagesExecutor {
@@ -25,9 +21,9 @@ pub(super) struct MessagesExecutor {
     // this time is used if account's lt is smaller
     min_next_lt: u64,
     /// blockchain config
-    config: Arc<PreloadedBlockchainConfig>,
+    config: Arc<ParsedConfig>,
     /// vm execution params related to current block
-    params: Arc<ExecuteParams>,
+    params: Arc<ExecutorParams>,
     /// shard accounts
     accounts_cache: AccountsCache,
     /// Params to calculate messages execution work in work units
@@ -38,8 +34,8 @@ impl MessagesExecutor {
     pub fn new(
         shard_id: ShardIdent,
         min_next_lt: u64,
-        config: Arc<PreloadedBlockchainConfig>,
-        params: Arc<ExecuteParams>,
+        config: Arc<ParsedConfig>,
+        params: Arc<ExecutorParams>,
         shard_accounts: ShardAccounts,
         wu_params_execute: WorkUnitsParamsExecute,
     ) -> Self {
@@ -49,6 +45,8 @@ impl MessagesExecutor {
             config,
             params,
             accounts_cache: AccountsCache {
+                // TODO: Better handle workchains out of range.
+                workchain_id: shard_id.workchain().try_into().unwrap(),
                 shard_accounts,
                 items: Default::default(),
             },
@@ -60,7 +58,7 @@ impl MessagesExecutor {
         self.min_next_lt
     }
 
-    pub fn executor_params(&self) -> &Arc<ExecuteParams> {
+    pub fn executor_params(&self) -> &Arc<ExecutorParams> {
         &self.params
     }
 
@@ -73,6 +71,7 @@ impl MessagesExecutor {
         let AccountsCache {
             shard_accounts,
             items,
+            ..
         } = self.accounts_cache;
         (items.into_values(), shard_accounts)
     }
@@ -118,34 +117,16 @@ impl MessagesExecutor {
         let accounts_cache = Arc::new(&self.accounts_cache);
         let result = msg_group
             .into_par_iter()
-            .map_init(
-                move || {
-                    // TEMP: There will be a per-thread executor state.
-                    let unpacked = SmcInfoTonV6::unpack_config(
-                        &config.raw_config().params,
-                        params.block_unixtime,
-                    )
-                    .ok();
-
-                    (
-                        config.clone(),
-                        params.clone(),
-                        accounts_cache.clone(),
-                        unpacked,
-                    )
-                },
-                |(config, params, accounts_cache, unpacked), (account_id, msgs)| {
-                    Self::execute_subgroup(
-                        account_id,
-                        msgs,
-                        accounts_cache,
-                        min_next_lt,
-                        config,
-                        unpacked.clone().unwrap_or_default(),
-                        params,
-                    )
-                },
-            )
+            .map(|(account_id, msgs)| {
+                Self::execute_subgroup(
+                    account_id,
+                    msgs,
+                    &accounts_cache,
+                    min_next_lt,
+                    &config,
+                    &params,
+                )
+            })
             .collect_vec_list();
 
         for result in result {
@@ -219,19 +200,11 @@ impl MessagesExecutor {
         msgs: Vec<Box<ParsedMessage>>,
         accounts_cache: &AccountsCache,
         min_next_lt: u64,
-        config: &Arc<PreloadedBlockchainConfig>,
-        unpacked_config: SafeRc<Tuple>,
-        params: &Arc<ExecuteParams>,
+        config: &ParsedConfig,
+        params: &ExecutorParams,
     ) -> Result<ExecutedTransactions> {
         let shard_account_stuff = accounts_cache.get_account_stuff(&account_id)?;
-        Self::execute_messages(
-            shard_account_stuff,
-            msgs,
-            min_next_lt,
-            config,
-            unpacked_config,
-            params,
-        )
+        Self::execute_messages(shard_account_stuff, msgs, min_next_lt, config, params)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -255,20 +228,16 @@ impl MessagesExecutor {
         *group_max_vert_size = cmp::max(*group_max_vert_size, executed.transactions.len());
 
         for tx in executed.transactions {
-            if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
-                if let Err(e) = &tx.result {
-                    tracing::warn!(
-                        target: tracing_targets::EXEC_MANAGER,
-                        account_addr = %executed.account_state.account_addr,
-                        message_hash = %tx.in_message.cell.repr_hash(),
-                        "failed to execute external message: {e:?}",
-                    );
-                    *ext_msgs_error_count += 1;
-                    continue;
-                }
-            }
-
-            let executed = tx.result?;
+            let Some(executed) = tx.result else {
+                tracing::warn!(
+                    target: tracing_targets::EXEC_MANAGER,
+                    account_addr = %executed.account_state.account_addr,
+                    message_hash = %tx.in_message.cell.repr_hash(),
+                    "skipped external message",
+                );
+                *ext_msgs_error_count += 1;
+                continue;
+            };
 
             self.min_next_lt = cmp::max(self.min_next_lt, executed.next_lt);
 
@@ -300,9 +269,8 @@ impl MessagesExecutor {
         mut account_state: Box<ShardAccountStuff>,
         msgs: Vec<Box<ParsedMessage>>,
         min_next_lt: u64,
-        config: &Arc<PreloadedBlockchainConfig>,
-        unpacked_config: SafeRc<Tuple>,
-        params: &Arc<ExecuteParams>,
+        config: &ParsedConfig,
+        params: &ExecutorParams,
     ) -> Result<ExecutedTransactions> {
         let mut ext_msgs_skipped = 0;
         let timer = std::time::Instant::now();
@@ -320,7 +288,6 @@ impl MessagesExecutor {
                 msg,
                 min_next_lt,
                 config,
-                unpacked_config.clone(),
                 params,
             )?);
         }
@@ -343,21 +310,16 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        // TEMP: There will be a per-thread cached state for a new executor.
-        let unpacked_config =
-            SmcInfoTonV6::unpack_config(&config.raw_config().params, params.block_unixtime)?;
-
         let (account_stuff, executed) = execute_ordinary_transaction_impl(
             &mut account_stuff,
             in_message,
             min_next_lt,
             &config,
-            unpacked_config,
             &params,
         )
         .map(|executed| (account_stuff, executed))?;
 
-        if let Ok(tx) = &executed.result {
+        if let Some(tx) = &executed.result {
             self.min_next_lt = cmp::max(min_next_lt, tx.next_lt);
         }
         self.accounts_cache.add_account_stuff(account_stuff);
@@ -369,32 +331,30 @@ impl MessagesExecutor {
         &mut self,
         mut account_stuff: Box<ShardAccountStuff>,
         tick_tock: TickTock,
-    ) -> Result<ExecutedTransaction> {
+    ) -> Result<Option<ExecutedTransaction>> {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
 
-        // TEMP: There will be a per-thread cached state for a new executor.
-        let unpacked_config =
-            SmcInfoTonV6::unpack_config(&config.raw_config().params, params.block_unixtime)?;
-
-        let (account_stuff, executed) = execute_ticktock_transaction(
+        let Some(executed) = execute_ticktock_transaction(
             &mut account_stuff,
             tick_tock,
             min_next_lt,
             &config,
-            unpacked_config,
             &params,
-        )
-        .map(|executed| (account_stuff, executed))?;
+        )?
+        else {
+            return Ok(None);
+        };
 
         self.min_next_lt = cmp::max(min_next_lt, executed.next_lt);
         self.accounts_cache.add_account_stuff(account_stuff);
-        Ok(executed)
+        Ok(Some(executed))
     }
 }
 
 struct AccountsCache {
+    workchain_id: i8,
     shard_accounts: ShardAccounts,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
 }
@@ -416,7 +376,9 @@ impl AccountsCache {
             }
             Entry::Vacant(entry) => {
                 if let Some((_, state)) = self.shard_accounts.get(account_id)? {
-                    let account_stuff = ShardAccountStuff::new(account_id, state).map(Box::new)?;
+                    let account_stuff =
+                        ShardAccountStuff::new(self.workchain_id, account_id, state)
+                            .map(Box::new)?;
                     if f(&account_stuff) {
                         return Ok(Some(account_stuff));
                     }
@@ -434,9 +396,12 @@ impl AccountsCache {
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
         } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
-            ShardAccountStuff::new(account_id, shard_account).map(Box::new)
+            ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else {
-            Ok(Box::new(ShardAccountStuff::new_empty(account_id)))
+            Ok(Box::new(ShardAccountStuff::new_empty(
+                self.workchain_id,
+                account_id,
+            )))
         }
     }
 
@@ -471,7 +436,7 @@ pub struct ExecutedTransactions {
 }
 
 pub struct ExecutedOrdinaryTransaction {
-    pub result: Result<ExecutedTransaction>,
+    pub result: Option<ExecutedTransaction>,
     pub in_message: Box<ParsedMessage>,
 }
 
@@ -479,9 +444,8 @@ fn execute_ordinary_transaction_impl(
     account_stuff: &mut ShardAccountStuff,
     in_message: Box<ParsedMessage>,
     min_lt: u64,
-    config: &PreloadedBlockchainConfig,
-    unpacked_config: SafeRc<Tuple>,
-    params: &ExecuteParams,
+    config: &ParsedConfig,
+    params: &ExecutorParams,
 ) -> Result<ExecutedOrdinaryTransaction> {
     tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
@@ -493,71 +457,93 @@ fn execute_ordinary_transaction_impl(
 
     let _histogram = HistogramGuard::begin("tycho_collator_execute_ordinary_time");
 
-    let shard_account = &mut account_stuff.shard_account;
-    let result = OrdinaryTransactionExecutor::new().execute_with_libs_and_params(
-        Some(&in_message.cell),
-        shard_account,
-        min_lt,
-        params,
-        config,
-        unpacked_config,
-    );
+    let is_external = matches!(in_message.info, MsgInfo::ExtIn(_));
 
-    let result = match result {
-        Ok((
-            total_fees,
-            ExecutorOutput {
-                account,
-                transaction,
-            },
-        )) => {
-            let tx_lt = shard_account.last_trans_lt;
-            account_stuff.apply_transaction(tx_lt, total_fees, account, &transaction);
-            Ok(transaction)
+    let uncommited = Executor::new(params, config)
+        .with_min_lt(min_lt)
+        .begin_ordinary(
+            &account_stuff.make_std_addr(),
+            is_external,
+            in_message.cell.clone(),
+            &account_stuff.shard_account,
+        );
+
+    let output = match uncommited {
+        Ok(uncommited) => uncommited.commit()?,
+        Err(TxError::Skipped) if is_external => {
+            return Ok(ExecutedOrdinaryTransaction {
+                result: None,
+                in_message,
+            })
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e.into()),
     };
 
-    Ok(ExecutedOrdinaryTransaction { result, in_message })
+    let tx_lt = output.new_state.last_trans_lt;
+
+    account_stuff.shard_account = output.new_state;
+    account_stuff.apply_transaction(
+        tx_lt,
+        output.transaction_meta.total_fees,
+        output.new_state_meta,
+        output.transaction.clone(),
+    );
+
+    Ok(ExecutedOrdinaryTransaction {
+        result: Some(ExecutedTransaction {
+            transaction: output.transaction,
+            out_msgs: output.transaction_meta.out_msgs,
+            gas_used: output.transaction_meta.gas_used,
+            next_lt: output.transaction_meta.next_lt,
+        }),
+        in_message,
+    })
 }
 
 fn execute_ticktock_transaction(
     account_stuff: &mut ShardAccountStuff,
-    tick_tock: TickTock,
+    kind: TickTock,
     min_lt: u64,
-    config: &PreloadedBlockchainConfig,
-    unpacked_config: SafeRc<Tuple>,
-    params: &ExecuteParams,
-) -> Result<ExecutedTransaction> {
+    config: &ParsedConfig,
+    params: &ExecutorParams,
+) -> Result<Option<ExecutedTransaction>> {
     tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
-        kind = ?tick_tock,
+        ?kind,
         "executing ticktock",
     );
 
     let _histogram = HistogramGuard::begin("tycho_collator_execute_ticktock_time");
 
-    let shard_account = &mut account_stuff.shard_account;
+    let uncommited = Executor::new(params, config)
+        .with_min_lt(min_lt)
+        .begin_tick_tock(
+            &account_stuff.make_std_addr(),
+            kind,
+            &account_stuff.shard_account,
+        );
 
-    // NOTE: Failed (without tx) ticktock execution is considered as a fatal error
-    let (
-        total_fees,
-        ExecutorOutput {
-            account,
-            transaction,
-        },
-    ) = TickTockTransactionExecutor::new(tick_tock).execute_with_libs_and_params(
-        None,
-        shard_account,
-        min_lt,
-        params,
-        config,
-        unpacked_config,
-    )?;
+    let output = match uncommited {
+        Ok(uncommited) => uncommited.commit()?,
+        Err(TxError::Skipped) => return Ok(None),
+        Err(TxError::Fatal(e)) => return Err(e),
+    };
 
-    let tx_lt = shard_account.last_trans_lt;
-    account_stuff.apply_transaction(tx_lt, total_fees, account, &transaction);
+    let tx_lt = output.new_state.last_trans_lt;
 
-    Ok(transaction)
+    account_stuff.shard_account = output.new_state;
+    account_stuff.apply_transaction(
+        tx_lt,
+        output.transaction_meta.total_fees,
+        output.new_state_meta,
+        output.transaction.clone(),
+    );
+
+    Ok(Some(ExecutedTransaction {
+        transaction: output.transaction,
+        out_msgs: output.transaction_meta.out_msgs,
+        gas_used: output.transaction_meta.gas_used,
+        next_lt: output.transaction_meta.next_lt,
+    }))
 }

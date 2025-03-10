@@ -17,3 +17,9 @@ pub enum CollatorError {
     #[error(transparent)]
     Anyhow(#[from] anyhow::Error),
 }
+
+impl From<everscale_types::error::Error> for CollatorError {
+    fn from(value: everscale_types::error::Error) -> Self {
+        Self::Anyhow(value.into())
+    }
+}
