@@ -689,6 +689,7 @@ impl Phase<FinalizeState> {
             ref_by_mc_seqno,
             block: new_block,
             is_key_block: new_block_info.key_block,
+            consensus_config_changed: self.state.collation_data.consensus_config_changed,
             prev_blocks_ids: self.state.prev_shard_data.blocks_ids().clone(),
             top_shard_blocks_ids: self
                 .state
@@ -867,7 +868,12 @@ impl Phase<FinalizeState> {
             let prev_vset = prev_config.get_current_validator_set_raw()?;
             let current_vset = config.get_current_validator_set_raw()?;
 
+            let consensus_config = config.get_consensus_config()?;
             let prev_consensus_config = prev_config.get_consensus_config()?;
+
+            // remember if consensus config changed
+            collation_data.consensus_config_changed =
+                Some(consensus_config != prev_consensus_config);
 
             let prev_shuffle_mc_validators =
                 prev_config.get_collation_config()?.shuffle_mc_validators;
@@ -877,7 +883,7 @@ impl Phase<FinalizeState> {
                 // on recovery override: just use passed value; if a signed block includes equal or
                 // lesser value as 'processed_up_to_anchor' - mempool will throw error before start
                 consensus_info.genesis_info.start_round + 1
-            } else if config.get_consensus_config()? != prev_consensus_config {
+            } else if consensus_config != prev_consensus_config {
                 // update genesis on config change only if it is not already overridden
                 consensus_info.genesis_info = GenesisInfo {
                     // mempool reboots when block gets signed, old session anchors are dropped
