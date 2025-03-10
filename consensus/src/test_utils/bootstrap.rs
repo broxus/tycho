@@ -8,9 +8,9 @@ use tycho_network::{
 };
 use tycho_util::time::now_sec;
 
-use crate::engine::{MempoolConfig, MempoolConfigBuilder, MempoolNodeConfig};
+use crate::engine::{MempoolConfigBuilder, MempoolMergedConfig, MempoolNodeConfig};
 
-pub fn default_test_config() -> MempoolConfig {
+pub fn default_test_config() -> MempoolMergedConfig {
     let consensus_config = ConsensusConfig {
         clock_skew_millis: 5 * 1000,
         payload_batch_bytes: 768 * 1024,
@@ -31,10 +31,11 @@ pub fn default_test_config() -> MempoolConfig {
         cache_future_broadcasts_rounds: 105,
     };
 
-    let mut builder = MempoolConfigBuilder::default();
+    let mut builder = MempoolConfigBuilder::new(&node_config);
     builder.set_genesis(GenesisInfo::default());
-    builder.set_consensus_config(&consensus_config);
-    builder.set_node_config(&node_config);
+    builder
+        .set_consensus_config(&consensus_config)
+        .expect("invalid consensus config");
 
     builder.build().unwrap()
 }

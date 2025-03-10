@@ -12,8 +12,8 @@ use tycho_util::sync::rayon_run_fifo;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
-use crate::effects::{AltFormat, Ctx, MempoolStore, ValidateCtx};
-use crate::engine::{CachedConfig, Genesis};
+use crate::effects::{AltFormat, Ctx, MempoolStore, TaskResult, ValidateCtx};
+use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof, Round,
@@ -96,13 +96,17 @@ pub enum ValidateResult {
 // included into valid anchor chain, i.e. validated by consensus.
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
-    pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
+    pub fn verify(
+        point: &Point,
+        peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
+    ) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
 
         let result = if !point.is_integrity_ok() {
             Err(VerifyError::BadSig)
         } else {
-            Self::verify_impl(point, peer_schedule).map_or(Ok(()), Err)
+            Self::verify_impl(point, peer_schedule, conf).map_or(Ok(()), Err)
         };
 
         ValidateCtx::verified(&result);
@@ -120,11 +124,11 @@ impl Verifier {
         store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
         ctx: ValidateCtx,
-    ) -> ValidateResult {
+    ) -> TaskResult<ValidateResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = ctx.span().enter();
 
-        match info.round().cmp(&Genesis::id().round) {
+        match info.round().cmp(&ctx.conf().genesis_round) {
             cmp::Ordering::Less => {
                 panic!("Coding error: can only validate points older than genesis")
             }
@@ -157,7 +161,7 @@ impl Verifier {
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
-            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre))
+            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre, ctx.conf()))
         {
             return ctx.validated(ValidateResult::IllFormed(IllFormedReason::AnchorLink));
         };
@@ -247,7 +251,8 @@ impl Verifier {
                 // do not add same prev_digest twice - it is added as one of 'includes';
                 // do not extend listed dependencies as they may become certified by majority
                 .chain(prev_other_versions.into_iter());
-            Self::is_valid(info.clone(), deps_and_prev.collect()).instrument(ctx.span().clone())
+            Self::is_valid(info.clone(), deps_and_prev.collect(), ctx.conf())
+                .instrument(ctx.span().clone())
         });
 
         // drop strong links before await
@@ -265,15 +270,15 @@ impl Verifier {
                     }
                 },
                 is_valid = &mut is_valid_fut => {
-                    break is_valid;
+                    break is_valid?;
                 },
             }
         };
 
         let status = if valid {
-            ctx.validated(ValidateResult::Valid { is_certified })
+            ValidateResult::Valid { is_certified }
         } else {
-            ctx.validated(ValidateResult::Invalid { is_certified })
+            ValidateResult::Invalid { is_certified }
         };
 
         ctx.validated(status)
@@ -312,6 +317,7 @@ impl Verifier {
         link_field: AnchorStageRole,
         info: &PointInfo,     // @ r+0
         dag_round: &DagRound, // start with r+0
+        conf: &MempoolConfig,
     ) -> bool {
         let linked_id = info.anchor_id(link_field);
 
@@ -321,7 +327,7 @@ impl Verifier {
             return true;
         };
 
-        if round.round() == Genesis::id().round {
+        if round.round() == conf.genesis_round {
             // notice that point is required to link to the freshest leader point
             // among all its (in)direct dependencies, which is checked later
             return true;
@@ -404,7 +410,8 @@ impl Verifier {
     async fn is_valid(
         info: PointInfo,
         mut deps_and_prev: FuturesUnordered<DagPointFuture>,
-    ) -> bool {
+        conf: &MempoolConfig,
+    ) -> TaskResult<bool> {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.data().prev_digest();
         let prev_round = info.round().prev();
@@ -419,20 +426,21 @@ impl Verifier {
         let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);
         let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
 
-        let max_allowed_dep_time = info.data().time
-            + UnixTime::from_millis(CachedConfig::get().consensus.clock_skew_millis as _);
+        let max_allowed_dep_time =
+            info.data().time + UnixTime::from_millis(conf.consensus.clock_skew_millis as _);
 
-        while let Some(dag_point) = deps_and_prev.next().await {
+        while let Some(task_result) = deps_and_prev.next().await {
+            let dag_point = task_result?;
             if dag_point.round() == prev_round && dag_point.author() == info.data().author {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         let Some(proven) = dag_point.trusted() else {
                             // author must have skipped current point's round
                             // to clear its bad history
-                            return false;
+                            return Ok(false);
                         };
                         if !Self::is_proof_ok(&info, proven) {
-                            return false;
+                            return Ok(false);
                         } // else ok continue
                     }
                     Some(_) | None => {
@@ -441,16 +449,17 @@ impl Verifier {
                             DagPoint::Valid(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`
                                 // None: point must have filled `prev_digest` and `includes`
-                                return false;
+                                return Ok(false);
                             }
                             DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`,
                                 //       just to be invalid for an invalid dependency
                                 // None: author must have skipped current point's round
-                                return false;
+                                return Ok(false);
                             }
                             DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                                return false; // same as for valid
+                                // same as for valid
+                                return Ok(false);
                             }
                             DagPoint::NotFound(_) => {
                                 // failed download is ok for both Some and None:
@@ -461,17 +470,18 @@ impl Verifier {
                 }
             } else {
                 let Some(dep) = dag_point.trusted() else {
-                    return false; // just invalid dependency
+                    // just invalid dependency
+                    return Ok(false);
                 };
                 if dep.data().time > max_allowed_dep_time {
                     // dependency time may exceed those in point only by a small value from config
-                    return false;
+                    return Ok(false);
                 }
                 if dep.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
                     || dep.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
                 {
                     // did not actualize the chain
-                    return false;
+                    return Ok(false);
                 }
 
                 let dep_id = dep.id();
@@ -479,27 +489,28 @@ impl Verifier {
                     && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
                 {
                     // path does not lead to destination
-                    return false;
+                    return Ok(false);
                 }
                 if dep_id == anchor_proof_link_id {
                     if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
                         // path does not lead to destination
-                        return false;
+                        return Ok(false);
                     }
                     if dep.data().anchor_time != info.data().anchor_time {
                         // anchor candidate's time is not inherited from its proof
-                        return false;
+                        return Ok(false);
                     }
                 }
             }
         }
-        true
+        Ok(true)
     }
 
     /// blame author and every dependent point's author
     fn verify_impl(
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
     ) -> Option<VerifyError> {
         fn peer_count_genesis(len: usize, round: Round) -> Result<PeerCount, Round> {
             if len == PeerCount::GENESIS.full() {
@@ -513,7 +524,7 @@ impl Verifier {
             same_round_peers, // @ r+0
             includes_peers,   // @ r-1
             witness_peers,    // @ r-2
-        ) = match (point.round() - Genesis::id().round.prev().0).0 {
+        ) = match (point.round() - conf.genesis_round.prev().0).0 {
             0 => return Some(VerifyError::Fail(VerifyFailReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(point.round()).clone();
@@ -549,18 +560,18 @@ impl Verifier {
         };
 
         // point belongs to current genesis
-        if let Some(reason) = Self::links_across_genesis(point) {
+        if let Some(reason) = Self::links_across_genesis(point, conf) {
             return Some(VerifyError::IllFormed(reason));
         }
 
         // check size only now, as config seems up to date
         let payload_bytes: usize = point.payload().iter().fold(0, |acc, msg| acc + msg.len());
-        if payload_bytes > CachedConfig::get().consensus.payload_batch_bytes as usize {
+        if payload_bytes > conf.consensus.payload_batch_bytes as usize {
             let reason = IllFormedReason::TooLargePayload(payload_bytes);
             return Some(VerifyError::IllFormed(reason));
         }
 
-        if !point.is_well_formed() {
+        if !point.is_well_formed(conf) {
             return Some(VerifyError::IllFormed(IllFormedReason::NotDescribed));
         }
 
@@ -662,8 +673,8 @@ impl Verifier {
         None
     }
 
-    fn links_across_genesis(point: &Point) -> Option<IllFormedReason> {
-        let genesis_round = Genesis::id().round;
+    fn links_across_genesis(point: &Point, conf: &MempoolConfig) -> Option<IllFormedReason> {
+        let genesis_round = conf.genesis_round;
         let proof_round = point.anchor_round(AnchorStageRole::Proof);
         let trigger_round = point.anchor_round(AnchorStageRole::Trigger);
         match (
@@ -756,7 +767,7 @@ impl ValidateCtx {
             .increment(1);
     }
 
-    fn validated(&self, result: ValidateResult) -> ValidateResult {
+    fn validated(&self, result: ValidateResult) -> TaskResult<ValidateResult> {
         match &result {
             ValidateResult::IllFormed(reason) => {
                 tracing::error!(
@@ -783,6 +794,6 @@ impl ValidateCtx {
                 );
             }
         };
-        result
+        Ok(result)
     }
 }

@@ -107,6 +107,7 @@ impl PeerScheduleStateless {
     pub(super) fn set_next_peers(&mut self, peers: &[PeerId]) {
         self.peer_sets[2] = Arc::new(peers.iter().copied().collect());
         self.peer_vecs[2] = Arc::new(peers.to_vec());
+        self.meter();
     }
 
     /// on epoch change
@@ -134,11 +135,34 @@ impl PeerScheduleStateless {
 
         self.peer_sets.rotate_left(1);
         self.peer_vecs.rotate_left(1);
+        self.meter();
     }
 
     pub(super) fn forget_previous(&mut self) {
         self.peer_sets[0] = Default::default();
         self.peer_vecs[0] = Default::default();
+        self.meter();
+    }
+
+    fn meter(&self) {
+        fn pos(among: &[PeerId], local_id: &PeerId) -> u8 {
+            (among.iter())
+                .position(|peer_id| local_id == peer_id)
+                .map(|pos| pos + 1)
+                .unwrap_or_default() as u8
+        }
+        let local_id = PeerId::from(self.local_keys.public_key);
+        metrics::gauge!("tycho_mempool_peer_in_curr_vsubset")
+            .set(pos(&self.peer_vecs[1], &local_id));
+        metrics::gauge!("tycho_mempool_peer_in_next_vsubset")
+            .set(pos(&self.peer_vecs[2], &local_id));
+
+        metrics::gauge!("tycho_mempool_peer_vsubset_change", "epoch" => "curr")
+            .set(self.cur_epoch_start.0);
+        metrics::gauge!("tycho_mempool_peer_vsubset_change", "epoch" => "next").set(
+            self.next_epoch_start
+                .map_or(self.prev_epoch_start.0, |round| round.0),
+        );
     }
 }
 
