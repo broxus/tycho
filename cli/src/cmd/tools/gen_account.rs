@@ -3,8 +3,11 @@ use everscale_crypto::ed25519;
 use everscale_types::models::{Account, AccountState, OptionalAccount, StateInit, StdAddr};
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
+use tycho_cli_models::account::AccountStateOutput;
+use tycho_cli_models::print_json;
+use tycho_cli_models::FpTokens;
 
-use crate::util::{compute_storage_used, parse_public_key, print_json, FpTokens};
+use crate::util::{compute_storage_used, parse_public_key};
 
 /// Generate an account state
 #[derive(clap::Parser)]
@@ -145,11 +148,11 @@ impl GiverCmd {
 }
 
 fn write_state(account: &HashBytes, state: &Account) -> Result<()> {
-    let res = serde_json::json!({
-        "account": account.to_string(),
-        "boc": BocRepr::encode_base64(OptionalAccount(Some(state.clone())))?,
-    });
-    print_json(res)
+    let output = AccountStateOutput {
+        account: account.to_string(),
+        boc: BocRepr::encode_base64(OptionalAccount(Some(state.clone())))?,
+    };
+    print_json(output)
 }
 
 struct WalletBuilder {

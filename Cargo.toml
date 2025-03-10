@@ -11,6 +11,7 @@ resolver = "2"
 members = [
     "block-util",
     "cli",
+    "cli-models",
     "collator",
     "consensus",
     "control",
@@ -124,6 +125,7 @@ tycho-vm = { git = "https://github.com/broxus/tycho-vm.git" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.2.5" }
+tycho-cli-models = { path = "./cli-models", version = "0.2.5" }
 tycho-collator = { path = "./collator", version = "0.2.5" }
 tycho-consensus = { path = "./consensus", version = "0.2.5" }
 tycho-control = { path = "./control", version = "0.2.5" }

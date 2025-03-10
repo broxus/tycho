@@ -17,7 +17,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 
 use crate::util::jrpc_client::{AccountStateResponse, JrpcClient};
-use crate::util::{parse_public_key, parse_secret_key, print_json};
+use crate::util::{parse_public_key, parse_secret_key};
 
 /// Blockchain stuff
 #[derive(clap::Parser)]
@@ -65,14 +65,14 @@ impl GetParamCmd {
         let client = JrpcClient::new(self.rpc)?;
         let res = client.get_config().await?;
         let params = serde_json::to_value(res.config.params)?;
-        let item = &params.get(self.param.to_string());
+        let item = params.get(self.param.to_string()).cloned();
 
-        let output = serde_json::json!({
-            "global_id": res.global_id,
-            "seqno": res.seqno,
-            "param": item,
-        });
-        print_json(output)
+        let output = tycho_cli_models::blockchain::ConfigParamOutput {
+            global_id: res.global_id,
+            seqno: res.seqno,
+            param: item,
+        };
+        tycho_cli_models::print_json(output)
     }
 }
 
@@ -271,12 +271,12 @@ async fn send_config_action(client: &JrpcClient, action: Action, sign: &KeyArgs)
     let message_cell = CellBuilder::build_from(message)?;
     client.send_message(message_cell.as_ref()).await?;
 
-    let output = serde_json::json!({
-        "expire_at": expire_at,
-        "message_hash": message_cell.repr_hash(),
-        "message": Boc::encode_base64(message_cell.as_ref()),
-    });
-    print_json(output)
+    let output = tycho_cli_models::blockchain::ConfigMessageOutput {
+        expire_at,
+        message_hash: message_cell.repr_hash().to_string(),
+        message: Boc::encode_base64(message_cell.as_ref()),
+    };
+    tycho_cli_models::print_json(output)
 }
 
 async fn prepare_action(

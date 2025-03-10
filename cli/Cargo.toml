@@ -52,6 +52,7 @@ weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
+tycho-cli-models = { workspace = true }
 tycho-collator = { workspace = true }
 tycho-control = { workspace = true, features = ["full"] }
 tycho-core = { workspace = true }

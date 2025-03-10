@@ -3516,6 +3516,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tycho-block-util",
+ "tycho-cli-models",
  "tycho-collator",
  "tycho-consensus",
  "tycho-control",
@@ -3525,6 +3526,16 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "weedb",
+]
+
+[[package]]
+name = "tycho-cli-models"
+version = "0.2.5"
+dependencies = [
+ "anyhow",
+ "everscale-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

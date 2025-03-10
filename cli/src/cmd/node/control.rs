@@ -13,7 +13,7 @@ use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
-use crate::util::print_json;
+use tycho_cli_models::print_json;
 use crate::BaseArgs;
 
 #[derive(Subcommand)]
