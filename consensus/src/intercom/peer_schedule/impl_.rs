@@ -83,8 +83,6 @@ impl PeerSchedule {
     ) -> bool {
         if next_round <= self.atomic().cur_epoch_start {
             return false; // ignore outdated
-        } else {
-            self.apply_scheduled(next_round);
         }
         let mut locked = self.write();
 

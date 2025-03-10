@@ -149,6 +149,8 @@ impl MempoolConfigBuilder {
         hasher.update(&(consensus.commit_history_rounds as u128).to_be_bytes());
         hasher.update(&(consensus.deduplicate_rounds as u128).to_be_bytes());
         hasher.update(&(consensus.max_consensus_lag_rounds as u128).to_be_bytes());
+        // TODO add comment in everscale-types
+        hasher.update(&(consensus.sync_support_rounds as u128).to_be_bytes());
 
         let overlay_id = OverlayId(hasher.finalize().into());
 
