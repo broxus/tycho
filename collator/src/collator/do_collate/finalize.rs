@@ -342,6 +342,7 @@ impl Phase<FinalizeState> {
                 labels,
             );
 
+            let (processed_to_anchor, _) = processed_upto.get_min_externals_processed_to()?;
             let prev_state = &self.state.prev_shard_data.observable_states()[0];
             let prev_processed_to_anchor = self
                 .state
@@ -358,6 +359,7 @@ impl Phase<FinalizeState> {
                     });
             let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
                 &mut self.state.collation_data,
+                processed_to_anchor,
                 config_params,
                 prev_state,
                 prev_processed_to_anchor,
@@ -796,6 +798,7 @@ impl Phase<FinalizeState> {
 
     fn create_mc_state_extra(
         collation_data: &mut BlockCollationData,
+        processed_to_anchor: u32,
         config_params: Option<BlockchainConfig>,
         prev_state: &ShardStateStuff,
         prev_processed_to_anchor: u32,
@@ -887,7 +890,7 @@ impl Phase<FinalizeState> {
                 // update genesis on config change only if it is not already overridden
                 consensus_info.genesis_info = GenesisInfo {
                     // mempool reboots when block gets signed, old session anchors are dropped
-                    start_round: prev_processed_to_anchor,
+                    start_round: processed_to_anchor,
                     // this is max imported anchor time, next one must be from new session
                     genesis_millis: collation_data.get_gen_chain_time() + 1,
                 };
