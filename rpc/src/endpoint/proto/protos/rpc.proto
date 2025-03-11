@@ -1,7 +1,6 @@
 syntax = "proto3";
 
 import "google/protobuf/empty.proto";
-import "google/protobuf/struct.proto";
 
 package rpc;
 
@@ -53,6 +52,7 @@ message Request {
     GetAccountsByCodeHash  get_accounts_by_code_hash = 10;
     SendMessage            send_message = 11;
     GetLibraryCell         get_library_cell = 12;
+    GetTransaction         get_transaction_block_id = 13;
   }
 }
 
@@ -139,6 +139,18 @@ message Response {
     }
   }
 
+  message BlockId {
+    int32  workchain = 1;
+    uint64 shard = 2;
+    uint32 seqno = 3;
+    bytes  root_hash = 4;
+    bytes  file_hash = 5;
+  }
+
+  message GetTransactionBlockId {
+    optional BlockId block_id = 1;
+  }
+
   oneof Result {
     GetRawTransaction       get_raw_transaction = 1;
     GetTransactionsList     get_transactions_list = 2;
@@ -151,6 +163,7 @@ message Response {
     GetContractState        get_contract_state = 9;
     google.protobuf.Empty   send_message = 10;
     GetLibraryCell          get_library_cell = 11;
+    GetTransactionBlockId   get_transaction_block_id = 12;
   }
 }
 

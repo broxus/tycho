@@ -212,6 +212,18 @@ impl RpcState {
             .map_err(RpcStateError::Internal)
     }
 
+    pub fn get_transaction_block_id(
+        &self,
+        hash: &HashBytes,
+    ) -> Result<Option<BlockId>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_transaction_block_id(hash)
+            .map_err(RpcStateError::Internal)
+    }
+
     pub fn get_dst_transaction(
         &self,
         in_msg_hash: &HashBytes,

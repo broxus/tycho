@@ -57,6 +57,7 @@ declare_proto_methods! {
     GetTransactionsList,
     GetTransaction,
     GetDstTransaction,
+    GetTransactionBlockId,
 }
 
 pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Request>) -> Response {
@@ -306,11 +307,9 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                         .map(Bytes::copy_from_slice)
                         .take(p.limit as usize)
                         .collect();
-                    let result =
-                        response::Result::GetTransactionsList(response::GetTransactionsList {
-                            transactions,
-                        });
-                    ok_to_response(result)
+                    ok_to_response(response::Result::GetTransactionsList(
+                        response::GetTransactionsList { transactions },
+                    ))
                 }
                 Err(e) => error_to_response(e),
             }
@@ -325,12 +324,11 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             };
 
             match state.get_transaction(&hash) {
-                Ok(tx) => {
-                    let result = response::Result::GetRawTransaction(response::GetRawTransaction {
+                Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
+                    response::GetRawTransaction {
                         transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
-                    });
-                    ok_to_response(result)
-                }
+                    },
+                )),
                 Err(e) => error_to_response(e),
             }
         }
@@ -344,12 +342,35 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             };
 
             match state.get_dst_transaction(&hash) {
-                Ok(tx) => {
-                    let result = response::Result::GetRawTransaction(response::GetRawTransaction {
+                Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
+                    response::GetRawTransaction {
                         transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
-                    });
-                    ok_to_response(result)
+                    },
+                )),
+                Err(e) => error_to_response(e),
+            }
+        }
+        request::Call::GetTransactionBlockId(p) => {
+            let Some(hash) = hash_from_bytes(p.id) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid tx id".into(),
                 }
+                .into_response();
+            };
+
+            match state.get_transaction_block_id(&hash) {
+                Ok(block_id) => ok_to_response(response::Result::GetTransactionBlockId(
+                    response::GetTransactionBlockId {
+                        block_id: block_id.map(|id| response::BlockId {
+                            workchain: id.shard.workchain(),
+                            shard: id.shard.prefix(),
+                            seqno: id.seqno,
+                            root_hash: Bytes::copy_from_slice(id.root_hash.as_ref()),
+                            file_hash: Bytes::copy_from_slice(id.file_hash.as_ref()),
+                        }),
+                    },
+                )),
                 Err(e) => error_to_response(e),
             }
         }
@@ -371,6 +392,7 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
             "getTimings",
             "getContractState",
             "sendMessage",
+            "getLibraryCell",
         ];
 
         if state.is_full() {
@@ -379,6 +401,7 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
                 "getTransaction",
                 "getDstTransaction",
                 "getAccountsByCodeHash",
+                "getTransactionBlockId",
             ]);
         }
 
