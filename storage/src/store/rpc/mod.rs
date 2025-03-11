@@ -14,6 +14,7 @@ use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
+use crate::tables::Transactions;
 use crate::util::*;
 
 pub struct RpcStorage {
@@ -144,10 +145,43 @@ impl RpcStorage {
         &self,
         hash: &HashBytes,
     ) -> Result<Option<rocksdb::DBPinnableSlice<'_>>> {
-        let Some(key) = self.db.transactions_by_hash.get(hash)? else {
+        let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
             return Ok(None);
         };
-        self.db.transactions.get(key).map_err(Into::into)
+        let tx_info = &tx_info.as_ref()[..Transactions::KEY_LEN];
+        self.db.transactions.get(tx_info).map_err(Into::into)
+    }
+
+    pub fn get_transaction_block_id(&self, hash: &HashBytes) -> Result<Option<BlockId>> {
+        let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
+            return Ok(None);
+        };
+        let tx_info = tx_info.as_ref();
+        if tx_info.len() < tables::TransactionsByHash::VALUE_FULL_LEN {
+            return Ok(None);
+        }
+
+        let prefix_len = tx_info[41];
+        debug_assert!(prefix_len < 64);
+
+        let account_prefix = u64::from_be_bytes(tx_info[1..9].try_into().unwrap());
+        let tail_mask = 1u64 << (63 - prefix_len);
+
+        // TODO: Move into types?
+        let Some(shard) = ShardIdent::new(
+            tx_info[0] as i8 as i32,
+            (account_prefix | tail_mask) & !(tail_mask - 1),
+        ) else {
+            // TODO: unwrap?
+            return Ok(None);
+        };
+
+        Ok(Some(BlockId {
+            shard,
+            seqno: u32::from_le_bytes(tx_info[42..46].try_into().unwrap()),
+            root_hash: HashBytes::from_slice(&tx_info[46..78]),
+            file_hash: HashBytes::from_slice(&tx_info[78..110]),
+        }))
     }
 
     pub fn get_dst_transaction(
@@ -594,8 +628,14 @@ impl RpcStorage {
             let tx_by_in_msg_cf = &db.transactions_by_in_msg.cf();
 
             // Prepare buffer for full tx id
-            let mut tx_key = [0u8; tables::Transactions::KEY_LEN];
-            tx_key[0] = workchain as u8;
+            let mut tx_info = [0u8; tables::TransactionsByHash::VALUE_FULL_LEN];
+            tx_info[0] = workchain as u8;
+
+            let block_id = block.id();
+            tx_info[41] = block_id.shard.prefix_len() as u8;
+            tx_info[42..46].copy_from_slice(&block_id.seqno.to_le_bytes());
+            tx_info[46..78].copy_from_slice(block_id.root_hash.as_slice());
+            tx_info[78..110].copy_from_slice(block_id.file_hash.as_slice());
 
             let mut tx_buffer = Vec::with_capacity(1024);
 
@@ -606,7 +646,7 @@ impl RpcStorage {
                 non_empty_batch |= true;
 
                 // Fill account address in the key buffer
-                tx_key[1..33].copy_from_slice(account.as_slice());
+                tx_info[1..33].copy_from_slice(account.as_slice());
 
                 // Flag to update code hash
                 let mut has_special_actions = false;
@@ -620,7 +660,7 @@ impl RpcStorage {
 
                     let tx = tx_cell.load()?;
 
-                    tx_key[33..41].copy_from_slice(&tx.lt.to_be_bytes());
+                    tx_info[33..41].copy_from_slice(&tx.lt.to_be_bytes());
 
                     // Update flags
                     if first_tx {
@@ -657,10 +697,18 @@ impl RpcStorage {
                     )
                     .encode(&mut tx_buffer);
 
-                    write_batch.put_cf(tx_cf, tx_key.as_slice(), &tx_buffer);
-                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_key.as_slice());
+                    write_batch.put_cf(
+                        tx_cf,
+                        &tx_info[..tables::Transactions::KEY_LEN],
+                        &tx_buffer,
+                    );
+                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
                     if let Some(in_msg) = &tx.in_msg {
-                        write_batch.put_cf(tx_by_in_msg_cf, in_msg.repr_hash(), tx_key.as_slice());
+                        write_batch.put_cf(
+                            tx_by_in_msg_cf,
+                            in_msg.repr_hash(),
+                            &tx_info[..tables::Transactions::KEY_LEN],
+                        );
                     }
                 }
 
@@ -1089,3 +1137,21 @@ const fn extract_tag(shard: &ShardIdent) -> u64 {
 const TX_MIN_LT: &[u8] = b"tx_min_lt";
 const TX_GC_RUNNING: &[u8] = b"tx_gc_running";
 const INSTANCE_ID: &[u8] = b"instance_id";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shard_prefix() {
+        let prefix_len = 10;
+
+        let account_prefix = 0xabccdeadaaaaaaaa;
+        let tail_mask = 1u64 << (63 - prefix_len);
+
+        let shard = ShardIdent::new(0, (account_prefix | tail_mask) & !(tail_mask - 1)).unwrap();
+        assert_eq!(shard, unsafe {
+            ShardIdent::new_unchecked(0, 0xabe0000000000000)
+        });
+    }
+}

@@ -39,6 +39,7 @@ declare_jrpc_method! {
         GetTransactionsList(GetTransactionsListRequest),
         GetTransaction(GetTransactionRequest),
         GetDstTransaction(GetDstTransactionRequest),
+        GetTransactionBlockId(GetTransactionRequest),
     }
 }
 
@@ -177,6 +178,19 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
             Err(e) => error_to_response(req.id, e),
         },
+        MethodParams::GetTransactionBlockId(p) => match state.get_transaction_block_id(&p.id) {
+            Ok(value) => ok_to_response(
+                req.id,
+                value.as_ref().map(|id| BlockIdResponse {
+                    workchain: id.shard.workchain(),
+                    shard: format!("{:016x}", id.shard.prefix()),
+                    seqno: id.seqno,
+                    root_hash: &id.root_hash,
+                    file_hash: &id.file_hash,
+                }),
+            ),
+            Err(e) => error_to_response(req.id, e),
+        },
     }
 }
 
@@ -262,6 +276,7 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
             "getTimings",
             "getContractState",
             "sendMessage",
+            "getLibraryCell",
         ];
 
         if state.is_full() {
@@ -270,6 +285,7 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
                 "getTransaction",
                 "getDstTransaction",
                 "getAccountsByCodeHash",
+                "getTransactionBlockId",
             ]);
         }
 
@@ -379,6 +395,16 @@ impl Serialize for GetTransactionsListResponse<'_> {
 
         seq.end()
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockIdResponse<'a> {
+    workchain: i32,
+    shard: String,
+    seqno: u32,
+    root_hash: &'a HashBytes,
+    file_hash: &'a HashBytes,
 }
 
 fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {
