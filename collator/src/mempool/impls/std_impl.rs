@@ -143,13 +143,10 @@ impl MempoolAdapterStdImpl {
             .boxed();
 
         tokio::spawn(async move {
-            loop {
-                let engine_result = tokio::select! {
-                    biased;
-                    () = &mut anchor_task => continue, // just poll
-                    engine_result = &mut engine_stop_rx => engine_result
-                };
-                match engine_result {
+            tokio::select! {
+                biased; // poll anchor task more often
+                () = &mut anchor_task => {},
+                engine_result = &mut engine_stop_rx => match engine_result {
                     Ok(()) => tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "Mempool main task is stopped: some subtask was cancelled"
@@ -158,8 +155,7 @@ impl MempoolAdapterStdImpl {
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "Mempool main task is cancelled"
                     ),
-                };
-                break;
+                },
             }
         });
 
