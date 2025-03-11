@@ -1,3 +1,4 @@
+use std::collections::hash_map;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -293,12 +294,26 @@ impl ZerostateConfig {
                     public_key != zero_public_key(),
                     "minter public key is invalid"
                 );
-                self.accounts.insert(
-                    minter_address,
-                    build_minter_account(public_key, &minter_address)?.into(),
-                );
+
+                match self.accounts.entry(minter_address) {
+                    hash_map::Entry::Vacant(entry) => {
+                        entry.insert(build_minter_account(public_key, &minter_address)?.into());
+                    }
+                    hash_map::Entry::Occupied(_) => {
+                        anyhow::bail!(
+                            "cannot use `minter_public_key` when custom minter contract is used"
+                        );
+                    }
+                }
             }
-            (None, Some(_)) => anyhow::bail!("minter_public_key is required"),
+            (None, Some(minter_address)) => {
+                if !self.accounts.contains_key(&minter_address) {
+                    anyhow::bail!(
+                        "either custom account state at {minter_address} \
+                        or `minter_public_key` field is required"
+                    );
+                }
+            }
             (Some(_), None) => anyhow::bail!("minter address is not set (param 2)"),
             (None, None) => {}
         }
