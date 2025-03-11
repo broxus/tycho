@@ -1943,7 +1943,7 @@ def mempool_engine_rates() -> RowPanel:
             "Engine: committed anchors",
         ),
         create_counter_panel(
-            "tycho_mempool_collected_signatures_count",
+            "tycho_mempool_signatures_collected_count",
             "Broadcaster: collected signatures in response",
         ),
         create_counter_panel(
@@ -1951,8 +1951,19 @@ def mempool_engine_rates() -> RowPanel:
             "Collector: timely received broadcasts",
         ),
         create_counter_panel(
+            "tycho_mempool_broadcaster_retry_count",
+            "Broadcaster: signature request retries",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_signatures_rejected_count",
+                range_selector="$__interval",
+            ),
+            "Broadcaster: rejections received (total at moment)",
+        ),
+        create_counter_panel(
             "tycho_mempool_signing_current_round_count",
-            "Current round broadcasts signed",
+            "Signer: current round broadcasts signed",
         ),
         create_counter_panel(
             "tycho_mempool_collected_includes_count",
@@ -1960,16 +1971,16 @@ def mempool_engine_rates() -> RowPanel:
         ),
         create_counter_panel(
             "tycho_mempool_signing_prev_round_count",
-            "Previous round broadcasts signed",
+            "Signer: previous round broadcasts signed",
         ),
         create_counter_panel(
             "tycho_mempool_signing_postponed",
-            "Signings postponed: point time or round are in future",
+            "Signer: postponed points - time or round are in future",
             legend_format="{{instance}} - {{kind}}",
         ),
         create_counter_panel(
             "tycho_mempool_signing_rejected",
-            "Signings rejected: point round too old or node not in v_set",
+            "Signer: rejected point - round too old or node not in v_set",
             legend_format="{{instance}} - {{kind}}",
         ),
     ]
@@ -2152,17 +2163,24 @@ def mempool_intercom() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_download_unreliable_responses",
-                range_selector="$__interval",
-            ),
-            "Downloader: unreliable response (total at moment)",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
                 "tycho_mempool_download_query_failed_count",
                 range_selector="$__interval",
             ),
             "Downloader: queries network error (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_download_unreliable_responses",
+                range_selector="$__interval",
+            ),
+            "Downloader: unreliable responses (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_signatures_unreliable_count",
+                range_selector="$__interval",
+            ),
+            "Broadcaster: unreliable signatures in response (total at moment)",
         ),
     ]
     return create_row("Mempool communication", metrics)
