@@ -411,6 +411,7 @@ pub struct CommitPointerKey {
 
 pub struct CommitPointerValue {
     pub queue_key: QueueKey,
+    pub seqno: u32,
 }
 
 impl StoredValue for CommitPointerKey {
@@ -434,13 +435,13 @@ impl StoredValue for CommitPointerKey {
 }
 
 impl StoredValue for CommitPointerValue {
-    const SIZE_HINT: usize = QueueKey::SIZE_HINT;
+    const SIZE_HINT: usize = QueueKey::SIZE_HINT + 4;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
         self.queue_key.serialize(buffer);
-        // buffer.write_raw_slice(&self.seqno.to_be_bytes());
+        buffer.write_raw_slice(&self.seqno.to_be_bytes());
     }
 
     fn deserialize(reader: &mut &[u8]) -> Self {
@@ -449,10 +450,10 @@ impl StoredValue for CommitPointerValue {
         }
 
         let queue_key = QueueKey::deserialize(reader);
-        // let mut seqno_bytes = [0u8; 4];
-        // seqno_bytes.copy_from_slice(&reader[..4]);
-        // let seqno = u32::from_be_bytes(seqno_bytes);
+        let mut seqno_bytes = [0u8; 4];
+        seqno_bytes.copy_from_slice(&reader[..4]);
+        let seqno = u32::from_be_bytes(seqno_bytes);
 
-        Self { queue_key }
+        Self { queue_key, seqno }
     }
 }

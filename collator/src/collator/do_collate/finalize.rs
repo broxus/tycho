@@ -26,7 +26,7 @@ use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
     PreparedInMsg, PreparedOutMsg,
 };
-use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage};
+use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
@@ -185,13 +185,17 @@ impl Phase<FinalizeState> {
                     "tycho_do_collate_apply_queue_diff_time",
                     &labels,
                 );
-                mq_adapter.apply_diff(
-                    queue_diff_with_msgs,
-                    block_id_short,
-                    &queue_diff_hash,
-                    statistics,
-                    false,
-                )?;
+
+                // TODO should check sequence only if previous diff is required or check only uncommitted zone
+                mq_adapter
+                    .apply_diff(
+                        queue_diff_with_msgs,
+                        block_id_short,
+                        &queue_diff_hash,
+                        statistics,
+                        Some(DiffZone::Uncommitted),
+                    )
+                    .context("finalize")?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
                 Ok(apply_queue_diff_elapsed)

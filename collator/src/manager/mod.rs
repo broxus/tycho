@@ -2,7 +2,7 @@ use std::collections::{hash_map, VecDeque};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
@@ -29,7 +29,9 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
 };
-use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, QueueDiffWithMessages};
+use crate::internal_queue::types::{
+    DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
+};
 use crate::manager::types::{BlockCacheStoreResult, HandledBlockFromBcCtx};
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
@@ -500,6 +502,7 @@ where
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_entry: &BlockCacheEntry,
         min_processed_to: Option<&QueueKey>,
+        is_first: &mut bool,
     ) -> Result<()> {
         if block_entry.block_id.seqno == 0 {
             return Ok(());
@@ -557,13 +560,25 @@ where
             queue_diff.as_ref().max_message,
         );
 
-        mq_adapter.apply_diff(
-            queue_diff_with_msgs,
-            queue_diff.block_id().as_short_id(),
-            queue_diff.diff_hash(),
-            statistics,
-            true,
-        )
+        let check_diff = if *is_first {
+            None
+        } else {
+            Some(DiffZone::Both)
+        };
+
+        mq_adapter
+            .apply_diff(
+                queue_diff_with_msgs,
+                queue_diff.block_id().as_short_id(),
+                queue_diff.diff_hash(),
+                statistics,
+                check_diff,
+            )
+            .context("apply_block_queue_diff_from_entry_stuff")?;
+
+        *is_first = false;
+
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
@@ -852,8 +867,6 @@ where
                         };
                     }
                 }
-
-                self.mq_adapter.clear_uncommitted_state()?;
 
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1147,7 +1160,7 @@ where
     /// 3. Commit block if it was collated first
     /// 4. Notify mempool about new master block
     /// 5. Sync to received block if it is far ahead last collated and last synced_to
-    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id()))]
+    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id(), skip_sync = skip_sync))]
     async fn handle_block_from_bc(
         &self,
         ctx: HandledBlockFromBcCtx,
@@ -1207,8 +1220,6 @@ where
                     };
                 }
             }
-
-            self.mq_adapter.clear_uncommitted_state()?;
 
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
@@ -1508,6 +1519,7 @@ where
             metrics::gauge!("tycho_collator_sync_is_running", &labels).set(1);
         }
 
+        // if `fast_sync` is enabled then we will skip already applied queue diffs
         let queue_diffs_applied_to_top_blocks = if self.config.fast_sync {
             if let Some(applied_to_mc_block_id) =
                 self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
@@ -1521,6 +1533,9 @@ where
             FastHashMap::default()
         };
 
+        // clear uncommitted state before applying diffs
+        self.mq_adapter.clear_uncommitted_state()?;
+
         // try load required previous queue diffs
         for (shard_id, min_processed_to) in &min_processed_to_by_shards {
             let mut prev_queue_diffs = vec![];
@@ -1529,18 +1544,23 @@ where
             };
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
 
+            let mut is_first_diff = true;
+
             while let Some(prev_block_id) = prev_block_ids.pop_front() {
                 if prev_block_id.seqno == 0 {
                     continue;
                 }
 
                 if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id) {
+                    // if required diff is below top applied then skip
                     if prev_block_id.seqno <= *border {
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                             prev_block_id = %prev_block_id.as_short_id(),
                             top_applied_seqno = border,
                             "previous queue diff skipped because it below top applied",
                         );
+                        // if we skip a diff for append to queue, then the first diff in the applicable range is not a true first diff
+                        is_first_diff = false;
                         continue;
                     }
                 }
@@ -1627,7 +1647,6 @@ where
                 }
             }
 
-            let mut is_first_diff = true;
             // apply required previous queue diffs for each shard
             while let Some((diff, diff_hash, block_id, min_message, max_message)) =
                 prev_queue_diffs.pop()
@@ -1635,13 +1654,21 @@ where
                 let statistics =
                     DiffStatistics::from_diff(&diff, block_id.shard, min_message, max_message);
 
-                self.mq_adapter.apply_diff(
-                    diff,
-                    block_id.as_short_id(),
-                    &diff_hash,
-                    statistics,
-                    is_first_diff,
-                )?;
+                let check_sequence = if is_first_diff {
+                    None
+                } else {
+                    Some(DiffZone::Both)
+                };
+
+                self.mq_adapter
+                    .apply_diff(
+                        diff,
+                        block_id.as_short_id(),
+                        &diff_hash,
+                        statistics,
+                        check_sequence,
+                    )
+                    .context("sync_to_applied_mc_block")?;
 
                 is_first_diff = false;
             }
@@ -1650,6 +1677,9 @@ where
         // sync all applied blocks
         // and refresh collation session by the last one
         // with re-init of collators state
+
+        let mut skip_check_map = FastHashMap::default();
+
         loop {
             // pop first applied mc block and sync
             // actually we can sync more mc blocks than known in applied_range
@@ -1674,6 +1704,10 @@ where
                     .into_iter()
                     .chain(subgraph.shard_blocks.iter())
                 {
+                    let is_first = skip_check_map
+                        .entry(block_entry.block_id.shard)
+                        .or_insert(true);
+
                     // do not apply diff if block was collated
                     if let Some(border) =
                         queue_diffs_applied_to_top_blocks.get(&block_entry.block_id.shard)
@@ -1684,6 +1718,10 @@ where
                                 top_applied_seqno = border,
                                 "queue diff apply skipped because it is below top applied",
                             );
+
+                            // should check sequence because diff is not first
+                            *is_first = false;
+
                             continue;
                         }
                     }
@@ -1695,6 +1733,7 @@ where
                         self.mq_adapter.clone(),
                         block_entry,
                         min_processed_to,
+                        is_first,
                     )?;
                 }
             }

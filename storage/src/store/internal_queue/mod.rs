@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::fs::File;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_util::{FastHashMap, FastHashSet};
@@ -190,6 +190,7 @@ impl InternalQueueStorage {
 
                 let commit_pointer_value = CommitPointerValue {
                     queue_key: queue_diff.max_message,
+                    seqno: queue_diff.seqno,
                 };
 
                 batch.put_cf(
@@ -292,11 +293,11 @@ impl InternalQueueTransaction {
 
     pub fn commit_messages(
         &mut self,
-        commit_pointers: &FastHashMap<ShardIdent, QueueKey>,
+        commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
     ) -> Result<()> {
         let commit_pointers_cf = self.db.internal_message_commit_pointer.cf();
 
-        for (&shard_ident, &queue_key) in commit_pointers.iter() {
+        for (&shard_ident, (queue_key, seqno)) in commit_pointers.iter() {
             let key = CommitPointerKey { shard_ident }.to_vec();
 
             // Get the old value if it exists
@@ -309,10 +310,15 @@ impl InternalQueueTransaction {
 
             match queue_key.cmp(&old_pointer.queue_key) {
                 Ordering::Less => {
-                    bail!("Trying to commit a pointer that is less than the old pointer")
+                    tracing::trace!(
+                        "Trying to commit a pointer that is less than the old pointer. Skip."
+                    );
                 }
                 Ordering::Greater => {
-                    let new_val = CommitPointerValue { queue_key };
+                    let new_val = CommitPointerValue {
+                        queue_key: *queue_key,
+                        seqno: *seqno,
+                    };
                     self.batch
                         .put_cf(&commit_pointers_cf, key, new_val.to_vec());
                 }
@@ -518,7 +524,7 @@ pub struct InternalQueueSnapshot {
 }
 
 impl InternalQueueSnapshot {
-    pub fn get_last_applied_diff_info<T: ColumnFamily>(
+    pub fn get_last_applied_diff_seqno<T: ColumnFamily>(
         &self,
         table: &Table<T>,
         shard_ident: &ShardIdent,
@@ -541,19 +547,12 @@ impl InternalQueueSnapshot {
         iter.seek_for_prev(key.to_vec().as_slice());
 
         let value = match iter.key() {
-            Some(value) => {
-                let key = DiffInfoKey::from_slice(value);
-                key.seqno
-            }
+            Some(value) => DiffInfoKey::from_slice(value).seqno,
+
             None => return Ok(None),
         };
 
         Ok(Some(value))
-    }
-
-    pub fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
-        let table = &self.db.internal_message_diff_info;
-        self.get_last_applied_diff_info(table, shard_ident)
     }
 
     pub fn iter_messages(

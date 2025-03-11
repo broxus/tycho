@@ -49,7 +49,7 @@ where
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
-        skip_check_sequence: bool,
+        check_sequence: Option<DiffZone>,
     ) -> Result<()>;
 
     /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
@@ -149,25 +149,27 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(stats)
     }
 
-    #[instrument(skip_all, fields(%block_id_short, %diff_hash, skip_check_sequence))]
+    #[instrument(skip_all, fields(%block_id_short, %diff_hash, check_sequence = ?check_sequence))]
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
-        skip_check_sequence: bool,
+        check_sequence: Option<DiffZone>,
     ) -> Result<()> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            block_id_short = %block_id_short,
+            diff_hash = %diff_hash,
+            "apply_diff started"
+        );
+
         let start_time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_to = diff.processed_to.clone();
-        self.queue.apply_diff(
-            diff,
-            block_id_short,
-            diff_hash,
-            statistics,
-            skip_check_sequence,
-        )?;
+        self.queue
+            .apply_diff(diff, block_id_short, diff_hash, statistics, check_sequence)?;
 
         let elapsed = start_time.elapsed();
         tracing::info!(
@@ -235,6 +237,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     #[instrument(skip_all)]
     fn clear_uncommitted_state(&self) -> Result<()> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            "clear_uncommitted_state started"
+        );
+
         let partitions = &vec![0, 1].into_iter().collect();
 
         let start_time = std::time::Instant::now();
@@ -249,20 +256,27 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%shard_ident, seqno))]
+    #[instrument(skip_all, fields(%shard_ident, seqno, zone = ?zone))]
     fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            shard_ident = %shard_ident,
+            seqno,
+            zone = ?zone,
+            "get_diff_info started"
+        );
         let start_time = std::time::Instant::now();
         let diff = self.queue.get_diff_info(shard_ident, seqno, zone)?;
         let elapsed = start_time.elapsed();
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
-            "get_diff completed"
+            "get_diff_info completed"
         );
         Ok(diff)
     }

@@ -25,7 +25,7 @@ use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
-use crate::internal_queue::types::{DiffStatistics, EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue};
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use crate::test_utils::try_init_test_tracing;
@@ -558,7 +558,7 @@ where
             },
             &queue_diff_hash,
             statistics.clone(),
-            false,
+            Some(DiffZone::Both),
         )?;
         self.secondary_mq_adapter.apply_diff(
             queue_diff_with_msgs,
@@ -568,7 +568,7 @@ where
             },
             &queue_diff_hash,
             statistics,
-            false,
+            Some(DiffZone::Both),
         )?;
 
         // update working state

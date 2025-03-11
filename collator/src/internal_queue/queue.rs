@@ -11,7 +11,6 @@ use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
-use crate::internal_queue;
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::state::storage::{
@@ -22,6 +21,7 @@ use crate::internal_queue::types::{
     QueueShardRange, QueueStatistics,
 };
 use crate::types::ProcessedTo;
+use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
@@ -82,7 +82,7 @@ where
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
-        skip_check_sequence: bool,
+        check_sequence: Option<DiffZone>,
     ) -> Result<()>;
     /// Commit diffs to the state and update GC
     fn commit_diff(
@@ -225,7 +225,7 @@ where
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
-        skip_check_sequence: bool,
+        check_sequence: Option<DiffZone>,
     ) -> Result<()> {
         // Take global lock. Lock commit and clear uncommitted state for execution
         let _global_read_guard = self.global_lock.read().unwrap_or_else(|e| e.into_inner());
@@ -255,24 +255,31 @@ where
             return Ok(());
         }
 
-        let last_applied_seqno = self
-            .state
-            .get_last_applied_block_seqno(&block_id_short.shard)?;
+        if let Some(zone) = check_sequence {
+            let last_applied_seqno = self.state.get_last_applied_seqno(&block_id_short.shard)?;
 
-        if !skip_check_sequence {
             if let Some(last_applied_seqno) = last_applied_seqno {
-                // Check if the diff is already applied
-                if block_id_short.seqno <= last_applied_seqno {
-                    return Ok(());
-                }
+                let diff: Option<DiffInfo> = internal_queue::queue::Queue::get_diff_info(
+                    self,
+                    &block_id_short.shard,
+                    last_applied_seqno,
+                    zone,
+                )?;
 
-                // Check if the diff is sequential
-                if block_id_short.seqno != last_applied_seqno + 1 {
-                    bail!(
-                        "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
-                        block_id_short.seqno,
-                        last_applied_seqno
-                    );
+                if let Some(diff) = diff {
+                    // Check if the diff is already applied
+                    if block_id_short.seqno <= diff.seqno {
+                        return Ok(());
+                    }
+
+                    // Check if the diff is sequential
+                    if block_id_short.seqno != diff.seqno + 1 {
+                        bail!(
+                            "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
+                            block_id_short.seqno,
+                            diff.seqno
+                        );
+                    }
                 }
             }
         }
@@ -311,6 +318,22 @@ where
             .map(|(block_id, _)| block_id)
             .ok_or_else(|| anyhow!("Masterchain block not found in commit_diff"))?;
 
+        // check current commit pointer. If it is greater than committing diff then skip
+        let committed_pointer = self.state.get_commit_pointers()?;
+        let mc_pointer = committed_pointer.get(&mc_block_id.shard);
+        if let Some(mc_pointer) = mc_pointer {
+            if mc_pointer.seqno >= mc_block_id.seqno {
+                tracing::debug!(
+                    target: tracing_targets::MQ,
+                    "Skip commit diff for block_id: {}. Committed by next mc_block_id: {}",
+                    mc_block_id,
+                    mc_pointer.seqno
+                );
+                // Skip commit because it was already committed
+                return Ok(());
+            }
+        }
+
         let mut gc_ranges = FastHashMap::default();
 
         let mut commit_pointer = FastHashMap::default();
@@ -320,6 +343,7 @@ where
             let diff = self
                 .state
                 .get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?;
+
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
                 None if *top_shard_block_changed && mc_block_id.seqno != 0 => {
@@ -332,7 +356,7 @@ where
 
             // Check for duplicate shard in commit_diff
             if commit_pointer
-                .insert(block_id.shard, diff.max_message)
+                .insert(block_id.shard, (diff.max_message, diff.seqno))
                 .is_some()
             {
                 bail!("Duplicate shard in commit_diff: {}", block_id.shard);

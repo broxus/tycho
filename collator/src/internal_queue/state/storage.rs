@@ -83,7 +83,7 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
     /// Set commit pointers and last applied mc block id
     fn commit(
         &self,
-        commit_pointers: &FastHashMap<ShardIdent, QueueKey>,
+        commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
         mc_block_id: &BlockId,
     ) -> Result<()>;
 
@@ -107,7 +107,7 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>>;
     /// Get last applied block seqno by shard ident from committed and uncommited zone
-    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
+    fn get_last_applied_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
     /// Get commit pointers
     fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>>;
 
@@ -180,7 +180,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 
     fn commit(
         &self,
-        commit_pointers: &FastHashMap<ShardIdent, QueueKey>,
+        commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
         mc_block_id: &BlockId,
     ) -> Result<()> {
         let mut tx = self.storage.internal_queue_storage().begin_transaction();
@@ -272,9 +272,12 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         Ok(Some(diff_info))
     }
 
-    fn get_last_applied_block_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
+    fn get_last_applied_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        snapshot.get_last_applied_block_seqno(shard_ident)
+        snapshot.get_last_applied_diff_seqno(
+            &self.storage.base_db().internal_message_diff_info,
+            shard_ident,
+        )
     }
 
     fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>> {
