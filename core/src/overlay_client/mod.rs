@@ -337,7 +337,7 @@ impl Inner {
                 self.overlay.remove_unknown_peer(&peer_id);
             }
 
-            // Remove expired unknown peers
+            // Remove not active unknown peers
             self.overlay.cleanup_unknown_peers();
         }
     }

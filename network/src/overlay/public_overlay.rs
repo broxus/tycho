@@ -27,6 +27,8 @@ pub struct PublicOverlayBuilder {
     banned_peer_ids: FastDashSet<PeerId>,
     peer_resolver: Option<PeerResolver>,
     name: Option<&'static str>,
+    unknown_peer_ttl: Duration,
+    unknown_peer_threshold: u32,
 }
 
 impl PublicOverlayBuilder {
@@ -67,6 +69,22 @@ impl PublicOverlayBuilder {
         self
     }
 
+    /// Time-to-live for unknown peers in the overlay.
+    ///
+    /// Default: 5 min.
+    pub fn with_unknown_peer_ttl(mut self, unknown_peer_ttl: Duration) -> Self {
+        self.unknown_peer_ttl = unknown_peer_ttl;
+        self
+    }
+
+    /// Number of request from unknown peer to make forced a public keys exchange.
+    ///
+    /// Default: 20.
+    pub fn with_unknown_peer_threshold(mut self, unknown_peer_threshold: u32) -> Self {
+        self.unknown_peer_threshold = unknown_peer_threshold;
+        self
+    }
+
     /// Name of the overlay used in metrics.
     pub fn named(mut self, name: &'static str) -> Self {
         self.name = Some(name);
@@ -93,6 +111,8 @@ impl PublicOverlayBuilder {
                 overlay_id: self.overlay_id,
                 min_capacity: self.min_capacity,
                 entry_ttl_sec,
+                unknown_peer_ttl_sec: self.unknown_peer_ttl.as_secs(),
+                unknown_peer_threshold: self.unknown_peer_threshold,
                 peer_resolver: self.peer_resolver,
                 entries: RwLock::new(entries),
                 entries_added: Notify::new(),
@@ -128,6 +148,8 @@ impl PublicOverlay {
             banned_peer_ids: Default::default(),
             peer_resolver: None,
             name: None,
+            unknown_peer_ttl: Duration::from_secs(300),
+            unknown_peer_threshold: 20,
         }
     }
 
@@ -197,7 +219,7 @@ impl PublicOverlay {
             })
             .count;
 
-        if count > UNKNOWN_PEER_REQUESTS_THRESHOLD {
+        if count > self.inner.unknown_peer_threshold {
             self.inner.unknown_peer_added.notify_waiters();
         }
     }
@@ -207,9 +229,9 @@ impl PublicOverlay {
     }
 
     pub fn cleanup_unknown_peers(&self) {
-        self.inner
-            .unknown_peer_ids
-            .retain(|_, entry| entry.last_update.elapsed() < UNKNOWN_PEER_EXPIRED_PERIOD);
+        self.inner.unknown_peer_ids.retain(|_, entry| {
+            entry.last_update.elapsed().as_secs() < self.inner.unknown_peer_ttl_sec
+        });
     }
 
     pub fn read_entries(&self) -> PublicOverlayEntriesReadGuard<'_> {
@@ -242,7 +264,7 @@ impl PublicOverlay {
         self.inner
             .unknown_peer_ids
             .iter()
-            .filter(|x| x.count > UNKNOWN_PEER_REQUESTS_THRESHOLD)
+            .filter(|x| x.count > self.inner.unknown_peer_threshold)
             .map(|x| *x.key())
             .collect::<Vec<_>>()
     }
@@ -427,6 +449,8 @@ struct Inner {
     overlay_id: OverlayId,
     min_capacity: usize,
     entry_ttl_sec: u32,
+    unknown_peer_ttl_sec: u64,
+    unknown_peer_threshold: u32,
     peer_resolver: Option<PeerResolver>,
     entries: RwLock<PublicOverlayEntries>,
     entry_count: AtomicUsize,
@@ -622,9 +646,6 @@ struct UnknownPeerEntry {
     count: u32,
     last_update: Instant,
 }
-
-const UNKNOWN_PEER_REQUESTS_THRESHOLD: u32 = 20;
-const UNKNOWN_PEER_EXPIRED_PERIOD: Duration = Duration::from_secs(5 * 60);
 
 type OverlayItems = IndexMap<PeerId, PublicOverlayEntryData, FastHasherState>;
 
