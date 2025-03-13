@@ -3,7 +3,7 @@
 pub struct Request {
     #[prost(
         oneof = "request::Call",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16"
     )]
     pub call: ::core::option::Option<request::Call>,
 }
@@ -59,6 +59,19 @@ pub mod request {
         #[prost(uint32, tag = "1")]
         pub seqno: u32,
     }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct GetBlock {
+        #[prost(int32, tag = "1")]
+        pub workchain: i32,
+        #[prost(uint64, tag = "2")]
+        pub shard: u64,
+        #[prost(uint32, tag = "3")]
+        pub seqno: u32,
+        #[prost(bytes = "bytes", tag = "4")]
+        pub root_hash: ::prost::bytes::Bytes,
+        #[prost(bytes = "bytes", tag = "5")]
+        pub file_hash: ::prost::bytes::Bytes,
+    }
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Call {
         #[prost(message, tag = "1")]
@@ -89,13 +102,17 @@ pub mod request {
         GetTransactionBlockId(GetTransaction),
         #[prost(message, tag = "14")]
         GetKeyBlockProof(GetKeyBlockProof),
+        #[prost(message, tag = "15")]
+        GetBlockProof(GetBlock),
+        #[prost(message, tag = "16")]
+        GetBlockData(GetBlock),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Response {
     #[prost(
         oneof = "response::Result",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15"
     )]
     pub result: ::core::option::Option<response::Result>,
 }
@@ -249,6 +266,11 @@ pub mod response {
         #[prost(bytes = "bytes", optional, tag = "1")]
         pub proof: ::core::option::Option<::prost::bytes::Bytes>,
     }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct BlockData {
+        #[prost(bytes = "bytes", optional, tag = "1")]
+        pub data: ::core::option::Option<::prost::bytes::Bytes>,
+    }
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Result {
         #[prost(message, tag = "1")]
@@ -277,6 +299,10 @@ pub mod response {
         GetTransactionBlockId(GetTransactionBlockId),
         #[prost(message, tag = "13")]
         GetKeyBlockProof(BlockProof),
+        #[prost(message, tag = "14")]
+        GetBlockProof(BlockProof),
+        #[prost(message, tag = "15")]
+        GetBlockData(BlockData),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

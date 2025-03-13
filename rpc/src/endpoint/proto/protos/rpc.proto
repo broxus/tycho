@@ -43,6 +43,14 @@ message Request {
     uint32 seqno = 1;
   }
 
+  message GetBlock {
+    int32  workchain = 1;
+    uint64 shard = 2;
+    uint32 seqno = 3;
+    bytes  root_hash = 4;
+    bytes  file_hash = 5;
+  }
+
   oneof Call {
     google.protobuf.Empty  get_capabilities = 1;
     google.protobuf.Empty  get_latest_key_block = 2;
@@ -58,6 +66,8 @@ message Request {
     GetLibraryCell         get_library_cell = 12;
     GetTransaction         get_transaction_block_id = 13;
     GetKeyBlockProof       get_key_block_proof = 14;
+    GetBlock               get_block_proof = 15;
+    GetBlock               get_block_data = 16;
   }
 }
 
@@ -160,6 +170,10 @@ message Response {
     optional bytes proof = 1;
   }
 
+  message BlockData {
+    optional bytes data = 1;
+  }
+
   oneof Result {
     GetRawTransaction       get_raw_transaction = 1;
     GetTransactionsList     get_transactions_list = 2;
@@ -174,6 +188,8 @@ message Response {
     GetLibraryCell          get_library_cell = 11;
     GetTransactionBlockId   get_transaction_block_id = 12;
     BlockProof              get_key_block_proof = 13;
+    BlockProof              get_block_proof = 14;
+    BlockData               get_block_data = 15;
   }
 }
 
