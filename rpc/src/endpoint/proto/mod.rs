@@ -17,7 +17,6 @@ use super::INVALID_PARAMS_CODE;
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
-use crate::endpoint::proto::protos::rpc::response::GetLibraryCell;
 use crate::endpoint::{
     INTERNAL_ERROR_CODE, INVALID_BOC_CODE, METHOD_NOT_FOUND_CODE, NOT_READY_CODE,
     NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
@@ -58,6 +57,7 @@ declare_proto_methods! {
     GetTransaction,
     GetDstTransaction,
     GetTransactionBlockId,
+    GetKeyBlockProof,
 }
 
 pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Request>) -> Response {
@@ -129,20 +129,14 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 .into_response();
             };
 
-            let cell_opt = match state.proto_cache().get_library_cell_proto(&hash) {
-                Some(value) => Some(value),
+            let res = match state.proto_cache().get_library_cell_response(&hash) {
+                Some(value) => value,
                 None => match state.get_raw_library(&hash) {
-                    Ok(Some(cell)) => {
-                        let boc = state.proto_cache().insert_library_cell(hash, cell);
-                        Some(boc)
-                    }
-                    Ok(None) => None,
+                    Ok(cell) => state.proto_cache().insert_library_cell_response(hash, cell),
                     Err(e) => return error_to_response(RpcStateError::Internal(e)),
                 },
             };
-            ok_to_response(response::Result::GetLibraryCell(GetLibraryCell {
-                cell: cell_opt,
-            }))
+            res.into_response()
         }
         request::Call::GetContractState(p) => {
             let Some(address) = addr_from_bytes(p.address) else {
@@ -374,6 +368,22 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 Err(e) => error_to_response(e),
             }
         }
+        request::Call::GetKeyBlockProof(p) => {
+            let res = match state.proto_cache().get_key_block_proof_response(p.seqno) {
+                Some(value) => value,
+                None => {
+                    let proof = state
+                        .get_key_block_proof(p.seqno)
+                        .await
+                        .map(|r| Bytes::copy_from_slice(r.as_ref()));
+
+                    state
+                        .proto_cache()
+                        .insert_key_block_proof_response(p.seqno, proof)
+                }
+            };
+            res.into_response()
+        }
     }
 }
 
@@ -393,6 +403,7 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
             "getContractState",
             "sendMessage",
             "getLibraryCell",
+            "getKeyBlockProof",
         ];
 
         if state.is_full() {

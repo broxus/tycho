@@ -235,6 +235,14 @@ impl RpcState {
             .get_dst_transaction(in_msg_hash)
             .map_err(RpcStateError::Internal)
     }
+
+    pub async fn get_key_block_proof(&self, key_block_seqno: u32) -> Option<impl AsRef<[u8]> + '_> {
+        let blocks = self.inner.storage.block_storage();
+        let handles = self.inner.storage.block_handle_storage();
+
+        let handle = handles.load_key_block_handle(key_block_seqno)?;
+        blocks.load_block_proof_raw(&handle).await.ok()
+    }
 }
 
 pub struct RpcStateSubscriber {

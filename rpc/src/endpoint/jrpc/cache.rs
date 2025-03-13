@@ -1,16 +1,19 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwapOption;
+use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{Block, BlockchainConfig};
 use everscale_types::prelude::Cell;
+use moka::sync::Cache;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use tycho_util::FastHasherState;
 
 pub struct JrpcEndpointCache {
-    libraries: moka::sync::Cache<HashBytes, String, FastHasherState>,
+    libraries: Cache<HashBytes, CachedJson, FastHasherState>,
+    key_block_proofs: Cache<u32, CachedJson, FastHasherState>,
     latest_key_block: ArcSwapOption<Box<RawValue>>,
     blockchain_config: ArcSwapOption<Box<RawValue>>,
 }
@@ -18,8 +21,11 @@ pub struct JrpcEndpointCache {
 impl Default for JrpcEndpointCache {
     fn default() -> Self {
         Self {
-            libraries: moka::sync::Cache::builder()
+            libraries: Cache::builder()
                 .max_capacity(100)
+                .build_with_hasher(Default::default()),
+            key_block_proofs: Cache::builder()
+                .max_capacity(10)
                 .build_with_hasher(Default::default()),
             latest_key_block: Default::default(),
             blockchain_config: Default::default(),
@@ -28,15 +34,56 @@ impl Default for JrpcEndpointCache {
 }
 
 impl JrpcEndpointCache {
-    pub fn get_library_cell_boc(&self, hash: &HashBytes) -> Option<String> {
+    pub fn insert_library_cell_response(
+        &self,
+        hash_bytes: HashBytes,
+        cell: Option<Cell>,
+    ) -> CachedJson {
+        static EMPTY: OnceLock<CachedJson> = OnceLock::new();
+
+        match cell {
+            None => EMPTY
+                .get_or_init(|| make_cached(GetLibraryCellResponse { cell: None }))
+                .clone(),
+            Some(cell) => {
+                let res = make_cached(GetLibraryCellResponse {
+                    cell: Some(Boc::encode_base64(cell)),
+                });
+                self.libraries.insert(hash_bytes, res.clone());
+                res
+            }
+        }
+    }
+
+    pub fn get_library_cell_response(&self, hash: &HashBytes) -> Option<CachedJson> {
         self.libraries.get(hash)
     }
 
-    pub fn insert_library_cell(&self, hash_bytes: HashBytes, cell: Cell) -> String {
-        let boc = Boc::encode_base64(cell);
-        self.libraries.insert(hash_bytes, boc.clone());
-        boc
+    pub fn insert_key_block_proof_response(
+        &self,
+        seqno: u32,
+        proof: Option<impl AsRef<[u8]>>,
+    ) -> CachedJson {
+        static EMPTY: OnceLock<CachedJson> = OnceLock::new();
+
+        match proof {
+            None => EMPTY
+                .get_or_init(|| make_cached(BlockProofResponse { proof: None }))
+                .clone(),
+            Some(proof) => {
+                let res = make_cached(BlockProofResponse {
+                    proof: Some(BASE64_STANDARD.encode(proof)),
+                });
+                self.key_block_proofs.insert(seqno, res.clone());
+                res
+            }
+        }
     }
+
+    pub fn get_key_block_proof_response(&self, seqno: u32) -> Option<CachedJson> {
+        self.key_block_proofs.get(&seqno)
+    }
+
     pub fn load_latest_key_block(&self) -> arc_swap::Guard<Option<CachedJson>> {
         self.latest_key_block.load()
     }
@@ -74,6 +121,17 @@ impl JrpcEndpointCache {
     }
 }
 
+#[derive(Serialize)]
+struct GetLibraryCellResponse {
+    cell: Option<String>,
+}
+
+// TODO: Add last_known_mc_seqno.
+#[derive(Serialize)]
+struct BlockProofResponse {
+    proof: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct LatestKeyBlockRef<'a> {
     #[serde(with = "BocRepr")]
@@ -90,3 +148,7 @@ struct LatestBlockchainConfigRef<'a> {
 }
 
 type CachedJson = Arc<Box<RawValue>>;
+
+fn make_cached<T: Serialize>(value: T) -> CachedJson {
+    Arc::new(serde_json::value::to_raw_value(&value).unwrap())
+}
