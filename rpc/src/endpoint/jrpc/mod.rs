@@ -40,7 +40,10 @@ declare_jrpc_method! {
         GetTransaction(GetTransactionRequest),
         GetDstTransaction(GetDstTransactionRequest),
         GetTransactionBlockId(GetTransactionRequest),
-        GetKeyBlockProof(GetKeyBlockProofRequest)
+        GetKeyBlockProof(GetKeyBlockProofRequest),
+        GetBlockProof(GetBlockRequest),
+        // NOTE: Temp endpoint. Must be enforced by limits and other stuff.
+        GetBlockData(GetBlockRequest),
     }
 }
 
@@ -176,19 +179,14 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetTransactionBlockId(p) => match state.get_transaction_block_id(&p.id) {
-            Ok(value) => ok_to_response(
-                req.id,
-                value.as_ref().map(|id| BlockIdResponse {
-                    workchain: id.shard.workchain(),
-                    shard: format!("{:016x}", id.shard.prefix()),
-                    seqno: id.seqno,
-                    root_hash: &id.root_hash,
-                    file_hash: &id.file_hash,
-                }),
-            ),
+            Ok(value) => ok_to_response(req.id, value.map(|block_id| BlockIdResponse { block_id })),
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetKeyBlockProof(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(req.id, RpcStateError::NotSupported);
+            }
+
             let res = match state.jrpc_cache().get_key_block_proof_response(p.seqno) {
                 Some(value) => value,
                 None => {
@@ -199,6 +197,32 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
                 }
             };
             ok_to_response(req.id, res.as_ref())
+        }
+        MethodParams::GetBlockProof(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(req.id, RpcStateError::NotSupported);
+            }
+
+            let proof = state.get_block_proof(&p.block_id).await.map(encode_base64);
+            ok_to_response(req.id, BlockProofResponse { proof })
+        }
+        MethodParams::GetBlockData(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(req.id, RpcStateError::NotSupported);
+            }
+
+            // TODO: Rework rate limiting for this request.
+            let _permit = state.acquire_download_block_permit().await;
+
+            let Some(data) = state.get_block_data(&p.block_id).await else {
+                return ok_to_response(req.id, BlockDataResponse { data: None });
+            };
+
+            tycho_util::sync::rayon_run(move || {
+                let data = encode_base64(data);
+                ok_to_response(req.id, BlockDataResponse { data: Some(data) })
+            })
+            .await
         }
     }
 }
@@ -271,6 +295,13 @@ pub struct GetKeyBlockProofRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetBlockRequest {
+    #[serde(with = "serde_helpers::string")]
+    pub block_id: BlockId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetDstTransactionRequest {
     pub message_hash: HashBytes,
 }
@@ -291,8 +322,11 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
             "getContractState",
             "sendMessage",
             "getLibraryCell",
-            "getKeyBlockProof",
         ];
+
+        if state.config().allow_huge_requests {
+            capabilities.extend(["getKeyBlockProof", "getBlockProof", "getBlockData"]);
+        }
 
         if state.is_full() {
             capabilities.extend([
@@ -408,12 +442,19 @@ impl Serialize for GetTransactionsListResponse<'_> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BlockIdResponse<'a> {
-    workchain: i32,
-    shard: String,
-    seqno: u32,
-    root_hash: &'a HashBytes,
-    file_hash: &'a HashBytes,
+struct BlockIdResponse {
+    #[serde(with = "serde_helpers::string")]
+    block_id: BlockId,
+}
+
+#[derive(Serialize)]
+struct BlockProofResponse {
+    proof: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BlockDataResponse {
+    data: Option<String>,
 }
 
 fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {

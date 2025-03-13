@@ -7,7 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -45,6 +45,9 @@ impl RpcStateBuilder {
             RpcStorage::StateOnly => None,
         };
 
+        let download_block_semaphore =
+            tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
+
         RpcState {
             inner: Arc::new(Inner {
                 config: self.config,
@@ -52,6 +55,7 @@ impl RpcStateBuilder {
                 blockchain_rpc_client,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
+                download_block_semaphore,
                 is_ready: AtomicBool::new(false),
                 timings: ArcSwap::new(Default::default()),
                 jrpc_cache: Default::default(),
@@ -120,6 +124,11 @@ impl RpcState {
 
     pub async fn init(&self, mc_block_id: &BlockId) -> Result<()> {
         self.inner.init(mc_block_id).await
+    }
+
+    pub async fn acquire_download_block_permit(&self) -> tokio::sync::SemaphorePermit<'_> {
+        // NOTE: We are not closing this semaphore explicitly.
+        self.inner.download_block_semaphore.acquire().await.unwrap()
     }
 
     pub async fn bind_endpoint(&self) -> Result<RpcEndpoint> {
@@ -236,12 +245,37 @@ impl RpcState {
             .map_err(RpcStateError::Internal)
     }
 
-    pub async fn get_key_block_proof(&self, key_block_seqno: u32) -> Option<impl AsRef<[u8]> + '_> {
+    pub async fn get_key_block_proof(
+        &self,
+        key_block_seqno: u32,
+    ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
         let blocks = self.inner.storage.block_storage();
         let handles = self.inner.storage.block_handle_storage();
 
         let handle = handles.load_key_block_handle(key_block_seqno)?;
         blocks.load_block_proof_raw(&handle).await.ok()
+    }
+
+    pub async fn get_block_proof(
+        &self,
+        block_id: &BlockId,
+    ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
+        let blocks = self.inner.storage.block_storage();
+        let handles = self.inner.storage.block_handle_storage();
+
+        let handle = handles.load_handle(block_id)?;
+        blocks.load_block_proof_raw(&handle).await.ok()
+    }
+
+    pub async fn get_block_data(
+        &self,
+        block_id: &BlockId,
+    ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
+        let blocks = self.inner.storage.block_storage();
+        let handles = self.inner.storage.block_handle_storage();
+
+        let handle = handles.load_handle(block_id)?;
+        blocks.load_block_data_raw(&handle).await.ok()
     }
 }
 
@@ -297,6 +331,7 @@ struct Inner {
     blockchain_rpc_client: BlockchainRpcClient,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
+    download_block_semaphore: Semaphore,
     is_ready: AtomicBool,
     timings: ArcSwap<StateTimings>,
     jrpc_cache: JrpcEndpointCache,
