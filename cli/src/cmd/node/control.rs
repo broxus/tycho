@@ -166,6 +166,7 @@ impl CmdGetAccount {
     }
 }
 
+/// Get list of all known public overlay neighbours.
 #[derive(Parser)]
 #[clap(disable_help_flag = true)]
 pub struct CmdGetNeighbours {

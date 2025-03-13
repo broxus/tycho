@@ -120,6 +120,7 @@ pub struct SetMasterKeyCmd {
     pubkey: String,
 
     /// RPC url
+    #[clap(long)]
     rpc: Url,
 
     #[clap(flatten)]
@@ -145,6 +146,7 @@ pub struct SetElectorCode {
     upgrade_args: Option<String>,
 
     /// RPC url
+    #[clap(long)]
     rpc: Url,
 
     #[clap(flatten)]
@@ -184,6 +186,7 @@ pub struct SetConfigCode {
     upgrade_args: Option<String>,
 
     /// RPC url
+    #[clap(long)]
     rpc: Url,
 
     #[clap(flatten)]
