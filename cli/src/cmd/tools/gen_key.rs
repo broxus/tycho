@@ -2,8 +2,10 @@ use std::io::Read;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
+use tycho_cli_models::keypair::KeypairOutput;
+use tycho_cli_models::print_json;
 
-use crate::util::{parse_secret_key, print_json};
+use crate::util::parse_secret_key;
 
 /// Generate a new key pair
 #[derive(clap::Parser)]
@@ -37,10 +39,10 @@ impl Cmd {
 
         let public = ed25519::PublicKey::from(&secret);
 
-        let keypair = serde_json::json!({
-            "public": hex::encode(public.as_bytes()),
-            "secret": hex::encode(secret.as_bytes()),
-        });
+        let keypair = KeypairOutput {
+            public: hex::encode(public.as_bytes()),
+            secret: hex::encode(secret.as_bytes()),
+        };
 
         print_json(keypair)
     }

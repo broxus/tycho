@@ -1,0 +1,36 @@
+name: Network Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CC: /usr/bin/clang
+  CXX: /usr/bin/clang++
+
+jobs:
+  network-tests:
+    name: Network Integration Tests
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: ./.github/actions/init
+        with:
+          fake-procfs: true
+          
+      - name: Install just
+        uses: extractions/setup-just@v2
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
+      - name: Run network tests
+        run: ./ci/run_network_tests.sh

@@ -20,6 +20,7 @@ use serde::Serialize;
 use tycho_block_util::config::{
     apply_price_factor, build_elections_data_to_sign, compute_gas_price_factor,
 };
+use tycho_cli_models::FpTokens;
 use tycho_control::ControlClient;
 use tycho_network::PeerId;
 use tycho_util::cli::logger::init_logger_simple;
@@ -31,7 +32,7 @@ use crate::node::{ElectionsConfig, NodeKeys};
 use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
-use crate::util::{elector, print_json, wallet, FpTokens};
+use crate::util::{elector, wallet};
 use crate::BaseArgs;
 
 /// Participate in validator elections.
@@ -403,7 +404,7 @@ impl CmdOnce {
             // Get current elections
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
             let Some(Ref(elections)) = elector_data.current_election else {
-                return print_json(ParticipateStatus::NoElections);
+                return tycho_cli_models::print_json(ParticipateStatus::NoElections);
             };
 
             // Check for an existing stake
@@ -450,7 +451,7 @@ impl CmdOnce {
             };
 
             // Done
-            print_json(ParticipateStatus::Participating {
+            tycho_cli_models::print_json(ParticipateStatus::Participating {
                 message,
                 elections_id: elections.elect_at,
                 elections_end: elections.elect_close,
@@ -509,7 +510,7 @@ impl CmdRecover {
             // Find reward
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
             let Some(to_recover) = elector_data.credits.get(&wallet.address.address) else {
-                return print_json(RecoverStatus::NoReward);
+                return tycho_cli_models::print_json(RecoverStatus::NoReward);
             };
 
             // Send recover message
@@ -519,7 +520,7 @@ impl CmdRecover {
                 .await?;
 
             // Done
-            print_json(RecoverStatus::Recovered {
+            tycho_cli_models::print_json(RecoverStatus::Recovered {
                 message,
                 amount: *to_recover,
             })
@@ -611,7 +612,7 @@ impl CmdWithdraw {
                 .transfer(internal, self.transfer.into_params(price_factor))
                 .await?;
 
-            print_json(serde_json::json!({
+            tycho_cli_models::print_json(serde_json::json!({
                 "message": message,
             }))
         })
@@ -630,7 +631,7 @@ impl CmdGetState {
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
-            print_json(elector_data)
+            tycho_cli_models::print_json(elector_data)
         })
     }
 }

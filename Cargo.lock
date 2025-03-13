@@ -3526,6 +3526,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tycho-block-util",
+ "tycho-cli-models",
  "tycho-collator",
  "tycho-consensus",
  "tycho-control",
@@ -3535,6 +3536,16 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "weedb",
+]
+
+[[package]]
+name = "tycho-cli-models"
+version = "0.2.5"
+dependencies = [
+ "anyhow",
+ "everscale-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3671,14 +3682,6 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
-]
-
-[[package]]
-name = "tycho-gen-protos"
-version = "0.2.5"
-dependencies = [
- "anyhow",
- "prost-build",
 ]
 
 [[package]]
@@ -4355,6 +4358,18 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "xtask"
+version = "0.2.5"
+dependencies = [
+ "anyhow",
+ "clap",
+ "prost-build",
+ "serde",
+ "serde_json",
+ "tycho-cli-models",
+]
 
 [[package]]
 name = "zerocopy"

@@ -1,13 +1,7 @@
-use std::path::Path;
-
-use anyhow::anyhow;
-
-fn main() -> anyhow::Result<()> {
+pub fn run() -> anyhow::Result<()> {
     let input = ["rpc.proto"];
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| anyhow!("project root dir not found"))?;
+    let root = super::project_root();
     let protos_dir = root
         .join("rpc")
         .join("src")
