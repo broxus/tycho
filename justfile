@@ -82,6 +82,9 @@ gen_dashboard:
 update_rpc_proto:
     cargo run -p tycho-gen-protos
 
+update_cli_reference:
+    CI=true cargo run --bin tycho -- util markdown-help > docs/cli-reference.md
+
 # === Integration tests stuff ===
 
 # Runs all tests including ignored. Will take a lot of time to run.

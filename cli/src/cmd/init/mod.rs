@@ -381,6 +381,10 @@ fn generate_key() -> ed25519::SecretKey {
 fn default_binary_path() -> &'static Path {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
+        if std::env::var("CI").is_ok() {
+            return PathBuf::from("/tmp/tycho-bin");
+        }
+
         if let Ok(path) = std::env::current_exe() {
             return path;
         }

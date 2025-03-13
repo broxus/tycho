@@ -14,6 +14,7 @@ mod cmd {
     pub mod init;
     pub mod node;
     pub mod tools;
+    pub mod util;
 }
 
 mod node;
@@ -69,6 +70,7 @@ enum Cmd {
     Elect(cmd::elect::Cmd),
     #[cfg(feature = "debug")]
     Debug(cmd::debug::Cmd),
+    Util(cmd::util::Cmd),
 }
 
 impl Cmd {
@@ -80,6 +82,7 @@ impl Cmd {
             Cmd::Elect(cmd) => cmd.run(args),
             #[cfg(feature = "debug")]
             Cmd::Debug(cmd) => cmd.run(),
+            Cmd::Util(cmd) => cmd.run(),
         }
     }
 }
@@ -93,7 +96,7 @@ pub struct BaseArgs {
 
 impl BaseArgs {
     pub fn create_home_dir(&self) -> Result<&Self> {
-        crate::util::create_dir_all(&self.home)?;
+        util::create_dir_all(&self.home)?;
         Ok(self)
     }
 
@@ -142,6 +145,10 @@ fn version_string() -> &'static str {
 fn default_home_dir() -> &'static Path {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
+        if std::env::var("CI").is_ok() {
+            return PathBuf::from("/tmp/.tycho-ci");
+        }
+
         if let Ok(dir) = std::env::var("TYCHO_HOME") {
             return dir.into();
         }
