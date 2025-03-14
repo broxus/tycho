@@ -40,10 +40,10 @@ impl EngineHandle {
             };
             if !(self.net.peer_schedule).set_next_subset(set, round, subset) {
                 tracing::trace!("cannot schedule outdated round {switch_round} and set");
-                return;
             }
+        } else {
+            self.net.peer_schedule.set_next_set(set);
         }
-        self.net.peer_schedule.set_next_set(set);
     }
 
     pub(super) fn stop_tracing_span(&self) -> Span {
