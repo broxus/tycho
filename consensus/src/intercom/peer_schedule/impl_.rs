@@ -83,8 +83,6 @@ impl PeerSchedule {
     ) -> bool {
         if next_round <= self.atomic().cur_epoch_start {
             return false; // ignore outdated
-        } else {
-            self.apply_scheduled(next_round);
         }
         let mut locked = self.write();
 
@@ -134,18 +132,6 @@ impl PeerSchedule {
             self.atomic().alt(),
             locked.data,
         );
-    }
-
-    /// after successful sync to current epoch
-    /// and validating all points from previous peer set
-    /// free some memory and ignore overlay updates
-    #[allow(dead_code)] // TODO use on change of validator set
-    pub fn forget_previous(&self) {
-        let mut locked = self.write();
-
-        locked.forget_previous(self.downgrade());
-        // atomic part is updated under lock too
-        self.update_atomic(|stateless| stateless.forget_previous());
     }
 
     /// in-time snapshot if consistency with peer state is not needed;
