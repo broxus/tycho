@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use arc_swap::ArcSwapOption;
 use bytes::{Bytes, BytesMut};
-use indexmap::IndexMap;
-use parking_lot::{RwLock, RwLockReadGuard};
+use indexmap::{IndexMap, IndexSet};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use rand::Rng;
 use tokio::sync::Notify;
 use tycho_util::futures::BoxFutureOrNoop;
@@ -78,6 +79,8 @@ impl PublicOverlayBuilder {
         S: Send + Sync + 'static,
         S: Service<ServiceRequest, QueryResponse = Response>,
     {
+        const UNRESOLVED_QUEUE_CAPACITY: usize = 5; // peers
+
         let request_prefix = tl_proto::serialize(rpc::Prefix {
             overlay_id: self.overlay_id.as_bytes(),
         });
@@ -99,6 +102,8 @@ impl PublicOverlayBuilder {
                 entries_changed: Notify::new(),
                 entries_removed: Notify::new(),
                 entry_count: AtomicUsize::new(0),
+                own_signed_entry: Default::default(),
+                unknown_peers_queue: UnknownPeersQueue::with_capacity(UNRESOLVED_QUEUE_CAPACITY),
                 banned_peer_ids: self.banned_peer_ids,
                 service: service.boxed(),
                 request_prefix: request_prefix.into_boxed_slice(),
@@ -140,6 +145,10 @@ impl PublicOverlay {
 
     pub fn peer_resolver(&self) -> &Option<PeerResolver> {
         &self.inner.peer_resolver
+    }
+
+    pub fn unknown_peers_queue(&self) -> &UnknownPeersQueue {
+        &self.inner.unknown_peers_queue
     }
 
     pub async fn query(
@@ -198,10 +207,18 @@ impl PublicOverlay {
         &self.inner.entries_removed
     }
 
+    /// Own signed public entry.
+    pub fn own_signed_entry(&self) -> Option<Arc<PublicEntry>> {
+        self.inner.own_signed_entry.load_full()
+    }
+
+    pub(crate) fn set_own_signed_entry(&self, entry: Arc<PublicEntry>) {
+        self.inner.own_signed_entry.store(Some(entry));
+    }
+
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
         self.inner.metrics.record_rx(req.body.len());
-        if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
-            // TODO: add peer from metadata to the overlay
+        if self.check_peer_id(&req.metadata.peer_id) {
             BoxFutureOrNoop::future(self.inner.service.on_query(req))
         } else {
             BoxFutureOrNoop::Noop
@@ -210,12 +227,32 @@ impl PublicOverlay {
 
     pub(crate) fn handle_message(&self, req: ServiceRequest) -> BoxFutureOrNoop<()> {
         self.inner.metrics.record_rx(req.body.len());
-        if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
-            // TODO: add peer from metadata to the overlay
+        if self.check_peer_id(&req.metadata.peer_id) {
             BoxFutureOrNoop::future(self.inner.service.on_message(req))
         } else {
             BoxFutureOrNoop::Noop
         }
+    }
+
+    fn check_peer_id(&self, peer_id: &PeerId) -> bool {
+        // TODO: Merge `banned_peer_ids` with `entires`?
+        if self.inner.banned_peer_ids.contains(peer_id) {
+            // Discard requests from banned peers.
+            return false;
+        }
+
+        // NOTE: We are checking `is_full` before `entries.read()`
+        // to reduce the amount of locks when we receive lots of requests
+        // from different peers.
+        if !self.inner.unknown_peers_queue.is_full() && !self.inner.entries.read().contains(peer_id)
+        {
+            // Push unknown peers into queue to resolve.
+            if self.inner.unknown_peers_queue.push(peer_id) {
+                tracing::debug!(%peer_id, "found new unknown peer to resolve");
+            }
+        }
+
+        true
     }
 
     /// Adds the given entries to the overlay.
@@ -379,6 +416,8 @@ struct Inner {
     entries_added: Notify,
     entries_changed: Notify,
     entries_removed: Notify,
+    own_signed_entry: ArcSwapOption<PublicEntry>,
+    unknown_peers_queue: UnknownPeersQueue,
     banned_peer_ids: FastDashSet<PeerId>,
     service: BoxService<ServiceRequest, Response>,
     request_prefix: Box<[u8]>,
@@ -516,6 +555,69 @@ impl std::ops::Deref for PublicOverlayEntriesReadGuard<'_> {
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.entries
+    }
+}
+
+pub struct UnknownPeersQueue {
+    peer_ids: Mutex<IndexSet<PeerId, FastHasherState>>,
+    peer_id_count: AtomicUsize,
+    capacity: usize,
+}
+
+impl UnknownPeersQueue {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            peer_ids: Mutex::new(IndexSet::with_capacity_and_hasher(
+                capacity,
+                Default::default(),
+            )),
+            peer_id_count: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.len() >= self.capacity
+    }
+
+    pub fn len(&self) -> usize {
+        self.peer_id_count.load(Ordering::Acquire)
+    }
+
+    /// Tries to push a peer id to the queue.
+    /// Returns true if this id was really added.
+    pub fn push(&self, peer_id: &PeerId) -> bool {
+        // NOTE: We could also optimistically check `is_full` here, but we are
+        // already doing it in the outer scope before the "known entry" check.
+
+        let mut peer_ids = self.peer_ids.lock();
+        if peer_ids.len() >= self.capacity {
+            return false;
+        }
+
+        let added = peer_ids.insert(*peer_id);
+        self.peer_id_count.fetch_add(added as _, Ordering::Release);
+        added
+    }
+
+    /// Pops all collected peer ids.
+    pub fn pop_multiple(&self) -> Option<IndexSet<PeerId, FastHasherState>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let mut peer_ids = self.peer_ids.lock();
+        self.peer_id_count.store(0, Ordering::Release);
+        let res = std::mem::take(&mut *peer_ids);
+        if res.is_empty() {
+            None
+        } else {
+            Some(res)
+        }
     }
 }
 
@@ -730,5 +832,67 @@ mod tests {
         });
 
         assert_eq!(count_entries(&overlay), 201);
+    }
+
+    #[test]
+    fn unknown_peers_queue() {
+        let queue = UnknownPeersQueue::with_capacity(5);
+        assert!(queue.is_empty());
+        assert!(!queue.is_full());
+
+        // Add
+        let added = queue.push(&PeerId([0; 32]));
+        assert!(added);
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+        assert!(!queue.is_full());
+
+        let added = queue.push(&PeerId([0; 32]));
+        assert!(!added);
+        assert_eq!(queue.len(), 1);
+
+        for i in 1..=3 {
+            let added = queue.push(&PeerId([i; 32]));
+            assert!(added);
+            assert_eq!(queue.len(), i as usize + 1);
+            assert!(!queue.is_empty());
+            assert!(!queue.is_full());
+        }
+
+        let added = queue.push(&PeerId([4; 32]));
+        assert!(added);
+        assert_eq!(queue.len(), 5);
+        assert!(queue.is_full());
+
+        let added = queue.push(&PeerId([5; 32]));
+        assert!(!added);
+        assert_eq!(queue.len(), 5);
+        assert!(queue.is_full());
+
+        // Pop
+        let items = queue.pop_multiple().unwrap();
+        assert!(queue.is_empty());
+        assert!(!queue.is_full());
+        assert_eq!(items.len(), 5);
+        for i in 0..5 {
+            assert!(items.contains(&PeerId([i; 32])));
+        }
+
+        let items = queue.pop_multiple();
+        assert!(items.is_none());
+
+        // Add
+        let added = queue.push(&PeerId([0; 32]));
+        assert!(added);
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+        assert!(!queue.is_full());
+
+        // Pop
+        let items = queue.pop_multiple().unwrap();
+        assert!(queue.is_empty());
+        assert!(!queue.is_full());
+        assert_eq!(items.len(), 1);
+        assert!(items.contains(&PeerId([0; 32])));
     }
 }

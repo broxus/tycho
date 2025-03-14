@@ -17,11 +17,11 @@ pub use self::private_overlay::{
 };
 pub use self::public_overlay::{
     ChooseMultiplePublicOverlayEntries, PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries,
-    PublicOverlayEntriesReadGuard, PublicOverlayEntryData,
+    PublicOverlayEntriesReadGuard, PublicOverlayEntryData, UnknownPeersQueue,
 };
 use crate::dht::DhtService;
 use crate::network::Network;
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry};
+use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry, PublicEntryResponse};
 use crate::types::{PeerId, Response, Service, ServiceRequest};
 use crate::util::Routable;
 
@@ -152,6 +152,18 @@ impl Service<ServiceRequest> for OverlayService {
                         Response::from_tl(res),
                     )));
                 }
+                rpc::GetPublicEntry::TL_ID => {
+                    let req = match tl_proto::deserialize::<rpc::GetPublicEntry>(&req.body) {
+                        Ok(req) => req,
+                        Err(e) => break 'req e,
+                    };
+                    tracing::debug!("get_public_entry");
+
+                    let res = self.0.handle_get_public_entry(&req);
+                    return BoxFutureOrNoop::future(futures_util::future::ready(Some(
+                        Response::from_tl(res),
+                    )));
+                }
                 _ => break 'req TlError::UnknownConstructor,
             };
 
@@ -236,7 +248,11 @@ impl Service<ServiceRequest> for OverlayService {
 
 impl Routable for OverlayService {
     fn query_ids(&self) -> impl IntoIterator<Item = u32> {
-        [rpc::ExchangeRandomPublicEntries::TL_ID, rpc::Prefix::TL_ID]
+        [
+            rpc::ExchangeRandomPublicEntries::TL_ID,
+            rpc::GetPublicEntry::TL_ID,
+            rpc::Prefix::TL_ID,
+        ]
     }
 
     fn message_ids(&self) -> impl IntoIterator<Item = u32> {
@@ -342,5 +358,22 @@ impl OverlayServiceInner {
         };
 
         PublicEntriesResponse::PublicEntries(entries)
+    }
+
+    fn handle_get_public_entry(&self, req: &rpc::GetPublicEntry) -> PublicEntryResponse {
+        // Find the overlay
+        let overlay = match self.public_overlays.get(&req.overlay_id) {
+            Some(overlay) => overlay,
+            None => return PublicEntryResponse::OverlayNotFound,
+        };
+
+        let Some(entry) = overlay.own_signed_entry() else {
+            // NOTE: We return `OverlayNotFound` because if there is no signed entry
+            // stored, then the background tasks are not running at all and this is
+            // kind of "shadow" mode which is identical to not being in the overlay.
+            return PublicEntryResponse::OverlayNotFound;
+        };
+
+        PublicEntryResponse::Found(entry)
     }
 }

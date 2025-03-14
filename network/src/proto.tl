@@ -187,8 +187,15 @@ overlay.publicEntry
 /**
 * @param entries    list of public overlay entries.
 */
+// TODO: Rename to `overlay.publicEntries.{found,overlayNotFound}`.
 overlay.publicEntries entries:(vector overlay.publicEntry) = overlay.PublicEntriesResponse;
 overlay.overlayNotFound = overlay.PublicEntriesResponse;
+
+/**
+* @param entry      public entry of the peer.
+*/
+overlay.publicEntry.found entry:overlay.publicEntry = overlay.PublicEntryResponse;
+overlay.publicEntry.overlayNotFound = overlay.PublicEntryResponse;
 
 // TODO: add broadcast
 
@@ -200,10 +207,19 @@ overlay.overlayNotFound = overlay.PublicEntriesResponse;
 * @param overlay_id     public overlay id
 * @param entries        list of public overlay entries
 */
+// TODO: the return type is actually a `overlay.PublicEntriesResponse`.
+//       We need to update the network with the correct one.
 overlay.exchangeRandomPublicEntries
     overlay_id:int256
     entries:(vector overlay.publicEntry)
     = overlay.PublicEntries;
+
+/**
+* Get peer entry of the specified public overlay.
+*
+* @param overlay_id     public overlay id
+*/
+overlay.getPublicEntry overlay_id:int256 = overlay.PublicEntryResponse;
 
 /**
 * Overlay query/message prefix with an overlay id.

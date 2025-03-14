@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
+use futures_util::StreamExt;
 use indexmap::IndexSet;
 use rand::Rng;
+use tycho_util::futures::JoinTask;
 use tycho_util::time::{now_sec, shifted_interval, shifted_interval_immediate};
 
 use crate::dht::{DhtClient, DhtQueryMode, DhtService};
@@ -11,7 +14,7 @@ use crate::network::{KnownPeerHandle, Network, WeakNetwork};
 use crate::overlay::tasks_stream::TasksStream;
 use crate::overlay::{OverlayId, OverlayServiceInner, PublicEntry, PublicOverlayEntries};
 use crate::proto::dht::{MergedValueKeyName, MergedValueKeyRef, Value};
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntryToSign};
+use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntryResponse, PublicEntryToSign};
 use crate::types::Request;
 use crate::util::NetworkExt;
 
@@ -32,6 +35,10 @@ impl OverlayServiceInner {
                 tasks: &'a mut TasksStream,
                 force: bool,
             },
+            CollectPublicEntries {
+                overlay_id: OverlayId,
+                tasks: &'a mut TasksStream,
+            },
             StorePublicEntries {
                 overlay_id: OverlayId,
                 tasks: &'a mut TasksStream,
@@ -41,6 +48,7 @@ impl OverlayServiceInner {
         struct PublicOverlaysState {
             exchange: TasksStream,
             discover: TasksStream,
+            collect: TasksStream,
             store: TasksStream,
         }
 
@@ -68,6 +76,7 @@ impl OverlayServiceInner {
                         PublicOverlaysState {
                             exchange: TasksStream::new("exchange public overlay peers"),
                             discover: TasksStream::new("discover public overlay entries in DHT"),
+                            collect: TasksStream::new("collect public overlay entries"),
                             store: TasksStream::new("store public overlay entries in DHT"),
                         },
                     )),
@@ -90,6 +99,13 @@ impl OverlayServiceInner {
                                     overlay_id: id,
                                     tasks: &mut public_overlays_state.discover,
                                     force: false,
+                                },
+                                None => continue,
+                            },
+                            overlay_id = public_overlays_state.collect.next() => match overlay_id {
+                                Some(id) => Action::CollectPublicEntries {
+                                    overlay_id: id,
+                                    tasks: &mut public_overlays_state.collect,
                                 },
                                 None => continue,
                             },
@@ -127,6 +143,7 @@ impl OverlayServiceInner {
                         exchange,
                         discover,
                         store,
+                        collect,
                     }) => {
                         let iter = this.public_overlays.iter().map(|item| *item.key());
                         exchange.rebuild(iter.clone(), |_| {
@@ -140,6 +157,12 @@ impl OverlayServiceInner {
                             shifted_interval_immediate(
                                 this.config.public_overlay_peer_discovery_period,
                                 this.config.public_overlay_peer_discovery_max_jitter,
+                            )
+                        });
+                        collect.rebuild(iter.clone(), |_| {
+                            shifted_interval(
+                                this.config.public_overlay_peer_collect_period,
+                                this.config.public_overlay_peer_collect_max_jitter,
                             )
                         });
                         store.rebuild_ext(
@@ -220,6 +243,12 @@ impl OverlayServiceInner {
                             Ok(())
                         });
                     }
+                    Action::CollectPublicEntries { overlay_id, tasks } => {
+                        tasks.spawn(&overlay_id, move || async move {
+                            this.collect_public_entries(&network, &overlay_id).await;
+                            Ok(())
+                        });
+                    }
                     Action::StorePublicEntries { overlay_id, tasks } => {
                         let Some(dht_service) = dht_service.clone() else {
                             continue;
@@ -241,7 +270,6 @@ impl OverlayServiceInner {
     }
 
     #[tracing::instrument(
-        level = "debug",
         skip_all,
         fields(local_id = %self.local_id, overlay_id = %overlay_id),
     )]
@@ -263,11 +291,10 @@ impl OverlayServiceInner {
         let mut entries = Vec::with_capacity(n);
 
         // Always include us in the response
-        entries.push(Arc::new(self.make_local_public_overlay_entry(
-            network,
-            overlay_id,
-            now_sec(),
-        )));
+        let own_signed_entry =
+            Arc::new(self.make_local_public_overlay_entry(network, overlay_id, now_sec()));
+        overlay.set_own_signed_entry(own_signed_entry.clone());
+        entries.push(own_signed_entry);
 
         // Choose a random target to send the request and additional random entries
         let target_peer_handle;
@@ -337,7 +364,6 @@ impl OverlayServiceInner {
     }
 
     #[tracing::instrument(
-        level = "debug",
         skip_all,
         fields(local_id = %self.local_id, overlay_id = %overlay_id),
     )]
@@ -388,7 +414,94 @@ impl OverlayServiceInner {
     }
 
     #[tracing::instrument(
-        level = "debug",
+        skip_all,
+        fields(local_id = %self.local_id, overlay_id = %overlay_id),
+    )]
+    async fn collect_public_entries(&self, network: &Network, overlay_id: &OverlayId) {
+        use futures_util::future::FutureExt;
+
+        const QUERY_TIMEOUT: Duration = Duration::from_millis(100);
+
+        let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
+            overlay.value().clone()
+        } else {
+            tracing::warn!("overlay not found");
+            return;
+        };
+
+        let Some(peers) = overlay.unknown_peers_queue().pop_multiple() else {
+            tracing::debug!("no peers to collect");
+            return;
+        };
+        tracing::info!(count = peers.len(), "found peers to collect");
+
+        // Spawn tasks to collect overlay entries for unknown peers.
+        let mut futures = futures_util::stream::FuturesUnordered::new();
+        {
+            let req = Request::from_tl(rpc::GetPublicEntry {
+                overlay_id: overlay_id.to_bytes(),
+            });
+
+            // NOTE: This guard must be dropped before collecting futures.
+            let all_entries = overlay.read_entries();
+
+            for peer_id in peers {
+                if !network.known_peers().contains(&peer_id) || all_entries.contains(&peer_id) {
+                    // Skip completely unknown or already processed peers.
+                    continue;
+                }
+
+                let network = network.clone();
+                let req = req.clone();
+                futures.push(JoinTask::new(
+                    async move {
+                        match tokio::time::timeout(QUERY_TIMEOUT, network.query(&peer_id, req))
+                            .await
+                        {
+                            Ok(entry) => match entry?.parse_tl()? {
+                                PublicEntryResponse::Found(entry) => {
+                                    anyhow::ensure!(
+                                        entry.peer_id == peer_id,
+                                        "public entry peer id mismatch"
+                                    );
+                                    Ok(entry)
+                                }
+                                PublicEntryResponse::OverlayNotFound => {
+                                    anyhow::bail!("target peer doesn't known about this overlay");
+                                }
+                            },
+                            Err(_) => anyhow::bail!("public entry query timeout"),
+                        }
+                    }
+                    .map(move |res| (peer_id, res)),
+                ));
+            }
+        }
+
+        // Populate the overlay with responses
+        // TODO: Better collect then add all at once?
+        while let Some((peer_id, res)) = futures.next().await {
+            match res {
+                Ok(entry) => {
+                    tracing::debug!(%peer_id, "received public entry");
+
+                    let any_added = overlay.add_untrusted_entries(
+                        &self.local_id,
+                        std::slice::from_ref(&entry),
+                        now_sec(),
+                    );
+
+                    if any_added {
+                        // Give some space for the executor between signature checks.
+                        tokio::task::yield_now().await;
+                    }
+                }
+                Err(e) => tracing::debug!(%peer_id, "failed to get peer public overlay entry: {e}"),
+            }
+        }
+    }
+
+    #[tracing::instrument(
         skip_all,
         fields(local_id = %self.local_id, overlay_id = %overlay_id),
     )]
@@ -417,11 +530,13 @@ impl OverlayServiceInner {
             let mut entries = Vec::<Arc<PublicEntry>>::with_capacity(n);
 
             // Always include us in the list
-            entries.push(Arc::new(self.make_local_public_overlay_entry(
+            let own_signed_entry = Arc::new(self.make_local_public_overlay_entry(
                 dht_client.network(),
                 overlay_id,
                 now,
-            )));
+            ));
+            overlay.set_own_signed_entry(own_signed_entry.clone());
+            entries.push(own_signed_entry);
 
             // Fill with random entries
             entries.extend(
