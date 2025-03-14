@@ -178,17 +178,29 @@ impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
-        tracing::debug!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            id = %new_cx.mc_block_id.as_short_id(),
-            new_cx = ?DebugStateUpdateContext(&new_cx),
-            "Processing state update from mc block",
-        );
-
-        // NOTE: on the first call mempool engine will not be running
-        //      and `state_update_ctx` will be `None`
-
         let mut config_guard = self.config.lock().await;
+
+        // on the first call mempool engine is not running and `self.state_update_ctx` is `None`
+        // Note: assume we receive only signed versions, unsigned are out of interest
+        if let Some(has_newer_ctx) = (config_guard.state_update_ctx.as_ref())
+            .filter(|has_ctx| has_ctx.mc_block_id.seqno > new_cx.mc_block_id.seqno)
+        {
+            tracing::debug!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                id = %new_cx.mc_block_id.as_short_id(),
+                has_id = %has_newer_ctx.mc_block_id.as_short_id(),
+                new_cx = ?DebugStateUpdateContext(&new_cx),
+                "Skipped old state update from mc block",
+            );
+            return Ok(());
+        } else {
+            tracing::debug!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                id = %new_cx.mc_block_id.as_short_id(),
+                new_cx = ?DebugStateUpdateContext(&new_cx),
+                "Processing state update from mc block",
+            );
+        }
 
         let Some(engine) = config_guard.engine_running.as_ref() else {
             tracing::info!(
@@ -242,21 +254,13 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             return Ok(());
         };
 
-        if (config_guard.state_update_ctx.as_ref()).is_some_and(|old_cx| {
-            old_cx.consensus_info.vset_switch_round >= new_cx.consensus_info.vset_switch_round
-        }) {
-            tracing::debug!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                id = %new_cx.mc_block_id.as_short_id(),
-                new_cx = ?DebugStateUpdateContext(&new_cx),
-                "Skipped old state update from mc block",
-            );
-            return Ok(());
-        };
-
+        ConfigAdapter::apply_prev_vset(engine.handle(), &new_cx)?;
         ConfigAdapter::apply_curr_vset(engine.handle(), &new_cx)?;
         ConfigAdapter::apply_next_vset(engine.handle(), &new_cx);
+        self.top_known_anchor
+            .set_max_raw(new_cx.top_processed_to_anchor_id);
         config_guard.state_update_ctx = Some(new_cx);
+
         Ok(())
     }
 
