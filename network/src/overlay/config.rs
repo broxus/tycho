@@ -35,6 +35,18 @@ pub struct OverlayConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub public_overlay_peer_exchange_max_jitter: Duration,
 
+    /// A period of collecting public overlay entries.
+    ///
+    /// Default: 3 minutes.
+    #[serde(with = "serde_helpers::humantime")]
+    pub public_overlay_peer_collect_period: Duration,
+
+    /// A maximum value of a random jitter for the peer collect period.
+    ///
+    /// Default: 30 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub public_overlay_peer_collect_max_jitter: Duration,
+
     /// A period of discovering public overlay peers.
     ///
     /// Default: 3 minutes.
@@ -61,6 +73,8 @@ impl Default for OverlayConfig {
             public_overlay_peer_store_max_entries: 20,
             public_overlay_peer_exchange_period: Duration::from_secs(3 * 60),
             public_overlay_peer_exchange_max_jitter: Duration::from_secs(30),
+            public_overlay_peer_collect_period: Duration::from_secs(10),
+            public_overlay_peer_collect_max_jitter: Duration::from_secs(5),
             public_overlay_peer_discovery_period: Duration::from_secs(3 * 60),
             public_overlay_peer_discovery_max_jitter: Duration::from_secs(30),
             exchange_public_entries_batch: 20,
