@@ -342,6 +342,7 @@ impl Phase<FinalizeState> {
                 labels,
             );
 
+            let (processed_to_anchor, _) = processed_upto.get_min_externals_processed_to()?;
             let prev_state = &self.state.prev_shard_data.observable_states()[0];
             let prev_processed_to_anchor = self
                 .state
@@ -358,6 +359,7 @@ impl Phase<FinalizeState> {
                     });
             let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
                 &mut self.state.collation_data,
+                processed_to_anchor,
                 config_params,
                 prev_state,
                 prev_processed_to_anchor,
@@ -795,6 +797,7 @@ impl Phase<FinalizeState> {
 
     fn create_mc_state_extra(
         collation_data: &mut BlockCollationData,
+        processed_to_anchor: u32,
         config_params: Option<BlockchainConfig>,
         prev_state: &ShardStateStuff,
         prev_processed_to_anchor: u32,
@@ -822,6 +825,7 @@ impl Phase<FinalizeState> {
 
         if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
             if (mp_cfg_override.genesis_info).overrides(&consensus_info.genesis_info) {
+                // mempool applied genesis and config during boot, now update genesis in state
                 consensus_info.genesis_info = mp_cfg_override.genesis_info;
 
                 is_key_block = true;
@@ -858,7 +862,6 @@ impl Phase<FinalizeState> {
         // prev_state_extra.flags is checked in the McStateExtra::load_from
 
         // 5. update validator_info and consensus_info
-        let consensus_config = config.params.get_consensus_config()?;
         let mut validator_info = None;
         if is_key_block {
             // check if validator set changed by the cells hash
@@ -866,59 +869,89 @@ impl Phase<FinalizeState> {
             //       instead of just using the `prev_vset`.
             let prev_vset = prev_config.get_current_validator_set_raw()?;
             let current_vset = config.get_current_validator_set_raw()?;
-            if current_vset.repr_hash() != prev_vset.repr_hash() {
-                // TODO: For now we cannot update `consensus_info` when just the
-                // `shuffle_mc_validators` changes, because in that case we
-                // still need to compute some round when this setting will apply.
-                let prev_shuffle_mc_validators =
-                    prev_config.get_collation_config()?.shuffle_mc_validators;
 
-                // calc next session update round
-                let session_update_round = {
-                    // `prev_processed_to_anchor` is a round in the ending session, after which
-                    // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
-                    let mempool_last_round_to_create =
-                        prev_processed_to_anchor + consensus_config.max_consensus_lag_rounds as u32;
-                    let session_last_round = if consensus_info.prev_vset_switch_round
-                        > consensus_info.genesis_info.start_round
-                    {
-                        // consensus session cannot abort until reaching full history amount of rounds,
-                        // because mempool has to re-validate historical points during sync,
-                        // and can hold just one previous vset to check peer authority
-                        let full_history_round = consensus_info.prev_vset_switch_round
-                            + consensus_config.max_total_rounds();
-                        mempool_last_round_to_create.max(full_history_round)
-                    } else {
-                        // mempool history does not span across genesis,
-                        // so can change vset earlier without invalidating points
-                        mempool_last_round_to_create
-                    };
-                    // `+1` because it will be the first mempool round in the new session
-                    session_last_round + 1
+            let prev_shuffle_mc_validators =
+                prev_config.get_collation_config()?.shuffle_mc_validators;
+
+            let prev_consensus_config = prev_config.get_consensus_config()?;
+            let is_consensus_config_changed =
+                prev_consensus_config != config.get_consensus_config()?;
+
+            let is_curr_switch_applied =
+                consensus_info.vset_switch_round <= prev_processed_to_anchor;
+
+            // calc next session update round
+            let next_session_start_round = if consensus_info != prev_state_extra.consensus_info {
+                // on recovery override: just use passed value; if a signed block includes equal or
+                // lesser value as 'processed_up_to_anchor' - mempool will throw error before start
+                consensus_info.genesis_info.start_round + 1
+            } else if is_consensus_config_changed {
+                // update genesis on config change only if it is not already overridden
+                consensus_info.genesis_info = GenesisInfo {
+                    // mempool reboots when block gets signed, old session anchors are dropped
+                    start_round: processed_to_anchor,
+                    // this is max imported anchor time, next one must be from new session
+                    genesis_millis: collation_data.get_gen_chain_time() + 1,
                 };
-
-                // currently we simultaneously update session_seqno in collation and session_update_round in consesus
-                if consensus_info.vset_switch_round < session_update_round {
-                    consensus_info.prev_vset_switch_round = consensus_info.vset_switch_round;
-                    consensus_info.vset_switch_round = session_update_round;
-                    consensus_info.prev_shuffle_mc_validators = prev_shuffle_mc_validators;
+                // start round is attributed in block, so we should not use it for v_set change
+                consensus_info.genesis_info.start_round + 1
+            } else {
+                // `prev_processed_to_anchor` is a round in the ending session, after which
+                // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
+                let last_round_to_create = prev_processed_to_anchor
+                    + prev_consensus_config.max_consensus_lag_rounds as u32;
+                // `+1` because it will be the first mempool round in the new session
+                if !is_curr_switch_applied {
+                    // just overwrite (skip) outdated v_set preserving prev_* attributes;
+                    // currently set switch round may be greater because of full history requirement
+                    (last_round_to_create + 1).max(consensus_info.vset_switch_round)
+                } else if consensus_info.vset_switch_round > consensus_info.genesis_info.start_round
+                {
+                    // consensus session cannot abort until reaching full history amount of rounds,
+                    // because mempool has to re-validate historical points during sync,
+                    // and can hold just one previous vset to check peer authority
+                    let full_history_round =
+                        consensus_info.vset_switch_round + prev_consensus_config.max_total_rounds();
+                    last_round_to_create.max(full_history_round) + 1
+                } else {
+                    // mempool history does not span across genesis,
+                    // so can change vset earlier without invalidating points
+                    last_round_to_create + 1
                 }
+            };
+
+            // simultaneously update session_seqno in collation and consensus if v_(sub)_set changes;
+            // genesis change (recovery or config) should not rotate validators by itself, so it
+            // doesn't allow to apply scheduled v_set immediately despite it splits dag history
+            if current_vset.repr_hash() != prev_vset.repr_hash()
+                || collation_config.shuffle_mc_validators != prev_shuffle_mc_validators
+            {
+                // take prev_* attributes for mempool to calculate a subset from v_set (if used);
+                // also mempool may skip a short-lived session that ended sooner than schedule
+                // was applied in mempool (but subset rotations should not be that short)
+
+                if is_curr_switch_applied {
+                    consensus_info.prev_shuffle_mc_validators = prev_shuffle_mc_validators;
+                    consensus_info.prev_vset_switch_round = consensus_info.vset_switch_round;
+                }
+                // next session start is calculated to be safely (re-)scheduled after mempool pause
+                consensus_info.vset_switch_round = next_session_start_round;
 
                 // calculate next validator subset and hash
                 let current_vset = current_vset.parse::<ValidatorSet>()?;
                 let (_, validator_list_hash_short) = current_vset.compute_mc_subset(
-                    session_update_round,
+                    next_session_start_round,
                     collation_config.shuffle_mc_validators,
                 ).ok_or_else(|| anyhow!(
                     "Error calculating subset of validators for next session (shard_id = {}, session_seqno = {})",
                     ShardIdent::MASTERCHAIN,
-                    session_update_round,
+                    next_session_start_round,
                 ))?;
 
                 validator_info = Some(ValidatorInfo {
                     validator_list_hash_short,
                     // TODO: rename field in types
-                    catchain_seqno: session_update_round,
+                    catchain_seqno: next_session_start_round,
                     nx_cc_updated: true,
                 });
             }
