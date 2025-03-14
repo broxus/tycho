@@ -78,9 +78,6 @@ impl DagFront {
             }
         }
 
-        // FIXME should call peer_schedule.forget_previos(self.last_back_bottom) here
-        //   and allow peer schedule to have more than one previous subset
-        //   as dag bottom must be moved and old rounds dropped before subset is forgotten
         peer_schedule.apply_scheduled(new_top);
 
         if new_top > self.last_back_bottom + conf.consensus.max_total_rounds() {

@@ -51,7 +51,6 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
         genesis.round().next(),
         &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
     );
-    peer_schedule.apply_scheduled(genesis.round().next());
 
     let stub_consensus_round = RoundWatch::<Consensus>::default();
     let stub_downloader =
