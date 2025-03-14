@@ -9,7 +9,7 @@ use crate::models::Round;
 
 #[derive(Debug)]
 pub struct PeerScheduleStateful {
-    // whole validator set
+    // whole validator sets except local id for peer resolver
     validator_set: [FastHashMap<PeerId, PeerState>; 3],
     // working subset
     active_subset: [Arc<FastHashMap<PeerId, PeerState>>; 3],
@@ -138,6 +138,10 @@ impl PeerScheduleStateful {
         self.validator_set[2] = validator_set;
         self.all_resolved = all_resolved;
         meter_all_resolved(self.all_resolved.len());
+        for peer in &to_forget {
+            self.broadcast_receivers.remove(peer);
+        }
+        meter_bcast_receivers(self.broadcast_receivers.len());
         to_forget
     }
 
