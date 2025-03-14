@@ -33,6 +33,10 @@ impl Digest {
     pub(super) fn new(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).into())
     }
+    // TODO encode DB key with TL and remove this method
+    pub fn wrap(value: [u8; 32]) -> Self {
+        Self(value)
+    }
     pub fn inner(&self) -> &'_ [u8; 32] {
         &self.0
     }
@@ -143,7 +147,7 @@ impl UnixTime {
         Self(millis)
     }
     pub fn now() -> Self {
-        Self(tycho_util::time::now_millis())
+        Self(tycho_util::time::MonotonicClock::now_millis())
     }
 
     pub fn next(&self) -> Self {

@@ -3595,6 +3595,7 @@ dependencies = [
  "tl-proto",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-flame",
  "tracing-subscriber",

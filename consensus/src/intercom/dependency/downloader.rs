@@ -9,13 +9,13 @@ use futures_util::{future, StreamExt};
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::{Interval, MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use tracing::Instrument;
 use tycho_network::{PeerId, Request};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::{Verifier, VerifyError};
+use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{CachedConfig, ConsensusConfigExt};
@@ -31,7 +31,7 @@ pub struct Downloader {
 
 pub enum DownloadResult {
     Verified(Point),
-    IllFormed(Point),
+    IllFormed(Point, IllFormedReason),
 }
 
 struct DownloaderInner {
@@ -174,9 +174,6 @@ impl Downloader {
             undone_peers,
             downloading: FuturesUnordered::new(),
             attempt: 0,
-            interval: tokio::time::interval(Duration::from_millis(
-                CachedConfig::get().consensus.download_retry_millis as _,
-            )),
         };
         let downloaded = task
             .run(dependers_rx, broadcast_result)
@@ -213,8 +210,6 @@ struct DownloadTask<T> {
         FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse<Point>>)>>,
 
     attempt: u8,
-    /// skip time-driven attempt if an attempt was init by empty task queue
-    interval: Interval,
 }
 
 impl<T: DownloadType> DownloadTask<T> {
@@ -225,13 +220,12 @@ impl<T: DownloadType> DownloadTask<T> {
         mut dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         mut broadcast_result: oneshot::Receiver<DownloadResult>,
     ) -> Option<DownloadResult> {
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            CachedConfig::get().consensus.download_retry_millis as _,
+        ));
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
-        self.interval
-            .set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-        while let Ok(peer_id) = dependers_rx.try_recv() {
-            self.add_depender(&peer_id);
-        }
+        // no `interval.reset()`: download starts right after biased receive of all known dependers
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -247,12 +241,11 @@ impl<T: DownloadType> DownloadTask<T> {
                         None => if self.not_found as usize >= self.peer_count.majority_of_others() {
                             break None;
                         } else if self.downloading.is_empty() {
-                            self.interval.reset(); // start new interval at current moment
-                            self.download_random();
+                            interval.reset_immediately(); // restart interval and tick immediately
                         }
                     },
                 // most rare arm to make progress despite slow responding peers
-                _ = self.interval.tick() => self.download_random(), // first tick fires immediately
+                _ = interval.tick() => self.download_random(), // first tick fires immediately
             }
         }
         // on exit futures are dropped and receivers are cleaned,
@@ -401,24 +394,15 @@ impl<T: DownloadType> DownloadTask<T> {
                         );
                         None
                     }
-                    Err(
-                        error @ (VerifyError::IllFormed
-                        | VerifyError::MustBeEmpty(_)
-                        | VerifyError::LackOfPeers(_)
-                        | VerifyError::UnknownPeers(_)),
-                    ) => {
+                    Err(VerifyError::IllFormed(reason)) => {
                         tracing::error!(
-                            error = display(error),
+                            error = display(&reason),
                             point = debug(&point),
-                            "downloaded illformed"
+                            "downloaded ill-formed"
                         );
-                        Some(DownloadResult::IllFormed(point))
+                        Some(DownloadResult::IllFormed(point, reason))
                     }
-                    Err(
-                        error @ (VerifyError::BeforeGenesis
-                        | VerifyError::UnknownAuthor
-                        | VerifyError::Uninit(_)),
-                    ) => {
+                    Err(VerifyError::Fail(error)) => {
                         panic!(
                             "should not receive {error} for downloaded {:?}",
                             point.id().alt()
