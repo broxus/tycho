@@ -26,8 +26,8 @@ pub use self::overlay::{
     PublicOverlayEntryData,
 };
 pub use self::util::{
-    check_peer_signature, try_handle_prefix, try_handle_prefix_with_offset, NetworkExt, Routable,
-    Router, RouterBuilder, UnknownPeerError,
+    check_peer_signature, make_local_public_overlay_entry, try_handle_prefix,
+    try_handle_prefix_with_offset, NetworkExt, Routable, Router, RouterBuilder, UnknownPeerError,
 };
 
 mod dht;

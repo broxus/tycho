@@ -47,6 +47,12 @@ pub struct OverlayConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub public_overlay_peer_discovery_max_jitter: Duration,
 
+    /// A period of signing local public overlay entry.
+    ///
+    /// Default: 10 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub public_overlay_peer_sign_period: Duration,
+
     /// Number of peers to send during entries exchange request.
     ///
     /// Default: 20.
@@ -63,6 +69,7 @@ impl Default for OverlayConfig {
             public_overlay_peer_exchange_max_jitter: Duration::from_secs(30),
             public_overlay_peer_discovery_period: Duration::from_secs(3 * 60),
             public_overlay_peer_discovery_max_jitter: Duration::from_secs(30),
+            public_overlay_peer_sign_period: Duration::from_secs(10),
             exchange_public_entries_batch: 20,
         }
     }

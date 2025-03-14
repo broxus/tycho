@@ -74,6 +74,7 @@ impl OverlayServiceBuilder {
             public_overlays_changed: Arc::new(Notify::new()),
             private_overlays_changed: Arc::new(Notify::new()),
             public_entries_merger: Arc::new(PublicOverlayEntriesMerger),
+            signed_local_entries: Default::default(),
         });
 
         let background_tasks = OverlayServiceBackgroundTasks {
@@ -111,6 +112,14 @@ impl OverlayService {
 
     pub fn remove_public_overlay(&self, overlay_id: &OverlayId) -> bool {
         self.0.remove_public_overlay(overlay_id)
+    }
+
+    pub fn add_signed_local_overlay(&self, overlay_id: &OverlayId, entry: PublicEntry) -> bool {
+        self.0.add_signed_local_overlay(overlay_id, entry)
+    }
+
+    pub fn local_id(&self) -> PeerId {
+        self.0.local_id
     }
 }
 
@@ -252,6 +261,7 @@ struct OverlayServiceInner {
     public_overlays_changed: Arc<Notify>,
     private_overlays_changed: Arc<Notify>,
     public_entries_merger: Arc<PublicOverlayEntriesMerger>,
+    signed_local_entries: FastDashMap<OverlayId, Arc<PublicEntry>>,
 }
 
 impl OverlayServiceInner {
@@ -303,6 +313,12 @@ impl OverlayServiceInner {
         removed
     }
 
+    fn add_signed_local_overlay(&self, overlay_id: &OverlayId, entry: PublicEntry) -> bool {
+        self.signed_local_entries
+            .insert(*overlay_id, Arc::new(entry))
+            .is_some()
+    }
+
     fn handle_exchange_public_entries(
         &self,
         req: &rpc::ExchangeRandomPublicEntries,
@@ -326,7 +342,7 @@ impl OverlayServiceInner {
             .map(|id| id.peer_id)
             .collect::<FastHashSet<_>>();
 
-        let entries = {
+        let mut entries = {
             let entries = overlay.read_entries();
 
             // Choose additional random entries to ensure we have enough new entries to send back
@@ -337,9 +353,14 @@ impl OverlayServiceInner {
                     let is_new = !requested_ids.contains(&item.entry.peer_id);
                     is_new.then(|| item.entry.clone())
                 })
-                .take(n)
+                .take(n - 1)
                 .collect::<Vec<_>>()
         };
+
+        // Should exist
+        if let Some(signed_entry) = self.signed_local_entries.get(overlay.overlay_id()) {
+            entries.push(signed_entry.clone());
+        }
 
         PublicEntriesResponse::PublicEntries(entries)
     }
