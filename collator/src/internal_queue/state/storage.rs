@@ -8,7 +8,9 @@ use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPar
 use tycho_storage::model::{
     CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey, StatKey,
 };
-use tycho_storage::{InternalQueueSnapshot, InternalQueueTransaction, Storage};
+use tycho_storage::snapshot::InternalQueueSnapshot;
+use tycho_storage::transaction::InternalQueueTransaction;
+use tycho_storage::Storage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -212,9 +214,8 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     }
 
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>> {
-        self.storage
-            .internal_queue_storage()
-            .get_last_committed_mc_block_id()
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        snapshot.get_last_committed_mc_block_id()
     }
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
@@ -274,10 +275,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 
     fn get_last_applied_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        snapshot.get_last_applied_diff_seqno(
-            &self.storage.base_db().internal_message_diff_info,
-            shard_ident,
-        )
+        snapshot.get_last_applied_diff_seqno(shard_ident)
     }
 
     fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>> {

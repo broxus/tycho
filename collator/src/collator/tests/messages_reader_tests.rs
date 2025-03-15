@@ -25,7 +25,9 @@ use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
-use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::{
+    DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue,
+};
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use crate::test_utils::try_init_test_tracing;

@@ -11,6 +11,14 @@ use tycho_block_util::tl;
 use tycho_util::FastHashMap;
 
 use crate::util::{StoredValue, StoredValueBuffer};
+
+pub struct InternalQueueMessage<'a> {
+    pub key: ShardsInternalMessagesKey,
+    pub workchain: i8,
+    pub prefix: u64,
+    pub message_boc: &'a [u8],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShardsInternalMessagesKey {
     pub partition: QueuePartitionIdx,
