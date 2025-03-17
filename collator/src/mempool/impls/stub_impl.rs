@@ -177,7 +177,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
+    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
         Ok(())
     }
 
