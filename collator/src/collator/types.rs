@@ -6,11 +6,12 @@ use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
-    AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits, BlockRef,
-    CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, LibDescr, MsgInfo,
-    MsgsExecutionParams, OptionalAccount, OutMsg, OwnedMessage, PrevBlockRef, ShardAccount,
-    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
-    ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit, StdAddr, Transaction, ValueFlow,
+    AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
+    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
+    InMsgDescr, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg, OutMsgDescr,
+    OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated,
+    ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SimpleLib, SpecialFlags, StateInit,
+    StdAddr, Transaction, ValueFlow,
 };
 use everscale_types::num::Tokens;
 use tl_proto::TlWrite;
@@ -25,7 +26,7 @@ use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
-use crate::types::{BlockCandidate, McData, ProofFunds, TopShardBlockInfo};
+use crate::types::{BlockCandidate, McData, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -198,7 +199,6 @@ pub(super) struct BlockCollationDataBuilder {
     shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
     pub shards_max_end_lt: u64,
     pub shard_fees: ShardFees,
-    pub value_flow: ValueFlow,
     pub min_ref_mc_seqno: u32,
     pub rand_seed: HashBytes,
     #[cfg(feature = "block-creator-stats")]
@@ -228,7 +228,6 @@ impl BlockCollationDataBuilder {
             gen_utime_ms,
             shards_max_end_lt: 0,
             shard_fees: Default::default(),
-            value_flow: Default::default(),
             min_ref_mc_seqno,
             rand_seed,
             #[cfg(feature = "block-creator-stats")]
@@ -239,6 +238,7 @@ impl BlockCollationDataBuilder {
             mempool_config_override,
         }
     }
+
     pub fn set_shards(&mut self, shards: FastHashMap<ShardIdent, Box<ShardDescription>>) {
         self.shards = Some(shards);
     }
@@ -258,16 +258,12 @@ impl BlockCollationDataBuilder {
     pub fn store_shard_fees(
         &mut self,
         shard_id: ShardIdent,
-        proof_funds: ProofFunds,
+        proof_funds: ShardFeeCreated,
     ) -> Result<()> {
-        let shard_fee_created = ShardFeeCreated {
-            fees: proof_funds.fees_collected.clone(),
-            create: proof_funds.funds_created.clone(),
-        };
         self.shard_fees.set(
             ShardIdentFull::from(shard_id),
-            shard_fee_created.clone(),
-            shard_fee_created,
+            proof_funds.clone(),
+            proof_funds,
         )?;
         Ok(())
     }
@@ -295,7 +291,7 @@ impl BlockCollationDataBuilder {
             shards: self.shards,
             top_shard_blocks: self.top_shard_blocks,
             shard_fees: self.shard_fees,
-            value_flow: self.value_flow,
+            value_flow: Default::default(),
             block_limit,
             start_lt,
             next_lt: start_lt + 1,
@@ -375,8 +371,7 @@ pub(super) struct BlockCollationData {
     pub mint_msg: Option<InMsg>,
     pub recover_create_msg: Option<InMsg>,
 
-    pub value_flow: ValueFlow,
-
+    pub value_flow: PartialValueFlow,
     pub min_ref_mc_seqno: u32,
 
     pub rand_seed: HashBytes,
@@ -395,6 +390,63 @@ impl BlockCollationData {
     pub fn get_gen_chain_time(&self) -> u64 {
         self.gen_utime as u64 * 1000 + self.gen_utime_ms as u64
     }
+
+    /// Updates [`Self::value_flow`] and returns its full version.
+    pub fn finalize_value_flow(
+        &mut self,
+        account_blocks: &AccountBlocks,
+        shard_accounts: &ShardAccounts,
+        in_msgs: &InMsgDescr,
+        out_msgs: &OutMsgDescr,
+        config: &BlockchainConfig,
+    ) -> Result<ValueFlow> {
+        let is_masterchain = self.block_id_short.is_masterchain();
+        let burning = config.get_burning_config().unwrap_or_default();
+
+        // Add message and transaction fees collected in this block.
+        let mut new_fees = account_blocks.root_extra().clone();
+        new_fees.try_add_assign_tokens(in_msgs.root_extra().fees_collected)?;
+
+        // Burn a fraction of fees in masterchain.
+        if is_masterchain {
+            let burned = burning.compute_burned_fees(new_fees.tokens)?;
+
+            self.value_flow.burned.try_add_assign_tokens(burned)?;
+            new_fees.try_sub_assign_tokens(burned)?;
+        }
+
+        self.value_flow.fees_collected.try_add_assign(&new_fees)?;
+
+        // Finalize value flow.
+        Ok(ValueFlow {
+            from_prev_block: self.value_flow.from_prev_block.clone(),
+            to_next_block: shard_accounts.root_extra().balance.clone(),
+            imported: in_msgs.root_extra().value_imported.clone(),
+            exported: out_msgs.root_extra().clone(),
+            fees_collected: self.value_flow.fees_collected.clone(),
+            burned: self.value_flow.burned.clone(),
+            fees_imported: self.shard_fees.root_extra().fees.clone(),
+            recovered: self.value_flow.recovered.clone(),
+            created: self.value_flow.created.clone(),
+            minted: self.value_flow.minted.clone(),
+        })
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct PartialValueFlow {
+    /// Total amount transferred from the previous block.
+    pub from_prev_block: CurrencyCollection,
+    /// Fee recovery.
+    pub recovered: CurrencyCollection,
+    /// Block creation fees.
+    pub created: CurrencyCollection,
+    /// Minted native tokens and extra currencies.
+    pub minted: CurrencyCollection,
+    /// Burned native tokens and extra currencies.
+    pub burned: CurrencyCollection,
+    /// Fees collected on init.
+    pub fees_collected: CurrencyCollection,
 }
 
 #[derive(Debug)]
@@ -839,6 +891,7 @@ pub struct ExecutedTransaction {
     pub out_msgs: Vec<Lazy<OwnedMessage>>,
     pub gas_used: u64,
     pub next_lt: u64,
+    pub burned: Tokens,
 }
 
 pub struct ParsedMessage {

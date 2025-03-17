@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{bail, Result};
 use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardIdent, ValueFlow,
+    BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardFeeCreated, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
@@ -19,8 +19,7 @@ use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, ProofFunds,
-    TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -994,7 +993,7 @@ impl BlocksCacheData for MasterBlocksCacheData {
 #[derive(Default)]
 struct ShardBlocksCacheData {
     value_flow: ValueFlow,
-    proof_funds: ProofFunds,
+    proof_funds: ShardFeeCreated,
     #[cfg(feature = "block-creator-stats")]
     creators: Vec<everscale_types::cell::HashBytes>,
 }
@@ -1004,10 +1003,10 @@ impl ShardBlocksCacheData {
         self.value_flow = candidate.value_flow.clone();
 
         self.proof_funds
-            .fees_collected
+            .fees
             .try_add_assign(&candidate.value_flow.fees_collected)?;
         self.proof_funds
-            .funds_created
+            .create
             .try_add_assign(&candidate.value_flow.created)?;
 
         #[cfg(feature = "block-creator-stats")]

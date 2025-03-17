@@ -351,19 +351,13 @@ impl IntAdrExt for IntAddr {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ProofFunds {
-    pub fees_collected: CurrencyCollection,
-    pub funds_created: CurrencyCollection,
-}
-
 #[derive(Debug, Clone)]
 pub struct TopBlockDescription {
     pub block_id: BlockId,
     pub block_info: BlockInfo,
     pub processed_to_anchor_id: u32,
     pub value_flow: ValueFlow,
-    pub proof_funds: ProofFunds,
+    pub proof_funds: ShardFeeCreated,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
     pub processed_to: ProcessedTo,
