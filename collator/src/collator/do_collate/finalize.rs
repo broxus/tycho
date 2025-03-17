@@ -21,6 +21,7 @@ use tycho_util::FastHashMap;
 use super::phase::{Phase, PhaseState};
 use super::PrevData;
 use crate::collator::debug_info::BlockDebugInfo;
+use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
@@ -59,10 +60,13 @@ impl Phase<FinalizeState> {
         &mut self,
         messages_reader: MessagesReader<EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Result<(
-        FinalizeMessagesReaderResult,
-        impl FnOnce() -> Result<Duration>,
-    )> {
+    ) -> Result<
+        (
+            FinalizeMessagesReaderResult,
+            impl FnOnce() -> Result<Duration>,
+        ),
+        CollatorError,
+    > {
         let labels = [("workchain", self.state.shard_id.workchain().to_string())];
 
         let prev_hash = self
@@ -106,9 +110,33 @@ impl Phase<FinalizeState> {
                 continue;
             }
 
+            let diff_info = mq_adapter
+                .get_diff_info(
+                    &top_shard_block.shard,
+                    top_shard_block.seqno,
+                    DiffZone::Both,
+                )?
+                // TODO: now we cancel collation if diff was not found
+                //      but this may hide an issue with diff saving in the regular work
+                //      so it is better to cancel all active collations when we
+                //      clean uncommitted queue state on block mismatch
+                .ok_or_else(|| {
+                    tracing::warn!(target: tracing_targets::COLLATOR,
+                        "finalize_messages_reader: cannot get diff with stats from queue for block {}",
+                        top_shard_block.as_short_id(),
+                    );
+                    CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
+                        top_shard_block.as_short_id(),
+                    ))
+                })?;
+
             diffs_info.insert(
                 top_shard_block.shard,
-                mq_adapter.get_router_and_statistics(&top_shard_block.as_short_id(), 0)?,
+                mq_adapter.get_router_and_statistics(
+                    &top_shard_block.as_short_id(),
+                    diff_info,
+                    0,
+                )?,
             );
         }
 

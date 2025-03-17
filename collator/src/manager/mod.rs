@@ -868,6 +868,8 @@ where
                     }
                 }
 
+                self.mq_adapter.clear_uncommitted_state()?;
+
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
                     ?store_res,
@@ -1221,6 +1223,8 @@ where
                 }
             }
 
+            self.mq_adapter.clear_uncommitted_state()?;
+
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
                 "saved block from bc to cache",
@@ -1539,9 +1543,6 @@ where
         } else {
             FastHashMap::default()
         };
-
-        // clear uncommitted state before applying diffs
-        self.mq_adapter.clear_uncommitted_state()?;
 
         // try load required previous queue diffs
         for (shard_id, min_processed_to) in &min_processed_to_by_shards {
