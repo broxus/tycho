@@ -2,8 +2,9 @@ use std::collections::hash_map;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use everscale_types::models::*;
+use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use phase::{ActualState, Phase};
@@ -27,7 +28,7 @@ use super::types::{
 use super::{CollatorStdImpl, ForceMasterCollation};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::error::{CollationCancelReason, CollatorError};
-use crate::collator::types::RandSeed;
+use crate::collator::types::{PartialValueFlow, RandSeed};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -475,71 +476,95 @@ impl CollatorStdImpl {
         Ok(start_lt)
     }
 
-    fn update_value_flow(
-        is_masterchain: bool,
+    fn init_value_flow(
         config: &BlockchainConfig,
         old_global_balance: &CurrencyCollection,
         prev_total_balance: &CurrencyCollection,
         total_validator_fees: &CurrencyCollection,
         collation_data: &mut BlockCollationData,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::COLLATOR, "update_value_flow");
+        tracing::trace!(target: tracing_targets::COLLATOR, "init_value_flow");
 
-        if is_masterchain {
-            collation_data.value_flow.created.tokens = config.get_block_creation_reward(true)?;
+        let mut value_flow = PartialValueFlow::default();
 
-            collation_data.value_flow.recovered = collation_data.value_flow.created.clone();
-            collation_data
-                .value_flow
-                .recovered
-                .try_add_assign(&collation_data.value_flow.fees_collected)?;
-            collation_data
-                .value_flow
-                .recovered
-                .try_add_assign(total_validator_fees)?;
+        if collation_data.block_id_short.is_masterchain() {
+            // Burn a fraction of shard fees (except the created part).
+            let shard = collation_data.shard_fees.root_extra();
+            let simple_shard_fees = shard.fees.checked_sub(&shard.create)?.tokens;
+            let burned = config
+                .get_burning_config()
+                .unwrap_or_default()
+                .compute_burned_fees(simple_shard_fees)?;
+            value_flow.burned = burned.into();
 
-            match config.get_fee_collector_address() {
-                Err(_) => {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "fee recovery disabled (no collector smart contract defined in configuration)",
-                    );
-                    collation_data.value_flow.recovered = CurrencyCollection::default();
-                }
-                Ok(_addr) => {
-                    const RECOVER_BASE_THRESHOLD: u128 = 1_000_000_000;
+            // Collect shard fees.
+            value_flow.fees_collected = shard.fees.clone();
+            value_flow.fees_collected.try_sub_assign_tokens(burned)?;
 
-                    let gas_price = config.get_gas_prices(true)?.gas_price;
-                    let gas_price_factor = compute_gas_price_factor(true, gas_price)?;
-                    let threshold = apply_price_factor(RECOVER_BASE_THRESHOLD, gas_price_factor);
+            // Create block reward.
+            let created = config.get_block_creation_reward(true)?;
+            value_flow.created = created.into();
 
-                    if collation_data.value_flow.recovered.tokens.into_inner() < threshold {
-                        tracing::debug!(target: tracing_targets::COLLATOR,
-                            "fee recovery skipped ({:?})", collation_data.value_flow.recovered,
-                        );
-                        collation_data.value_flow.recovered = CurrencyCollection::default();
-                    }
-                }
-            };
+            // Try to recover accumulated fees.
+            value_flow.recovered =
+                Self::compute_recovered_amount(config, created, &shard.fees, total_validator_fees)?;
 
-            collation_data.value_flow.minted =
-                Self::compute_minted_amount(config, old_global_balance)?;
-
-            if collation_data.value_flow.minted != CurrencyCollection::ZERO
-                && config.get_minter_address().is_err()
-            {
-                tracing::warn!(target: tracing_targets::COLLATOR,
-                    "minting of {:?} disabled: no minting smart contract defined",
-                    collation_data.value_flow.minted,
-                );
-                collation_data.value_flow.minted = CurrencyCollection::default();
-            }
+            // Mint new tokens based on the config.
+            value_flow.minted = Self::compute_minted_amount(config, old_global_balance)?;
         } else {
-            collation_data.value_flow.created.tokens = config.get_block_creation_reward(false)?;
-            collation_data.value_flow.created.tokens >>=
-                collation_data.block_id_short.shard.prefix_len() as u8;
+            // Create block reward.
+            let mut created = config.get_block_creation_reward(false)?;
+            created >>= collation_data.block_id_short.shard.prefix_len() as u8;
+            value_flow.created = created.into();
         }
-        collation_data.value_flow.from_prev_block = prev_total_balance.clone();
+
+        // Save previous shard balance.
+        value_flow.from_prev_block = prev_total_balance.clone();
+
+        // Collect block reward.
+        value_flow
+            .fees_collected
+            .try_add_assign(&value_flow.created)?;
+
+        // Apply value flow.
+        collation_data.value_flow = value_flow;
         Ok(())
+    }
+
+    fn compute_recovered_amount(
+        config: &BlockchainConfig,
+        created: Tokens,
+        shard_fees: &CurrencyCollection,
+        total_validator_fees: &CurrencyCollection,
+    ) -> Result<CurrencyCollection> {
+        const RECOVERY_BASE_THRESHOLD: u128 = 1_000_000_000;
+
+        let mut recovered = total_validator_fees.clone();
+        recovered.try_add_assign(shard_fees)?;
+        recovered.try_add_assign_tokens(created)?;
+
+        match config.get_fee_collector_address() {
+            Ok(_addr) => {
+                let gas_price = config.get_gas_prices(true)?.gas_price;
+                let gas_price_factor = compute_gas_price_factor(true, gas_price)?;
+                let threshold = apply_price_factor(RECOVERY_BASE_THRESHOLD, gas_price_factor);
+
+                if recovered.tokens.into_inner() < threshold {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "fee recovery skipped ({recovered:?})",
+                    );
+                    recovered = CurrencyCollection::ZERO;
+                }
+            }
+            Err(_) => {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "fee recovery disabled (no collector smart contract defined in configuration)",
+                );
+                recovered = CurrencyCollection::ZERO;
+            }
+        };
+
+        Ok(recovered)
     }
 
     fn compute_minted_amount(
@@ -548,44 +573,36 @@ impl CollatorStdImpl {
     ) -> Result<CurrencyCollection> {
         tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount");
 
-        let mut to_mint = CurrencyCollection::default();
-
-        let to_mint_cp = match config.get::<ConfigParam7>() {
-            Ok(Some(v)) => v,
-            _ => {
-                tracing::warn!(target: tracing_targets::COLLATOR,
-                    "Can't get config param 7 (to_mint)",
-                );
-                return Ok(to_mint);
-            }
+        let Some(target_ec) = config.get::<ConfigParam7>()? else {
+            tracing::warn!(target: tracing_targets::COLLATOR,
+                "Can't get config param 7 (to_mint)",
+            );
+            return Ok(CurrencyCollection::ZERO);
         };
 
-        for item in to_mint_cp.as_dict().iter() {
-            let (key, amount) = item?;
-            let amount2 = old_global_balance
-                .other
-                .as_dict()
-                .get(key)?
-                .unwrap_or_default();
-            if amount > amount2 {
-                let delta = amount.checked_sub(&amount2).ok_or_else(|| {
-                    anyhow!(
-                        "amount {:?} should sub amount2 {:?} without overflow",
-                        amount,
-                        amount2,
-                    )
-                })?;
+        let mut minted = ExtraCurrencyCollection::new();
+
+        let global_ec = old_global_balance.other.as_dict();
+        for item in target_ec.as_dict().iter() {
+            let (id, target) = item?;
+            let global = global_ec.get(id)?.unwrap_or_default();
+
+            if let Some(delta) = target.checked_sub(&global) {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "currency #{}: existing {:?}, required {:?}, to be minted {:?}",
-                    key, amount2, amount, delta,
+                    "currency #{id}: existing {global}, required {target}, \
+                    to be minted {delta}",
                 );
-                if key != 0 {
-                    to_mint.other.as_dict_mut().set(key, delta)?;
+
+                if id != 0 && !delta.is_zero() {
+                    minted.as_dict_mut().set(id, delta)?;
                 }
             }
         }
 
-        Ok(to_mint)
+        Ok(CurrencyCollection {
+            tokens: Tokens::ZERO,
+            other: minted,
+        })
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
@@ -691,14 +708,6 @@ impl CollatorStdImpl {
             #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }
-
-        let shard_fees = collation_data_builder.shard_fees.root_extra().clone();
-
-        collation_data_builder
-            .value_flow
-            .fees_collected
-            .try_add_assign(&shard_fees.fees)?;
-        collation_data_builder.value_flow.fees_imported = shard_fees.fees;
 
         Ok(())
     }
@@ -808,8 +817,7 @@ impl CollatorStdImpl {
 
         // compute created / minted / recovered / from_prev_block
         let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
-        Self::update_value_flow(
-            is_masterchain,
+        Self::init_value_flow(
             &mc_data.config,
             &mc_data.global_balance,
             prev_total_balance,

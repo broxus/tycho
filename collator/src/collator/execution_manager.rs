@@ -495,6 +495,7 @@ fn execute_ordinary_transaction_impl(
             out_msgs: output.transaction_meta.out_msgs,
             gas_used: output.transaction_meta.gas_used,
             next_lt: output.transaction_meta.next_lt,
+            burned: output.burned,
         }),
         in_message,
     })
@@ -545,5 +546,6 @@ fn execute_ticktock_transaction(
         out_msgs: output.transaction_meta.out_msgs,
         gas_used: output.transaction_meta.gas_used,
         next_lt: output.transaction_meta.next_lt,
+        burned: output.burned,
     }))
 }

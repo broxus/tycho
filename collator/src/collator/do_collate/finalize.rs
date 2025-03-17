@@ -225,7 +225,9 @@ impl Phase<FinalizeState> {
             .finalize
             .clone();
 
-        let shard = self.state.collation_data.block_id_short.shard;
+        let collation_data = &mut self.state.collation_data;
+
+        let shard = collation_data.block_id_short.shard;
 
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
@@ -242,7 +244,7 @@ impl Phase<FinalizeState> {
         // Compute a masterchain block seqno which will reference this block.
         let ref_by_mc_seqno = if is_masterchain {
             // The block itself for the masterchain
-            self.state.collation_data.block_id_short.seqno
+            collation_data.block_id_short.seqno
         } else {
             // And the next masterchain block for shards
             self.state.mc_data.block_id.seqno + 1
@@ -264,7 +266,7 @@ impl Phase<FinalizeState> {
                     "tycho_collator_finalize_build_in_msgs_time",
                     labels,
                 );
-                in_msgs_res = Self::build_in_msgs(&self.state.collation_data.in_msgs);
+                in_msgs_res = Self::build_in_msgs(&collation_data.in_msgs);
                 build_in_msgs_elapsed = histogram.finish();
             });
             s.spawn(|_| {
@@ -272,7 +274,7 @@ impl Phase<FinalizeState> {
                     "tycho_collator_finalize_build_out_msgs_time",
                     labels,
                 );
-                out_msgs_res = Self::build_out_msgs(&self.state.collation_data.out_msgs);
+                out_msgs_res = Self::build_out_msgs(&collation_data.out_msgs);
                 build_out_msgs_elapsed = histogram.finish();
             });
 
@@ -294,36 +296,25 @@ impl Phase<FinalizeState> {
             histogram_build_account_blocks_and_messages.finish();
 
         let processed_accounts = processed_accounts_res?;
-        self.state.collation_data.accounts_count = processed_accounts.accounts_len as u64;
+        collation_data.accounts_count = processed_accounts.accounts_len as u64;
         let in_msgs = in_msgs_res?;
         let out_msgs = out_msgs_res?;
 
         // TODO: update new_config_opt from hard fork
-        // calc value flow
-        let mut value_flow = self.state.collation_data.value_flow.clone();
 
-        value_flow.imported = in_msgs.root_extra().value_imported.clone();
-        value_flow.exported = out_msgs.root_extra().clone();
-        value_flow.fees_collected = processed_accounts.account_blocks.root_extra().clone();
-        value_flow
-            .fees_collected
-            .try_add_assign_tokens(in_msgs.root_extra().fees_collected)?;
-        value_flow
-            .fees_collected
-            .try_add_assign(&value_flow.fees_imported)?;
-        value_flow
-            .fees_collected
-            .try_add_assign(&value_flow.created)?;
-        value_flow.to_next_block = processed_accounts
-            .shard_accounts
-            .root_extra()
-            .balance
-            .clone();
+        // Compute value flow.
+        let value_flow = collation_data.finalize_value_flow(
+            &processed_accounts.account_blocks,
+            &processed_accounts.shard_accounts,
+            &in_msgs,
+            &out_msgs,
+            &self.state.mc_data.config,
+        )?;
 
+        // Validate value flow with simple rules.
         if collator_config.check_value_flow {
             Self::check_value_flow(
                 &value_flow,
-                is_masterchain,
                 &self.state.collation_data,
                 &self.state.mc_data.config,
                 &self.state.prev_shard_data,
@@ -1175,10 +1166,8 @@ impl Phase<FinalizeState> {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn check_value_flow(
         value_flow: &ValueFlow,
-        is_masterchain: bool,
         collation_data: &BlockCollationData,
         config: &BlockchainConfig,
         prev_shard_data: &PrevData,
@@ -1186,139 +1175,151 @@ impl Phase<FinalizeState> {
         out_msgs: &OutMsgDescr,
         processed_accounts: &ProcessedAccounts,
     ) -> Result<()> {
-        if !is_masterchain && value_flow.minted != CurrencyCollection::default() {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                is invalid (non-zero minted value in a non-masterchain block)",
-                collation_data.block_id_short
-            )
-        }
-        if !is_masterchain && value_flow.recovered != CurrencyCollection::default() {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                is invalid (non-zero recovered value in a non-masterchain block)",
-                collation_data.block_id_short
-            )
-        }
-        if value_flow.recovered != CurrencyCollection::default()
-            && collation_data.recover_create_msg.is_none()
-        {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                has a non-zero recovered fees value, but there is no recovery InMsg",
-                collation_data.block_id_short
-            )
-        }
-        if value_flow.recovered == CurrencyCollection::default()
-            && collation_data.recover_create_msg.is_some()
-        {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                has a zero recovered fees value, but there is a recovery InMsg",
-                collation_data.block_id_short
-            )
-        }
-        if value_flow.minted != CurrencyCollection::default() && collation_data.mint_msg.is_none() {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                has a non-zero minted value, but there is no mint InMsg",
-                collation_data.block_id_short
-            )
-        }
-        if value_flow.minted == CurrencyCollection::default() && collation_data.mint_msg.is_some() {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                has a zero minted value, but there is a mint InMsg",
-                collation_data.block_id_short
-            )
-        }
+        let is_masterchain = collation_data.block_id_short.is_masterchain();
 
-        let mut create_fee = config
-            .get_block_creation_reward(is_masterchain)
-            .unwrap_or_default();
-        create_fee >>= collation_data.block_id_short.shard.prefix_len() as u8;
-        if value_flow.created.tokens != create_fee {
-            anyhow::bail!(
-                "ValueFlow of block {} declares block creation fee {}, \
-                but the current configuration expects it to be {}",
-                collation_data.block_id_short,
-                value_flow.created.tokens,
-                create_fee
-            )
-        }
-        if value_flow.fees_imported != CurrencyCollection::default() && !is_masterchain {
-            anyhow::bail!(
-                "ValueFlow of block {} \
-                is invalid (non-zero fees_imported in a non-masterchain block)",
+        // Fees recovery.
+        if value_flow.recovered.is_zero() {
+            anyhow::ensure!(
+                collation_data.recover_create_msg.is_none(),
+                "ValueFlow of block {} has no recovered fees, \
+                but there is a recovery InMsg",
                 collation_data.block_id_short
-            )
-        }
-
-        let from_prev_block = prev_shard_data
-            .observable_accounts()
-            .root_extra()
-            .balance
-            .clone();
-        if from_prev_block != value_flow.from_prev_block {
-            anyhow::bail!(
-                "ValueFlow for {} declares from_prev_blk={} \
-                but the sum over all accounts present in the previous state is {}",
-                collation_data.block_id_short,
-                value_flow.from_prev_block.tokens,
-                from_prev_block.tokens
-            )
-        }
-        let to_next_block = processed_accounts
-            .shard_accounts
-            .root_extra()
-            .balance
-            .clone();
-        if to_next_block != value_flow.to_next_block {
-            anyhow::bail!(
-                "ValueFlow for {} declares to_next_blk={} but the sum over all accounts \
-                present in the new state is {}",
-                collation_data.block_id_short,
-                value_flow.to_next_block.tokens,
-                to_next_block.tokens
-            )
-        }
-
-        let imported = in_msgs.root_extra().value_imported.clone();
-        if imported != value_flow.imported {
-            anyhow::bail!(
-                "ValueFlow for {} declares imported={} but the sum over all inbound messages \
-                listed in InMsgDescr is {}",
-                collation_data.block_id_short,
-                value_flow.imported.tokens,
-                imported.tokens
+            );
+        } else {
+            anyhow::ensure!(
+                is_masterchain,
+                "ValueFlow of block {} is invalid \
+                (non-zero recovered value in a non-masterchain block)",
+                collation_data.block_id_short
+            );
+            anyhow::ensure!(
+                collation_data.recover_create_msg.is_some(),
+                "ValueFlow of block {} has recovered fees, \
+                but there is no recovery InMsg",
+                collation_data.block_id_short
             );
         }
-        let exported = out_msgs.root_extra().clone();
-        if exported != value_flow.exported {
-            anyhow::bail!(
-                "ValueFlow for {} declares exported={} but the sum over all outbound messages \
-                listed in OutMsgDescr is {}",
-                collation_data.block_id_short,
-                value_flow.exported.tokens,
-                exported.tokens
-            )
+
+        // Minting.
+        if value_flow.minted.is_zero() {
+            anyhow::ensure!(
+                collation_data.mint_msg.is_none(),
+                "ValueFlow of block {} has a zero minted value, \
+                but there is a mint InMsg",
+                collation_data.block_id_short
+            );
+        } else {
+            anyhow::ensure!(
+                is_masterchain,
+                "ValueFlow of block {} is invalid \
+                (non-zero minted value in a non-masterchain block)",
+                collation_data.block_id_short
+            );
+            anyhow::ensure!(
+                collation_data.mint_msg.is_some(),
+                "ValueFlow of block {} has a non-zero minted value, \
+                but there is no mint InMsg",
+                collation_data.block_id_short
+            );
         }
 
-        let transaction_fees = processed_accounts.account_blocks.root_extra().clone();
+        // Burning.
+        anyhow::ensure!(
+            is_masterchain || value_flow.burned.is_zero(),
+            "ValueFlow of block {} is invalid \
+            (non-zero burned in a non-masterchain block)",
+            collation_data.block_id_short
+        );
+
+        // Block creation reward.
+        let mut created = config
+            .get_block_creation_reward(is_masterchain)
+            .unwrap_or_default();
+        created >>= collation_data.block_id_short.shard.prefix_len() as u8;
+        anyhow::ensure!(
+            value_flow.created == CurrencyCollection::from(created),
+            "ValueFlow of block {} declares block creation reward {}, \
+            but the current configuration expects it to be {}",
+            collation_data.block_id_short,
+            value_flow.created.tokens,
+            created
+        );
+
+        // Imported shard fees.
+        anyhow::ensure!(
+            is_masterchain || value_flow.fees_imported.is_zero(),
+            "ValueFlow of block {} is invalid \
+            (non-zero fees_imported in a non-masterchain block)",
+            collation_data.block_id_short
+        );
+
+        // Previous total shard balance.
+        let from_prev_block = &prev_shard_data.observable_accounts().root_extra().balance;
+        anyhow::ensure!(
+            value_flow.from_prev_block == *from_prev_block,
+            "ValueFlow for {} declares from_prev_block={}, \
+            but the total balance present in the previous state is {}",
+            collation_data.block_id_short,
+            value_flow.from_prev_block.tokens,
+            from_prev_block.tokens
+        );
+
+        // Next total shard balance.
+        let to_next_block = &processed_accounts.shard_accounts.root_extra().balance;
+        anyhow::ensure!(
+            value_flow.to_next_block == *to_next_block,
+            "ValueFlow for {} declares to_next_block={}, \
+            but the total balance present in the new state is {}",
+            collation_data.block_id_short,
+            value_flow.to_next_block.tokens,
+            to_next_block.tokens
+        );
+
+        // Imported messages value.
+        let imported = &in_msgs.root_extra().value_imported;
+        anyhow::ensure!(
+            value_flow.imported == *imported,
+            "ValueFlow for {} declares imported={}, \
+            but the total inbound messages value from InMsgDescr is {}",
+            collation_data.block_id_short,
+            value_flow.imported.tokens,
+            imported.tokens
+        );
+
+        // Exported messages value.
+        let exported = out_msgs.root_extra();
+        anyhow::ensure!(
+            value_flow.exported == *exported,
+            "ValueFlow for {} declares exported={}, \
+            but the total outbound messages value from OutMsgDescr is {}",
+            collation_data.block_id_short,
+            value_flow.exported.tokens,
+            exported.tokens
+        );
+
+        // Fees collected in this block.
+        let transaction_fees = processed_accounts.account_blocks.root_extra();
         let in_msgs_fees = in_msgs.root_extra().fees_collected;
-        let mut expected_fees = transaction_fees.clone();
-        expected_fees.try_add_assign_tokens(in_msgs_fees)?;
-        expected_fees.try_add_assign_tokens(value_flow.fees_imported.tokens)?;
-        expected_fees.try_add_assign_tokens(value_flow.created.tokens)?;
+        let mut fees_collected = transaction_fees.clone();
+        fees_collected.try_add_assign_tokens(in_msgs_fees)?;
+        fees_collected.try_add_assign_tokens(value_flow.fees_imported.tokens)?;
+        fees_collected.try_add_assign_tokens(value_flow.created.tokens)?;
 
-        if value_flow.fees_collected != expected_fees {
-            anyhow::bail!("ValueFlow for {} declares fees_collected={} but the total message import fees are {}, \
-                the total transaction fees are {}, creation fee for this block is {} \
-                and the total imported fees from shards are {} with a total of {}", collation_data.block_id_short,
-                    value_flow.fees_collected.tokens, in_msgs_fees, transaction_fees.tokens,
-                    value_flow.created.tokens, value_flow.fees_imported.tokens, expected_fees.tokens)
-        }
+        anyhow::ensure!(
+            value_flow.fees_collected == fees_collected,
+            "ValueFlow for {} declares fees_collected={}, \
+            but the computed amount is {}, where \
+            transaction_fees={}, in_msgs_fees={}, fees_imported={} and created={}",
+            collation_data.block_id_short,
+            value_flow.fees_collected.tokens,
+            fees_collected.tokens,
+            transaction_fees.tokens,
+            in_msgs_fees,
+            value_flow.fees_imported.tokens,
+            value_flow.created.tokens,
+        );
 
+        // Validate balance delta.
         if !value_flow.validate()? {
             anyhow::bail!(
                 "ValueFlow for {} \
