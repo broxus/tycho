@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
@@ -88,10 +88,11 @@ where
     fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get diffs tail len from uncommitted state and committed state
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
-    /// Get partition router and statistics for the specified block
+    /// Get partition router and statistics for the specified block and diff
     fn get_router_and_statistics(
         &self,
         block_id_short: &BlockIdShort,
+        diff_info: DiffInfo,
         partition: QueuePartitionIdx,
     ) -> Result<(PartitionRouter, DiffStatistics)>;
 }
@@ -323,22 +324,20 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn get_router_and_statistics(
         &self,
         block_id_short: &BlockIdShort,
+        diff_info: DiffInfo,
         partition: QueuePartitionIdx,
     ) -> Result<(PartitionRouter, DiffStatistics)> {
         let start_time = std::time::Instant::now();
-        let diff = self
-            .get_diff_info(&block_id_short.shard, block_id_short.seqno, DiffZone::Both)?
-            .ok_or_else(|| anyhow!("Diff for block {} not found", block_id_short))?;
 
         let partition_router = PartitionRouter::with_partitions(
-            &diff.router_partitions_src,
-            &diff.router_partitions_dst,
+            &diff_info.router_partitions_src,
+            &diff_info.router_partitions_dst,
         );
 
         let statistics_range = QueueShardRange {
             shard_ident: block_id_short.shard,
-            from: diff.min_message,
-            to: diff.max_message,
+            from: diff_info.min_message,
+            to: diff_info.max_message,
         };
 
         let queue_statistics = self.get_statistics(partition, &[statistics_range])?;
@@ -348,8 +347,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
         let diff_statistics = DiffStatistics::new(
             block_id_short.shard,
-            diff.min_message,
-            diff.max_message,
+            diff_info.min_message,
+            diff_info.max_message,
             diff_statistics,
             queue_statistics.shard_messages_count(),
         );
