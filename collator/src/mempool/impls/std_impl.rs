@@ -7,7 +7,7 @@ mod state_update_queue;
 
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -77,7 +77,7 @@ impl MempoolAdapterStdImpl {
         fun(&mut config_guard.builder)
     }
 
-    fn handle_state_update(
+    async fn handle_state_update(
         &self,
         config_guard: &mut ConfigAdapter,
         new_cx: &StateUpdateContext,
@@ -90,9 +90,29 @@ impl MempoolAdapterStdImpl {
                 "Processing state update from mc block",
             );
 
-            ConfigAdapter::apply_prev_vset(engine.handle(), new_cx)?;
-            ConfigAdapter::apply_curr_vset(engine.handle(), new_cx)?;
-            ConfigAdapter::apply_next_vset(engine.handle(), new_cx);
+            // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
+            if engine.handle().merged_conf().genesis_info() == new_cx.consensus_info.genesis_info {
+                ConfigAdapter::apply_prev_vset(engine.handle(), new_cx)?;
+                ConfigAdapter::apply_curr_vset(engine.handle(), new_cx)?;
+                ConfigAdapter::apply_next_vset(engine.handle(), new_cx);
+                return Ok(());
+            }
+
+            // Genesis is changed at runtime - restart immediately:
+            // block is signed by majority, so old mempool session and its anchors are not needed
+
+            let engine = (config_guard.engine_running.take())
+                .context("cannot happen: engine must be started")?;
+            self.cache.reset();
+            engine.stop().await;
+
+            // a new genesis is created even when overlay-related part of config stays the same
+            (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
+            // so config simultaneously changes with genesis via mempool restart
+            (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
+
+            let merged_config = config_guard.builder.build()?;
+            config_guard.engine_running = Some(self.run(&merged_config, new_cx)?);
 
             return Ok(());
         }
@@ -262,7 +282,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         let queued = config_guard.state_update_queue.drain(..=anchor_id)?;
 
         for ctx in queued {
-            self.handle_state_update(&mut config_guard, &ctx)?;
+            self.handle_state_update(&mut config_guard, &ctx).await?;
             self.top_known_anchor.set_max_raw(anchor_id);
         }
 
