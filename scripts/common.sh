@@ -1,3 +1,16 @@
+# NOTE: Should only be used for file modifications.
+# Example:
+#   jq_inplace <file> <jqargs>...
+function jq_inplace {
+    local file="$1"
+    shift 1
+    local data
+    data=$(cat "$file" | jq -e "$@")
+    if [ $? -eq 0 ]; then
+        echo -E "$data" > "$file"
+    fi
+}
+
 function is_number {
     if [ -n "$1" ] && [ "$1" -eq "$1" ] 2>/dev/null; then
         return 0
