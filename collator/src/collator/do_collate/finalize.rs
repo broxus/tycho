@@ -411,9 +411,18 @@ impl Phase<FinalizeState> {
             (None, Some(self.state.mc_data.make_block_ref()))
         };
 
+        // HACK: make every 3-d block incorrect on debug if env variable defined
+        let version =
+            if cfg!(debug_assertions) && self.state.collation_data.block_id_short.seqno % 3 == 0 {
+                let val = std::env::var("HACK_MISMATCH_BLOCK_VER").unwrap_or_default();
+                val.parse::<u32>().unwrap_or(0)
+            } else {
+                0
+            };
+
         // build block info
         let mut new_block_info = BlockInfo {
-            version: 0,
+            version,
             key_block: matches!(&mc_state_extra, Some(extra) if extra.after_key_block),
             shard: self.state.collation_data.block_id_short.shard,
             seqno: self.state.collation_data.block_id_short.seqno,
