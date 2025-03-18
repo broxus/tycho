@@ -487,7 +487,9 @@ impl CollatorStdImpl {
 
         let mut value_flow = PartialValueFlow::default();
 
-        if collation_data.block_id_short.is_masterchain() {
+        let block_id = collation_data.block_id_short;
+
+        if block_id.is_masterchain() {
             // Burn a fraction of shard fees (except the created part).
             let shard = collation_data.shard_fees.root_extra();
             let simple_shard_fees = shard.fees.checked_sub(&shard.create)?.tokens;
@@ -510,11 +512,12 @@ impl CollatorStdImpl {
                 Self::compute_recovered_amount(config, created, &shard.fees, total_validator_fees)?;
 
             // Mint new tokens based on the config.
-            value_flow.minted = Self::compute_minted_amount(config, old_global_balance)?;
+            value_flow.minted =
+                Self::compute_minted_amount(block_id.seqno, config, old_global_balance)?;
         } else {
             // Create block reward.
             let mut created = config.get_block_creation_reward(false)?;
-            created >>= collation_data.block_id_short.shard.prefix_len() as u8;
+            created >>= block_id.shard.prefix_len() as u8;
             value_flow.created = created.into();
         }
 
@@ -568,41 +571,59 @@ impl CollatorStdImpl {
     }
 
     fn compute_minted_amount(
+        mc_seqno: u32,
         config: &BlockchainConfig,
-        old_global_balance: &CurrencyCollection,
+        global_balance: &CurrencyCollection,
     ) -> Result<CurrencyCollection> {
         tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount");
 
-        let Some(target_ec) = config.get::<ConfigParam7>()? else {
-            tracing::warn!(target: tracing_targets::COLLATOR,
-                "Can't get config param 7 (to_mint)",
+        let mut minted = CurrencyCollection::ZERO;
+
+        // Mint using config param 7 (if any).
+        if let Some(target_ec) = config.get::<ConfigParam7>()? {
+            let global_ec = global_balance.other.as_dict();
+
+            for item in target_ec.as_dict().iter() {
+                let (id, target) = item?;
+                let global = global_ec.get(id)?.unwrap_or_default();
+
+                if let Some(delta) = target.checked_sub(&global) {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "Currency #{id}: existing={global}, required={target}, \
+                        delta={delta}",
+                    );
+
+                    if id != 0 && !delta.is_zero() {
+                        minted.other.as_dict_mut().set(id, delta)?;
+                    }
+                }
+            }
+        } else {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "Mint is disabled (config param 7 is missing)",
             );
-            return Ok(CurrencyCollection::ZERO);
-        };
+        }
 
-        let mut minted = ExtraCurrencyCollection::new();
+        // One-time mint.
+        if let Some(one_time) = config.get::<ConfigParam50>()? {
+            // TODO: Add check for some offset before `mint_at` to give some time
+            //       to react on config change?
 
-        let global_ec = old_global_balance.other.as_dict();
-        for item in target_ec.as_dict().iter() {
-            let (id, target) = item?;
-            let global = global_ec.get(id)?.unwrap_or_default();
-
-            if let Some(delta) = target.checked_sub(&global) {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "currency #{id}: existing {global}, required {target}, \
-                    to be minted {delta}",
-                );
-
-                if id != 0 && !delta.is_zero() {
-                    minted.as_dict_mut().set(id, delta)?;
+            if one_time.mint_at == mc_seqno {
+                if let Ok(new_minted) = minted.checked_add(&one_time.delta) {
+                    minted = new_minted;
+                } else {
+                    tracing::warn!(target: tracing_targets::COLLATOR,
+                        "Skipping one-time mint because of overflow, \
+                        existing={global_balance:?}, delta={:?}",
+                        one_time.delta,
+                    );
                 }
             }
         }
 
-        Ok(CurrencyCollection {
-            tokens: Tokens::ZERO,
-            other: minted,
-        })
+        // Done
+        Ok(minted)
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
