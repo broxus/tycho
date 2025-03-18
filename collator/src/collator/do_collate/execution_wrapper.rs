@@ -83,7 +83,7 @@ impl ExecutorWrapper {
 
         let mut result = vec![];
 
-        if !collator_data.value_flow.recovered.tokens.is_zero() {
+        if !collator_data.value_flow.recovered.is_zero() {
             let mut new_messages = self.create_special_transaction(
                 &config.get_fee_collector_address()?,
                 collator_data.value_flow.recovered.clone(),
@@ -93,7 +93,7 @@ impl ExecutorWrapper {
             result.append(&mut new_messages);
         }
 
-        if !collator_data.value_flow.minted.other.is_empty() {
+        if !collator_data.value_flow.minted.is_zero() {
             let mut new_messages = self.create_special_transaction(
                 &config.get_minter_address()?,
                 collator_data.value_flow.minted.clone(),
