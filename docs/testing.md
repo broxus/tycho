@@ -32,11 +32,11 @@ Replace `YOUR_GITHUB_USERNAME` with your GitHub username.
 ### How to test:
 
 ```bash
- scripts/run_network_tests.sh ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
+ scripts/run-network-tests.sh ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
  ```
 
 set `CI=true` to run tests using podman.
 
 ```bash
-CI=true scripts/run_network_tests.sh ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
+CI=true scripts/run-network-tests.sh ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
 ```

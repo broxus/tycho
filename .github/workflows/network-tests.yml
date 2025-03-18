@@ -42,4 +42,4 @@ jobs:
         run: |
           echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
       - name: Run network tests
-        run: ./scripts/run_network_tests.sh ${{ matrix.test_image }}
+        run: ./scripts/run-network-tests.sh ${{ matrix.test_image }}
