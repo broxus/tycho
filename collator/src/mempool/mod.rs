@@ -10,6 +10,7 @@ use tycho_network::PeerId;
 
 pub use self::impls::*;
 pub use self::state_update_context::*;
+use crate::types::processed_upto::BlockSeqno;
 
 mod impls {
     pub use self::std_impl::MempoolAdapterStdImpl;
@@ -62,7 +63,11 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// Process top processed to anchor reported by collation manager.
     /// Will manage mempool sync depth.
     /// Mempool should be ready to return this anchor and all next after it.
-    fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()>;
+    fn handle_top_processed_to_anchor(
+        &self,
+        mc_block_seqno: BlockSeqno,
+        anchor_id: MempoolAnchorId,
+    ) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
