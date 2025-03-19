@@ -498,22 +498,16 @@ where
         Ok(())
     }
 
+    /// * `first_required_diffs` - contains ids of known first required diffs for queue for each shard
     fn apply_block_queue_diff_from_entry_stuff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_entry: &BlockCacheEntry,
         min_processed_to: Option<&QueueKey>,
-        is_first: &mut bool,
+        first_required_diffs: &mut FastHashMap<ShardIdent, BlockId>,
     ) -> Result<()> {
-        if block_entry.block_id.seqno == 0 {
-            return Ok(());
-        }
+        let block_id = block_entry.block_id;
 
-        // skip already applied diff
-        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id())? {
-            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
-                queue_diff_block_id = %block_entry.block_id.as_short_id(),
-                "queue diff apply skipped because it is already applied",
-            );
+        if block_id.seqno == 0 {
             return Ok(());
         }
 
@@ -529,12 +523,24 @@ where
             if queue_diff.as_ref().max_message <= *min_pt {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     "Skipping diff for block {}: max_message {} <= min_processed_to {}",
-                    block_entry.block_id.as_short_id(),
+                    block_id.as_short_id(),
                     queue_diff.as_ref().max_message,
                     min_pt,
                 );
                 return Ok(());
             }
+        }
+
+        // skip already applied diff
+        if mq_adapter.is_diff_exists(&block_id.as_short_id())? {
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                queue_diff_block_id = %block_id.as_short_id(),
+                "queue diff apply skipped because it is already applied",
+            );
+            // if diff for block from bc already applied
+            // then we should check sequense for each next diff
+            first_required_diffs.insert(block_id.shard, BlockId::default());
+            return Ok(());
         }
 
         // load out_msg
@@ -560,10 +566,15 @@ where
             queue_diff.as_ref().max_message,
         );
 
-        let check_diff = if *is_first {
-            None
-        } else {
-            Some(DiffZone::Both)
+        let check_sequence = match first_required_diffs.get(&block_id.shard).copied() {
+            None => {
+                // if first required diff was not detected before
+                // we consider that current is first
+                first_required_diffs.insert(block_id.shard, block_id);
+                None
+            }
+            Some(id) if id == block_id => None,
+            _ => Some(DiffZone::Both),
         };
 
         mq_adapter
@@ -572,11 +583,9 @@ where
                 queue_diff.block_id().as_short_id(),
                 queue_diff.diff_hash(),
                 statistics,
-                check_diff,
+                check_sequence,
             )
             .context("apply_block_queue_diff_from_entry_stuff")?;
-
-        *is_first = false;
 
         Ok(())
     }
@@ -1544,7 +1553,12 @@ where
             FastHashMap::default()
         };
 
+        // load init block (from persistent state) to check if required diff was already applied from persistent
+        let init_mc_block_id = self.state_node_adapter.load_init_block_id();
+        let mut init_mc_block_reached_on = FastHashMap::new();
+
         // try load required previous queue diffs
+        let mut first_required_diffs = FastHashMap::new();
         for (shard_id, min_processed_to) in &min_processed_to_by_shards {
             let mut prev_queue_diffs = vec![];
             let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
@@ -1552,58 +1566,77 @@ where
             };
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
 
-            let mut is_first_diff = true;
-
             while let Some(prev_block_id) = prev_block_ids.pop_front() {
                 if prev_block_id.seqno == 0 {
                     continue;
                 }
 
+                // if diff is below top applied then skip
                 if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id) {
-                    // if required diff is below top applied then skip
                     if prev_block_id.seqno <= *border {
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                             prev_block_id = %prev_block_id.as_short_id(),
                             top_applied_seqno = border,
                             "previous queue diff skipped because it below top applied",
                         );
-                        // if we skip a diff for append to queue, then the first diff in the applicable range is not a true first diff
-                        is_first_diff = false;
+                        // if current diff is below top applied diff
+                        // then we should check sequense for each next diff
+                        first_required_diffs.insert(prev_block_id.shard, BlockId::default());
                         continue;
                     }
                 }
 
-                let init_mc_block_id = self.state_node_adapter.load_init_block_id();
-
+                // if diff is before init block (from persistent state)
+                // we do not need to apply it because queue was already restored from persistent
                 if let Some(init_mc_block_id) = init_mc_block_id {
+                    let mut skip_diff = false;
                     if prev_block_id.is_masterchain() {
                         if prev_block_id.seqno <= init_mc_block_id.seqno {
                             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                                 prev_block_id = %prev_block_id.as_short_id(),
                                 init_mc_block_id = %init_mc_block_id.as_short_id(),
-                                "queue diff apply skipped because it is below init block from persistent state",
+                                "master block queue diff apply skipped because it is below init block from persistent state",
                             );
-                            continue;
+                            skip_diff = true;
                         }
                     } else {
-                        let prev_shard_block_handle = self
-                            .state_node_adapter
-                            .load_block_handle(&prev_block_id)
-                            .await?
-                            .unwrap();
-                        let prev_ref_by_mc_seqno = prev_shard_block_handle.ref_by_mc_seqno();
-                        if prev_ref_by_mc_seqno <= init_mc_block_id.seqno {
+                        // check if we already reached init mc block before
+                        let mut init_mc_block_reached = matches!(
+                            init_mc_block_reached_on.get(&prev_block_id.shard),
+                            Some(reached_seqno) if prev_block_id.seqno <= *reached_seqno,
+                        );
+                        if !init_mc_block_reached {
+                            // for shard block we should check it's `ref_by_mc_seqno`
+                            let prev_shard_block_handle = self
+                                .state_node_adapter
+                                .load_block_handle(&prev_block_id)
+                                .await?
+                                .unwrap();
+                            let prev_ref_by_mc_seqno = prev_shard_block_handle.ref_by_mc_seqno();
+                            init_mc_block_reached = prev_ref_by_mc_seqno <= init_mc_block_id.seqno;
+                            if init_mc_block_reached {
+                                init_mc_block_reached_on
+                                    .insert(prev_block_id.shard, prev_block_id.seqno);
+                            }
+                        }
+                        if init_mc_block_reached {
                             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                                 prev_block_id = %prev_block_id.as_short_id(),
-                                prev_ref_by_mc_seqno,
                                 init_mc_block_id = %init_mc_block_id.as_short_id(),
-                                "queue diff apply skipped because it is below init block from persistent state",
+                                "shard block queue diff apply skipped because it is below init block from persistent state",
                             );
-                            continue;
+                            skip_diff = true;
                         }
+                    }
+                    if skip_diff {
+                        // if current diff is below init block
+                        // then we should check sequense for each next diff
+                        first_required_diffs.insert(prev_block_id.shard, BlockId::default());
+                        continue;
                     }
                 }
 
+                // load diff to check if it is required
                 let Some(queue_diff_stuff) =
                     self.state_node_adapter.load_diff(&prev_block_id).await?
                 else {
@@ -1629,6 +1662,10 @@ where
                     "check if diff required to restore queue working state on sync:",
                 );
                 if diff_required {
+                    // if next diff is not required
+                    // then current will be the first required
+                    first_required_diffs.insert(prev_block_id.shard, prev_block_id);
+
                     let block_stuff = self
                         .state_node_adapter
                         .load_block(&prev_block_id)
@@ -1662,10 +1699,10 @@ where
                 let statistics =
                     DiffStatistics::from_diff(&diff, block_id.shard, min_message, max_message);
 
-                let check_sequence = if is_first_diff {
-                    None
-                } else {
-                    Some(DiffZone::Both)
+                // we can skip the sequense check for the first required diff only
+                let check_sequence = match first_required_diffs.get(&block_id.shard) {
+                    Some(id) if *id == block_id => None,
+                    _ => Some(DiffZone::Both),
                 };
 
                 self.mq_adapter
@@ -1677,17 +1714,12 @@ where
                         check_sequence,
                     )
                     .context("sync_to_applied_mc_block")?;
-
-                is_first_diff = false;
             }
         }
 
         // sync all applied blocks
         // and refresh collation session by the last one
         // with re-init of collators state
-
-        let mut skip_check_map = FastHashMap::default();
-
         loop {
             // pop first applied mc block and sync
             // actually we can sync more mc blocks than known in applied_range
@@ -1712,11 +1744,7 @@ where
                     .into_iter()
                     .chain(subgraph.shard_blocks.iter())
                 {
-                    let is_first = skip_check_map
-                        .entry(block_entry.block_id.shard)
-                        .or_insert(true);
-
-                    // do not apply diff if block was collated
+                    // if diff is below top applied then skip
                     if let Some(border) =
                         queue_diffs_applied_to_top_blocks.get(&block_entry.block_id.shard)
                     {
@@ -1726,10 +1754,10 @@ where
                                 top_applied_seqno = border,
                                 "queue diff apply skipped because it is below top applied",
                             );
-
-                            // should check sequence because diff is not first
-                            *is_first = false;
-
+                            // if current diff is below top applied diff
+                            // then we should check sequense for each next diff
+                            first_required_diffs
+                                .insert(block_entry.block_id.shard, BlockId::default());
                             continue;
                         }
                     }
@@ -1741,7 +1769,7 @@ where
                         self.mq_adapter.clone(),
                         block_entry,
                         min_processed_to,
-                        is_first,
+                        &mut first_required_diffs,
                     )?;
                 }
             }
