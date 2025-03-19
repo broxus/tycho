@@ -407,6 +407,7 @@ where
         }
 
         self.detect_top_processed_to_anchor_and_notify_mempool_impl(
+            state.block_id().seqno,
             state
                 .shards()?
                 .as_vec()?
@@ -418,6 +419,7 @@ where
 
     fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
         &self,
+        mc_block_seqno: BlockSeqno,
         mc_top_shards: I,
         mc_processed_to_anchor_id: MempoolAnchorId,
     ) -> Result<()>
@@ -434,13 +436,14 @@ where
 
         );
 
-        self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)?;
+        self.notify_top_processed_to_anchor_to_mempool(mc_block_seqno, top_processed_to_anchor)?;
 
         Ok(())
     }
 
     fn notify_top_processed_to_anchor_to_mempool(
         &self,
+        mc_block_seqno: BlockSeqno,
         top_processed_to_anchor: MempoolAnchorId,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -449,7 +452,7 @@ where
         );
 
         self.mpool_adapter
-            .handle_top_processed_to_anchor(top_processed_to_anchor)?;
+            .handle_top_processed_to_anchor(mc_block_seqno, top_processed_to_anchor)?;
 
         self.mpool_adapter
             .clear_anchors_cache(top_processed_to_anchor)?;
@@ -1730,7 +1733,10 @@ where
                     .await?;
 
                 // handle top processed to anchor in mempool
-                self.notify_top_processed_to_anchor_to_mempool(mc_data.top_processed_to_anchor)?;
+                self.notify_top_processed_to_anchor_to_mempool(
+                    mc_data.block_id.seqno,
+                    mc_data.top_processed_to_anchor,
+                )?;
 
                 // report last "synced to" blocks to metrics
                 for synced_to_block_id in to_blocks_keys {
@@ -2754,11 +2760,11 @@ where
     /// 5. Clean up from cache
     /// 6. Process delayed master state update if exists
     /// 7. Notify top processed anchor to mempool if block commited by received from bc
-    async fn commit_valid_master_block(&self, block_id: &BlockId) -> Result<()> {
+    async fn commit_valid_master_block(&self, mc_block_id: &BlockId) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start to commit validated and valid master block ({})...",
-            block_id.as_short_id(),
+            mc_block_id.as_short_id(),
         );
 
         let histogram = HistogramGuard::begin("tycho_collator_commit_valid_master_block_time");
@@ -2775,7 +2781,7 @@ where
         // extract master block with all shard blocks if valid, and process them
         match self
             .blocks_cache
-            .extract_mc_block_subgraph_for_sync(block_id)
+            .extract_mc_block_subgraph_for_sync(mc_block_id)
         {
             McBlockSubgraphExtract::Extracted(McBlockSubgraph {
                 master_block,
@@ -2818,7 +2824,7 @@ where
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Master block subgraph is already extracted and cleaned up from cache ({}). Do nothing",
-                    block_id.as_short_id(),
+                    mc_block_id.as_short_id(),
                 );
             }
         }
@@ -2831,11 +2837,14 @@ where
         );
 
         // we can process delayed master state update now
-        self.process_delayed_mc_state_update(block_id).await?;
+        self.process_delayed_mc_state_update(mc_block_id).await?;
 
         // report last processed anchor to mempool
         if let Some(top_processed_to_anchor) = top_processed_to_anchor_to_notify {
-            self.notify_top_processed_to_anchor_to_mempool(top_processed_to_anchor)?;
+            self.notify_top_processed_to_anchor_to_mempool(
+                mc_block_id.seqno,
+                top_processed_to_anchor,
+            )?;
         }
 
         Ok(())
