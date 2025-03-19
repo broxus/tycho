@@ -3,6 +3,7 @@ name: Network Tests
 on:
   merge_group:
     branches: [master]
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -28,18 +29,25 @@ jobs:
           - test_name: one-to-many-internal-messages
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
             env:
-                TYCHO_BUILD_PROFILE: release_check
+              TYCHO_BUILD_PROFILE: release_check
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name == 'merge_group'
 
       - uses: ./.github/actions/init
+        if: github.event_name == 'merge_group'
         with:
           fake-procfs: true
 
       - name: Install just
         uses: extractions/setup-just@v2
+        if: github.event_name == 'merge_group'
+
       - name: Login to GHCR
+        if: github.event_name == 'merge_group'
         run: |
           echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
+
       - name: Run network tests
+        if: github.event_name == 'merge_group'
         run: ./scripts/run-network-tests.sh ${{ matrix.test_image }}
