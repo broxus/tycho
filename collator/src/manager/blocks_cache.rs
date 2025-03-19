@@ -213,6 +213,14 @@ impl BlocksCache {
         Ok(all_processed_to)
     }
 
+    /// If we have
+    /// ```
+    /// SB1-SB2-SB3-SB4-SB5
+    ///        \          \
+    ///         MB1--------MB2
+    /// ```
+    /// and MB2 is first applied
+    /// then will return `[MB1, SB2]`
     pub fn read_before_tail_ids_of_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,
