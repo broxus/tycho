@@ -24,6 +24,7 @@ use crate::mempool::{
     MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
+use crate::types::processed_upto::BlockSeqno;
 
 pub struct MempoolAdapterStdImpl {
     cache: Arc<Cache>,
@@ -283,7 +284,11 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(())
     }
 
-    fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
+    fn handle_top_processed_to_anchor(
+        &self,
+        _mc_block_seqno: BlockSeqno,
+        anchor_id: MempoolAnchorId,
+    ) -> Result<()> {
         self.top_known_anchor.set_max_raw(anchor_id);
         Ok(())
     }
