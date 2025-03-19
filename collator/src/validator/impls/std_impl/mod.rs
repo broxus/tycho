@@ -1,4 +1,3 @@
-use std::collections::btree_map::{self, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
+use indexmap::{self, IndexMap};
 use serde::{Deserialize, Serialize};
 use session::DebugLogValidatorSesssion;
 use tycho_util::{serde_helpers, FastHashMap};
@@ -13,7 +13,9 @@ use tycho_util::{serde_helpers, FastHashMap};
 use self::session::ValidatorSession;
 use crate::tracing_targets;
 use crate::validator::rpc::ExchangeSignaturesBackoff;
-use crate::validator::{AddSession, ValidationStatus, Validator, ValidatorNetworkContext};
+use crate::validator::{
+    AddSession, ValidationSessionId, ValidationStatus, Validator, ValidatorNetworkContext,
+};
 
 mod session;
 
@@ -99,7 +101,7 @@ impl Validator for ValidatorStdImpl {
         let shard_sessions = sessions.entry(info.shard_ident).or_default();
 
         match shard_sessions.entry(info.session_id) {
-            btree_map::Entry::Vacant(entry) => {
+            indexmap::map::Entry::Vacant(entry) => {
                 tracing::debug!(
                     target: tracing_targets::VALIDATOR,
                     session = ?DebugLogValidatorSesssion(&session),
@@ -108,9 +110,9 @@ impl Validator for ValidatorStdImpl {
                 entry.insert(session);
                 Ok(())
             }
-            btree_map::Entry::Occupied(_) => {
+            indexmap::map::Entry::Occupied(_) => {
                 anyhow::bail!(
-                    "validator session already exists: ({}, {})",
+                    "validator session already exists: ({}, {:?})",
                     info.shard_ident,
                     info.session_id
                 )
@@ -118,7 +120,11 @@ impl Validator for ValidatorStdImpl {
         }
     }
 
-    async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus> {
+    async fn validate(
+        &self,
+        session_id: ValidationSessionId,
+        block_id: &BlockId,
+    ) -> Result<ValidationStatus> {
         let session = 'session: {
             if let Some(shard_sessions) = self.inner.sessions.lock().get(&block_id.shard) {
                 if let Some(session) = shard_sessions.get(&session_id) {
@@ -127,8 +133,9 @@ impl Validator for ValidatorStdImpl {
             }
 
             anyhow::bail!(
-                "validator session not found: ({}, {session_id})",
-                block_id.shard
+                "validator session not found: ({}, {:?})",
+                block_id.shard,
+                session_id,
             );
         };
 
@@ -162,7 +169,7 @@ impl Validator for ValidatorStdImpl {
                     if *entry.key() < id {
                         // Fully cancel the session before removing it.
                         entry.get().cancel();
-                        entry.remove();
+                        entry.shift_remove();
                     } else {
                         break;
                     }
@@ -186,4 +193,5 @@ struct Inner {
 }
 
 type Sessions = FastHashMap<ShardIdent, ShardSessions>;
-type ShardSessions = BTreeMap<u32, ValidatorSession>;
+/// We use `IndexMap` because "subset short hash" component of session id is not sequential
+type ShardSessions = IndexMap<ValidationSessionId, ValidatorSession>;

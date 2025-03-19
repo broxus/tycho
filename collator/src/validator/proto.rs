@@ -11,8 +11,7 @@ pub struct OverlayIdData {
     pub zerostate_file_hash: [u8; 32],
     #[tl(with = "tycho_block_util::tl::shard_ident")]
     pub shard_ident: ShardIdent,
-    /// Timestamp of the corresponding validator set.
-    pub session_id: u32,
+    pub session_seqno: u32,
 }
 
 #[derive(Debug, Clone, TlRead, TlWrite)]

@@ -18,6 +18,7 @@ use tycho_util::FastHashMap;
 use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
 use crate::utils::block::detect_top_processed_to_anchor;
+use crate::validator::ValidationSessionId;
 
 pub mod processed_upto;
 
@@ -284,8 +285,26 @@ pub struct BlockStuffForSync {
     pub consensus_info: ConsensusInfo,
 }
 
-/// (`ShardIdent`, seqno)
-pub(crate) type CollationSessionId = (ShardIdent, u32);
+/// (`ShardIdent`, seqno, subset `short_hash`)
+pub(crate) type CollationSessionId = (ShardIdent, u32, u32);
+
+// pub(crate) trait SessionId {
+//     fn shard(&self) -> &ShardIdent;
+//     fn seqno(&self) -> u32;
+//     fn subset_short_hash(&self) -> u32;
+// }
+
+// impl SessionId for CollationSessionId {
+//     fn shard(&self) -> &ShardIdent {
+//         &self.0
+//     }
+//     fn seqno(&self) -> u32 {
+//         self.1
+//     }
+//     fn subset_short_hash(&self) -> u32 {
+//         self.2
+//     }
+// }
 
 #[derive(Clone)]
 pub struct CollationSessionInfo {
@@ -311,14 +330,20 @@ impl CollationSessionInfo {
     }
 
     pub fn id(&self) -> CollationSessionId {
-        (self.shard, self.seqno)
+        (self.shard, self.seqno, self.collators.short_hash)
     }
+
+    pub fn get_validation_session_id(&self) -> ValidationSessionId {
+        (self.seqno, self.collators.short_hash)
+    }
+
     pub fn shard(&self) -> ShardIdent {
         self.shard
     }
     pub fn seqno(&self) -> u32 {
         self.seqno
     }
+
     pub fn collators(&self) -> &ValidatorSubsetInfo {
         &self.collators
     }
