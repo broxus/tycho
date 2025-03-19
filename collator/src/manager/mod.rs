@@ -942,10 +942,11 @@ where
                 self.commit_valid_master_block(&block_id).await?;
             } else {
                 let validator = self.validator.clone();
-                let session_seqno = session_info.seqno();
+                let validation_session_id = session_info.get_validation_session_id();
                 let dispatcher = self.dispatcher.clone();
                 tokio::spawn(async move {
-                    let validation_result = validator.validate(session_seqno, &block_id).await;
+                    let validation_result =
+                        validator.validate(validation_session_id, &block_id).await;
 
                     match validation_result {
                         Ok(status) => {
@@ -2002,7 +2003,7 @@ where
             // self.mq_adapter.update_shards(split_merge_actions).await?;
         }
 
-        // find out the actual collation session seqno from master state
+        // find out the actual collation session start round from master state
         let current_session_seqno = mc_data.validator_info.catchain_seqno;
 
         // we need full validators set to define the subset for each session and to check if current node should collate
@@ -2053,7 +2054,7 @@ where
                 missed_shards_ids.remove(&shard_id);
 
                 // check if current node is in subset
-                let (subset, _) = get_validator_subset(shard_id)?;
+                let (subset, hash_short) = get_validator_subset(shard_id)?;
                 let local_pubkey = find_us_in_collators_set(&self.keypair, &subset);
 
                 if local_pubkey.is_none() {
@@ -2072,7 +2073,10 @@ where
                     hash_map::Entry::Occupied(entry) => {
                         let existing_session_info = entry.get().clone();
                         if local_pubkey.is_some() {
-                            if existing_session_info.seqno() >= current_session_seqno {
+                            // start new session when seqno changed or subset changed for the same seqno
+                            if existing_session_info.collators().short_hash == hash_short
+                                && existing_session_info.seqno() == current_session_seqno
+                            {
                                 sessions_to_keep.push((shard_id, existing_session_info, block_ids));
                             } else {
                                 to_finish_sessions.push(entry.remove());
@@ -2194,7 +2198,7 @@ where
             if shard_id.is_masterchain() {
                 self.validator.add_session(AddSession {
                     shard_ident: shard_id,
-                    session_id: new_session_info.seqno(),
+                    session_id: new_session_info.get_validation_session_id(),
                     start_block_seqno: next_block_id_short.seqno,
                     validators: &new_session_info.collators().validators,
                 })?;
