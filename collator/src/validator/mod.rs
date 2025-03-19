@@ -26,7 +26,11 @@ pub trait Validator: Send + Sync + 'static {
     fn add_session(&self, info: AddSession<'_>) -> Result<()>;
 
     /// Collects signatures for the specified block.
-    async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus>;
+    async fn validate(
+        &self,
+        session_id: ValidationSessionId,
+        block_id: &BlockId,
+    ) -> Result<ValidationStatus>;
 
     /// Cancels validation before the specified block.
     ///
@@ -43,11 +47,24 @@ pub struct ValidatorNetworkContext {
     pub zerostate_id: BlockId,
 }
 
+/// (seqno, subset `short_hash`)
+pub(super) type ValidationSessionId = (u32, u32);
+
+pub(super) trait CompositeValidationSessionId {
+    fn seqno(&self) -> u32;
+}
+
+impl CompositeValidationSessionId for ValidationSessionId {
+    fn seqno(&self) -> u32 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AddSession<'a> {
     pub shard_ident: ShardIdent,
     pub start_block_seqno: u32,
-    pub session_id: u32,
+    pub session_id: ValidationSessionId,
     pub validators: &'a [ValidatorDescription],
 }
 
