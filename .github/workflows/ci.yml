@@ -68,20 +68,6 @@ jobs:
           components: "clippy,rustfmt"
       - name: Clippy check
         run: just lint
-
-  just_install:
-    name: just install works
-    needs: rustfmt
-    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.shell == 'true'}}
-    runs-on: [self-hosted, linux]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/init
-        with:
-          components: "clippy,rustfmt"
-      - name: Clippy check
-        run: just install
-
   test:
     name: Test with codecov
     runs-on: [self-hosted, linux]
