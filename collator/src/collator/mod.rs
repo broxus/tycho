@@ -447,69 +447,54 @@ impl CollatorStdImpl {
         working_state: &WorkingState,
         anchors_proc_info: AnchorsProcessingInfo,
     ) -> Result<Vec<InitAnchorSource>, CollatorError> {
-        let import_init_anchors = match self
+        // get overrided genesis info if present or last know from state
+        let genesis_info = self
             .mempool_config_override
             .as_ref()
-            .map(|c| c.genesis_info)
-        {
-            // There may be cases when processed to anchor in shard is before anchor in master.
-            // We can produce incorrect shard block, then ignore it, take correct from bc and try to collate next one.
-            Some(new_genesis) if new_genesis.start_round > 0 => {
-                let import_init_anchors =
-                    if anchors_proc_info.processed_to_anchor_id <= new_genesis.start_round {
-                        if anchors_proc_info.processed_to_anchor_id == new_genesis.start_round {
-                            // when we start from new genesis we unable to import anchor on the start round
-                            // because mempool actually is starting from the next round
-                            // so we should not try to import init anchors
-                            false
-                        } else if self.shard_id.is_masterchain() {
-                            // if last processed_to anchor is before the start round for master,
-                            // then cancel collation because we need to receive more blocks from bc
-                            return Err(CollatorError::Cancelled(
-                                CollationCancelReason::AnchorNotFound(
-                                    anchors_proc_info.processed_to_anchor_id,
-                                ),
-                            ));
-                        } else {
-                            // last processed_to anchor in shard can be before last procssed in master
-                            // it is normal, so we should not cancel collation but we unable to import init anchors
-                            false
-                        }
-                    } else {
-                        // when last processed_to anchor is after genesis start round then we can import init anchors
-                        true
-                    };
+            .map_or(working_state.mc_data.consensus_info.genesis_info, |c| {
+                c.genesis_info
+            });
 
-                if !import_init_anchors {
-                    // needs to generate last imported anchor info
-                    let block_stuff = self
-                        .state_node_adapter
-                        .load_block(&anchors_proc_info.last_imported_in_block_id)
-                        .await?
-                        .unwrap();
-                    let created_by = block_stuff
-                        .load_extra()
-                        .map_err(|e| CollatorError::Anyhow(e.into()))?
-                        .created_by;
-                    let anchor_info = AnchorInfo {
-                        id: new_genesis.start_round,
-                        ct: anchors_proc_info.last_imported_chain_time,
-                        all_exts_count: 0,
-                        our_exts_count: 0,
-                        author: PeerId(created_by.0),
-                    };
-                    self.anchors_cache
-                        .set_last_imported_anchor_info(anchor_info);
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            ?genesis_info,
+            ?anchors_proc_info,
+            "check_and_import_init_anchors",
+        );
+
+        // There may be cases when processed to anchor in shard is before anchor in master.
+        // We can produce incorrect shard block, then ignore it, take correct from bc and try to collate the next one.
+        let import_init_anchors = if genesis_info.start_round > 0 {
+            if anchors_proc_info.processed_to_anchor_id <= genesis_info.start_round {
+                if anchors_proc_info.processed_to_anchor_id == genesis_info.start_round {
+                    // when we start from new genesis we unable to import anchor on the start round
+                    // because mempool actually is starting from the next round
+                    // so we should not try to import init anchors
+                    false
+                } else if self.shard_id.is_masterchain() {
+                    // if last processed_to anchor is before the start round for master,
+                    // then cancel collation because we need to receive more blocks from bc
+                    return Err(CollatorError::Cancelled(
+                        CollationCancelReason::AnchorNotFound(
+                            anchors_proc_info.processed_to_anchor_id,
+                        ),
+                    ));
+                } else {
+                    // last processed_to anchor in shard can be before last processed in master
+                    // it is normal, so we should not cancel collation but we unable to import init anchors
+                    // possibly we will produce incorrect shard block then take correct from bc and try to collate next one
+                    false
                 }
-
-                import_init_anchors
+            } else {
+                // when last processed_to anchor is after genesis start round then we can import init anchors
+                true
             }
-            _ => true,
+        } else {
+            // required to import init anchors when genesis is a zerostate
+            true
         };
 
         if import_init_anchors {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                next_block_id = %self.next_block_info,
                 "importing anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
                 anchors_proc_info.processed_to_anchor_id,
                 anchors_proc_info.processed_to_msgs_offset,
@@ -527,6 +512,28 @@ impl CollatorStdImpl {
             )
             .await
         } else {
+            // needs to set last imported anchor info into cache
+            // because nothing will be imported on init
+            // but we should be able to import next anchor for collation
+            let block_stuff = self
+                .state_node_adapter
+                .load_block(&anchors_proc_info.last_imported_in_block_id)
+                .await?
+                .unwrap();
+            let created_by = block_stuff
+                .load_extra()
+                .map_err(|e| CollatorError::Anyhow(e.into()))?
+                .created_by;
+            let anchor_info = AnchorInfo {
+                id: genesis_info.start_round,
+                ct: anchors_proc_info.last_imported_chain_time,
+                all_exts_count: 0,
+                our_exts_count: 0,
+                author: PeerId(created_by.0),
+            };
+            self.anchors_cache
+                .set_last_imported_anchor_info(anchor_info);
+
             Ok(vec![])
         }
     }
@@ -971,7 +978,7 @@ impl CollatorStdImpl {
                 // it means that no shard blocks were collated between masters
                 // because there were no messages for processing
                 // and we can omit top processed anchor from shard
-                // if it lower then top processed from master
+                // if it is lower then top processed from master
                 for (top_shard_id, top_shard_descr) in mc_data.shards.iter() {
                     if shard_id == top_shard_id {
                         if prev_block_id.seqno == top_shard_descr.seqno
