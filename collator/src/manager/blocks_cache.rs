@@ -667,7 +667,7 @@ impl BlocksCache {
                 for removed_seqno in removed_seqno_list {
                     guard
                         .data
-                        .remove_last_collated_block_ids_from(&removed_seqno);
+                        .remove_last_collated_block_ids_before(&removed_seqno);
                 }
             }
         }
