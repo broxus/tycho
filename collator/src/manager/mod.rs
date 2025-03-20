@@ -169,10 +169,11 @@ where
 
         self.spawn_task(move |worker| {
             Box::pin(async move {
-                worker.detect_top_processed_to_anchor_and_notify_mempool(
+                let future = worker.detect_top_processed_to_anchor_and_notify_mempool(
                     state_cloned,
                     processed_upto.get_min_externals_processed_to()?.0,
-                )
+                );
+                future.await
             })
         })
         .await?;
@@ -396,7 +397,7 @@ where
     /// Tries to determine top anchor that was processed to
     /// by info from received state and notify mempool
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    fn detect_top_processed_to_anchor_and_notify_mempool(
+    async fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
         state: ShardStateStuff,
         mc_processed_to_anchor_id: MempoolAnchorId,
@@ -415,9 +416,10 @@ where
                 .map(|(_, descr)| descr),
             mc_processed_to_anchor_id,
         )
+        .await
     }
 
-    fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
+    async fn detect_top_processed_to_anchor_and_notify_mempool_impl<I>(
         &self,
         mc_block_seqno: BlockSeqno,
         mc_top_shards: I,
@@ -436,12 +438,13 @@ where
 
         );
 
-        self.notify_top_processed_to_anchor_to_mempool(mc_block_seqno, top_processed_to_anchor)?;
+        self.notify_top_processed_to_anchor_to_mempool(mc_block_seqno, top_processed_to_anchor)
+            .await?;
 
         Ok(())
     }
 
-    fn notify_top_processed_to_anchor_to_mempool(
+    async fn notify_top_processed_to_anchor_to_mempool(
         &self,
         mc_block_seqno: BlockSeqno,
         top_processed_to_anchor: MempoolAnchorId,
@@ -452,7 +455,8 @@ where
         );
 
         self.mpool_adapter
-            .handle_top_processed_to_anchor(mc_block_seqno, top_processed_to_anchor)?;
+            .handle_top_processed_to_anchor(mc_block_seqno, top_processed_to_anchor)
+            .await?;
 
         self.mpool_adapter
             .clear_anchors_cache(top_processed_to_anchor)?;
@@ -1741,7 +1745,8 @@ where
                 self.notify_top_processed_to_anchor_to_mempool(
                     mc_data.block_id.seqno,
                     mc_data.top_processed_to_anchor,
-                )?;
+                )
+                .await?;
 
                 // report last "synced to" blocks to metrics
                 for synced_to_block_id in to_blocks_keys {
@@ -2857,7 +2862,8 @@ where
             self.notify_top_processed_to_anchor_to_mempool(
                 mc_block_id.seqno,
                 top_processed_to_anchor,
-            )?;
+            )
+            .await?;
         }
 
         Ok(())

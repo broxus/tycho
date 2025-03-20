@@ -3,12 +3,13 @@ use everscale_types::models::{BlockId, ValidatorSet};
 use tycho_consensus::prelude::{EngineHandle, EngineRunning, MempoolConfigBuilder};
 use tycho_network::PeerId;
 
+use super::state_update_queue::StateUpdateQueue;
 use crate::mempool::StateUpdateContext;
 use crate::tracing_targets;
 
 pub struct ConfigAdapter {
     pub builder: MempoolConfigBuilder,
-    pub state_update_ctx: Option<StateUpdateContext>,
+    pub state_update_queue: StateUpdateQueue,
     pub engine_running: Option<EngineRunning>,
 }
 
