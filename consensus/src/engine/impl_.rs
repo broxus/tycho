@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt, TryStreamExt};
+use futures_util::{FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use rayon::prelude::IntoParallelRefIterator;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
@@ -21,7 +21,6 @@ use crate::engine::lifecycle::{EngineError, EngineHandle, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::ConsensusConfigExt;
-use crate::intercom::CollectorSignal;
 use crate::models::{
     DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
@@ -440,25 +439,9 @@ impl Engine {
             let head = self.dag.head(&self.round_task.state.peer_schedule);
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
-            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
-
-            let own_point_fut = match start_replay_bcasts.take().flatten() {
-                Some((point, prev_bcast)) => {
-                    if let Some(prev) = prev_bcast {
-                        self.round_task.init_prev_broadcast(prev, &round_ctx);
-                    }
-                    future::ready(Ok(Some(point))).boxed()
-                }
-                None => (self.round_task).own_point_task(
-                    &head,
-                    collector_signal_tx.subscribe(),
-                    &round_ctx,
-                ),
-            };
-
             let mut round_task_run = std::pin::pin!(self
                 .round_task
-                .run(own_point_fut, collector_signal_tx, &head, &round_ctx)
+                .run(start_replay_bcasts.take().flatten(), &head, &round_ctx)
                 .until_ready());
 
             loop {
