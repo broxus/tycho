@@ -2023,9 +2023,13 @@ def mempool_engine() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_engine_produce_skipped", range_selector="$__interval"
+                "tycho_mempool_engine_produce_skipped",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
             ),
             "Engine: points to produce skipped (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_commit_time",
