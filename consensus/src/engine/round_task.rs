@@ -2,11 +2,12 @@ use std::cmp;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_util::future::BoxFuture;
 use futures_util::{future, FutureExt};
 use tokio::sync::{oneshot, watch};
 
-use crate::dag::{DagHead, LastOwnPoint, Producer, ValidateResult, Verifier, WeakDagRound};
+use crate::dag::{
+    DagHead, LastOwnPoint, ProduceError, Producer, ValidateResult, Verifier, WeakDagRound,
+};
 use crate::effects::{
     AltFormat, CollectCtx, Ctx, MempoolStore, RoundCtx, Task, TaskResult, ValidateCtx,
 };
@@ -69,7 +70,7 @@ impl RoundTaskReady {
         }
     }
 
-    pub fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
+    fn init_prev_broadcast(&mut self, prev_last_point: Point, round_ctx: &RoundCtx) {
         assert!(
             self.prev_broadcast.is_none(),
             "previous broadcast is already set"
@@ -94,99 +95,90 @@ impl RoundTaskReady {
         }));
     }
 
-    pub fn own_point_task(
-        &self,
-        head: &DagHead,
+    async fn own_point_task(
+        last_own_point: Option<Arc<LastOwnPoint>>,
+        input_buffer: InputBuffer,
+        store: MempoolStore,
+        head: DagHead,
         mut collector_signal_rx: watch::Receiver<CollectorSignal>,
-        round_ctx: &RoundCtx,
-    ) -> BoxFuture<'static, TaskResult<Option<Point>>> {
-        let allowed_to_produce =
-            (self.last_own_point.as_ref()).is_none_or(|prev_own| {
-                match prev_own.round.cmp(&head.prev().round()) {
-                    cmp::Ordering::Less => true,
-                    cmp::Ordering::Equal => {
-                        prev_own.evidence.len() >= prev_own.signers.majority_of_others()
-                    }
-                    cmp::Ordering::Greater => {
-                        let _guard = round_ctx.span().enter();
-                        panic!(
-                            "already produced point at {:?} and gathered {}/{} evidence, \
-                             trying to produce point at {:?}",
-                            prev_own.round,
-                            prev_own.evidence.len(),
-                            prev_own.signers.majority_of_others(),
-                            head.current().round()
-                        );
-                    }
+        round_ctx: RoundCtx,
+    ) -> TaskResult<Result<Point, ProduceError>> {
+        let allowed_to_produce = (last_own_point.as_ref()).is_none_or(|prev_own| {
+            match prev_own.round.cmp(&head.prev().round()) {
+                cmp::Ordering::Less => true,
+                cmp::Ordering::Equal => {
+                    prev_own.evidence.len() >= prev_own.signers.majority_of_others()
                 }
-            });
+                cmp::Ordering::Greater => {
+                    let _guard = round_ctx.span().enter();
+                    panic!(
+                        "already produced point at {:?} and gathered {}/{} evidence, \
+                             trying to produce point at {:?}",
+                        prev_own.round,
+                        prev_own.evidence.len(),
+                        prev_own.signers.majority_of_others(),
+                        head.current().round()
+                    );
+                }
+            }
+        });
 
         if !allowed_to_produce {
-            return future::ready(Ok(None)).boxed();
+            return Ok(Err(ProduceError::NotAllowed));
         }
 
-        let input_buffer = self.state.input_buffer.clone();
-        let last_own_point = self.last_own_point.clone();
-        let store = self.state.store.clone();
-        let head = head.clone();
-        let round_ctx = round_ctx.clone();
+        // this part must always be lazy: not started until polled
 
-        // must stay lazy: not started until polled
-        async move {
-            let mut threshold = std::pin::pin!(head.prev().threshold().reached());
-            let is_in_time = loop {
-                tokio::select!(
-                    () = &mut threshold => {
-                        break true;
-                    },
-                    recv_status = collector_signal_rx.changed() => {
-                        if recv_status.is_err() {
-                            break false;
-                        }
-                        match *collector_signal_rx.borrow_and_update() {
-                            CollectorSignal::Retry {ready: true} => break false,
-                            CollectorSignal::Retry {ready: false} => {},
-                        }
+        let mut threshold = std::pin::pin!(head.prev().threshold().reached());
+        let is_in_time = loop {
+            tokio::select!(
+                () = &mut threshold => {
+                    break true;
+                },
+                recv_status = collector_signal_rx.changed() => {
+                    if recv_status.is_err() {
+                        break false;
                     }
-                );
-            };
-            if !is_in_time {
-                return Ok(None);
-            }
-
-            let task_start_time = Instant::now();
-
-            let produced = (round_ctx.span()).in_scope(|| {
-                Producer::new_point(
-                    last_own_point.as_deref(),
-                    &input_buffer,
-                    &head,
-                    round_ctx.conf(),
-                )
-            });
-            round_ctx.own_point(produced.as_ref());
-            let Some(own_point) = produced else {
-                return Ok(None);
-            };
-            // Note: actually we should use `keys().to_include`, this is a WorkAround to support
-            //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
-            //   this is safe as any node never changes its keys until restart, after which
-            //   the node does not recognise points signed with old keypair as locally created
-            let wa_keys = head.keys().to_produce.as_ref();
-            (head.current())
-                .add_local(&own_point, wa_keys, &store, &round_ctx)
-                .await?;
-            metrics::histogram!("tycho_mempool_engine_produce_time")
-                .record(task_start_time.elapsed());
-            Ok(Some(own_point))
+                    match *collector_signal_rx.borrow_and_update() {
+                        CollectorSignal::Retry {ready: true} => break false,
+                        CollectorSignal::Retry {ready: false} => {},
+                    }
+                }
+            );
+        };
+        if !is_in_time {
+            return Ok(Err(ProduceError::NextRoundThreshold));
         }
-        .boxed()
+
+        let task_start_time = Instant::now();
+
+        let produced = (round_ctx.span()).in_scope(|| {
+            Producer::new_point(
+                last_own_point.as_deref(),
+                &input_buffer,
+                &head,
+                round_ctx.conf(),
+            )
+        });
+        let own_point = match produced {
+            Ok(own_point) => own_point,
+            Err(err) => return Ok(Err(err)),
+        };
+        // Note: actually we should use `keys().to_include`, this is a WorkAround to support
+        //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
+        //   this is safe as any node never changes its keys until restart, after which
+        //   the node does not recognise points signed with old keypair as locally created
+        let wa_keys = head.keys().to_produce.as_ref();
+        (head.current())
+            .add_local(&own_point, wa_keys, &store, &round_ctx)
+            .await?;
+        metrics::histogram!("tycho_mempool_engine_produce_time").record(task_start_time.elapsed());
+        Ok(Ok(own_point))
     }
 
     pub fn run(
-        self,
-        own_point_fut: BoxFuture<'static, TaskResult<Option<Point>>>,
-        collector_signal_tx: watch::Sender<CollectorSignal>,
+        mut self,
+        start_replay_bcasts: Option<(Point, Option<Point>)>,
         head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> RoundTaskRunning {
@@ -202,7 +194,27 @@ impl RoundTaskReady {
             round_ctx,
         );
 
+        let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
+
         let broadcaster_run = round_ctx.task().spawn({
+            let produce_point_fut = match start_replay_bcasts {
+                Some((point, prev_bcast)) => {
+                    if let Some(prev) = prev_bcast {
+                        self.init_prev_broadcast(prev, round_ctx);
+                    }
+                    future::ready(Ok(Ok(point))).boxed()
+                }
+                None => Self::own_point_task(
+                    self.last_own_point.clone(),
+                    self.state.input_buffer.clone(),
+                    self.state.store.clone(),
+                    head.clone(),
+                    collector_signal_tx.subscribe(),
+                    round_ctx.clone(),
+                )
+                .boxed(),
+            };
+
             let own_point_round = head.current().downgrade();
             let collector_signal_rx = collector_signal_tx.subscribe();
             let round_ctx = round_ctx.clone();
@@ -213,9 +225,9 @@ impl RoundTaskReady {
             let store = self.state.store.clone();
 
             async move {
-                let maybe_own_point = own_point_fut.await?;
-
-                if let Some(own_point) = maybe_own_point {
+                let own_point_result = produce_point_fut.await?;
+                round_ctx.own_point(own_point_result.as_ref());
+                if let Ok(own_point) = own_point_result {
                     let self_check = Self::expect_own_valid_point(
                         own_point_round,
                         own_point.clone(),
@@ -350,13 +362,10 @@ impl RoundCtx {
         metrics::gauge!("tycho_mempool_produced_point_time_skew").set(diff);
     }
 
-    fn own_point(&self, own_point: Option<&Point>) {
-        // refresh counters with zeros every round
-        metrics::counter!("tycho_mempool_engine_produce_skipped")
-            .increment(own_point.is_none() as _);
-        metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_some() as _);
+    fn own_point(&self, own_point: Result<&Point, &ProduceError>) {
+        metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_ok() as _);
 
-        let no_proof = own_point.is_some_and(|point| point.evidence().is_empty());
+        let no_proof = own_point.is_ok_and(|point| point.evidence().is_empty());
         metrics::counter!("tycho_mempool_points_no_proof_produced").increment(no_proof as _);
 
         metrics::counter!("tycho_mempool_point_payload_count")
@@ -366,29 +375,51 @@ impl RoundCtx {
         metrics::counter!("tycho_mempool_point_payload_bytes")
             .increment(payload_bytes.unwrap_or_default());
 
-        if own_point.is_none() {
+        if own_point.is_err() {
             // if point is produced, then method is called immediately when its time is known
             Self::own_point_time_skew(0.0);
         }
 
-        if let Some(own_point) = own_point {
-            tracing::info!(
-                parent: self.span(),
-                digest = display(own_point.digest().alt()),
-                payload_bytes = own_point
-                    .payload().iter().map(|bytes| bytes.len()).sum::<usize>(),
-                externals = own_point.payload().len(),
-                is_proof = Some(own_point.data().anchor_proof == Link::ToSelf).filter(|x| *x),
-                is_trigger = Some(own_point.data().anchor_trigger == Link::ToSelf).filter(|x| *x),
-                "produced point"
-            );
-            tracing::debug!(
-                parent: self.span(),
-                ?own_point,
-                "created point details"
-            );
-        } else {
-            tracing::info!(parent: self.span(), "produce point skipped");
-        };
+        match own_point {
+            Ok(own_point) => {
+                tracing::info!(
+                    parent: self.span(),
+                    digest = display(own_point.digest().alt()),
+                    payload_bytes = own_point
+                        .payload().iter().map(|bytes| bytes.len()).sum::<usize>(),
+                    externals = own_point.payload().len(),
+                    is_proof = Some(own_point.data().anchor_proof == Link::ToSelf).filter(|x| *x),
+                    is_trigger = Some(own_point.data().anchor_trigger == Link::ToSelf).filter(|x| *x),
+                    "produced point"
+                );
+                tracing::debug!(
+                    parent: self.span(),
+                    ?own_point,
+                    "created point details"
+                );
+            }
+            Err(reason) => {
+                match reason {
+                    ProduceError::NotAllowed | ProduceError::NotEnoughEvidence => {
+                        tracing::warn!(parent: self.span(), %reason, "produce point skipped");
+                    }
+                    ProduceError::NextRoundThreshold | ProduceError::NotScheduled => {
+                        tracing::info!(parent: self.span(), %reason, "produce point skipped");
+                    }
+                    ProduceError::PrevPointMismatch { .. } => {
+                        tracing::error!(parent: self.span(), %reason, "produce point skipped");
+                    }
+                };
+                let label = match reason {
+                    ProduceError::NotAllowed
+                    | ProduceError::NotEnoughEvidence
+                    | ProduceError::NextRoundThreshold => "late",
+                    ProduceError::NotScheduled => "not in v_set",
+                    ProduceError::PrevPointMismatch { .. } => "prev point",
+                };
+                metrics::counter!("tycho_mempool_engine_produce_skipped", "kind" => label)
+                    .increment(1);
+            }
+        }
     }
 }
