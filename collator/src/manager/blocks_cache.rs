@@ -495,7 +495,14 @@ impl BlocksCache {
                     bail!("Block cache entry should exist ({})", key)
                 };
 
-                if let BlockCacheEntryData::Received { .. } = occupied_entry.get().data {
+                if matches!(
+                    occupied_entry.get().data,
+                    BlockCacheEntryData::Received { .. }
+                        | BlockCacheEntryData::Collated {
+                            received_after_collation: true,
+                            ..
+                        }
+                ) {
                     if extracted_mc_block_entry.is_some() {
                         is_last = false;
                         break;
