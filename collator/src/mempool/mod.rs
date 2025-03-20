@@ -63,7 +63,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// Process top processed to anchor reported by collation manager.
     /// Will manage mempool sync depth.
     /// Mempool should be ready to return this anchor and all next after it.
-    fn handle_top_processed_to_anchor(
+    async fn handle_top_processed_to_anchor(
         &self,
         mc_block_seqno: BlockSeqno,
         anchor_id: MempoolAnchorId,
