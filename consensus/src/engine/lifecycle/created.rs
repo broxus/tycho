@@ -3,6 +3,7 @@ use tokio::sync::oneshot;
 use crate::effects::TaskTracker;
 use crate::engine::lifecycle::{EngineNetwork, FixHistoryFlag};
 use crate::engine::{Engine, MempoolMergedConfig};
+use crate::intercom::InitPeers;
 use crate::prelude::{EngineBinding, EngineHandle, EngineNetworkArgs, EngineRunning};
 
 pub struct EngineCreated {
@@ -17,9 +18,10 @@ impl EngineCreated {
         bind: EngineBinding,
         net_args: &EngineNetworkArgs,
         merged_conf: &MempoolMergedConfig,
+        init_peers: &InitPeers,
     ) -> Self {
         let super_tracker = TaskTracker::default();
-        let net = EngineNetwork::new(net_args, &super_tracker, merged_conf);
+        let net = EngineNetwork::new(net_args, &super_tracker, merged_conf, init_peers);
 
         let handle = EngineHandle {
             super_tracker,
@@ -34,10 +36,6 @@ impl EngineCreated {
             engine,
             engine_task_tracker,
         }
-    }
-
-    pub fn handle(&self) -> &EngineHandle {
-        &self.handle
     }
 
     pub fn run(self, engine_stop_tx: oneshot::Sender<()>) -> EngineRunning {

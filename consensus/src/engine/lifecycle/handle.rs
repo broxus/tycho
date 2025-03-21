@@ -22,23 +22,9 @@ impl EngineHandle {
         &self.merged_conf
     }
 
-    #[cfg(any(test, feature = "test"))]
-    pub fn set_start_peers(&self, peers: &[PeerId]) {
-        let first = (self.merged_conf.conf.genesis_round).next();
-        (self.net.peer_schedule).set_next_subset(peers, first, peers);
-    }
-
     pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
         if let Some((switch_round, subset)) = subset {
-            let genesis_round = self.merged_conf().conf.genesis_round;
-            // specially for zerostate with unaligned genesis,
-            // and for first (prev) vset after reboot or a new genesis
-            let round = if switch_round <= genesis_round.0 {
-                genesis_round.next()
-            } else {
-                Round(switch_round)
-            };
-            if !(self.net.peer_schedule).set_next_subset(set, round, subset) {
+            if !(self.net.peer_schedule).set_next_subset(set, Round(switch_round), subset) {
                 tracing::trace!("cannot schedule outdated round {switch_round} and set");
             }
         } else {

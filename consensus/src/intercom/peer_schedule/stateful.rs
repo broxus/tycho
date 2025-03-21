@@ -10,11 +10,10 @@ use crate::models::Round;
 #[derive(Debug)]
 pub struct PeerScheduleStateful {
     // whole validator sets except local id for peer resolver
-    validator_set: [FastHashMap<PeerId, PeerState>; 3],
+    validator_set: [FastHashMap<PeerId, PeerState>; 4],
     // working subset
-    active_subset: [Arc<FastHashMap<PeerId, PeerState>>; 3],
-    prev_epoch_start: Round,
-    pub(super) cur_epoch_start: Round,
+    active_subset: [Arc<FastHashMap<PeerId, PeerState>>; 4],
+    epoch_starts: [Round; 3],
     pub(super) next_epoch_start: Option<Round>,
     empty: Arc<FastHashMap<PeerId, PeerState>>,
     // resolved peers from current or next subset
@@ -27,8 +26,7 @@ impl Default for PeerScheduleStateful {
         Self {
             validator_set: Default::default(),
             active_subset: Default::default(),
-            prev_epoch_start: Round::BOTTOM,
-            cur_epoch_start: Round::BOTTOM,
+            epoch_starts: [Round::BOTTOM, Round::BOTTOM, Round::BOTTOM],
             next_epoch_start: None,
             empty: Default::default(),
             broadcast_receivers: Default::default(),
@@ -43,22 +41,29 @@ impl PeerScheduleStateful {
         &self.broadcast_receivers
     }
 
+    pub(super) fn curr_epoch_start(&self) -> Round {
+        self.epoch_starts[2]
+    }
+
     /// local peer id is always kept as not resolved
     pub fn peers_state_for(&self, round: Round) -> &'_ Arc<FastHashMap<PeerId, PeerState>> {
         let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
+            &self.active_subset[3]
+        } else if round >= self.epoch_starts[2] {
             &self.active_subset[2]
-        } else if round >= self.cur_epoch_start {
+        } else if round >= self.epoch_starts[1] {
             &self.active_subset[1]
-        } else if round >= self.prev_epoch_start {
+        } else if round >= self.epoch_starts[0] {
             &self.active_subset[0]
         } else {
             &self.empty
         };
         if result.is_empty() {
             tracing::error!(
-                "empty peer set for {round:?}; epoch starts: prev={} curr={} next={:?}",
-                self.prev_epoch_start.0,
-                self.cur_epoch_start.0,
+                "empty peer set for {round:?}; epoch starts: oldest={} prev={} curr={} next={:?}",
+                self.epoch_starts[0].0,
+                self.epoch_starts[1].0,
+                self.epoch_starts[2].0,
                 self.next_epoch_start.map(|r| r.0)
             );
         }
@@ -93,7 +98,7 @@ impl PeerScheduleStateful {
                     .entry(*peer_id)
                     .and_modify(|old| *old = state);
                 is_applied = true;
-                is_broadcast_receiver |= i != 0;
+                is_broadcast_receiver |= i >= 2;
             }
         }
         if is_applied {
@@ -131,16 +136,17 @@ impl PeerScheduleStateful {
                 (*peer_id, state)
             })
             .collect::<FastHashMap<_, _>>();
-        let to_forget = self.validator_set[2]
+        let to_forget = self.validator_set[3]
             .iter()
             .filter(|(peer, _)| {
                 !(self.validator_set[0].contains_key(peer)
                     || self.validator_set[1].contains_key(peer)
+                    || self.validator_set[2].contains_key(peer)
                     || validator_set.contains_key(peer))
             })
             .map(|(peer_id, _)| *peer_id)
             .collect();
-        self.validator_set[2] = validator_set;
+        self.validator_set[3] = validator_set;
         self.all_resolved = all_resolved;
         meter_all_resolved(self.all_resolved.len());
         for peer in &to_forget {
@@ -162,10 +168,10 @@ impl PeerScheduleStateful {
                 (*peer_id, state)
             })
             .collect::<FastHashMap<_, _>>();
-        self.active_subset[2] = Arc::new(peers_state);
-        self.broadcast_receivers = self.active_subset[1]
+        self.active_subset[3] = Arc::new(peers_state);
+        self.broadcast_receivers = self.active_subset[2]
             .iter()
-            .chain(self.active_subset[2].iter())
+            .chain(self.active_subset[3].iter())
             .filter(|(_, state)| **state == PeerState::Resolved)
             .map(|(peer_id, _)| *peer_id)
             .collect();
@@ -176,23 +182,23 @@ impl PeerScheduleStateful {
     pub(super) fn rotate(&mut self) {
         assert!(
             self.validator_set[0].is_empty() && self.active_subset[0].is_empty(),
-            "previous peer set was not cleaned {self:?}"
+            "oldest peer set was not cleaned {self:?}"
         );
 
-        // make next from previous
+        // make next from oldest
         let next = self
             .next_epoch_start
             .ok_or_else(|| format!("{self:?}"))
             .expect("attempt to change epoch, but next epoch start is not set");
 
         assert!(
-            next > self.cur_epoch_start,
+            next > self.curr_epoch_start(),
             "next start is not in future {self:?}"
         );
 
-        self.prev_epoch_start = self.cur_epoch_start;
-        self.cur_epoch_start = next;
         self.next_epoch_start = None; // makes next epoch peers inaccessible for reads
+        self.epoch_starts[0] = next;
+        self.epoch_starts.rotate_left(1);
 
         self.validator_set.rotate_left(1);
         self.active_subset.rotate_left(1);
@@ -200,11 +206,12 @@ impl PeerScheduleStateful {
 
     /// on epoch change
     #[must_use]
-    pub(super) fn forget_previous(&mut self) -> Vec<PeerId> {
+    pub(super) fn forget_oldest(&mut self) -> Vec<PeerId> {
         let mut to_forget = Vec::new();
         for (peer_id, state) in mem::take(&mut self.validator_set[0]).iter() {
             if !self.validator_set[1].contains_key(peer_id)
                 && !self.validator_set[2].contains_key(peer_id)
+                && !self.validator_set[3].contains_key(peer_id)
             {
                 to_forget.push(*peer_id);
                 if *state == PeerState::Resolved {
