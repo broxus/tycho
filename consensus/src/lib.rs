@@ -16,5 +16,6 @@ pub mod prelude {
         ConsensusConfigExt, InputBuffer, MempoolConfigBuilder, MempoolMergedConfig,
         MempoolNodeConfig,
     };
+    pub use crate::intercom::InitPeers;
     pub use crate::models::{AnchorData, MempoolOutput, PointInfo};
 }

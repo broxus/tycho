@@ -40,25 +40,73 @@ struct PeerScheduleInner {
     task_tracker: TaskTracker,
 }
 
+pub struct InitPeers {
+    pub prev_v_set: Vec<PeerId>,
+    pub prev_v_subset: Vec<PeerId>,
+    pub curr_start_round: u32,
+    pub curr_v_set: Vec<PeerId>,
+    pub curr_v_subset: Vec<PeerId>,
+    pub next_v_set: Vec<PeerId>,
+}
+
+impl InitPeers {
+    #[cfg(feature = "test")]
+    pub fn new(curr_v_subset: Vec<PeerId>) -> Self {
+        Self {
+            prev_v_set: vec![],
+            prev_v_subset: vec![],
+            curr_start_round: 0,
+            curr_v_set: curr_v_subset.clone(),
+            curr_v_subset,
+            next_v_set: vec![],
+        }
+    }
+
+    pub fn check(&self, merged_conf: &MempoolMergedConfig) -> anyhow::Result<()> {
+        let after_genesis = merged_conf.conf.genesis_round.next();
+        if self.curr_start_round > after_genesis.0 {
+            anyhow::ensure!(
+                !self.prev_v_subset.is_empty(),
+                "cannot init peer schedule with empty prev_v_set that spans across genesis"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl PeerSchedule {
     pub fn new(
         local_keys: Arc<KeyPair>,
         overlay: PrivateOverlay,
-        merged_conf: &MempoolMergedConfig,
         task_tracker: &TaskTracker,
     ) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
-        let this = Self(Arc::new(PeerScheduleInner {
+        Self(Arc::new(PeerScheduleInner {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
             task_tracker: task_tracker.clone(),
-        }));
+        }))
+    }
+
+    pub fn init(&self, merged_conf: &MempoolMergedConfig, init: &InitPeers) {
         // validator set is not defined for genesis
         let genesis_round = merged_conf.conf.genesis_round;
-        this.set_next_subset(&[], genesis_round.prev(), &[merged_conf.genesis_author()]);
-        this.apply_scheduled(genesis_round);
+        self.set_next_subset(&[], genesis_round.prev(), &[merged_conf.genesis_author()]);
+        self.apply_scheduled(genesis_round);
 
-        this
+        let curr_start = Round(init.curr_start_round);
+        let after_genesis = genesis_round.next();
+
+        if curr_start > after_genesis {
+            // Note protected by `InitPeers::check()`
+            self.set_next_subset(&init.prev_v_set, after_genesis, &init.prev_v_subset);
+            self.apply_scheduled(after_genesis);
+            self.set_next_subset(&init.curr_v_set, curr_start, &init.curr_v_subset);
+        } else {
+            self.set_next_subset(&init.curr_v_set, after_genesis, &init.curr_v_subset);
+            self.apply_scheduled(after_genesis);
+            self.set_next_set(&init.next_v_set);
+        }
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, RawRwLock, PeerScheduleLocked> {

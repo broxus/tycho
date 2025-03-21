@@ -16,7 +16,7 @@ use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, MempoolStore, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
-use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
+use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
     Signature, Through, UnixTime,
@@ -45,12 +45,9 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
 
     // any peer id will be ok, network is not used
-    let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &merged_conf, &task_tracker);
-    peer_schedule.set_next_subset(
-        &[],
-        genesis.round().next(),
-        &peers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-    );
+    let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &task_tracker);
+    let init_peers = InitPeers::new(peers.iter().map(|(id, _)| *id).collect());
+    peer_schedule.init(&merged_conf, &init_peers);
 
     let stub_consensus_round = RoundWatch::<Consensus>::default();
     let stub_downloader =

@@ -2,7 +2,7 @@ pub use core::*;
 
 pub use broadcast::*;
 pub use dependency::*;
-pub use peer_schedule::PeerSchedule;
+pub use peer_schedule::{InitPeers, PeerSchedule};
 
 // Note: intercom modules' responsibilities
 //   matches visibility of their internal DTOs
