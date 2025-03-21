@@ -79,7 +79,7 @@ impl MempoolAdapterStdImpl {
         fun(&mut config_guard.builder)
     }
 
-    async fn handle_state_update(
+    async fn process_state_update(
         &self,
         config_guard: &mut ConfigAdapter,
         new_cx: &StateUpdateContext,
@@ -294,16 +294,12 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(())
     }
 
-    async fn handle_top_processed_to_anchor(
-        &self,
-        mc_block_seqno: BlockSeqno,
-        _anchor_id: MempoolAnchorId,
-    ) -> Result<()> {
+    async fn handle_signed_mc_block(&self, mc_block_seqno: BlockSeqno) -> Result<()> {
         let mut config_guard = self.config.lock().await;
         let queued = config_guard.state_update_queue.drain(..=mc_block_seqno)?;
 
         for ctx in queued {
-            self.handle_state_update(&mut config_guard, &ctx).await?;
+            self.process_state_update(&mut config_guard, &ctx).await?;
             self.top_known_anchor
                 .set_max_raw(ctx.top_processed_to_anchor_id);
         }

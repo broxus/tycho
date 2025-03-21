@@ -178,11 +178,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    async fn handle_top_processed_to_anchor(
-        &self,
-        _mc_block_seqno: BlockSeqno,
-        _anchor_id: MempoolAnchorId,
-    ) -> Result<()> {
+    async fn handle_signed_mc_block(&self, _mc_block_seqno: BlockSeqno) -> Result<()> {
         Ok(())
     }
 

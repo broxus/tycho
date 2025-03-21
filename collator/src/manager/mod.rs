@@ -451,7 +451,7 @@ where
         );
 
         self.mpool_adapter
-            .handle_top_processed_to_anchor(mc_block_seqno, top_processed_to_anchor)
+            .handle_signed_mc_block(mc_block_seqno)
             .await?;
 
         self.mpool_adapter
