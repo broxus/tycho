@@ -60,14 +60,12 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// 3. Validators sets
     async fn handle_mc_state_update(&self, cx: StateUpdateContext) -> Result<()>;
 
-    /// Process top processed to anchor reported by collation manager.
-    /// Will manage mempool sync depth.
-    /// Mempool should be ready to return this anchor and all next after it.
-    fn handle_top_processed_to_anchor(
-        &self,
-        mc_block_seqno: BlockSeqno,
-        anchor_id: MempoolAnchorId,
-    ) -> Result<()>;
+    /// Process state update reported by collation manager earlier.
+    /// Will apply v_set and config changes to mempool. Also starts mempool at first call.
+    /// Advances mempool pause bound which allows mempool to resume its work.
+    /// Mempool should be ready to return mc block `processed_up_to` anchor and all next after it.
+    /// This method will not clean anchor cache.
+    async fn handle_signed_mc_block(&self, mc_block_seqno: BlockSeqno) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
