@@ -165,7 +165,7 @@ pub struct QueueKey {
 }
 
 impl QueueKey {
-    const SIZE_HINT: usize = 8 + 32;
+    pub const SIZE_HINT: usize = 8 + 32;
 
     pub const MIN: Self = Self {
         lt: 0,
@@ -338,7 +338,7 @@ pub type QueuePartitionIdx = u16;
 
 pub type RouterPartitions = BTreeMap<QueuePartitionIdx, BTreeSet<RouterAddr>>;
 
-mod processed_to_map {
+pub mod processed_to_map {
     use tl_proto::{TlPacket, TlResult};
 
     use super::*;
@@ -388,7 +388,7 @@ mod processed_to_map {
     }
 }
 
-mod router_partitions_map {
+pub mod router_partitions_map {
     use tl_proto::{TlPacket, TlResult};
 
     use super::*;

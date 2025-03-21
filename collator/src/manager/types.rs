@@ -3,14 +3,17 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use everscale_types::cell::Lazy;
-use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ShardIdent};
+use everscale_types::models::{
+    BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
+};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tycho_block_util::queue::QueueDiffStuff;
+use tycho_block_util::queue::{QueueDiffStuff, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
+use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
     ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ProcessedTo,
     ShardDescriptionExt,
@@ -164,6 +167,9 @@ pub(super) enum BlockCacheEntryData {
 
         /// Whether the block was received after collation
         received_after_collation: bool,
+
+        /// Processed to info for every partition
+        processed_upto: ProcessedUptoInfoStuff,
     },
     Received {
         /// Cached state of the applied master block
@@ -178,6 +184,9 @@ pub(super) enum BlockCacheEntryData {
 
         /// Additional shard block cache info
         additional_shard_block_cache_info: Option<AdditionalShardBlockCacheInfo>,
+
+        /// Processed to info for every partition
+        processed_upto: ProcessedUptoInfoStuff,
     },
 }
 
@@ -197,6 +206,14 @@ impl BlockCacheEntryData {
                 ..
             } => additional_shard_block_cache_info.clone(),
         })
+    }
+
+    pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
+        match self {
+            Self::Received { processed_upto, .. } | Self::Collated { processed_upto, .. } => {
+                processed_upto
+            }
+        }
     }
 }
 
@@ -253,6 +270,7 @@ impl BlockCacheEntry {
         let block_id = *candidate.block.id();
         let prev_blocks_ids = candidate.prev_blocks_ids.clone();
         let ref_by_mc_seqno = candidate.ref_by_mc_seqno;
+        let processed_upto = candidate.processed_upto.clone();
         let entry = BlockCandidateStuff {
             candidate: *candidate,
             signatures: Default::default(),
@@ -275,6 +293,7 @@ impl BlockCacheEntry {
                 candidate_stuff: entry,
                 status: CandidateStatus::Collated,
                 received_after_collation: false,
+                processed_upto,
             },
             prev_blocks_ids,
             top_shard_blocks_info,
@@ -288,6 +307,7 @@ impl BlockCacheEntry {
         queue_diff: QueueDiffStuff,
         out_msgs: Lazy<OutMsgDescr>,
         ref_by_mc_seqno: u32,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Self> {
         let block_id = *state.block_id();
 
@@ -313,6 +333,7 @@ impl BlockCacheEntry {
                 out_msgs,
                 collated_after_receive: false,
                 additional_shard_block_cache_info: None,
+                processed_upto,
             },
             prev_blocks_ids,
             top_shard_blocks_info,
@@ -359,6 +380,23 @@ pub(super) struct McBlockSubgraph {
     pub shard_blocks: Vec<BlockCacheEntry>,
 }
 
+impl McBlockSubgraph {
+    pub(crate) fn get_partitions(&self) -> FastHashSet<QueuePartitionIdx> {
+        let mut partitions = FastHashSet::default();
+
+        for block in self
+            .shard_blocks
+            .iter()
+            .chain(std::iter::once(&self.master_block))
+        {
+            for partition in block.data.processed_upto().partitions.keys() {
+                partitions.insert(*partition);
+            }
+        }
+        partitions
+    }
+}
+
 pub(super) enum McBlockSubgraphExtract {
     Extracted(McBlockSubgraph),
     AlreadyExtracted,
@@ -371,4 +409,9 @@ impl std::fmt::Display for McBlockSubgraphExtract {
             Self::AlreadyExtracted => write!(f, "AlreadyExtracted"),
         }
     }
+}
+
+pub struct HandledBlockFromBcCtx {
+    pub state: ShardStateStuff,
+    pub processed_upto: ProcessedUptoInfo,
 }

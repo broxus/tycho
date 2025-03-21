@@ -1,6 +1,6 @@
 pub use self::proto::{
-    QueueDiff, QueueKey, QueuePartitionIdx, QueueState, QueueStateHeader, QueueStateRef,
-    RouterAddr, RouterPartitions,
+    processed_to_map, router_partitions_map, QueueDiff, QueueKey, QueuePartitionIdx, QueueState,
+    QueueStateHeader, QueueStateRef, RouterAddr, RouterPartitions,
 };
 pub use self::queue_diff::{
     QueueDiffMessagesIter, QueueDiffStuff, QueueDiffStuffAug, SerializedQueueDiff,
