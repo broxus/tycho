@@ -11,7 +11,7 @@ use tokio::signal::unix;
 use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
-    EngineBinding, EngineCreated, EngineNetworkArgs, InputBuffer, MempoolAdapterStore,
+    EngineBinding, EngineCreated, EngineNetworkArgs, InitPeers, InputBuffer, MempoolAdapterStore,
     MempoolConfigBuilder, MempoolMergedConfig, RoundWatch, TopKnownAnchor,
 };
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer};
@@ -137,7 +137,7 @@ impl CmdRun {
 
 struct Mempool {
     net_args: EngineNetworkArgs,
-    bootstrap_peers: Vec<PeerId>,
+    init_peers: InitPeers,
 
     storage: Storage,
     input_buffer: InputBuffer,
@@ -149,11 +149,8 @@ impl Mempool {
         let global_config =
             GlobalConfig::from_file(&cmd.global_config).context("failed to load global config")?;
 
-        let bootstrap_peers = global_config
-            .bootstrap_peers
-            .iter()
-            .map(|info| info.id)
-            .collect::<Vec<_>>();
+        let init_peers =
+            InitPeers::new((global_config.bootstrap_peers.iter().map(|info| info.id)).collect());
 
         let net_args = {
             let keys = NodeKeys::from_file(&cmd.keys).context("failed to load node keys")?;
@@ -242,7 +239,7 @@ impl Mempool {
 
         Ok(Mempool {
             net_args,
-            bootstrap_peers,
+            init_peers,
 
             storage,
             input_buffer,
@@ -267,9 +264,7 @@ impl Mempool {
             output: committed_tx,
         };
 
-        let engine = EngineCreated::new(bind, &self.net_args, &self.merged_conf);
-
-        engine.handle().set_start_peers(&self.bootstrap_peers);
+        let engine = EngineCreated::new(bind, &self.net_args, &self.merged_conf, &self.init_peers);
 
         tracing::info!("mempool engine initialized");
 

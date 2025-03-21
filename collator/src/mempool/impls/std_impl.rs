@@ -7,7 +7,7 @@ mod state_update_queue;
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -201,37 +201,25 @@ impl MempoolAdapterStdImpl {
             output: anchor_tx,
         };
 
-        let engine = EngineCreated::new(bind, &self.net_args, merged_conf);
+        let init_peers = ConfigAdapter::init_peers(ctx);
+        let engine = EngineCreated::new(bind, &self.net_args, merged_conf, &init_peers);
 
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = ctx
             .top_processed_to_anchor_id
             .saturating_sub(merged_conf.consensus().reset_rounds())
             .max(merged_conf.genesis_info().start_round);
-        if estimated_sync_bottom >= ctx.consensus_info.vset_switch_round {
-            if ctx.prev_validator_set.is_some() {
-                tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "will not use prev vset");
-            }
-            ConfigAdapter::apply_curr_vset(engine.handle(), ctx)?;
-            ConfigAdapter::apply_next_vset(engine.handle(), ctx);
-        } else if estimated_sync_bottom >= ctx.consensus_info.prev_vset_switch_round {
-            ConfigAdapter::apply_prev_vset(engine.handle(), ctx)?;
-            ConfigAdapter::apply_curr_vset(engine.handle(), ctx)?;
-            if ctx.next_validator_set.is_some() {
-                tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, "cannot use next vset");
-            }
-        } else {
-            bail!(
-                "cannot start from outdated peer sets (too short mempool epoch(s)): \
+        anyhow::ensure!(
+            estimated_sync_bottom >= ctx.consensus_info.prev_vset_switch_round,
+            "cannot start from outdated peer sets (too short mempool epoch(s)): \
                  estimated sync bottom {estimated_sync_bottom} \
                  is older than prev vset switch round {}; \
                  start round {}, top processed to anchor {} in block {}",
-                ctx.consensus_info.prev_vset_switch_round,
-                merged_conf.genesis_info().start_round,
-                ctx.top_processed_to_anchor_id,
-                ctx.mc_block_id,
-            )
-        };
+            ctx.consensus_info.prev_vset_switch_round,
+            merged_conf.genesis_info().start_round,
+            ctx.top_processed_to_anchor_id,
+            ctx.mc_block_id,
+        );
 
         let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
         let engine = engine.run(engine_stop_tx);

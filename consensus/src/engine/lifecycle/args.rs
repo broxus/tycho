@@ -7,7 +7,7 @@ use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, Pr
 use crate::effects::{MempoolAdapterStore, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
-use crate::intercom::{Dispatcher, PeerSchedule, Responder};
+use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
 use crate::models::MempoolOutput;
 
 #[derive(Clone)]
@@ -42,6 +42,7 @@ impl EngineNetwork {
         net_args: &EngineNetworkArgs,
         task_tracker: &TaskTracker,
         merged_conf: &MempoolMergedConfig,
+        init_peers: &InitPeers,
     ) -> Self {
         let responder = Responder::default();
         let overlay_id = merged_conf.overlay_id;
@@ -61,12 +62,10 @@ impl EngineNetwork {
         );
 
         let dispatcher = Dispatcher::new(&net_args.network, &private_overlay);
-        let peer_schedule = PeerSchedule::new(
-            net_args.key_pair.clone(),
-            private_overlay,
-            merged_conf,
-            task_tracker,
-        );
+        let peer_schedule =
+            PeerSchedule::new(net_args.key_pair.clone(), private_overlay, task_tracker);
+        peer_schedule.init(merged_conf, init_peers);
+
         Self {
             peer_schedule,
             dispatcher,

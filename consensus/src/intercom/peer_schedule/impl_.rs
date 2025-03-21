@@ -40,25 +40,66 @@ struct PeerScheduleInner {
     task_tracker: TaskTracker,
 }
 
+pub struct InitPeers {
+    pub prev_start_round: u32,
+    pub prev_v_set: Vec<PeerId>,
+    pub prev_v_subset: Vec<PeerId>,
+    pub curr_start_round: u32,
+    pub curr_v_set: Vec<PeerId>,
+    pub curr_v_subset: Vec<PeerId>,
+    pub next_v_set: Vec<PeerId>,
+}
+
+impl InitPeers {
+    #[cfg(feature = "test")]
+    pub fn new(curr_v_subset: Vec<PeerId>) -> Self {
+        Self {
+            prev_start_round: 0,
+            prev_v_set: vec![],
+            prev_v_subset: vec![],
+            curr_start_round: 0,
+            curr_v_set: curr_v_subset.clone(),
+            curr_v_subset,
+            next_v_set: vec![],
+        }
+    }
+}
+
 impl PeerSchedule {
     pub fn new(
         local_keys: Arc<KeyPair>,
         overlay: PrivateOverlay,
-        merged_conf: &MempoolMergedConfig,
         task_tracker: &TaskTracker,
     ) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
-        let this = Self(Arc::new(PeerScheduleInner {
+        Self(Arc::new(PeerScheduleInner {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
             task_tracker: task_tracker.clone(),
-        }));
-        // validator set is not defined for genesis
-        let genesis_round = merged_conf.conf.genesis_round;
-        this.set_next_subset(&[], genesis_round.prev(), &[merged_conf.genesis_author()]);
-        this.apply_scheduled(genesis_round);
+        }))
+    }
 
-        this
+    pub fn init(&self, merged_conf: &MempoolMergedConfig, init: &InitPeers) {
+        let genesis_round = merged_conf.conf.genesis_round;
+        self.set_next_subset(&[], genesis_round.prev(), &[merged_conf.genesis_author()]);
+        self.apply_scheduled(genesis_round);
+
+        let after_genesis = merged_conf.conf.genesis_round.next();
+
+        if init.curr_start_round > after_genesis.0 {
+            // set even if prev set is empty - to keep panic logs consistent
+            let prev_start = Round(init.prev_start_round).max(after_genesis);
+            self.set_next_subset(&init.prev_v_set, prev_start, &init.prev_v_subset);
+            self.apply_scheduled(prev_start);
+        }
+
+        let curr_start = Round(init.curr_start_round).max(after_genesis);
+        self.set_next_subset(&init.curr_v_set, curr_start, &init.curr_v_subset);
+        self.apply_scheduled(curr_start);
+
+        if !init.next_v_set.is_empty() {
+            self.set_next_set(&init.next_v_set);
+        }
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, RawRwLock, PeerScheduleLocked> {
@@ -81,12 +122,12 @@ impl PeerSchedule {
         next_round: Round,
         working_subset: &[PeerId],
     ) -> bool {
-        if next_round <= self.atomic().cur_epoch_start {
+        if next_round <= self.atomic().curr_epoch_start() {
             return false; // ignore outdated
         }
         let mut locked = self.write();
 
-        if next_round <= locked.data.cur_epoch_start {
+        if next_round <= locked.data.curr_epoch_start() {
             return false; // double-check because arc-swap is racy with `self.apply_scheduled()`
         }
 
@@ -128,12 +169,12 @@ impl PeerSchedule {
         );
 
         // rotate only after previous data is cleaned
-        locked.forget_previous(self.downgrade());
+        locked.forget_oldest(self.downgrade());
         locked.data.rotate();
 
         // atomic part is updated under lock too
         self.update_atomic(|stateless| {
-            stateless.forget_previous();
+            stateless.forget_oldest();
             stateless.rotate();
         });
         tracing::info!(
