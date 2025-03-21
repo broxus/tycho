@@ -167,15 +167,11 @@ where
 
         let state_cloned = state.clone();
 
-        self.spawn_task(move |worker| {
-            Box::pin(async move {
-                let future = worker.detect_top_processed_to_anchor_and_notify_mempool(
-                    state_cloned,
-                    processed_upto.get_min_externals_processed_to()?.0,
-                );
-                future.await
-            })
-        })
+        self.spawn_task(method_to_async_closure!(
+            detect_top_processed_to_anchor_and_notify_mempool,
+            state_cloned,
+            processed_upto.get_min_externals_processed_to()?.0
+        ))
         .await?;
 
         let state_cloned = state.clone();
