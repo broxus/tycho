@@ -11,10 +11,13 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::mempool::MempoolAnchorId;
+use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ProcessedTo,
-    ShardDescriptionExt,
+    ShardDescriptionExt, ShardHashesExt,
 };
+use crate::utils::block::detect_top_processed_to_anchor;
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -240,6 +243,8 @@ pub(super) struct BlockCacheEntry {
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without master.
     pub top_shard_blocks_info: Vec<(BlockId, bool)>,
+    /// For master block will contain top processed to anchor among master and all shards.
+    pub top_processed_to_anchor: Option<MempoolAnchorId>,
 
     /// Seqno of master block that includes current shard block in his subgraph
     pub ref_by_mc_seqno: u32,
@@ -260,6 +265,7 @@ impl BlockCacheEntry {
         };
 
         let mut top_shard_blocks_info = vec![];
+        let mut top_processed_to_anchor = None;
         if let Some(mc_data) = mc_data {
             for (shard_id, shard_descr) in mc_data.shards.iter() {
                 top_shard_blocks_info.push((
@@ -267,6 +273,7 @@ impl BlockCacheEntry {
                     shard_descr.top_sc_block_updated,
                 ));
             }
+            top_processed_to_anchor = Some(mc_data.top_processed_to_anchor);
         }
 
         Ok(Self {
@@ -278,6 +285,7 @@ impl BlockCacheEntry {
             },
             prev_blocks_ids,
             top_shard_blocks_info,
+            top_processed_to_anchor,
             ref_by_mc_seqno,
         })
     }
@@ -292,6 +300,7 @@ impl BlockCacheEntry {
         let block_id = *state.block_id();
 
         let mut top_shard_blocks_info = vec![];
+        let mut top_processed_to_anchor = None;
         let cached_state = if block_id.is_masterchain() {
             for item in state.shards()?.iter() {
                 let (shard_id, shard_descr) = item?;
@@ -300,6 +309,15 @@ impl BlockCacheEntry {
                     shard_descr.top_sc_block_updated,
                 ));
             }
+            top_processed_to_anchor = Some(detect_top_processed_to_anchor(
+                state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
+                state
+                    .state()
+                    .processed_upto
+                    .load()?
+                    .get_min_externals_processed_to()?
+                    .0,
+            ));
             Some(state)
         } else {
             None
@@ -316,6 +334,7 @@ impl BlockCacheEntry {
             },
             prev_blocks_ids,
             top_shard_blocks_info,
+            top_processed_to_anchor,
             ref_by_mc_seqno,
         })
     }

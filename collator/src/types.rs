@@ -18,6 +18,7 @@ use tycho_util::FastHashMap;
 use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
 use crate::utils::block::detect_top_processed_to_anchor;
+use crate::validator::ValidationSessionId;
 
 pub mod processed_upto;
 
@@ -123,7 +124,9 @@ pub struct McData {
     pub global_id: i32,
     pub block_id: BlockId,
 
+    /// Last known key block seqno. Will be equal to `McData.block_id.seqno` if it is a key block.
     pub prev_key_block_seqno: u32,
+
     pub gen_lt: u64,
     pub gen_chain_time: u64,
     pub libraries: Dict<HashBytes, LibDescr>,
@@ -215,6 +218,9 @@ pub struct BlockCandidate {
     pub ref_by_mc_seqno: u32,
     pub block: BlockStuffAug,
     pub is_key_block: bool,
+    /// If current block is a key master block and `ConsensusConfig` was changed.
+    /// `None` - if it is a shard block or not a key master block.
+    pub consensus_config_changed: Option<bool>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
     pub collated_data: Vec<u8>,
@@ -279,8 +285,26 @@ pub struct BlockStuffForSync {
     pub consensus_info: ConsensusInfo,
 }
 
-/// (`ShardIdent`, seqno)
-pub(crate) type CollationSessionId = (ShardIdent, u32);
+/// (`ShardIdent`, seqno, subset `short_hash`)
+pub(crate) type CollationSessionId = (ShardIdent, u32, u32);
+
+// pub(crate) trait SessionId {
+//     fn shard(&self) -> &ShardIdent;
+//     fn seqno(&self) -> u32;
+//     fn subset_short_hash(&self) -> u32;
+// }
+
+// impl SessionId for CollationSessionId {
+//     fn shard(&self) -> &ShardIdent {
+//         &self.0
+//     }
+//     fn seqno(&self) -> u32 {
+//         self.1
+//     }
+//     fn subset_short_hash(&self) -> u32 {
+//         self.2
+//     }
+// }
 
 #[derive(Clone)]
 pub struct CollationSessionInfo {
@@ -306,14 +330,20 @@ impl CollationSessionInfo {
     }
 
     pub fn id(&self) -> CollationSessionId {
-        (self.shard, self.seqno)
+        (self.shard, self.seqno, self.collators.short_hash)
     }
+
+    pub fn get_validation_session_id(&self) -> ValidationSessionId {
+        (self.seqno, self.collators.short_hash)
+    }
+
     pub fn shard(&self) -> ShardIdent {
         self.shard
     }
     pub fn seqno(&self) -> u32 {
         self.seqno
     }
+
     pub fn collators(&self) -> &ValidatorSubsetInfo {
         &self.collators
     }

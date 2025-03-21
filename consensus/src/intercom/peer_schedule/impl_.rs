@@ -83,10 +83,12 @@ impl PeerSchedule {
     ) -> bool {
         if next_round <= self.atomic().cur_epoch_start {
             return false; // ignore outdated
-        } else {
-            self.apply_scheduled(next_round);
         }
         let mut locked = self.write();
+
+        if next_round <= locked.data.cur_epoch_start {
+            return false; // double-check because arc-swap is racy with `self.apply_scheduled()`
+        }
 
         locked.set_next_set(self.downgrade(), validator_set);
 
@@ -100,9 +102,9 @@ impl PeerSchedule {
         });
 
         tracing::info!(
-            "peer schedule next subset updated for {next_round:?} {:?} {:?}",
+            "peer schedule next subset updated for {next_round:?} {:?}, trace: {:?}",
             self.atomic().alt(),
-            locked.data,
+            tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
         );
 
         true
@@ -114,10 +116,15 @@ impl PeerSchedule {
             return;
         }
         let mut locked = self.write();
+
+        if (locked.data.next_epoch_start).is_none_or(|scheduled| scheduled > current) {
+            return; // double-check because arc-swap is racy with `self.set_next_subset()`
+        }
+
         tracing::debug!(
-            "peer schedule before rotation for {current:?}: {:?} {:?}",
+            "peer schedule before rotation for {current:?}: {:?}, trace: {:?}",
             self.atomic().alt(),
-            locked.data,
+            tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
         );
 
         // rotate only after previous data is cleaned
@@ -130,22 +137,10 @@ impl PeerSchedule {
             stateless.rotate();
         });
         tracing::info!(
-            "peer schedule rotated for {current:?} {:?} {:?}",
+            "peer schedule rotated for {current:?} {:?}, trace: {:?}",
             self.atomic().alt(),
-            locked.data,
+            tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
         );
-    }
-
-    /// after successful sync to current epoch
-    /// and validating all points from previous peer set
-    /// free some memory and ignore overlay updates
-    #[allow(dead_code)] // TODO use on change of validator set
-    pub fn forget_previous(&self) {
-        let mut locked = self.write();
-
-        locked.forget_previous(self.downgrade());
-        // atomic part is updated under lock too
-        self.update_atomic(|stateless| stateless.forget_previous());
     }
 
     /// in-time snapshot if consistency with peer state is not needed;

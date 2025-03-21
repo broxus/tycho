@@ -120,8 +120,10 @@ async fn validator_signatures_match() -> Result<()> {
         seqno: 1,
         ..zerostate_id
     };
-    for session_id in (0..).step_by(1000).take(SESSION_COUNT) {
-        tracing::info!(session_id, %block_id, "adding session");
+    for session_seqno in (0..).step_by(1000).take(SESSION_COUNT) {
+        let session_id = (session_seqno, 0);
+
+        tracing::info!(?session_id, %block_id, "adding session");
 
         let validators = make_description(block_id.seqno, &nodes);
         for node in &nodes {
@@ -134,7 +136,7 @@ async fn validator_signatures_match() -> Result<()> {
         }
 
         for _ in 0..10 {
-            tracing::info!(%block_id, %session_id, "validating block");
+            tracing::info!(%block_id, ?session_id, "validating block");
 
             let mut futures = futures_util::stream::FuturesOrdered::new();
             for node in &nodes {
@@ -194,8 +196,10 @@ async fn malicious_validators_are_ignored() -> Result<()> {
         seqno: 1,
         ..zerostate_id
     };
-    for session_id in (0..).step_by(1000).take(SESSION_COUNT) {
-        tracing::info!(session_id, %block_id, "adding session");
+    for session_seqno in (0..).step_by(1000).take(SESSION_COUNT) {
+        let session_id = (session_seqno, 0);
+
+        tracing::info!(?session_id, %block_id, "adding session");
 
         let validators = make_description(block_id.seqno, &nodes);
         for node in &nodes {
@@ -208,7 +212,7 @@ async fn malicious_validators_are_ignored() -> Result<()> {
         }
 
         for _ in 0..10 {
-            tracing::info!(%block_id, %session_id, "validating block");
+            tracing::info!(%block_id, ?session_id, "validating block");
 
             let mut good_validators = futures_util::stream::FuturesOrdered::new();
             let mut bad_validators = futures_util::stream::FuturesOrdered::new();
@@ -293,7 +297,7 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         seqno: 1,
         ..zerostate_id
     };
-    let session_id = 0;
+    let session_id = (0, 0);
 
     let validators = make_description(block_id.seqno, &nodes);
     for node in &nodes {

@@ -8,10 +8,11 @@ use tycho_util::futures::BoxFutureOrNoop;
 use crate::tracing_targets;
 use crate::validator::proto::rpc;
 use crate::validator::rpc::ExchangeSignatures;
+use crate::validator::ValidationSessionId;
 
 pub struct ValidatorService<E> {
     pub shard_ident: ShardIdent,
-    pub session_id: u32,
+    pub session_id: ValidationSessionId,
     pub exchanger: Weak<E>,
 }
 
@@ -76,7 +77,7 @@ where
         skip_all,
         fields(
             shard_ident = %self.shard_ident,
-            session_id = self.session_id,
+            session_id = ?self.session_id,
         )
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
