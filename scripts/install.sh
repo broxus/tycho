@@ -2,9 +2,27 @@
 set -eE
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-root_dir=$(cd "${script_dir}/../" && pwd -P)
 
 source "${script_dir}/common.sh"
+
+# Parse command line arguments
+cargo_profile="release"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --profile)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --profile requires a value" >&2
+                exit 1
+            fi
+            cargo_profile="$2"
+            shift 2
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 if ! command -v cargo 2>&1 >/dev/null; then
     cat << EOF
@@ -32,7 +50,7 @@ fi
 
 echo "RUSTFLAGS: $RUSTFLAGS"
 # shellcheck disable=SC2086 # we want to expand the flags
-cargo install $features --path ./cli --locked
+cargo install $features --profile "$cargo_profile" --path ./cli --locked
 
 cat << EOF
 Node installed successfully. Run the following to configure it:
