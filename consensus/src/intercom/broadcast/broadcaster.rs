@@ -15,7 +15,6 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcastCtx, Ctx, RoundCtx};
-use crate::engine::CachedConfig;
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -42,6 +41,7 @@ pub struct Broadcaster {
     // results
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
+    attempt: u8,
 
     bcast_request: Request,
     bcast_peers: FastHashSet<PeerId>,
@@ -88,6 +88,7 @@ impl Broadcaster {
             removed_peers: Default::default(),
             rejections: Default::default(),
             signatures: Default::default(),
+            attempt: 0,
 
             bcast_request: Dispatcher::broadcast_request(&point),
             bcast_peers,
@@ -157,8 +158,6 @@ impl Broadcaster {
                 }
             }
         }
-        metrics::counter!("tycho_mempool_collected_signatures_count")
-            .increment(self.signatures.len() as _);
         Arc::new(LastOwnPoint {
             digest: *self.point.digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
@@ -168,11 +167,11 @@ impl Broadcaster {
         })
     }
 
-    pub async fn run_continue(mut self, round_ctx: RoundCtx) {
-        self.ctx = BroadcastCtx::new(&round_ctx, &self.point);
+    pub async fn run_continue(mut self, round_ctx: &RoundCtx) {
+        self.ctx = BroadcastCtx::new(round_ctx, &self.point);
 
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
-            CachedConfig::get().consensus.broadcast_retry_millis as _,
+            self.ctx.conf().consensus.broadcast_retry_millis as _,
         ));
         retry_interval.reset(); // query signatures after time passes, just to resend broadcast
         retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -189,6 +188,7 @@ impl Broadcaster {
                     };
                 }
                 _ = retry_interval.tick() => {
+                    BroadcastCtx::retry(self.sig_peers.len());
                     for peer in mem::take(&mut self.sig_peers) {
                         self.request_signature(false, &peer);
                     }
@@ -227,8 +227,24 @@ impl Broadcaster {
                             _ = sender.send(BroadcasterSignal::Ok);
                         };
                     }
-                    for peer in mem::take(&mut self.sig_peers) {
-                        self.request_signature(false, &peer);
+                    self.attempt = self.attempt.wrapping_add(1);
+                    if self.attempt == 0 {
+                        // network is stuck, give all broadcast filters a push; forget rejections
+                        self.sig_peers.clear();
+                        self.rejections.clear();
+                        self.sig_futures.clear();
+                        self.bcast_futures.clear();
+                        let peers = self.signers.clone();
+                        BroadcastCtx::retry(peers.len());
+                        for peer in &*peers {
+                            self.broadcast(peer);
+                        }
+                    } else {
+                        let peers = mem::take(&mut self.sig_peers);
+                        BroadcastCtx::retry(peers.len());
+                        for peer in &peers {
+                            self.request_signature(false, peer);
+                        }
                     }
                     false
                 }
@@ -237,6 +253,7 @@ impl Broadcaster {
         tracing::debug!(
             parent: self.ctx.span(),
             result = result,
+            attempt = self.attempt,
             collector_signal = debug(collector_signal),
             signatures = self.signatures.len(),
             "2F" = self.signers_count.majority_of_others(),
@@ -303,11 +320,16 @@ impl Broadcaster {
                         if self.signers.contains(peer_id) {
                             if signature.verifies(peer_id, self.point.digest()) {
                                 self.signatures.insert(*peer_id, signature);
+                                BroadcastCtx::sig_collected();
                             } else {
                                 // any invalid signature lowers our chances
                                 // to successfully finish current round
                                 self.rejections.insert(*peer_id);
+                                BroadcastCtx::sig_rejected();
+                                BroadcastCtx::sig_unreliable();
                             }
+                        } else {
+                            BroadcastCtx::sig_unreliable();
                         }
                     }
                     SignatureResponse::NoPoint => {
@@ -321,6 +343,9 @@ impl Broadcaster {
                     SignatureResponse::Rejected(_) => {
                         if self.signers.contains(peer_id) {
                             self.rejections.insert(*peer_id);
+                            BroadcastCtx::sig_rejected();
+                        } else {
+                            BroadcastCtx::sig_unreliable();
                         }
                     }
                 }
@@ -409,5 +434,20 @@ impl Broadcaster {
                 Err(())
             }
         }
+    }
+}
+
+impl BroadcastCtx {
+    fn retry(amount: usize) {
+        metrics::counter!("tycho_mempool_broadcaster_retry_count").increment(amount as u64);
+    }
+    fn sig_collected() {
+        metrics::counter!("tycho_mempool_signatures_collected_count").increment(1);
+    }
+    fn sig_rejected() {
+        metrics::counter!("tycho_mempool_signatures_rejected_count").increment(1);
+    }
+    fn sig_unreliable() {
+        metrics::counter!("tycho_mempool_signatures_unreliable_count").increment(1);
     }
 }

@@ -11,7 +11,7 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
-use crate::engine::Genesis;
+use crate::engine::MempoolMergedConfig;
 use crate::models::{MempoolOutput, PointId, Round};
 
 #[derive(Default)]
@@ -46,15 +46,22 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
             let round = match commit_result {
                 MempoolOutput::Running | MempoolOutput::Paused => continue,
-                MempoolOutput::NewStartAfterGap(round) => round,
-                MempoolOutput::NextAnchor(anchor_data) => anchor_data.anchor.round(),
+                MempoolOutput::NewStartAfterGap(round) => {
+                    tracing::warn!("gap in anchor chain, next to commit: {}", round.0);
+                    round
+                }
+                MempoolOutput::NextAnchor(anchor_data) => {
+                    let round = anchor_data.anchor.round();
+                    tracing::info!("committed anchor {}", round.0);
+                    round
+                }
             };
             self.top_known_anchor.set_max(round);
             self.commit_round.set_max(round);
         }
     }
 
-    pub async fn check(mut self) {
+    pub async fn check(mut self, merged_conf: &MempoolMergedConfig) {
         let mut next_expected_history_round = None;
         loop {
             let (peer_id, commit_result) = self
@@ -78,7 +85,7 @@ impl AnchorConsumer {
 
             if next_expected_history_round.is_none() {
                 // Genesis point is excluded from commit, points only reference it
-                next_expected_history_round = Some(Genesis::id().round.next());
+                next_expected_history_round = Some(merged_conf.conf.genesis_round.next());
             }
 
             let anchor_round = anchor.round();

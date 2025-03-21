@@ -13,19 +13,19 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
-use crate::effects::{MempoolStore, RoundCtx, ValidateCtx};
+use crate::effects::{Ctx, EngineCtx, MempoolStore, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
+use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
     Signature, Through, UnixTime,
 };
 
-pub fn make_dag_parts<const PEER_COUNT: usize>(
+pub fn make_engine_parts<const PEER_COUNT: usize>(
     peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
-    local_keys: &Arc<KeyPair>,
-    genesis: &Point,
-) -> (PeerSchedule, Downloader) {
+    local_keys: Arc<KeyPair>,
+) -> (PeerSchedule, Downloader, Point, EngineCtx) {
     let network = Network::builder()
         .with_random_private_key()
         .build("0.0.0.0:0", Router::builder().build())
@@ -36,8 +36,16 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
+    let task_tracker = TaskTracker::default();
+
+    let merged_conf = crate::test_utils::default_test_config();
+    let conf = &merged_conf.conf;
+    let genesis = merged_conf.genesis();
+
+    let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
+
     // any peer id will be ok, network is not used
-    let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
+    let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &merged_conf, &task_tracker);
     peer_schedule.set_next_subset(
         &[],
         genesis.round().next(),
@@ -49,7 +57,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let stub_downloader =
         Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
 
-    (peer_schedule, stub_downloader)
+    (peer_schedule, stub_downloader, genesis, engine_ctx)
 }
 
 #[allow(clippy::too_many_arguments, reason = "ok in test")]
@@ -70,6 +78,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
+                .map(|p| p.expect("shutdown"))
                 .map(|p| p.valid().expect("must be valid").info().clone())
                 .next()
         })
@@ -113,18 +122,14 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             &last_trigger,
             msg_count,
             msg_bytes,
+            round_ctx.conf(),
         );
         points.insert(point.data().author, point);
     }
 
     for point in points.values() {
-        let serialized_point = tl_proto::serialize(point);
-        // skip 4 bytes of Point tag
-        if !Point::verify_hash_inner(&serialized_point[4..]) {
-            panic!("Point hash is not valid");
-        };
-
-        Verifier::verify(point, peer_schedule).expect("well-formed point");
+        point.verify_hash().unwrap();
+        Verifier::verify(point, peer_schedule, round_ctx.conf()).expect("well-formed point");
         let info = PointInfo::from(point);
         let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
@@ -139,7 +144,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         )
         .await;
         assert!(
-            matches!(validated, ValidateResult::Valid { .. }),
+            matches!(validated, Ok(ValidateResult::Valid { .. })),
             "expected valid point, got {validated:?}"
         );
     }
@@ -147,7 +152,8 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     for point in points.values() {
         dag_round
             .add_local(point, Some(local_keys), store, round_ctx)
-            .await;
+            .await
+            .expect("cancelled");
     }
 }
 
@@ -164,6 +170,7 @@ fn point<const PEER_COUNT: usize>(
     last_trigger: &PointId,
     msg_count: usize,
     msg_bytes: usize,
+    conf: &MempoolConfig,
 ) -> Point {
     assert!(idx < PEER_COUNT, "peer index out of range");
     assert!(
@@ -215,15 +222,22 @@ fn point<const PEER_COUNT: usize>(
         max_anchor_time
     };
 
-    Point::new(&peers[idx].1, round, evidence, payload, PointData {
-        author: peers[idx].0,
-        time: max_prev_time.next(),
-        includes: includes.clone(),
-        witness: Default::default(),
-        anchor_trigger,
-        anchor_proof,
-        anchor_time,
-    })
+    Point::new(
+        &peers[idx].1,
+        round,
+        evidence,
+        payload,
+        PointData {
+            author: peers[idx].0,
+            time: max_prev_time.next(),
+            includes: includes.clone(),
+            witness: Default::default(),
+            anchor_trigger,
+            anchor_proof,
+            anchor_time,
+        },
+        conf,
+    )
 }
 
 fn point_anchor_link(

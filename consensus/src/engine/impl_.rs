@@ -1,198 +1,148 @@
+use std::cmp;
 use std::collections::BTreeMap;
-use std::mem;
 use std::ops::RangeInclusive;
-use std::sync::Arc;
 use std::time::Duration;
 
-use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt, StreamExt};
+use futures_util::{FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use rayon::prelude::IntoParallelRefIterator;
-use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
-use tracing::Instrument;
-use tycho_network::{Network, OverlayService, PeerId, PeerResolver, PrivateOverlay};
-use tycho_util::futures::JoinTask;
+use tokio::sync::mpsc;
+use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Committer, DagFront, DagRound, KeyGroup, Verifier};
+use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
 use crate::effects::{
-    AltFormat, Ctx, DbCleaner, EngineCtx, MempoolAdapterStore, MempoolStore, RoundCtx,
+    AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult, TaskTracker,
 };
-use crate::engine::input_buffer::InputBuffer;
+use crate::engine::committer_task::CommitterTask;
+use crate::engine::lifecycle::{EngineError, EngineHandle, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis, MempoolConfig};
-use crate::intercom::{CollectorSignal, Dispatcher, PeerSchedule, Responder};
+use crate::engine::ConsensusConfigExt;
 use crate::models::{
-    AnchorData, DagPoint, MempoolOutput, Point, PointInfo, PointRestore, PointRestoreSelect,
-    PointStatusStoredRef, Round,
+    DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
+
+pub type EngineResult<T> = std::result::Result<T, EngineError>;
 
 pub struct Engine {
     dag: DagFront,
-    committer_run: JoinHandle<Committer>,
-    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+    committer_run: CommitterTask,
+    output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
+    _peer_schedule_updater: Task<()>,
+    init_task: Option<Task<FixHistoryFlag>>,
     ctx: EngineCtx,
-    init_task: Option<JoinTask<()>>,
-}
-
-#[derive(Clone)]
-pub struct EngineHandle {
-    peer_schedule: PeerSchedule,
-}
-impl EngineHandle {
-    pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
-        if let Some((switch_round, subset)) = subset {
-            // specially for zerostate with unaligned genesis,
-            // and for first (prev) vset after reboot or a new genesis
-            let round = if switch_round <= Genesis::id().round.0 {
-                Genesis::id().round.next()
-            } else {
-                Round(switch_round)
-            };
-            if !(self.peer_schedule).set_next_subset(set, round, subset) {
-                tracing::trace!("cannot schedule outdated round {switch_round} and set");
-                return;
-            }
-        }
-        self.peer_schedule.set_next_set(set);
-    }
 }
 
 impl Engine {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        key_pair: Arc<KeyPair>,
-        network: &Network,
-        peer_resolver: &PeerResolver,
-        overlay_service: &OverlayService,
-        mempool_adapter_store: &MempoolAdapterStore,
-        input_buffer: InputBuffer,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-        top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        config: &MempoolConfig,
-    ) -> Self {
-        // mostly everything depends on genesis - must init at the first line
-        // MempoolConfig::init(&global_config);
-        let (genesis, overlay_id) = CachedConfig::init(config);
+        handle: &EngineHandle,
+        task_tracker: &TaskTracker,
+        fix_history: FixHistoryFlag,
+    ) -> Engine {
+        let EngineHandle {
+            bind,
+            net,
+            merged_conf,
+            ..
+        } = handle;
+
+        let conf = &merged_conf.conf;
+        let genesis = merged_conf.genesis();
 
         let consensus_round = RoundWatch::default();
-        consensus_round.set_max(Genesis::id().round);
-        top_known_anchor.set_max(Genesis::id().round);
-        let engine_ctx = EngineCtx::new(consensus_round.get());
-        let responder = Responder::default();
+        consensus_round.set_max(conf.genesis_round);
+        bind.top_known_anchor.set_max(conf.genesis_round);
 
-        let private_overlay = PrivateOverlay::builder(overlay_id)
-            .with_peer_resolver(peer_resolver.clone())
-            .named("tycho-consensus")
-            .build(responder.clone());
-
-        overlay_service.add_private_overlay(&private_overlay);
-
-        let dispatcher = Dispatcher::new(network, &private_overlay);
-        let peer_schedule = PeerSchedule::new(key_pair.clone(), private_overlay);
+        let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker);
+        let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
 
         genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis, &peer_schedule).expect("genesis failed to verify");
+        Verifier::verify(&genesis, &net.peer_schedule, conf).expect("genesis failed to verify");
 
-        let store = MempoolStore::new(mempool_adapter_store);
-        let db_cleaner = DbCleaner::new(mempool_adapter_store);
+        let store = MempoolStore::new(&bind.mempool_adapter_store);
+        let db_cleaner = DbCleaner::new(&bind.mempool_adapter_store);
 
         // Dag, created at genesis, will at first extend up to its greatest length
         // (in case last broadcast is within it) without data,
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
         let mut dag = DagFront::default();
-        let mut committer = dag.init(DagRound::new_bottom(
-            Genesis::id().round.prev(),
-            &peer_schedule,
-        ));
-        dag.fill_to_top(Genesis::id().round, Some(&mut committer), &peer_schedule);
-        let committer_run = tokio::spawn(future::ready(committer));
+        let mut committer = dag.init(
+            DagRound::new_bottom(conf.genesis_round.prev(), &net.peer_schedule, conf),
+            conf,
+        );
+        dag.fill_to_top(
+            conf.genesis_round,
+            Some(&mut committer),
+            &net.peer_schedule,
+            &round_ctx,
+        );
+        let committer_run = CommitterTask::new(committer, engine_ctx.conf());
 
-        let init_task = JoinTask::new({
+        let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
-            async move {
-                let init_storage_task = tokio::task::spawn_blocking({
-                    move || {
-                        store.init_storage(&overlay_id);
-                        store.insert_point(&genesis, PointStatusStoredRef::Exists);
-                    }
-                });
-                match init_storage_task.await {
-                    Ok(()) => (),
-                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Err(e) => panic!("failed to clean db on genesis {e:?}"),
-                }
+            let overlay_id = merged_conf.overlay_id;
+            let conf = conf.clone();
+            move || {
+                store.init_storage(&overlay_id);
+                store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                fix_history // just pass further
             }
         });
 
         let round_task = RoundTaskReady::new(
-            &dispatcher,
-            peer_schedule,
+            &net.dispatcher,
+            net.peer_schedule.clone(),
             store,
             &consensus_round,
-            top_known_anchor.clone(),
-            responder,
-            input_buffer,
+            bind.top_known_anchor.clone(),
+            net.responder.clone(),
+            bind.input_buffer.clone(),
         );
 
-        tokio::spawn({
-            let peer_schedule = round_task.state.peer_schedule.clone();
-            async move {
-                peer_schedule.run_updater().await;
-            }
+        let peer_schedule_updater = engine_ctx.task().spawn({
+            let peer_schedule = net.peer_schedule.clone();
+            peer_schedule.run_updater()
         });
 
         Self {
             dag,
             committer_run,
-            committed_info_tx,
+            output: bind.output.clone(),
             db_cleaner,
             round_task,
-            ctx: engine_ctx,
+            _peer_schedule_updater: peer_schedule_updater,
             init_task: Some(init_task),
+            ctx: engine_ctx,
         }
-    }
-
-    pub fn get_handle(&self) -> EngineHandle {
-        EngineHandle {
-            peer_schedule: self.round_task.state.peer_schedule.clone(),
-        }
-    }
-
-    #[cfg(any(test, feature = "test"))]
-    pub fn set_start_peers(&self, peers: &[PeerId]) {
-        let first = Genesis::id().round.next();
-        (self.round_task.state.peer_schedule).set_next_subset(peers, first, peers);
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast
-    async fn pre_run(&mut self) -> Option<(Point, Option<Point>)> {
-        self.init_task.take().expect("init task must be set").await;
+    async fn pre_run(&mut self) -> EngineResult<Option<(Point, Option<Point>)>> {
+        let fix_history = (self.init_task.take().expect("init task must be set")).await?;
 
         // take last round from db
 
-        let last_db_round = tokio::task::spawn_blocking({
-            let store = self.round_task.state.store.clone();
-            move || store.last_round()
-        })
-        .await
-        .expect("load last round from db");
+        let last_db_round = (self.ctx.task())
+            .spawn_blocking({
+                let store = self.round_task.state.store.clone();
+                move || store.last_round()
+            })
+            .await?;
 
-        self.ctx = EngineCtx::new(last_db_round);
+        self.ctx.update(last_db_round);
         tracing::info!(parent: self.ctx.span(), "rounds set since found last db round");
+        let conf = self.ctx.conf();
 
         // wait collator to load blocks and update peer schedule
 
         let top_known_anchor = {
-            let min_top_known_anchor =
-                last_db_round - CachedConfig::get().consensus.max_consensus_lag_rounds;
+            let min_top_known_anchor = last_db_round - conf.consensus.max_consensus_lag_rounds;
 
             // NOTE collator have to apply mc state update to mempool first,
             //  and pass its top known anchor only after completion
@@ -214,23 +164,25 @@ impl Engine {
 
         let dag_top_round = last_db_round
             .max(top_known_anchor)
-            .max(Genesis::id().round.next());
+            .max(conf.genesis_round.next());
         self.round_task.state.consensus_round.set_max(dag_top_round);
         let round_ctx = RoundCtx::new(&self.ctx, dag_top_round);
         tracing::info!(parent: round_ctx.span(), "current round set to dag top");
 
-        let mut committer = take_committer(&mut self.committer_run).expect("init");
-        (self.dag).fill_to_top(
-            dag_top_round,
-            Some(&mut committer),
-            &self.round_task.state.peer_schedule,
-        );
-        _ = committer.drop_upto(
-            (top_known_anchor - CachedConfig::get().consensus.replay_anchor_rounds())
-                .max(Genesis::id().round),
-        );
-        let dag_bottom_round = committer.bottom_round();
-
+        let dag_bottom_round = {
+            let committer = self.committer_run.ready_mut().await?.expect("ready");
+            (self.dag).fill_to_top(
+                dag_top_round,
+                Some(committer),
+                &self.round_task.state.peer_schedule,
+                &round_ctx,
+            );
+            _ = committer.drop_upto(
+                (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
+                conf,
+            );
+            committer.bottom_round()
+        };
         // preload and sign last rounds if node may still participate in consensus
 
         if dag_bottom_round <= last_db_round {
@@ -242,7 +194,7 @@ impl Engine {
                 "will restore points from DB",
             );
             let range = RangeInclusive::new(dag_bottom_round, last_db_round);
-            self.preload_points(range, &round_ctx).await;
+            self.preload_points(range, fix_history, &round_ctx).await?;
         } else {
             tracing::info!(
                 parent: round_ctx.span(),
@@ -269,6 +221,7 @@ impl Engine {
                 .and_then(|local_id| dag_round.view(&local_id, |loc| loc.first_valid()))
                 .flatten()
                 .and_then(|dag_point_fut| dag_point_fut.now_or_never())
+                .transpose()?
                 .map(|dag_point| dag_point.id());
             if let Some(last_id) = first_valid {
                 tracing::info!(
@@ -289,7 +242,7 @@ impl Engine {
                 (dag_top_round.next(), None)
             }
             Some(last_id) => {
-                let task = tokio::task::spawn_blocking({
+                let task = round_ctx.task().spawn_blocking({
                     let store = self.round_task.state.store.clone();
                     move || {
                         let last = store
@@ -303,36 +256,38 @@ impl Engine {
                         (last, prev)
                     }
                 });
+                let (last, prev) = task.await?;
                 // if there's a broadcast at two last DB rounds - then it's round will be current
-                match task.await {
-                    Ok((last, prev)) => (last.round().next(), Some((last, prev))),
-                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Err(e) => {
-                        let _span = round_ctx.span().enter();
-                        panic!("loading broadcasts on init: {e}")
-                    }
-                }
+                (last.round().next(), Some((last, prev)))
             }
         };
         (self.dag).fill_to_top(
             new_top_round,
-            Some(&mut committer),
+            Some(self.committer_run.ready_mut().await?.expect("ready")),
             &self.round_task.state.peer_schedule,
+            &round_ctx,
         );
-        self.committer_run = tokio::spawn(future::ready(committer));
 
         self.round_task.state.consensus_round.set_max(new_top_round);
 
-        replay_bcasts
+        Ok(replay_bcasts)
     }
 
-    async fn preload_points(&self, range: RangeInclusive<Round>, round_ctx: &RoundCtx) {
-        let task = tokio::task::spawn_blocking({
+    async fn preload_points(
+        &self,
+        range: RangeInclusive<Round>,
+        fix_history: FixHistoryFlag,
+        round_ctx: &RoundCtx,
+    ) -> TaskResult<()> {
+        let task = round_ctx.task().spawn_blocking({
             let store = self.round_task.state.store.clone();
             let peer_schedule = self.round_task.state.peer_schedule.clone();
             let round_ctx = round_ctx.clone();
             move || {
                 let _guard = round_ctx.span().enter();
+                if fix_history.0 {
+                    store.reset_statuses(&range);
+                }
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
@@ -349,9 +304,9 @@ impl Engine {
                             .multi_get_points(keys) // assume load result is sorted
                             .par_iter()
                             .map(|point| {
-                                let is_ok = point.verify_hash().is_ok()
-                                    && Verifier::verify(point, &peer_schedule).is_ok();
-                                if is_ok {
+                                if Verifier::verify(point, &peer_schedule, round_ctx.conf()).is_ok()
+                                    && point.verify_hash().is_ok()
+                                {
                                     // return back as they were, now with prev_proof filled
                                     PointRestore::Exists(point.into(), point.prev_proof())
                                 } else {
@@ -369,16 +324,9 @@ impl Engine {
                 map
             }
         });
-        let preloaded = match task.await {
-            Ok(result) => result,
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(e) => {
-                let _span = round_ctx.span().enter();
-                panic!("preload last rounds on init: {e}");
-            }
-        };
 
-        for ((round, _), point_restores) in preloaded {
+        let mut reversed_futures = BTreeMap::new();
+        for ((round, order), point_restores) in task.await? {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let dag_restore = FuturesUnordered::new();
             for point_restore in point_restores {
@@ -389,22 +337,31 @@ impl Engine {
                     round_ctx,
                 ));
             }
-            dag_restore.collect::<Vec<DagPoint>>().await;
+            reversed_futures.insert((cmp::Reverse(round), order), dag_restore);
         }
+        for dag_restore in reversed_futures.into_values() {
+            dag_restore.try_collect::<Vec<DagPoint>>().await?;
+        }
+        Ok(())
     }
 
-    pub async fn run(mut self) {
+    // this future never completes with Ok result
+    pub async fn run(mut self) -> EngineResult<futures_util::never::Never> {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
-        let mut start_replay_bcasts = Some(self.pre_run().await);
-        let _db_clean_task = self.db_cleaner.new_task(
+        let mut start_replay_bcasts = Some(self.pre_run().await?);
+        let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
+            start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
+        });
+        let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
+        let _db_clean_task: Task<()> = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
+            &round_ctx,
         );
 
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
-        let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
@@ -425,56 +382,44 @@ impl Engine {
                         old_dag_top_round.0,
                     );
                     metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
-                        .increment(consensus_round - old_dag_top_round);
+                        .increment(consensus_round.diff_f64(old_dag_top_round));
                     // if received from BcastFilter - produce point at round before it
                     let next_round = consensus_round.max(old_dag_top_round.next());
                     (old_dag_top_round, next_round)
                 };
 
-                let mut ready_committer = take_committer(&mut self.committer_run);
-
                 let dag_top_round = match collator_feedback(
                     self.round_task.state.top_known_anchor.receiver(),
                     old_dag_top_round,
                     &mut is_paused,
-                    &self.committed_info_tx,
+                    &self.output,
                     &round_ctx,
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
                     Err(collator_sync) => {
                         collator_sync.await;
-                        if let Some(committer) = ready_committer {
-                            self.committer_run = committer_task(
-                                committer,
-                                full_history_bottom.take(),
-                                self.committed_info_tx.clone(),
-                                round_ctx.clone(),
-                            );
-                        }
+                        let committer_update = self.committer_run.update_task(
+                            full_history_bottom.take(),
+                            self.output.clone(),
+                            &round_ctx,
+                        );
+                        committer_update.await?;
                         continue;
                     }
                 };
 
                 if old_dag_top_round < dag_top_round.prev() {
-                    self.ctx = EngineCtx::new(dag_top_round.prev());
+                    self.ctx.update(dag_top_round.prev());
                 }
 
                 round_ctx = RoundCtx::new(&self.ctx, dag_top_round.prev());
 
                 *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
                     dag_top_round,
-                    ready_committer.as_mut(),
+                    self.committer_run.ready_mut().await?,
                     &self.round_task.state.peer_schedule,
+                    &round_ctx,
                 ));
-
-                if let Some(committer) = ready_committer {
-                    self.committer_run = committer_task(
-                        committer,
-                        full_history_bottom.take(),
-                        self.committed_info_tx.clone(),
-                        round_ctx.clone(),
-                    );
-                }
 
                 assert!(
                     dag_top_round <= next_round,
@@ -494,51 +439,23 @@ impl Engine {
             let head = self.dag.head(&self.round_task.state.peer_schedule);
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
-            let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
-
-            let own_point_fut = match start_replay_bcasts.take().flatten() {
-                Some((point, prev_bcast)) => {
-                    if let Some(prev) = prev_bcast {
-                        self.round_task.init_prev_broadcast(prev, &round_ctx);
-                    }
-                    future::ready(Some(point)).boxed()
-                }
-                None => (self.round_task).own_point_task(
-                    &head,
-                    collector_signal_tx.subscribe(),
-                    &round_ctx,
-                ),
-            };
-
-            let mut retry_interval = collector_signal_tx.subscribe();
-
             let mut round_task_run = std::pin::pin!(self
                 .round_task
-                .run(own_point_fut, collector_signal_tx, &head, &round_ctx)
+                .run(start_replay_bcasts.take().flatten(), &head, &round_ctx)
                 .until_ready());
 
             loop {
-                let heart_beat = retry_interval.changed();
                 tokio::select! {
-                    _ = heart_beat => {
-                        if let Some(committer) = take_committer(&mut self.committer_run) {
-                            self.committer_run = committer_task(
-                                committer,
-                                full_history_bottom.take(),
-                                self.committed_info_tx.clone(),
-                                round_ctx.clone(),
-                            );
-                        }
-                    }
+                    _ = self.committer_run.interval.tick() => {
+                        self.committer_run.update_task(
+                            full_history_bottom.take(),
+                            self.output.clone(),
+                            &round_ctx,
+                        ).await?;
+                    },
                     round_task = &mut round_task_run => {
-                        match round_task {
-                            Ok(round_task) => {
-                                self.round_task = round_task;
-                                break;
-                            }
-                            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                            Err(e) => panic!("mempool engine failed: {e:?}"),
-                        }
+                        self.round_task = round_task?;
+                        break;
                     }
                 }
             }
@@ -555,7 +472,7 @@ fn collator_feedback(
 ) -> Result<Round, BoxFuture<'static, ()>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
-    let pause_at = top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
+    let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
     // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
     //  (the next after next engine round), while vset switch round is exactly pause bound + 1
     if old_dag_top_round >= pause_at {
@@ -570,14 +487,18 @@ fn collator_feedback(
             committed_info_tx.send(MempoolOutput::Paused).ok();
         }
 
+        let timeout = Duration::from_millis(round_ctx.conf().consensus.broadcast_retry_millis as _);
+
+        let round_ctx = round_ctx.clone();
         let collator_sync = async move {
             loop {
                 let top_known_anchor = top_known_anchor_recv.next().await;
                 //  exit if ready to produce point: collator synced enough
                 let pause_at =
-                    top_known_anchor + CachedConfig::get().consensus.max_consensus_lag_rounds;
+                    top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
                 let exit = old_dag_top_round < pause_at;
                 tracing::debug!(
+                    parent: round_ctx.span(),
                     top_known_anchor = top_known_anchor.0,
                     pause_at = pause_at.0,
                     exit = exit,
@@ -588,14 +509,7 @@ fn collator_feedback(
                 }
             }
         };
-        let task = tokio::time::timeout(
-            Duration::from_millis(CachedConfig::get().consensus.broadcast_retry_millis as _),
-            collator_sync.instrument(round_ctx.span().clone()),
-        )
-        .map(|_| ())
-        .boxed();
-
-        Err(task)
+        Err((tokio::time::timeout(timeout, collator_sync).map(|_| ())).boxed())
     } else if *is_paused {
         tracing::info!(
             parent: round_ctx.span(),
@@ -608,120 +522,5 @@ fn collator_feedback(
         Ok(pause_at)
     } else {
         Ok(pause_at)
-    }
-}
-
-fn take_committer(committer_run: &mut JoinHandle<Committer>) -> Option<Committer> {
-    if committer_run.is_finished() {
-        let taken = mem::replace(committer_run, tokio::spawn(future::pending()));
-        committer_run.abort();
-        match taken.now_or_never() {
-            Some(Ok(committer)) => Some(committer),
-            Some(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Some(Err(e)) => panic!("committer task: {e:?}"),
-            None => unreachable!("committer task is finished and can be taken only once"),
-        }
-    } else {
-        None
-    }
-}
-
-fn committer_task(
-    mut committer: Committer,
-    full_history_bottom: Option<Round>,
-    committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-    round_ctx: RoundCtx,
-) -> JoinHandle<Committer> {
-    tokio::task::spawn_blocking(move || {
-        // may run for long several times in a row and commit nothing, because of missed points
-        let _span = round_ctx.span().enter();
-
-        let mut committed = None;
-        let mut new_full_history_bottom = None;
-
-        let start_bottom = committer.bottom_round();
-        let start_dag_len = committer.dag_len();
-
-        for attempt in 0.. {
-            match committer.commit() {
-                Ok(data) => {
-                    committed = Some(data);
-                    break;
-                }
-                Err(round) => {
-                    let result = committer.drop_upto(round.next());
-                    new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
-                    tracing::info!(
-                        ?start_bottom,
-                        start_dag_len,
-                        current_bottom = ?committer.bottom_round(),
-                        current_dag_len = committer.dag_len(),
-                        attempt,
-                        "comitter rounds were dropped as impossible to sync"
-                    );
-                    if result.is_err() {
-                        break;
-                    } else if attempt > start_dag_len {
-                        panic!(
-                            "infinite loop on dropping dag rounds: \
-                             start dag len {start_dag_len}, start bottom {start_bottom:?} \
-                             resulting {:?}",
-                            committer.alt()
-                        )
-                    };
-                }
-            }
-        }
-
-        if let Some(new_bottom) = new_full_history_bottom.or(full_history_bottom) {
-            committed_info_tx
-                .send(MempoolOutput::NewStartAfterGap(new_bottom)) // not recoverable
-                .expect("Failed to send anchor history info to mpsc channel");
-        }
-
-        if let Some(committed) = committed {
-            round_ctx.log_committed(&committed);
-            for data in committed {
-                round_ctx.commit_metrics(&data.anchor);
-                committed_info_tx
-                    .send(MempoolOutput::NextAnchor(data)) // not recoverable
-                    .expect("Failed to send anchor history info to mpsc channel");
-            }
-        }
-
-        EngineCtx::meter_dag_len(committer.dag_len());
-
-        committer
-    })
-}
-
-impl RoundCtx {
-    fn commit_metrics(&self, anchor: &PointInfo) {
-        metrics::counter!("tycho_mempool_commit_anchors").increment(1);
-        metrics::gauge!("tycho_mempool_commit_latency_rounds").set(self.depth(anchor.round()));
-    }
-
-    fn log_committed(&self, committed: &[AnchorData]) {
-        if !committed.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
-            let committed = committed
-                .iter()
-                .map(|data| {
-                    let history = data
-                        .history
-                        .iter()
-                        .map(|point| format!("{:?}", point.id().alt()))
-                        .join(", ");
-                    format!(
-                        "anchor {:?} time {} : [ {history} ]",
-                        data.anchor.id().alt(),
-                        data.anchor.data().time
-                    )
-                })
-                .join("  ;  ");
-            tracing::debug!(
-                parent: self.span(),
-                "committed {committed}"
-            );
-        }
     }
 }

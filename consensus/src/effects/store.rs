@@ -9,14 +9,13 @@ use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::OverlayId;
 use tycho_storage::MempoolStorage;
-use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
-use crate::effects::AltFormat;
+use crate::effects::{AltFormat, Cancelled, Ctx, RoundCtx, Task};
 use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{CachedConfig, ConsensusConfigExt, Genesis};
+use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::models::{
     Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus, PointStatusStored,
     PointStatusStoredRef, PointStatusValidated, Round,
@@ -32,7 +31,12 @@ pub struct MempoolAdapterStore {
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()>;
+    fn insert_point(
+        &self,
+        point: &Point,
+        status: PointStatusStoredRef<'_>,
+        conf: &MempoolConfig,
+    ) -> Result<()>;
 
     fn set_status(
         &self,
@@ -56,6 +60,8 @@ trait MempoolStoreImpl: Send + Sync {
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>>;
 
     fn last_round(&self) -> Result<Round>;
+
+    fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()>;
 
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>>;
 
@@ -123,9 +129,14 @@ impl MempoolStore {
         Self(Arc::new(()))
     }
 
-    pub fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) {
+    pub fn insert_point(
+        &self,
+        point: &Point,
+        status: PointStatusStoredRef<'_>,
+        conf: &MempoolConfig,
+    ) {
         self.0
-            .insert_point(point, status)
+            .insert_point(point, status, conf)
             .with_context(|| format!("id {:?}", point.id().alt()))
             .expect("DB insert point full");
     }
@@ -174,6 +185,13 @@ impl MempoolStore {
         self.0.last_round().expect("DB load last round")
     }
 
+    pub fn reset_statuses(&self, range: &RangeInclusive<Round>) {
+        self.0
+            .reset_statuses(range)
+            .with_context(|| format!("range [{}..={}]", range.start().0, range.end().0))
+            .expect("DB reset statuses");
+    }
+
     pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestoreSelect> {
         self.0
             .load_restore(range)
@@ -202,7 +220,12 @@ impl DbCleaner {
         }
     }
 
-    fn least_to_keep(consensus: Round, committed: Round, top_known_anchor: Round) -> Round {
+    fn least_to_keep(
+        consensus: Round,
+        committed: Round,
+        top_known_anchor: Round,
+        conf: &MempoolConfig,
+    ) -> Round {
         // If the node is not scheduled, then it's paused and does not receive broadcasts:
         // mempool receives fresher TKA (via validator sync)
         // while BcastFilter has outdated consensus round.
@@ -211,29 +234,32 @@ impl DbCleaner {
 
         // So `committed` follows both consensus and TKA, and does not stall while Engine can.
 
-        let least_to_keep = (committed - CachedConfig::get().consensus.reset_rounds()).min(
+        let least_to_keep = (committed - conf.consensus.reset_rounds()).min(
             // consensus for general work and sync:  collator may observe a gap if lags too far
             // TKA for deep sync: consensus round is stalled, history not needed for others
-            consensus.max(top_known_anchor) - CachedConfig::get().consensus.max_total_rounds(),
+            consensus.max(top_known_anchor) - conf.consensus.max_total_rounds(),
         );
-        let remainder =
-            least_to_keep.0 % CachedConfig::get().node.clean_db_period_rounds.get() as u32;
-        Genesis::id().round.max(least_to_keep - remainder)
+        let remainder = least_to_keep.0 % NodeConfig::get().clean_db_period_rounds.get() as u32;
+        (conf.genesis_round).max(least_to_keep - remainder)
     }
 
     pub fn new_task(
         &self,
         mut consensus_round: RoundWatcher<Consensus>,
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
-    ) -> JoinTask<()> {
+        round_ctx: &RoundCtx,
+    ) -> Task<()> {
         let storage = self.storage.clone();
+        let task_ctx = round_ctx.task();
+        let round_ctx = round_ctx.clone();
         let mut committed_round = self.committed_round.receiver();
 
-        JoinTask::new(async move {
+        task_ctx.spawn(async move {
             let mut consensus = consensus_round.get();
             let mut committed = committed_round.get();
             let mut top_known = top_known_anchor.get();
-            let mut prev_least_to_keep = Self::least_to_keep(consensus, committed, top_known);
+            let mut prev_least_to_keep =
+                Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
             loop {
                 tokio::select! {
                     biased;
@@ -244,19 +270,20 @@ impl DbCleaner {
 
                 metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_top_known")
-                    .set(consensus - top_known);
+                    .set(consensus.diff_f64(top_known));
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
-                    .set(consensus - committed);
+                    .set(consensus.diff_f64(committed));
                 metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
-                    .set(committed - top_known);
+                    .set(committed.diff_f64(top_known));
 
-                let new_least_to_keep = Self::least_to_keep(consensus, committed, top_known);
+                let new_least_to_keep =
+                    Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
                 metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
-                    .set(consensus - new_least_to_keep);
+                    .set(consensus.diff_f64(new_least_to_keep));
 
-                if new_least_to_keep > prev_least_to_keep {
+                if prev_least_to_keep < new_least_to_keep {
                     let storage = storage.clone();
-                    let task = tokio::task::spawn_blocking(move || {
+                    let task = round_ctx.task().spawn_blocking(move || {
                         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
                         MempoolStorage::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
 
@@ -286,10 +313,9 @@ impl DbCleaner {
                     });
                     match task.await {
                         Ok(()) => prev_least_to_keep = new_least_to_keep,
-                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                        Err(cancelled) => {
-                            tracing::error!("clean mempool storage task: {cancelled:?}");
-                            // keep prev value unchanged to retry
+                        Err(Cancelled()) => {
+                            tracing::warn!("mempool clean task DB cancelled");
+                            break;
                         }
                     }
                 }
@@ -299,7 +325,12 @@ impl DbCleaner {
 }
 
 impl MempoolStoreImpl for MempoolStorage {
-    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
+    fn insert_point(
+        &self,
+        point: &Point,
+        status: PointStatusStoredRef<'_>,
+        conf: &MempoolConfig,
+    ) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
@@ -314,7 +345,7 @@ impl MempoolStoreImpl for MempoolStorage {
         // in contrast, status are written from random places, but only via `merge_cf()`
         let mut batch = WriteBatch::default();
 
-        let mut buffer = Vec::<u8>::with_capacity(CachedConfig::get().point_max_bytes);
+        let mut buffer = Vec::<u8>::with_capacity(conf.point_max_bytes);
         point.write_to(&mut buffer);
         batch.put_cf(&points_cf, key.as_slice(), &buffer);
 
@@ -549,6 +580,36 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(Round(round))
     }
 
+    fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()> {
+        let status_t = &self.db.tables().points_status;
+        let db = self.db.rocksdb();
+
+        let mut start = [0_u8; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_prefix(range.start().0, &mut start);
+
+        let mut end_excl = [0_u8; MempoolStorage::KEY_LEN];
+        MempoolStorage::fill_prefix(range.end().next().0, &mut end_excl);
+
+        let mut conf = status_t.new_read_config();
+        conf.set_iterate_lower_bound(start);
+        conf.set_iterate_upper_bound(end_excl);
+        let mut iter = db.iterator_cf_opt(&status_t.cf(), conf, IteratorMode::Start);
+
+        let mut batch = WriteBatch::default();
+        batch.delete_range_cf(&status_t.cf(), start, end_excl);
+        loop {
+            let Some(kv) = iter.next() else { break };
+            let k = kv.context("status iter next")?.0;
+            batch.put_cf(&status_t.cf(), k, []);
+        }
+
+        db.write(batch)?;
+
+        db.compact_range_cf(&status_t.cf(), Some(start), Some(end_excl));
+
+        self.wait_for_compact()
+    }
+
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
@@ -659,7 +720,12 @@ impl MempoolStoreImpl for MempoolStorage {
 
 #[cfg(feature = "test")]
 impl MempoolStoreImpl for () {
-    fn insert_point(&self, _: &Point, _: PointStatusStoredRef<'_>) -> Result<()> {
+    fn insert_point(
+        &self,
+        _: &Point,
+        _: PointStatusStoredRef<'_>,
+        _: &MempoolConfig,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -696,6 +762,10 @@ impl MempoolStoreImpl for () {
     }
 
     fn last_round(&self) -> Result<Round> {
+        anyhow::bail!("should not be used in tests")
+    }
+
+    fn reset_statuses(&self, _: &RangeInclusive<Round>) -> Result<()> {
         anyhow::bail!("should not be used in tests")
     }
 
