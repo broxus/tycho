@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    ExternalsRange, InternalsRange, Lazy, MsgsExecutionParams, ProcessedUptoInfo,
-    ProcessedUptoPartition, ShardIdent, ShardIdentFull, ShardRange,
+    ExternalsRange, InternalsRange, MsgsExecutionParams, ProcessedUptoInfo, ProcessedUptoPartition,
+    ShardIdent, ShardIdentFull, ShardRange,
 };
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_util::FastHashSet;

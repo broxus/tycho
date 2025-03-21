@@ -148,6 +148,10 @@ where
 
         while let Some(next) = next_master_fut.await.transpose()? {
             // NOTE: Start fetching the next master block in parallel to the processing of the current one
+            // If we have a chain of providers, when switching to the next one, since blocks are processed
+            // asynchronously and in parallel with requesting the next block, the processing of the
+            // previous block may already use the new provider. Therefore, the next provider must
+            // necessarily store the previous block.
             next_master_fut = JoinTask::new(self.fetch_next_master_block(next.id()));
 
             let mc_seqno = next.id().seqno;

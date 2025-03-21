@@ -21,6 +21,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 clap = { workspace = true }
+clap-markdown = { workspace = true }
 dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 everscale-crypto = { workspace = true }

@@ -495,6 +495,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-markdown"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ebc67e6266e14f8b31541c2f204724fa2ac7ad5c17d6f5908fbb92a60f42cff"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_builder"
 version = "4.5.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -947,7 +956,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=adada6e6539abd798dbbc5a7fc1d17cc31fa7eff#adada6e6539abd798dbbc5a7fc1d17cc31fa7eff"
+source = "git+https://github.com/broxus/everscale-types.git?rev=90cd8f576e8cd3898e2524b70de8ad73aef8e3fd#90cd8f576e8cd3898e2524b70de8ad73aef8e3fd"
 dependencies = [
  "ahash",
  "anyhow",
@@ -976,7 +985,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=adada6e6539abd798dbbc5a7fc1d17cc31fa7eff#adada6e6539abd798dbbc5a7fc1d17cc31fa7eff"
+source = "git+https://github.com/broxus/everscale-types.git?rev=90cd8f576e8cd3898e2524b70de8ad73aef8e3fd#90cd8f576e8cd3898e2524b70de8ad73aef8e3fd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1568,7 +1577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3251,20 +3260,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ton_executor"
-version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?rev=de566312176aa524d4afc26a04c931f97079b77f#de566312176aa524d4afc26a04c931f97079b77f"
-dependencies = [
- "ahash",
- "anyhow",
- "everscale-types",
- "num-bigint",
- "thiserror 2.0.11",
- "tracing",
- "tycho-vm",
-]
-
-[[package]]
 name = "tower"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3466,7 +3461,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tycho-block-util"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3476,6 +3471,7 @@ dependencies = [
  "everscale-types",
  "hex",
  "parking_lot",
+ "rayon",
  "thiserror 2.0.11",
  "tl-proto",
  "tycho-util",
@@ -3483,7 +3479,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-cli"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3491,6 +3487,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "clap",
+ "clap-markdown",
  "dirs",
  "ed25519-dalek",
  "everscale-crypto",
@@ -3529,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-collator"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3556,7 +3553,6 @@ dependencies = [
  "tl-proto",
  "tokio",
  "tokio-util",
- "ton_executor",
  "tracing",
  "tracing-subscriber",
  "trait-variant",
@@ -3564,6 +3560,7 @@ dependencies = [
  "tycho-collator",
  "tycho-consensus",
  "tycho-core",
+ "tycho-executor",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
@@ -3572,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-consensus"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3611,7 +3608,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-control"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3635,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3664,8 +3661,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-executor"
+version = "0.1.0"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=1b76f974eae5fdbd311ac17c20747a875efe8072#1b76f974eae5fdbd311ac17c20747a875efe8072"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "everscale-types",
+ "num-bigint",
+ "thiserror 2.0.11",
+ "tycho-vm",
+]
+
+[[package]]
 name = "tycho-gen-protos"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "prost-build",
@@ -3673,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-light-node"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -3694,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-network"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3737,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3767,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulator"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -3781,7 +3791,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3822,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3858,7 +3868,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#2660562fd78d310e5aa4bae3b6aefbe90295e219"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=1b76f974eae5fdbd311ac17c20747a875efe8072#1b76f974eae5fdbd311ac17c20747a875efe8072"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3879,7 +3889,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git#2660562fd78d310e5aa4bae3b6aefbe90295e219"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=1b76f974eae5fdbd311ac17c20747a875efe8072#1b76f974eae5fdbd311ac17c20747a875efe8072"
 dependencies = [
  "darling",
  "proc-macro2",

@@ -54,7 +54,7 @@ impl ExtMsgRepr {
         }
 
         // Start parsing the message (we are sure now that it is an ordinary cell).
-        let mut cs = msg_root.as_slice_allow_pruned();
+        let mut cs = msg_root.as_slice_allow_exotic();
 
         // Parse info first.
         let info = MsgInfo::load_from(&mut cs)?;

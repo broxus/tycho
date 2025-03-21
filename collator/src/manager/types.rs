@@ -2,8 +2,9 @@ use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    BlockId, BlockIdShort, BlockInfo, Lazy, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
+    BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;

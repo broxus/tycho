@@ -2,8 +2,9 @@ use std::collections::{btree_map, BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Result};
+use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    BlockId, BlockIdShort, ConsensusInfo, Lazy, OutMsgDescr, ShardIdent, ValueFlow,
+    BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardFeeCreated, ShardIdent, ValueFlow,
 };
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
@@ -19,8 +20,7 @@ use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, ProofFunds,
-    TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -498,7 +498,14 @@ impl BlocksCache {
                     bail!("Block cache entry should exist ({})", key)
                 };
 
-                if let BlockCacheEntryData::Received { .. } = occupied_entry.get().data {
+                if matches!(
+                    occupied_entry.get().data,
+                    BlockCacheEntryData::Received { .. }
+                        | BlockCacheEntryData::Collated {
+                            received_after_collation: true,
+                            ..
+                        }
+                ) {
                     if extracted_mc_block_entry.is_some() {
                         is_last = false;
                         break;
@@ -663,7 +670,7 @@ impl BlocksCache {
                 for removed_seqno in removed_seqno_list {
                     guard
                         .data
-                        .remove_last_collated_block_ids_from(&removed_seqno);
+                        .remove_last_collated_block_ids_before(&removed_seqno);
                 }
             }
         }
@@ -998,7 +1005,7 @@ impl BlocksCacheData for MasterBlocksCacheData {
 #[derive(Default)]
 struct ShardBlocksCacheData {
     value_flow: ValueFlow,
-    proof_funds: ProofFunds,
+    proof_funds: ShardFeeCreated,
     #[cfg(feature = "block-creator-stats")]
     creators: Vec<everscale_types::cell::HashBytes>,
 }
@@ -1008,10 +1015,10 @@ impl ShardBlocksCacheData {
         self.value_flow = candidate.value_flow.clone();
 
         self.proof_funds
-            .fees_collected
+            .fees
             .try_add_assign(&candidate.value_flow.fees_collected)?;
         self.proof_funds
-            .funds_created
+            .create
             .try_add_assign(&candidate.value_flow.created)?;
 
         #[cfg(feature = "block-creator-stats")]

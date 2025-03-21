@@ -39,6 +39,11 @@ declare_jrpc_method! {
         GetTransactionsList(GetTransactionsListRequest),
         GetTransaction(GetTransactionRequest),
         GetDstTransaction(GetDstTransactionRequest),
+        GetTransactionBlockId(GetTransactionRequest),
+        GetKeyBlockProof(GetKeyBlockProofRequest),
+        GetBlockProof(GetBlockRequest),
+        // NOTE: Temp endpoint. Must be enforced by limits and other stuff.
+        GetBlockData(GetBlockRequest),
     }
 }
 
@@ -80,18 +85,14 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             ok_to_response(req.id, ())
         }
         MethodParams::GetLibraryCell(p) => {
-            let library_boc = match state.jrpc_cache().get_library_cell_boc(&p.hash) {
-                Some(value) => Some(value),
+            let res = match state.jrpc_cache().get_library_cell_response(&p.hash) {
+                Some(value) => value,
                 None => match state.get_raw_library(&p.hash) {
-                    Ok(Some(cell)) => {
-                        let boc = state.jrpc_cache().insert_library_cell(p.hash, cell);
-                        Some(boc)
-                    }
-                    Ok(None) => None,
+                    Ok(res) => state.jrpc_cache().insert_library_cell_response(p.hash, res),
                     Err(e) => return error_to_response(req.id, RpcStateError::Internal(e)),
                 },
             };
-            ok_to_response(req.id, GetLibraryCellResponse { cell: library_boc })
+            ok_to_response(req.id, res.as_ref())
         }
         MethodParams::GetContractState(p) => {
             let item = match state.get_account_state(&p.address) {
@@ -177,6 +178,52 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
             Err(e) => error_to_response(req.id, e),
         },
+        MethodParams::GetTransactionBlockId(p) => match state.get_transaction_block_id(&p.id) {
+            Ok(value) => ok_to_response(req.id, value.map(|block_id| BlockIdResponse { block_id })),
+            Err(e) => error_to_response(req.id, e),
+        },
+        MethodParams::GetKeyBlockProof(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(req.id, RpcStateError::NotSupported);
+            }
+
+            let res = match state.jrpc_cache().get_key_block_proof_response(p.seqno) {
+                Some(value) => value,
+                None => {
+                    let res = state.get_key_block_proof(p.seqno).await;
+                    state
+                        .jrpc_cache()
+                        .insert_key_block_proof_response(p.seqno, res)
+                }
+            };
+            ok_to_response(req.id, res.as_ref())
+        }
+        MethodParams::GetBlockProof(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(req.id, RpcStateError::NotSupported);
+            }
+
+            let proof = state.get_block_proof(&p.block_id).await.map(encode_base64);
+            ok_to_response(req.id, BlockProofResponse { proof })
+        }
+        MethodParams::GetBlockData(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(req.id, RpcStateError::NotSupported);
+            }
+
+            // TODO: Rework rate limiting for this request.
+            let _permit = state.acquire_download_block_permit().await;
+
+            let Some(data) = state.get_block_data(&p.block_id).await else {
+                return ok_to_response(req.id, BlockDataResponse { data: None });
+            };
+
+            tycho_util::sync::rayon_run(move || {
+                let data = encode_base64(data);
+                ok_to_response(req.id, BlockDataResponse { data: Some(data) })
+            })
+            .await
+        }
     }
 }
 
@@ -242,6 +289,18 @@ pub struct GetTransactionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GetKeyBlockProofRequest {
+    pub seqno: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetBlockRequest {
+    #[serde(with = "serde_helpers::string")]
+    pub block_id: BlockId,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetDstTransactionRequest {
     pub message_hash: HashBytes,
@@ -262,7 +321,12 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
             "getTimings",
             "getContractState",
             "sendMessage",
+            "getLibraryCell",
         ];
+
+        if state.config().allow_huge_requests {
+            capabilities.extend(["getKeyBlockProof", "getBlockProof", "getBlockData"]);
+        }
 
         if state.is_full() {
             capabilities.extend([
@@ -270,6 +334,7 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
                 "getTransaction",
                 "getDstTransaction",
                 "getAccountsByCodeHash",
+                "getTransactionBlockId",
             ]);
         }
 
@@ -280,12 +345,6 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
 #[derive(Serialize)]
 pub struct GetStatusResponse {
     ready: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GetLibraryCellResponse {
-    pub cell: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -379,6 +438,23 @@ impl Serialize for GetTransactionsListResponse<'_> {
 
         seq.end()
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockIdResponse {
+    #[serde(with = "serde_helpers::string")]
+    block_id: BlockId,
+}
+
+#[derive(Serialize)]
+struct BlockProofResponse {
+    proof: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BlockDataResponse {
+    data: Option<String>,
 }
 
 fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {

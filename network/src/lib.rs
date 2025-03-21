@@ -23,7 +23,7 @@ pub use self::overlay::{
     PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PrivateOverlayEntryData,
     PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
-    PublicOverlayEntryData,
+    PublicOverlayEntryData, UnknownPeersQueue,
 };
 pub use self::util::{
     check_peer_signature, try_handle_prefix, try_handle_prefix_with_offset, NetworkExt, Routable,

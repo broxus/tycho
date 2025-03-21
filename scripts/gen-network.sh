@@ -22,8 +22,6 @@ while [[ $# -gt 0 ]]; do
         if [ "$#" -gt 0 ]; then shift;
         else
           echo 'ERROR: Expected directory path'
-          echo ''
-          print_help
           exit 1
         fi
       ;;
@@ -32,9 +30,7 @@ while [[ $# -gt 0 ]]; do
         shift # past argument
         if [ "$#" -gt 0 ]; then shift;
         else
-          echo 'ERROR: Expected directory path'
-          echo ''
-          print_help
+          echo 'ERROR: Expected validator balance'
           exit 1
         fi
       ;;
@@ -43,9 +39,7 @@ while [[ $# -gt 0 ]]; do
         shift # past argument
         if [ "$#" -gt 0 ]; then shift;
         else
-          echo 'ERROR: Expected directory path'
-          echo ''
-          print_help
+          echo 'ERROR: Expected validator stake'
           exit 1
         fi
       ;;

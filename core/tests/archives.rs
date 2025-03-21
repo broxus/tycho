@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use anyhow::Result;
 use bytes::BytesMut;
 use bytesize::ByteSize;
@@ -40,8 +43,10 @@ impl StateSubscriber for DummySubscriber {
     }
 }
 
+type ArchivesSet = BTreeMap<u32, Arc<Archive>>;
+
 pub struct ArchiveProvider {
-    archive: Archive,
+    archives: parking_lot::Mutex<ArchivesSet>,
     proof_checker: ProofChecker,
 }
 
@@ -52,24 +57,43 @@ impl ArchiveProvider {
             block_id,
         } = block_id_relation;
 
-        let (ref block, ref proof, ref queue_diff) = match self.archive.get_entry_by_id(block_id) {
-            Ok(entry) => entry,
-            Err(e) => return Some(Err(e.into())),
+        let archive = {
+            let mut archive = None;
+
+            let guard = self.archives.lock();
+            for (_, value) in guard.iter() {
+                if value.mc_block_ids.contains_key(&mc_block_id.seqno) {
+                    archive = Some(value.clone());
+                }
+            }
+
+            archive
         };
 
-        match self
-            .proof_checker
-            .check_proof(CheckProof {
-                mc_block_id,
-                block,
-                proof,
-                queue_diff,
-                store_on_success: true,
-            })
-            .await
-        {
-            Ok(_) => Some(Ok(block.clone())),
-            Err(e) => Some(Err(e)),
+        match archive {
+            Some(archive) => {
+                let (ref block, ref proof, ref queue_diff) =
+                    match archive.get_entry_by_id(block_id).await {
+                        Ok(entry) => entry,
+                        Err(e) => return Some(Err(e.into())),
+                    };
+
+                match self
+                    .proof_checker
+                    .check_proof(CheckProof {
+                        mc_block_id,
+                        block,
+                        proof,
+                        queue_diff,
+                        store_on_success: true,
+                    })
+                    .await
+                {
+                    Ok(_) => Some(Ok(block.clone())),
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            None => None,
         }
     }
 }
@@ -80,7 +104,16 @@ impl BlockProvider for ArchiveProvider {
     type CleanupFut<'a> = future::Ready<Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        let id = match self.archive.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
+        let guard = self.archives.lock();
+
+        let mut block_id = None;
+        for (_, value) in guard.iter() {
+            if let Some(id) = value.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
+                block_id = Some(*id);
+            };
+        }
+
+        let id = match block_id {
             Some(id) => id,
             None => return Box::pin(future::ready(None)),
         };
@@ -248,29 +281,40 @@ async fn archives() -> Result<()> {
     let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
 
     // Archive provider
-    let archive_data = utils::read_file("archive_1.bin")?;
-    let archive = utils::parse_archive(&archive_data)?;
-
-    let archive_provider = ArchiveProvider {
-        archive,
-        proof_checker: ProofChecker::new(storage.clone()),
-    };
+    let first_archive_data = utils::read_file("archive_1.bin")?;
+    let first_archive = utils::parse_archive(&first_archive_data).map(Arc::new)?;
 
     // Next archive provider
     let next_archive_data = utils::read_file("archive_2.bin")?;
-    let next_archive = utils::parse_archive(&next_archive_data)?;
-
-    let next_archive_provider = ArchiveProvider {
-        archive: next_archive,
-        proof_checker: ProofChecker::new(storage.clone()),
-    };
+    let next_archive = utils::parse_archive(&next_archive_data).map(Arc::new)?;
 
     // Last archive provider
     let last_archive_data = utils::read_file("archive_3.bin")?;
-    let last_archive = utils::parse_archive(&last_archive_data)?;
+    let last_archive = utils::parse_archive(&last_archive_data).map(Arc::new)?;
+
+    let mut first_provider_archives = ArchivesSet::new();
+    first_provider_archives.insert(1, first_archive.clone());
+
+    let archive_provider = ArchiveProvider {
+        archives: parking_lot::Mutex::new(first_provider_archives),
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    let mut next_provider_archives = ArchivesSet::new();
+    next_provider_archives.insert(1, first_archive);
+    next_provider_archives.insert(101, next_archive.clone());
+
+    let next_archive_provider = ArchiveProvider {
+        archives: parking_lot::Mutex::new(next_provider_archives),
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    let mut last_provider_archives = ArchivesSet::new();
+    last_provider_archives.insert(101, next_archive);
+    last_provider_archives.insert(201, last_archive);
 
     let last_archive_provider = ArchiveProvider {
-        archive: last_archive,
+        archives: parking_lot::Mutex::new(last_provider_archives),
         proof_checker: ProofChecker::new(storage.clone()),
     };
 
@@ -301,7 +345,7 @@ async fn archives() -> Result<()> {
         .block_storage()
         .get_archive_size(archive_id)?
         .unwrap();
-    assert_eq!(archive_size, archive_data.len());
+    assert_eq!(archive_size, first_archive_data.len());
 
     // Check archive data
     let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
@@ -314,7 +358,7 @@ async fn archives() -> Result<()> {
             .await?;
         expected_archive_data.extend_from_slice(&chunk);
     }
-    assert_eq!(archive_data, expected_archive_data);
+    assert_eq!(first_archive_data, expected_archive_data);
 
     Ok(())
 }
@@ -359,31 +403,42 @@ async fn heavy_archives() -> Result<()> {
 
     // Archive provider
     let archive_path = integration_test_path.join("archive_1.bin");
-    let archive_data = std::fs::read(archive_path)?;
-    let archive = utils::parse_archive(&archive_data)?;
-
-    let archive_provider = ArchiveProvider {
-        archive,
-        proof_checker: ProofChecker::new(storage.clone()),
-    };
+    let first_archive_data = std::fs::read(archive_path)?;
+    let first_archive = utils::parse_archive(&first_archive_data).map(Arc::new)?;
 
     // Next archive provider
     let next_archive_path = integration_test_path.join("archive_2.bin");
     let next_archive_data = std::fs::read(next_archive_path)?;
-    let next_archive = utils::parse_archive(&next_archive_data)?;
-
-    let next_archive_provider = ArchiveProvider {
-        archive: next_archive,
-        proof_checker: ProofChecker::new(storage.clone()),
-    };
+    let next_archive = utils::parse_archive(&next_archive_data).map(Arc::new)?;
 
     // Last archive provider
     let last_archive_path = integration_test_path.join("archive_3.bin");
     let last_archive_data = std::fs::read(last_archive_path)?;
-    let last_archive = utils::parse_archive(&last_archive_data)?;
+    let last_archive = utils::parse_archive(&last_archive_data).map(Arc::new)?;
+
+    let mut first_provider_archives = ArchivesSet::new();
+    first_provider_archives.insert(1, first_archive.clone());
+
+    let archive_provider = ArchiveProvider {
+        archives: parking_lot::Mutex::new(first_provider_archives),
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    let mut next_provider_archives = ArchivesSet::new();
+    next_provider_archives.insert(1, first_archive);
+    next_provider_archives.insert(101, next_archive.clone());
+
+    let next_archive_provider = ArchiveProvider {
+        archives: parking_lot::Mutex::new(next_provider_archives),
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    let mut last_provider_archives = ArchivesSet::new();
+    last_provider_archives.insert(101, next_archive);
+    last_provider_archives.insert(201, last_archive);
 
     let last_archive_provider = ArchiveProvider {
-        archive: last_archive,
+        archives: parking_lot::Mutex::new(last_provider_archives),
         proof_checker: ProofChecker::new(storage.clone()),
     };
 
@@ -407,7 +462,7 @@ async fn heavy_archives() -> Result<()> {
     // Check archive data
     let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
 
-    check_archive(&storage, &archive_data, archive_chunk_size, 1).await?;
+    check_archive(&storage, &first_archive_data, archive_chunk_size, 1).await?;
     check_archive(&storage, &next_archive_data, archive_chunk_size, 101).await?;
 
     // Make network

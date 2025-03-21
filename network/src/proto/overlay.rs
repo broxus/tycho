@@ -42,9 +42,20 @@ impl PublicEntry {
 #[derive(Debug, Clone, Hash, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum PublicEntriesResponse {
+    // TODO: Rename to `found`.
     #[tl(id = "overlay.publicEntries")]
     PublicEntries(#[tl(with = "tl::VecWithMaxLen::<20>")] Vec<Arc<PublicEntry>>),
     #[tl(id = "overlay.overlayNotFound")]
+    OverlayNotFound,
+}
+
+/// A single public overlay entry.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum PublicEntryResponse {
+    #[tl(id = "overlay.publicEntry.found")]
+    Found(Arc<PublicEntry>),
+    #[tl(id = "overlay.publicEntry.overlayNotFound")]
     OverlayNotFound,
 }
 
@@ -61,6 +72,14 @@ pub mod rpc {
         /// A list of public overlay entries.
         #[tl(with = "tl::VecWithMaxLen::<20>")]
         pub entries: Vec<Arc<PublicEntry>>,
+    }
+
+    /// Get peer entry of the specified public overlay.
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "overlay.getPublicEntry", scheme = "proto.tl")]
+    pub struct GetPublicEntry {
+        /// Public overlay id.
+        pub overlay_id: [u8; 32],
     }
 
     /// Overlay query/message prefix with an overlay id.

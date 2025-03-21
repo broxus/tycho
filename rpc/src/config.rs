@@ -22,6 +22,17 @@ pub struct RpcConfig {
     /// Default: `4` (= 16 virtual shards).
     pub shard_split_depth: u8,
 
+    // NOTE: TEMP
+    /// Whether `getKeyBlockProof`, `getBlockProof` and `getBlockData` queries are enabled.
+    ///
+    /// Default: `false`.
+    pub allow_huge_requests: bool,
+
+    /// Max number of parallel block downloads.
+    ///
+    /// Default: `10`.
+    pub max_parallel_block_downloads: usize,
+
     pub storage: RpcStorage,
 }
 
@@ -49,6 +60,7 @@ impl RpcStorage {
     pub fn is_full(&self) -> bool {
         matches!(self, Self::Full { .. })
     }
+
     pub fn gc_is_enabled(&self) -> bool {
         match self {
             Self::Full { gc, .. } => gc.is_some(),
@@ -70,6 +82,8 @@ impl Default for RpcConfig {
             listen_addr: (Ipv4Addr::UNSPECIFIED, 8000).into(),
             generate_stub_keyblock: false,
             shard_split_depth: 4,
+            allow_huge_requests: false,
+            max_parallel_block_downloads: 10,
             storage: RpcStorage::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,

@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
-use everscale_types::cell::{CellBuilder, CellSlice, HashBytes};
+use anyhow::{bail, Context, Result};
+use everscale_types::cell::{CellBuilder, CellSlice, HashBytes, Lazy};
 use everscale_types::models::{
     BaseMessage, BlockchainConfig, CurrencyCollection, ImportFees, InMsg, InMsgExternal,
-    InMsgFinal, IntAddr, IntMsgInfo, IntermediateAddr, Lazy, MsgEnvelope, MsgInfo, OutMsg,
+    InMsgFinal, IntAddr, IntMsgInfo, IntermediateAddr, MsgEnvelope, MsgInfo, OutMsg,
     OutMsgDequeueImmediate, OutMsgExternal, OutMsgImmediate, OutMsgNew, ShardIdent, TickTock,
     Transaction,
 };
-use ton_executor::ExecutedTransaction;
 use tycho_block_util::queue::QueueKey;
 
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::types::{
-    BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, SpecialOrigin,
+    BlockCollationData, ExecutedTransaction, ParsedMessage, PreparedInMsg, PreparedOutMsg,
+    SpecialOrigin,
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
@@ -83,7 +83,7 @@ impl ExecutorWrapper {
 
         let mut result = vec![];
 
-        if !collator_data.value_flow.recovered.tokens.is_zero() {
+        if !collator_data.value_flow.recovered.is_zero() {
             let mut new_messages = self.create_special_transaction(
                 &config.get_fee_collector_address()?,
                 collator_data.value_flow.recovered.clone(),
@@ -93,7 +93,7 @@ impl ExecutorWrapper {
             result.append(&mut new_messages);
         }
 
-        if !collator_data.value_flow.minted.other.is_empty() {
+        if !collator_data.value_flow.minted.is_zero() {
             let mut new_messages = self.create_special_transaction(
                 &config.get_minter_address()?,
                 collator_data.value_flow.minted.clone(),
@@ -159,7 +159,9 @@ impl ExecutorWrapper {
             .executor
             .execute_ordinary_transaction(account_stuff, in_message)?;
 
-        let executor_output = executed.result?;
+        let executor_output = executed
+            .result
+            .context("special transactions can't be skipped")?;
 
         self.process_transaction(executor_output, Some(executed.in_message), collation_data)
     }
@@ -196,29 +198,32 @@ impl ExecutorWrapper {
     fn create_ticktock_transaction(
         &mut self,
         account_id: &HashBytes,
-        tick_tock: TickTock,
+        kind: TickTock,
         collation_data: &mut BlockCollationData,
     ) -> Result<Vec<Arc<EnqueuedMessage>>> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             account_addr = %account_id,
-            kind = ?tick_tock,
+            ?kind,
             "create_ticktock_transaction",
         );
 
         let Some(account_stuff) =
             self.executor
-                .take_account_stuff_if(account_id, |stuff| match tick_tock {
+                .take_account_stuff_if(account_id, |stuff| match kind {
                     TickTock::Tick => stuff.special.tick,
                     TickTock::Tock => stuff.special.tock,
                 })?
         else {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         };
 
-        let executor_output = self
+        let Some(executor_output) = self
             .executor
-            .execute_ticktock_transaction(account_stuff, tick_tock)?;
+            .execute_ticktock_transaction(account_stuff, kind)?
+        else {
+            return Ok(Vec::new());
+        };
 
         self.process_transaction(executor_output, None, collation_data)
     }
@@ -239,21 +244,30 @@ fn new_transaction(
         "process new transaction from message",
     );
 
+    // Update collation data.
     collation_data.execute_count_all += 1;
 
     let gas_used = &mut collation_data.block_limit.gas_used;
     *gas_used = gas_used.saturating_add(executed.gas_used);
 
+    assert!(
+        shard_id.is_masterchain() || executed.burned.is_zero(),
+        "Burn is allowed only in masterchain (block_id={})",
+        collation_data.block_id_short,
+    );
+    let value_flow = &mut collation_data.value_flow;
+    value_flow.burned.try_add_assign_tokens(executed.burned)?;
+
+    // Process inbound message.
     if let Some(in_msg) = in_msg {
         process_in_message(collation_data, executed.transaction.clone(), in_msg)?;
     }
 
+    // Process outbound messages.
     let mut out_messages = vec![];
-
-    for out_msg_cell in executed.out_msgs.values() {
-        let out_msg_cell = out_msg_cell?;
-        let out_msg_hash = *out_msg_cell.repr_hash();
-        let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
+    for out_msg_cell in executed.out_msgs {
+        let out_msg_hash = *out_msg_cell.inner().repr_hash();
+        let out_msg_info = out_msg_cell.inner().parse::<MsgInfo>()?;
 
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -279,7 +293,7 @@ fn new_transaction(
                             IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
                         },
                         fwd_fee_remaining: *fwd_fee,
-                        message: Lazy::from_raw(out_msg_cell.clone()),
+                        message: out_msg_cell.clone(),
                     })?,
                     transaction: executed.transaction.clone(),
                 });
@@ -295,7 +309,7 @@ fn new_transaction(
                 out_messages.push(Box::new(ParsedMessage {
                     info: out_msg_info,
                     dst_in_current_shard,
-                    cell: out_msg_cell,
+                    cell: out_msg_cell.into_inner(),
                     special_origin: None,
                     block_seqno: Some(collation_data.block_id_short.seqno),
                     from_same_shard: Some(true),
@@ -303,7 +317,7 @@ fn new_transaction(
             }
             MsgInfo::ExtOut(_) => {
                 let out_msg = OutMsg::External(OutMsgExternal {
-                    out_msg: Lazy::from_raw(out_msg_cell),
+                    out_msg: out_msg_cell,
                     transaction: executed.transaction.clone(),
                 });
 
@@ -337,7 +351,7 @@ fn process_in_message(
                     cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                     next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                     fwd_fee_remaining: Default::default(),
-                    message: Lazy::from_raw(in_msg.cell),
+                    message: Lazy::from_raw(in_msg.cell)?,
                 })?,
                 transaction,
                 fwd_fee: Default::default(),
@@ -362,7 +376,7 @@ fn process_in_message(
 
             import_fees = ImportFees::default();
             Lazy::new(&InMsg::External(InMsgExternal {
-                in_msg: Lazy::from_raw(in_msg.cell),
+                in_msg: Lazy::from_raw(in_msg.cell)?,
                 transaction,
             }))?
         }
@@ -384,7 +398,7 @@ fn process_in_message(
                 },
                 next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
                 fwd_fee_remaining: fwd_fee,
-                message: Lazy::from_raw(in_msg.cell),
+                message: Lazy::from_raw(in_msg.cell)?,
             })?;
 
             let in_msg = InMsg::Final(InMsgFinal {
@@ -421,7 +435,7 @@ fn process_in_message(
                 cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                 next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                 fwd_fee_remaining: fwd_fee,
-                message: Lazy::from_raw(in_msg.cell),
+                message: Lazy::from_raw(in_msg.cell)?,
             };
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,

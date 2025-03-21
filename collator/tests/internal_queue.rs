@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use everscale_types::cell::{Cell, CellSliceRange, HashBytes};
+use everscale_types::cell::{Cell, CellSliceRange, HashBytes, Lazy};
 use everscale_types::models::{
     AccountStatus, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason, CurrencyCollection,
-    HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, Lazy, MsgEnvelope, MsgInfo, OrdinaryTxInfo,
+    HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, MsgEnvelope, MsgInfo, OrdinaryTxInfo,
     OutMsg, OutMsgDescr, OutMsgNew, OwnedMessage, ShardIdent, SkippedComputePhase, StdAddr,
     Transaction, TxInfo,
 };

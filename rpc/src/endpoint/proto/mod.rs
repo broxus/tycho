@@ -17,7 +17,6 @@ use super::INVALID_PARAMS_CODE;
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
-use crate::endpoint::proto::protos::rpc::response::GetLibraryCell;
 use crate::endpoint::{
     INTERNAL_ERROR_CODE, INVALID_BOC_CODE, METHOD_NOT_FOUND_CODE, NOT_READY_CODE,
     NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
@@ -57,6 +56,10 @@ declare_proto_methods! {
     GetTransactionsList,
     GetTransaction,
     GetDstTransaction,
+    GetTransactionBlockId,
+    GetKeyBlockProof,
+    GetBlockProof,
+    GetBlockData,
 }
 
 pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Request>) -> Response {
@@ -121,35 +124,21 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
         }
         request::Call::GetLibraryCell(p) => {
             let Some(hash) = hash_from_bytes(p.hash) else {
-                return ProtoErrorResponse {
-                    code: INVALID_PARAMS_CODE,
-                    message: "invalid hash".into(),
-                }
-                .into_response();
+                return invalid_params_response("invalid hash");
             };
 
-            let cell_opt = match state.proto_cache().get_library_cell_proto(&hash) {
-                Some(value) => Some(value),
+            let res = match state.proto_cache().get_library_cell_response(&hash) {
+                Some(value) => value,
                 None => match state.get_raw_library(&hash) {
-                    Ok(Some(cell)) => {
-                        let boc = state.proto_cache().insert_library_cell(hash, cell);
-                        Some(boc)
-                    }
-                    Ok(None) => None,
+                    Ok(cell) => state.proto_cache().insert_library_cell_response(hash, cell),
                     Err(e) => return error_to_response(RpcStateError::Internal(e)),
                 },
             };
-            ok_to_response(response::Result::GetLibraryCell(GetLibraryCell {
-                cell: cell_opt,
-            }))
+            res.into_response()
         }
         request::Call::GetContractState(p) => {
             let Some(address) = addr_from_bytes(p.address) else {
-                return ProtoErrorResponse {
-                    code: INVALID_PARAMS_CODE,
-                    message: "invalid address".into(),
-                }
-                .into_response();
+                return invalid_params_response("invalid address");
             };
 
             let item = match state.get_account_state(&address) {
@@ -249,22 +238,12 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
 
             let Some(code_hash) = hash_from_bytes(p.code_hash) else {
-                return ProtoErrorResponse {
-                    code: INVALID_PARAMS_CODE,
-                    message: "invalid code hash".into(),
-                }
-                .into_response();
+                return invalid_params_response("invalid code hash");
             };
 
             let continuation = match p.continuation.map(addr_from_bytes) {
                 Some(Some(continuation)) => Some(continuation),
-                Some(None) => {
-                    return ProtoErrorResponse {
-                        code: INVALID_PARAMS_CODE,
-                        message: "invalid continuation".into(),
-                    }
-                    .into_response()
-                }
+                Some(None) => return invalid_params_response("invalid continuation"),
                 None => None,
             };
 
@@ -293,11 +272,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
 
             let Some(account) = addr_from_bytes(p.account) else {
-                return ProtoErrorResponse {
-                    code: INVALID_PARAMS_CODE,
-                    message: "invalid address".into(),
-                }
-                .into_response();
+                return invalid_params_response("invalid address");
             };
 
             match state.get_transactions(&account, p.last_transaction_lt) {
@@ -306,52 +281,119 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                         .map(Bytes::copy_from_slice)
                         .take(p.limit as usize)
                         .collect();
-                    let result =
-                        response::Result::GetTransactionsList(response::GetTransactionsList {
-                            transactions,
-                        });
-                    ok_to_response(result)
+                    ok_to_response(response::Result::GetTransactionsList(
+                        response::GetTransactionsList { transactions },
+                    ))
                 }
                 Err(e) => error_to_response(e),
             }
         }
         request::Call::GetTransaction(p) => {
             let Some(hash) = hash_from_bytes(p.id) else {
-                return ProtoErrorResponse {
-                    code: INVALID_PARAMS_CODE,
-                    message: "invalid tx id".into(),
-                }
-                .into_response();
+                return invalid_params_response("invalid tx id");
             };
 
             match state.get_transaction(&hash) {
-                Ok(tx) => {
-                    let result = response::Result::GetRawTransaction(response::GetRawTransaction {
+                Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
+                    response::GetRawTransaction {
                         transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
-                    });
-                    ok_to_response(result)
-                }
+                    },
+                )),
                 Err(e) => error_to_response(e),
             }
         }
         request::Call::GetDstTransaction(p) => {
             let Some(hash) = hash_from_bytes(p.message_hash) else {
-                return ProtoErrorResponse {
-                    code: INVALID_PARAMS_CODE,
-                    message: "invalid msg id".into(),
-                }
-                .into_response();
+                return invalid_params_response("invalid msg id");
             };
 
             match state.get_dst_transaction(&hash) {
-                Ok(tx) => {
-                    let result = response::Result::GetRawTransaction(response::GetRawTransaction {
+                Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
+                    response::GetRawTransaction {
                         transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
-                    });
-                    ok_to_response(result)
-                }
+                    },
+                )),
                 Err(e) => error_to_response(e),
             }
+        }
+        request::Call::GetTransactionBlockId(p) => {
+            let Some(hash) = hash_from_bytes(p.id) else {
+                return invalid_params_response("invalid tx id");
+            };
+
+            match state.get_transaction_block_id(&hash) {
+                Ok(block_id) => ok_to_response(response::Result::GetTransactionBlockId(
+                    response::GetTransactionBlockId {
+                        block_id: block_id.map(|id| response::BlockId {
+                            workchain: id.shard.workchain(),
+                            shard: id.shard.prefix(),
+                            seqno: id.seqno,
+                            root_hash: Bytes::copy_from_slice(id.root_hash.as_ref()),
+                            file_hash: Bytes::copy_from_slice(id.file_hash.as_ref()),
+                        }),
+                    },
+                )),
+                Err(e) => error_to_response(e),
+            }
+        }
+        request::Call::GetKeyBlockProof(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(RpcStateError::NotSupported);
+            }
+
+            let res = match state.proto_cache().get_key_block_proof_response(p.seqno) {
+                Some(value) => value,
+                None => {
+                    let proof = state
+                        .get_key_block_proof(p.seqno)
+                        .await
+                        .map(|r| Bytes::copy_from_slice(r.as_ref()));
+
+                    state
+                        .proto_cache()
+                        .insert_key_block_proof_response(p.seqno, proof)
+                }
+            };
+            res.into_response()
+        }
+        request::Call::GetBlockProof(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(RpcStateError::NotSupported);
+            }
+
+            let Some(block_id) = get_block_id(p) else {
+                return invalid_params_response("invalid block id");
+            };
+
+            let proof = state.get_block_proof(&block_id).await;
+            ok_to_response(response::Result::GetBlockProof(response::BlockProof {
+                proof: proof.map(Bytes::from_owner),
+            }))
+        }
+        request::Call::GetBlockData(p) => {
+            if !state.config().allow_huge_requests {
+                return error_to_response(RpcStateError::NotSupported);
+            }
+
+            let Some(block_id) = get_block_id(p) else {
+                return invalid_params_response("invalid block id");
+            };
+
+            // TODO: Rework rate limiting for this request.
+            let _permit = state.acquire_download_block_permit().await;
+
+            let Some(data) = state.get_block_data(&block_id).await else {
+                return ok_to_response(response::Result::GetBlockData(response::BlockData {
+                    data: None,
+                }));
+            };
+
+            tycho_util::sync::rayon_run(move || {
+                ok_to_response(response::Result::GetBlockData(response::BlockData {
+                    data: Some(Bytes::from_owner(data)),
+                }))
+            })
+            .await
         }
     }
 }
@@ -371,7 +413,12 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
             "getTimings",
             "getContractState",
             "sendMessage",
+            "getLibraryCell",
         ];
+
+        if state.config().allow_huge_requests {
+            capabilities.extend(["getKeyBlockProof", "getBlockProof", "getBlockData"]);
+        }
 
         if state.is_full() {
             capabilities.extend([
@@ -379,6 +426,7 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
                 "getTransaction",
                 "getDstTransaction",
                 "getAccountsByCodeHash",
+                "getTransactionBlockId",
             ]);
         }
 
@@ -414,6 +462,14 @@ fn too_large_limit_response() -> Response {
     .into_response()
 }
 
+fn invalid_params_response(reason: &'static str) -> Response {
+    ProtoErrorResponse {
+        code: INVALID_PARAMS_CODE,
+        message: Cow::Borrowed(reason),
+    }
+    .into_response()
+}
+
 fn addr_from_bytes(bytes: Bytes) -> Option<StdAddr> {
     (bytes.len() == 33)
         .then(|| StdAddr::new(bytes[0] as i8, HashBytes(bytes[1..33].try_into().unwrap())))
@@ -421,6 +477,15 @@ fn addr_from_bytes(bytes: Bytes) -> Option<StdAddr> {
 
 fn hash_from_bytes(bytes: Bytes) -> Option<HashBytes> {
     (bytes.len() == 32).then(|| HashBytes::from_slice(&bytes))
+}
+
+fn get_block_id(block_id: request::GetBlock) -> Option<BlockId> {
+    Some(BlockId {
+        shard: ShardIdent::new(block_id.workchain, block_id.shard)?,
+        seqno: block_id.seqno,
+        root_hash: hash_from_bytes(block_id.root_hash)?,
+        file_hash: hash_from_bytes(block_id.file_hash)?,
+    })
 }
 
 fn serialize_account(account: &Account) -> Result<Bytes, everscale_types::error::Error> {

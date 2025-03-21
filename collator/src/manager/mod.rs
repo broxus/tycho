@@ -1268,23 +1268,9 @@ where
             if let Some(top_mc_block_id_for_next_collation) =
                 self.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id)
             {
-                // Should wait for next collated mc block when collators are active
-                // but when all were cancelled or waiting, we can process last received mc block.
-                // Also can process last received mc block when no active collators
-
-                let has_active = self.active_collators.iter().any(|ac| {
-                    ac.state == CollatorState::Active || ac.state == CollatorState::CancelPending
-                });
-                if !has_active {
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
-                        last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                        last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
-                        "check_should_sync: should sync to last applied mc block \
-                        when all collators were cancelled, or waiting, or there are no collators",
-                    );
-                    true
-                } else if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+                // we can sync only when we have any applied block ahead
+                if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+                    // check if should sync according to master block delta
                     let should_sync = {
                         let applied_range_end_delta = applied_range_end
                             .saturating_sub(top_mc_block_id_for_next_collation.seqno);
@@ -1314,19 +1300,40 @@ where
                         }
                     };
 
-                    // we cannot sync right now because some collators are active
-                    // so we try to gracefully cancel collation in active collators
                     if should_sync {
+                        // we should sync but we can run sync right now only when there are no active collators
+                        let mut has_active = false;
                         for active_collator in self.active_collators.iter().filter(|ac| {
                             ac.state == CollatorState::Active
                                 || ac.state == CollatorState::CancelPending
                         }) {
+                            // try to gracefully cancel active collations
                             active_collator.cancel_collation.notify_one();
+                            has_active = true;
                         }
-                    }
 
-                    // and finish processing without syncing
-                    false
+                        if has_active {
+                            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                                last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
+                                last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                "check_should_sync: cannot sync when there are active collations, \
+                                try to gracefully cancel them",
+                            );
+                            false
+                        } else {
+                            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                                last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
+                                last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                "check_should_sync: can sync to last applied mc block \
+                                when all collators were cancelled, or waiting, or there are no collators (node not in set)",
+                            );
+                            true
+                        }
+                    } else {
+                        false
+                    }
                 } else {
                     // should collate next own mc block because no applied ahead
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,

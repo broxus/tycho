@@ -68,20 +68,6 @@ jobs:
           components: "clippy,rustfmt"
       - name: Clippy check
         run: just lint
-
-  just_install:
-    name: just install works
-    needs: rustfmt
-    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.shell == 'true'}}
-    runs-on: [self-hosted, linux]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/init
-        with:
-          components: "clippy,rustfmt"
-      - name: Clippy check
-        run: just install
-
   test:
     name: Test with codecov
     runs-on: [self-hosted, linux]
@@ -166,5 +152,18 @@ jobs:
         run: sudo apt update && sudo apt-get -y install protobuf-compiler
       - name: Update RPC proto
         run: just update_rpc_proto
+      - name: Check for uncommitted changes
+        run: git diff --exit-code
+        
+  check-cli-reference:
+    name: Check CLI Reference
+    needs: [changes]
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/init
+      - name: Update CLI reference
+        run: just update_cli_reference
       - name: Check for uncommitted changes
         run: git diff --exit-code
