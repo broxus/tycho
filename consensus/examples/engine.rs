@@ -11,7 +11,7 @@ use futures_util::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tycho_consensus::prelude::{
-    EngineBinding, EngineCreated, EngineNetworkArgs, InputBuffer, MempoolAdapterStore,
+    EngineBinding, EngineCreated, EngineNetworkArgs, InitPeers, InputBuffer, MempoolAdapterStore,
 };
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
@@ -129,7 +129,7 @@ fn make_network(
         .zip(bind_addresses.into_iter())
         .zip(peer_info.iter().map(|p| p.id))
     {
-        let all_peers = all_peers.clone();
+        let init_peers = InitPeers::new(all_peers.clone());
         let peer_info = peer_info.clone();
 
         let started = started.clone();
@@ -198,8 +198,7 @@ fn make_network(
                             top_known_anchor,
                         };
 
-                        let engine = EngineCreated::new(bind, &net_args, &merged_conf);
-                        engine.handle().set_start_peers(&all_peers);
+                        let engine = EngineCreated::new(bind, &net_args, &merged_conf, &init_peers);
 
                         let (engine_stop_tx, engine_stop_rx) = oneshot::channel();
                         let _engine_run = engine.run(engine_stop_tx); // keep alive
