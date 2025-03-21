@@ -1,5 +1,4 @@
 use std::cmp;
-use std::collections::btree_map;
 use std::sync::{Arc, Weak};
 
 use everscale_crypto::ed25519::KeyPair;
@@ -10,10 +9,11 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
+use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::Genesis;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, Round};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -121,6 +121,7 @@ impl DagRound {
         self.0.locations.view(author, |_, v| view(v))
     }
 
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn select<'a, F, R>(&'a self, mut filter_map: F) -> impl Iterator<Item = R> + 'a
     where
         F: FnMut((&PeerId, &DagLocation)) -> Option<R> + 'a,
@@ -139,16 +140,15 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
-    /// for genesis (next round key pair) and own points (point round key pair)
-    /// this does not start recursive validation so node may restart with only broadcast point
-    /// and download dependencies when consensus round is determined
-    /// Note must be called inside [`tokio::task::spawn_blocking()`] unlike other methods
-    pub fn insert_exact_sign(
+    /// for locally produced points
+    #[must_use = "await for point to resolve in dag"]
+    pub fn add_local(
         &self,
         point: &Point,
-        key_pair: Option<&KeyPair>,
+        key_pair: Option<&Arc<KeyPair>>,
         store: &MempoolStore,
-    ) {
+        round_ctx: &RoundCtx,
+    ) -> DagPointFuture {
         assert_eq!(
             point.round(),
             self.round(),
@@ -164,18 +164,16 @@ impl DagRound {
                     )
                 })
                 .or_insert_with(|| {
-                    DagPointFuture::new_local_trusted(point, &loc.state, store, key_pair)
-                });
-        });
+                    DagPointFuture::new_local_valid(point, &loc.state, store, key_pair, round_ctx)
+                })
+                .clone()
+        })
     }
 
-    pub fn set_bad_sig_in_broadcast_exact(&self, author: &PeerId) {
-        self.edit(author, |loc| loc.bad_sig_in_broadcast = true);
-    }
-
-    pub fn add_ill_formed_broadcast_exact(
+    pub fn add_ill_formed_broadcast(
         &self,
         point: &Point,
+        reason: &IllFormedReason,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
@@ -187,15 +185,17 @@ impl DagRound {
         self.edit(&point.data().author, |loc| {
             loc.versions
                 .entry(*point.digest())
-                .and_modify(|first| first.resolve_download(point, false))
+                .and_modify(|first| first.resolve_download(point, Some(reason)))
                 .or_insert_with(|| {
-                    DagPointFuture::new_ill_formed_broadcast(point, &loc.state, store, round_ctx)
+                    DagPointFuture::new_ill_formed_broadcast(
+                        point, reason, &loc.state, store, round_ctx,
+                    )
                 });
         });
     }
 
     /// Point already verified
-    pub fn add_broadcast_exact(
+    pub fn add_broadcast(
         &self,
         point: &Point,
         downloader: &Downloader,
@@ -208,25 +208,21 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        let digest = point.digest();
         self.edit(&point.data().author, |loc| {
-            match loc.versions.entry(*digest) {
-                btree_map::Entry::Occupied(occupied) => {
-                    let first = occupied.get();
-                    first.resolve_download(point, true);
-                }
-                btree_map::Entry::Vacant(vacant) => {
-                    vacant.insert(DagPointFuture::new_broadcast(
+            loc.versions
+                .entry(*point.digest())
+                .and_modify(|first| first.resolve_download(point, None))
+                .or_insert_with(|| {
+                    DagPointFuture::new_broadcast(
                         self, point, &loc.state, downloader, store, round_ctx,
-                    ));
-                }
-            }
+                    )
+                });
         });
     }
 
     /// notice: `round` must exactly match point's round,
     /// otherwise dependency will resolve to [`DagPoint::NotFound`]
-    pub fn add_evicted_broadcast_exact(
+    pub fn add_pruned_broadcast(
         &self,
         author: &PeerId,
         digest: &Digest,
@@ -236,7 +232,7 @@ impl DagRound {
     ) {
         self.edit(author, |loc| {
             loc.versions.entry(*digest).or_insert_with(|| {
-                DagPointFuture::new_load(
+                DagPointFuture::new_download(
                     self, author, digest, None, &loc.state, downloader, store, round_ctx,
                 )
             });
@@ -245,7 +241,7 @@ impl DagRound {
 
     /// notice: `round` must exactly match point's round,
     /// otherwise dependency will resolve to [`DagPoint::NotFound`]
-    pub fn add_dependency_exact(
+    pub fn add_dependency(
         &self,
         author: &PeerId,
         digest: &Digest,
@@ -259,7 +255,7 @@ impl DagRound {
                 .entry(*digest)
                 .and_modify(|first| first.add_depender(depender))
                 .or_insert_with(|| {
-                    DagPointFuture::new_load(
+                    DagPointFuture::new_download(
                         self,
                         author,
                         digest,
@@ -268,6 +264,43 @@ impl DagRound {
                         downloader,
                         store,
                         validate_ctx,
+                    )
+                })
+                .clone()
+        })
+    }
+
+    pub fn restore(
+        &self,
+        point_restore: PointRestore,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        round_ctx: &RoundCtx,
+    ) -> DagPointFuture {
+        let _guard = round_ctx.span().enter();
+        assert_eq!(
+            point_restore.round(),
+            self.round(),
+            "Coding error: point restore round does not match dag round"
+        );
+        let author = *point_restore.author();
+        self.edit(&author, |loc| {
+            loc.versions
+                .entry(*point_restore.digest())
+                .and_modify(|_| {
+                    panic!(
+                        "points must be restored only once. {:?}",
+                        point_restore.alt()
+                    )
+                })
+                .or_insert_with(|| {
+                    DagPointFuture::new_restore(
+                        self,
+                        point_restore,
+                        &loc.state,
+                        downloader,
+                        store,
+                        round_ctx,
                     )
                 })
                 .clone()
@@ -306,10 +339,9 @@ impl std::fmt::Debug for AltFmt<'_, DagRound> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
         write!(f, "{}[", inner.round().0)?;
-        inner
-            .select(|(peer, loc)| write!(f, "{}{:?}", peer.alt(), loc.alt()).err())
-            .next()
-            .map_or(Ok(()), Err)?;
+        for result in inner.select(|(peer, loc)| Some(write!(f, "{}{:?}", peer.alt(), loc.alt()))) {
+            result?;
+        }
         write!(f, "]")?;
         Ok(())
     }

@@ -67,8 +67,6 @@ pub struct KeyGroup {
     pub to_produce: Option<Arc<KeyPair>>,
     pub to_include: Option<Arc<KeyPair>>,
     pub to_witness: Option<Arc<KeyPair>>,
-    /// used after round is advanced, to finish witness of previous round
-    pub to_witness_prev: Option<Arc<KeyPair>>,
 }
 
 impl KeyGroup {
@@ -78,15 +76,11 @@ impl KeyGroup {
         let to_include = guard.local_keys(current.next());
         let to_produce = guard.local_keys(current);
         let to_witness = to_include.as_ref().and_then(|_| to_produce.clone());
-        let to_witness_prev = to_produce
-            .as_ref()
-            .and_then(|_| guard.local_keys(current.prev()));
 
         Self {
             to_produce,
             to_include,
             to_witness,
-            to_witness_prev,
         }
     }
 }
