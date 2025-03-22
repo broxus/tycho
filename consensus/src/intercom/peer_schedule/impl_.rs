@@ -41,6 +41,7 @@ struct PeerScheduleInner {
 }
 
 pub struct InitPeers {
+    pub prev_start_round: u32,
     pub prev_v_set: Vec<PeerId>,
     pub prev_v_subset: Vec<PeerId>,
     pub curr_start_round: u32,
@@ -53,6 +54,7 @@ impl InitPeers {
     #[cfg(feature = "test")]
     pub fn new(curr_v_subset: Vec<PeerId>) -> Self {
         Self {
+            prev_start_round: 0,
             prev_v_set: vec![],
             prev_v_subset: vec![],
             curr_start_round: 0,
@@ -60,17 +62,6 @@ impl InitPeers {
             curr_v_subset,
             next_v_set: vec![],
         }
-    }
-
-    pub fn check(&self, merged_conf: &MempoolMergedConfig) -> anyhow::Result<()> {
-        let after_genesis = merged_conf.conf.genesis_round.next();
-        if self.curr_start_round > after_genesis.0 {
-            anyhow::ensure!(
-                !self.prev_v_subset.is_empty(),
-                "cannot init peer schedule with empty prev_v_set that spans across genesis"
-            );
-        }
-        Ok(())
     }
 }
 
@@ -90,21 +81,37 @@ impl PeerSchedule {
 
     pub fn init(&self, merged_conf: &MempoolMergedConfig, init: &InitPeers) {
         // validator set is not defined for genesis
-        let genesis_round = merged_conf.conf.genesis_round;
-        self.set_next_subset(&[], genesis_round.prev(), &[merged_conf.genesis_author()]);
-        self.apply_scheduled(genesis_round);
+        let after_genesis = merged_conf.conf.genesis_round.next();
 
-        let curr_start = Round(init.curr_start_round);
-        let after_genesis = genesis_round.next();
+        let curr_start = if after_genesis.0 <= init.prev_start_round {
+            // set even if empty
+            let prev_start = Round(init.prev_start_round);
+            self.set_next_subset(&init.prev_v_set, prev_start, &init.prev_v_subset);
+            self.apply_scheduled(prev_start);
 
-        if curr_start > after_genesis {
-            // Note protected by `InitPeers::check()`
-            self.set_next_subset(&init.prev_v_set, after_genesis, &init.prev_v_subset);
-            self.apply_scheduled(after_genesis);
-            self.set_next_subset(&init.curr_v_set, curr_start, &init.curr_v_subset);
+            Round(init.curr_start_round)
         } else {
-            self.set_next_subset(&init.curr_v_set, after_genesis, &init.curr_v_subset);
-            self.apply_scheduled(after_genesis);
+            let genesis_round = merged_conf.conf.genesis_round;
+            self.set_next_subset(&[], genesis_round.prev(), &[merged_conf.genesis_author()]);
+            self.apply_scheduled(genesis_round);
+
+            if after_genesis.0 < init.curr_start_round {
+                if !init.prev_v_set.is_empty() {
+                    let prev_start = Round(init.prev_start_round).max(after_genesis);
+                    self.set_next_subset(&init.prev_v_set, prev_start, &init.prev_v_subset);
+                    self.apply_scheduled(prev_start);
+                }
+                Round(init.curr_start_round)
+            } else {
+                // after_genesis.0 >= init.curr_start_round
+                Round(init.curr_start_round).max(after_genesis)
+            }
+        };
+
+        self.set_next_subset(&init.curr_v_set, curr_start, &init.curr_v_subset);
+        self.apply_scheduled(curr_start);
+
+        if !init.next_v_set.is_empty() {
             self.set_next_set(&init.next_v_set);
         }
     }

@@ -58,10 +58,12 @@ impl StateUpdateContext {
         session_start_round: u32,
         shuffle_validators: bool,
     ) -> Vec<PeerId> {
-        validator_set
-            .compute_mc_subset(session_start_round, shuffle_validators)
-            .map(|(sub_list, _)| Self::peer_ids(sub_list.iter()))
-            .unwrap_or_default()
+        Self::peer_ids(
+            validator_set
+                .compute_mc_subset(session_start_round, shuffle_validators)
+                .iter()
+                .flat_map(|(sub_list, _)| sub_list.iter()),
+        )
     }
 
     fn peer_ids<'a>(iter: impl Iterator<Item = &'a ValidatorDescription>) -> Vec<PeerId> {

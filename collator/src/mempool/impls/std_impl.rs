@@ -201,7 +201,7 @@ impl MempoolAdapterStdImpl {
             output: anchor_tx,
         };
 
-        let init_peers = ConfigAdapter::init_peers(merged_conf, ctx)?;
+        let init_peers = ConfigAdapter::init_peers(ctx);
         let engine = EngineCreated::new(bind, &self.net_args, merged_conf, &init_peers);
 
         // actual oldest sync round will be not less than this

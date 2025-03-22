@@ -1,6 +1,4 @@
-use tycho_consensus::prelude::{
-    EngineHandle, EngineRunning, InitPeers, MempoolConfigBuilder, MempoolMergedConfig,
-};
+use tycho_consensus::prelude::{EngineHandle, EngineRunning, InitPeers, MempoolConfigBuilder};
 use tycho_network::PeerId;
 
 use super::state_update_queue::StateUpdateQueue;
@@ -16,20 +14,16 @@ pub struct ConfigAdapter {
 // TODO keep track of last applied v_set hash and round
 
 impl ConfigAdapter {
-    pub fn init_peers(
-        merged_conf: &MempoolMergedConfig,
-        new_cx: &StateUpdateContext,
-    ) -> anyhow::Result<InitPeers> {
-        let init_peers = InitPeers {
+    pub fn init_peers(new_cx: &StateUpdateContext) -> InitPeers {
+        InitPeers {
+            prev_start_round: new_cx.consensus_info.prev_vset_switch_round,
             prev_v_set: new_cx.prev_v_set(),
             prev_v_subset: new_cx.prev_v_subset(),
             curr_start_round: new_cx.consensus_info.vset_switch_round,
             curr_v_set: new_cx.curr_v_set(),
             curr_v_subset: new_cx.curr_v_subset(),
             next_v_set: new_cx.next_v_set(),
-        };
-        init_peers.check(merged_conf)?;
-        Ok(init_peers)
+        }
     }
 
     pub fn apply_next_vset(engine: &EngineHandle, new_cx: &StateUpdateContext) {
