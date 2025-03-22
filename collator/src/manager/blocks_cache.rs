@@ -28,9 +28,14 @@ use crate::validator::ValidationStatus;
 #[path = "tests/blocks_cache_tests.rs"]
 pub(super) mod tests;
 
-pub struct BlocksCache {
+struct BlocksCacheInner {
     masters: Mutex<MasterBlocksCache>,
     shards: FastDashMap<ShardIdent, ShardBlocksCache>,
+}
+
+#[derive(Clone)]
+pub struct BlocksCache {
+    inner: Arc<BlocksCacheInner>,
 }
 
 impl BlocksCache {
@@ -38,8 +43,10 @@ impl BlocksCache {
         metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").set(0);
 
         Self {
-            masters: Default::default(),
-            shards: Default::default(),
+            inner: Arc::new(BlocksCacheInner {
+                masters: Default::default(),
+                shards: Default::default(),
+            }),
         }
     }
 
@@ -49,7 +56,7 @@ impl BlocksCache {
         next_mc_block_id_short: BlockIdShort,
     ) -> Result<Vec<TopBlockDescription>> {
         let mut result = vec![];
-        for mut shard_cache in self.shards.iter_mut() {
+        for mut shard_cache in self.inner.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
                     let processed_to = entry
@@ -85,6 +92,7 @@ impl BlocksCache {
         next_mc_block_id_short: BlockIdShort,
     ) -> Option<FastHashMap<ShardIdent, BlockSeqno>> {
         if let Some(master) = self
+            .inner
             .masters
             .lock()
             .blocks
@@ -108,7 +116,7 @@ impl BlocksCache {
     ) -> Result<ConsensusInfo> {
         let consensus_info;
         {
-            let master_cache = self.masters.lock();
+            let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
                 bail!(
                     "get_consensus_info_for_mc_block: Master block not found in cache! ({})",
@@ -123,7 +131,7 @@ impl BlocksCache {
     }
 
     pub fn reset_top_shard_blocks_additional_info(&self) {
-        for mut shard_cache in self.shards.iter_mut() {
+        for mut shard_cache in self.inner.shards.iter_mut() {
             shard_cache.data.reset_top_shard_block_additional_info();
         }
     }
@@ -131,7 +139,7 @@ impl BlocksCache {
     pub fn get_last_collated_block_and_applied_mc_queue_range(
         &self,
     ) -> (Option<BlockId>, Option<(BlockSeqno, BlockSeqno)>) {
-        let master_cache = self.masters.lock();
+        let master_cache = self.inner.masters.lock();
         (
             master_cache.data.get_last_collated_block_id().cloned(),
             master_cache.data.applied_mc_queue_range,
@@ -150,7 +158,7 @@ impl BlocksCache {
 
         let updated_top_shard_block_ids;
         {
-            let master_cache = self.masters.lock();
+            let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
                 bail!(
                     "get_all_processed_to_by_mc_block_from_cache: Master block not found in cache! ({})",
@@ -178,7 +186,7 @@ impl BlocksCache {
             let mut processed_to_opt = None;
 
             // try to find in cache
-            if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
+            if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
                     processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
                 }
@@ -210,7 +218,7 @@ impl BlocksCache {
 
         let mut prev_shard_blocks_ids;
         {
-            let master_cache = self.masters.lock();
+            let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
                 bail!(
                     "read_before_tail_ids_of_mc_block: Master block not found in cache! ({})",
@@ -240,7 +248,7 @@ impl BlocksCache {
 
             let mut prev_block_ids = None;
             let mut not_found = true;
-            if let Some(shard_cache) = self.shards.get(&prev_sc_block_id.shard) {
+            if let Some(shard_cache) = self.inner.shards.get(&prev_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&prev_sc_block_id.seqno) {
                     not_found = false;
 
@@ -296,7 +304,7 @@ impl BlocksCache {
 
         let block_mismatch;
         if mc_data.is_some() {
-            let mut masters_guard = self.masters.lock();
+            let mut masters_guard = self.inner.masters.lock();
             let res = masters_guard.store_collated_block(candidate, mc_data)?;
             block_mismatch = res.block_mismatch;
             received_and_collated = res.received_and_collated;
@@ -304,7 +312,7 @@ impl BlocksCache {
             applied_mc_queue_range = masters_guard.data.applied_mc_queue_range;
         } else {
             let res = {
-                let mut g = self.shards.entry(block_id.shard).or_default();
+                let mut g = self.inner.shards.entry(block_id.shard).or_default();
                 g.store_collated_block(candidate, mc_data)?
             };
 
@@ -343,7 +351,7 @@ impl BlocksCache {
         let block_mismatch;
         let last_known_synced = 'sync: {
             if block_id.is_masterchain() {
-                let mut masters_guard = self.masters.lock();
+                let mut masters_guard = self.inner.masters.lock();
                 if let Some(last_known_synced) =
                     masters_guard.check_refresh_last_known_synced(block_id.seqno)
                 {
@@ -368,7 +376,7 @@ impl BlocksCache {
                 let ref_by_mc_seqno = ctx.ref_by_mc_seqno;
 
                 let res = {
-                    let mut g = self.shards.entry(block_id.shard).or_default();
+                    let mut g = self.inner.shards.entry(block_id.shard).or_default();
                     if let Some(last_known_synced) =
                         g.check_refresh_last_known_synced(block_id.seqno)
                     {
@@ -382,7 +390,7 @@ impl BlocksCache {
 
                 // if collated block mismatched remove its master and all next from last collated blocks ids
                 if block_mismatch {
-                    let mut masters_guard = self.masters.lock();
+                    let mut masters_guard = self.inner.masters.lock();
                     masters_guard
                         .data
                         .remove_last_collated_block_ids_from(&ref_by_mc_seqno);
@@ -426,7 +434,7 @@ impl BlocksCache {
             new_status,
         );
 
-        let mut guard = self.masters.lock();
+        let mut guard = self.inner.masters.lock();
         let Some(entry) = guard.blocks.get_mut(&block_id.seqno) else {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -472,7 +480,7 @@ impl BlocksCache {
         let mut extracted_mc_block_entry = None;
         let mut is_last = true;
         {
-            let mut guard = self.masters.lock();
+            let mut guard = self.inner.masters.lock();
             let keys = guard.blocks.keys().copied().collect::<Vec<_>>();
             for key in keys {
                 if key < from_seqno {
@@ -517,7 +525,7 @@ impl BlocksCache {
     pub fn extract_mc_block_subgraph_for_sync(&self, block_id: &BlockId) -> McBlockSubgraphExtract {
         // 1. Find requested master block
         let mc_block_entry = {
-            let mut guard = self.masters.lock();
+            let mut guard = self.inner.masters.lock();
 
             let Some(occupied_entry) = guard.blocks.remove(&block_id.seqno) else {
                 return McBlockSubgraphExtract::AlreadyExtracted;
@@ -572,7 +580,8 @@ impl BlocksCache {
                 continue;
             }
 
-            let Some(mut shard_cache) = self.shards.get_mut(&prev_shard_block_id.shard) else {
+            let Some(mut shard_cache) = self.inner.shards.get_mut(&prev_shard_block_id.shard)
+            else {
                 continue;
             };
 
@@ -619,9 +628,9 @@ impl BlocksCache {
 
         for block_key in to_blocks_keys {
             if block_key.is_masterchain() {
-                let mut guard = self.masters.lock();
+                let mut guard = self.inner.masters.lock();
                 guard.gc_to_boundary = Some(*block_key);
-            } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
+            } else if let Some(mut shard_cache) = self.inner.shards.get_mut(&block_key.shard) {
                 shard_cache.gc_to_boundary = Some(*block_key);
             }
         }
@@ -632,7 +641,7 @@ impl BlocksCache {
 
         // remove master blocks
         {
-            let mut guard = self.masters.lock();
+            let mut guard = self.inner.masters.lock();
             let mut removed_seqno_list = vec![];
             if let Some(gc_to_block_key) = guard.gc_to_boundary {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -661,7 +670,7 @@ impl BlocksCache {
         }
 
         // remove shard blocks
-        for mut shard_cache in self.shards.iter_mut() {
+        for mut shard_cache in self.inner.shards.iter_mut() {
             if let Some(gc_to_block_key) = shard_cache.gc_to_boundary {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     %gc_to_block_key,
@@ -695,7 +704,7 @@ impl BlocksCache {
 
         for block_key in after_blocks_keys {
             if block_key.is_masterchain() {
-                let mut guard = self.masters.lock();
+                let mut guard = self.inner.masters.lock();
                 let mut removed_seqno_list = vec![];
                 guard.blocks.retain(|key, value| {
                     let is_received = matches!(value.data, BlockCacheEntryData::Received { .. });
@@ -716,7 +725,7 @@ impl BlocksCache {
                         .data
                         .remove_last_collated_block_ids_from(&removed_seqno);
                 }
-            } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
+            } else if let Some(mut shard_cache) = self.inner.shards.get_mut(&block_key.shard) {
                 shard_cache.blocks.retain(|key, value| {
                     let is_received = matches!(value.data, BlockCacheEntryData::Received { .. });
                     let retained = key <= &block_key.seqno || is_received;
