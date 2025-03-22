@@ -52,7 +52,17 @@ impl Engine {
         } = handle;
 
         let conf = &merged_conf.conf;
-        let genesis = merged_conf.genesis();
+        let genesis_reachable = {
+            if (net.peer_schedule.atomic().peers_for(conf.genesis_round)).is_empty() {
+                None
+            } else {
+                let genesis = merged_conf.genesis();
+                genesis.verify_hash().expect("Failed to verify genesis");
+                Verifier::verify(&genesis, &net.peer_schedule, conf)
+                    .expect("genesis failed to verify");
+                Some(genesis)
+            }
+        };
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(conf.genesis_round);
@@ -61,11 +71,11 @@ impl Engine {
         let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker);
         let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
 
-        genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis, &net.peer_schedule, conf).expect("genesis failed to verify");
-
         let store = MempoolStore::new(&bind.mempool_adapter_store);
         let db_cleaner = DbCleaner::new(&bind.mempool_adapter_store);
+
+        let estimated_bottom = (conf.genesis_round.prev())
+            .max(bind.top_known_anchor.get() - merged_conf.consensus().replay_anchor_rounds());
 
         // Dag, created at genesis, will at first extend up to its greatest length
         // (in case last broadcast is within it) without data,
@@ -73,7 +83,7 @@ impl Engine {
         // before being filled with data
         let mut dag = DagFront::default();
         let mut committer = dag.init(
-            DagRound::new_bottom(conf.genesis_round.prev(), &net.peer_schedule, conf),
+            DagRound::new_bottom(estimated_bottom, &net.peer_schedule, conf),
             conf,
         );
         dag.fill_to_top(
@@ -90,7 +100,9 @@ impl Engine {
             let conf = conf.clone();
             move || {
                 store.init_storage(&overlay_id);
-                store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                if let Some(genesis) = genesis_reachable {
+                    store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                }
                 fix_history // just pass further
             }
         });
