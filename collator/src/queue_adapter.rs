@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
@@ -12,8 +14,8 @@ use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange, QueueStatistics,
+    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
+    QueueDiffWithMessages, QueueShardRange, QueueStatistics,
 };
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTupleRef};
@@ -38,7 +40,7 @@ where
     /// and source shards (equal to iterator ranges)
     fn get_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
 
@@ -88,7 +90,14 @@ where
     fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get diffs tail len from uncommitted state and committed state
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
-    /// Get partition router and statistics for the specified block and diff
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        shard_ident: &ShardIdent,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
+    /// Get partition router and statistics for the specified block
     fn get_router_and_statistics(
         &self,
         block_id_short: &BlockIdShort,
@@ -133,12 +142,14 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     #[instrument(skip_all, fields(partition, ranges = ?ranges))]
     fn get_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics> {
         let start_time = std::time::Instant::now();
 
-        let stats = self.queue.load_statistics(partition, ranges)?;
+        let stats = self.queue.load_diff_statistics(partitions, ranges)?;
+
+        let stats = QueueStatistics::with_statistics(stats);
 
         let elapsed = start_time.elapsed();
         tracing::info!(
@@ -321,6 +332,17 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         tail_len
     }
 
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        shard_ident: &ShardIdent,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
+        self.queue
+            .load_separated_diff_statistics(partitions, shard_ident, from, to)
+    }
+
     fn get_router_and_statistics(
         &self,
         block_id_short: &BlockIdShort,
@@ -340,7 +362,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             to: diff_info.max_message,
         };
 
-        let queue_statistics = self.get_statistics(partition, &[statistics_range])?;
+        let queue_statistics =
+            self.get_statistics(&vec![partition].into_iter().collect(), &[statistics_range])?;
 
         let mut diff_statistics = FastHashMap::default();
         diff_statistics.insert(partition, queue_statistics.statistics().clone());
