@@ -77,7 +77,7 @@ impl Drop for GcManager {
 
 fn gc_task<V: InternalMessageValue>(
     gc_state: Arc<Mutex<GcRange>>,
-    committed_state: Arc<dyn QueueState<V>>,
+    queue_state: Arc<dyn QueueState<V>>,
     delete_until: GcRange,
 ) {
     let _histogram = HistogramGuard::begin("tycho_internal_queue_gc_execute_task_time");
@@ -98,7 +98,7 @@ fn gc_task<V: InternalMessageValue>(
                     to: *current_last_key,
                 }];
 
-                if let Err(e) = committed_state.delete(*partition, range.as_slice()) {
+                if let Err(e) = queue_state.delete(*partition, range.as_slice()) {
                     tracing::error!(target: tracing_targets::MQ, "failed to delete messages: {e:?}");
                 }
 

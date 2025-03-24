@@ -16,8 +16,8 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange,
+    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
+    QueueDiffWithMessages, QueueShardRange,
 };
 use crate::types::ProcessedTo;
 // CONFIG
@@ -90,11 +90,19 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
     ) -> Result<()>;
 
     /// Load statistics for given partition and ranges
-    fn load_statistics(
+    fn load_diff_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         range: &[QueueShardRange],
     ) -> Result<FastHashMap<IntAddr, u64>>;
+
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        shard_ident: &ShardIdent,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
 
     /// Get last committed mc block id
     /// Returns None if no block was applied
@@ -191,9 +199,9 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         tx.write()
     }
 
-    fn load_statistics(
+    fn load_diff_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<FastHashMap<IntAddr, u64>> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
@@ -201,14 +209,36 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         let mut result = FastHashMap::default();
 
         for range in ranges {
-            snapshot.collect_stats_in_range(
-                range.shard_ident,
-                partition,
-                &range.from,
-                &range.to,
-                &mut result,
-            )?;
+            for partition in partitions {
+                snapshot.collect_stats_in_range(
+                    &range.shard_ident,
+                    *partition,
+                    &range.from,
+                    &range.to,
+                    &mut result,
+                )?;
+            }
         }
+
+        Ok(result)
+    }
+
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        shard_ident: &ShardIdent,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
+        let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
+        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+
+        let result = snapshot.collect_separated_stats_in_range_for_partitions(
+            shard_ident,
+            partitions,
+            from,
+            to,
+        )?;
 
         Ok(result)
     }
@@ -365,7 +395,6 @@ impl QueueStateStdImpl {
         let _histogram =
             HistogramGuard::begin("tycho_internal_queue_apply_diff_add_statistics_time");
         let shard_ident = diff_statistics.shard_ident();
-        let min_message = diff_statistics.min_message();
         let max_message = diff_statistics.max_message();
 
         for (partition, values) in diff_statistics.iter() {
@@ -377,7 +406,6 @@ impl QueueStateStdImpl {
                 let key = StatKey {
                     shard_ident: *shard_ident,
                     partition: *partition,
-                    min_message: *min_message,
                     max_message: *max_message,
                     dest,
                 };
