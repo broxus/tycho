@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use tycho_network::PeerId;
 
 use crate::dag::{DagHead, DagRound};
-use crate::effects::AltFormat;
-use crate::engine::InputBuffer;
+use crate::effects::{AltFormat, RoundCtx};
+use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
     Through, UnixTime,
@@ -18,6 +18,23 @@ pub struct LastOwnPoint {
     pub signers: PeerCount,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum ProduceError {
+    #[error("not enough evidence to start producer task")]
+    NotAllowed, // same check in another place
+    #[error("not enough evidence")]
+    NotEnoughEvidence,
+    #[error("reached threshold for the next round")]
+    NextRoundThreshold,
+    #[error("node is not scheduled at this round")]
+    NotScheduled,
+    #[error("included prev point # {} != broadcasted # {}", included.alt(), broadcasted.alt())]
+    PrevPointMismatch {
+        included: Digest,
+        broadcasted: Digest,
+    },
+}
+
 pub struct Producer;
 
 impl Producer {
@@ -25,10 +42,13 @@ impl Producer {
         last_own_point: Option<&LastOwnPoint>,
         input_buffer: &InputBuffer,
         head: &DagHead,
-    ) -> Option<Point> {
+        conf: &MempoolConfig,
+    ) -> Result<Point, ProduceError> {
         let current_round = head.current();
         let finished_round = head.prev();
-        let key_pair = head.keys().to_produce.as_deref()?;
+        let Some(key_pair) = head.keys().to_produce.as_deref() else {
+            return Err(ProduceError::NotScheduled);
+        };
 
         let proven_vertex = match last_own_point {
             Some(prev) if prev.round == finished_round.round() => {
@@ -36,7 +56,7 @@ impl Producer {
                 if prev.evidence.len() >= prev.signers.majority_of_others() {
                     Some(&prev.digest) // prev point is used only once
                 } else {
-                    return None; // cannot produce and has to skip round
+                    return Err(ProduceError::NotEnoughEvidence); // has to skip round
                 }
             }
             _ => None,
@@ -72,14 +92,18 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        let (time, anchor_time) =
-            Self::get_time(&anchor_proof, &local_id, proven_vertex, &includes, &witness);
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
             // it's not necessary to resend external messages from previous round
             // if at least 1F+1 peers (one reliable) signed previous point;
             // also notice that payload elems are deduplicated in mempool adapter
             last.evidence.len() >= last.signers.reliable_minority()
         }));
+
+        let prev_info = (includes.iter()).find(|point| point.data().author == local_id);
+
+        Self::check_prev_point(prev_info, proven_vertex)?;
+
+        let (time, anchor_time) = Self::get_time(&anchor_proof, prev_info, &includes, &witness);
 
         let includes = includes
             .into_iter()
@@ -97,7 +121,7 @@ impl Producer {
             .map(|point| (point.data().author, *point.digest()))
             .collect::<BTreeMap<_, _>>();
 
-        Some(Point::new(
+        Ok(Point::new(
             key_pair,
             current_round.round(),
             proven_vertex
@@ -114,6 +138,7 @@ impl Producer {
                 anchor_proof,
                 anchor_time,
             },
+            conf,
         ))
     }
 
@@ -232,27 +257,10 @@ impl Producer {
 
     fn get_time(
         anchor_proof: &Link,
-        local_id: &PeerId,
-        proven_vertex: Option<&Digest>,
+        prev_info: Option<&PointInfo>,
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
-        let prev_info = includes
-            .iter()
-            .find(|point| point.data().author == local_id);
-
-        // DB removal is a corner case: local node will download own points as dependencies
-        // of other's points. And local node may try to produce a new point with previous
-        // in includes, but there are no evidence for it, thus panic. Then, after restart
-        // the local node will re-broadcast those downloaded point, collect signatures for it
-        // and produce a new point at round it panicked.
-        assert_eq!(
-            prev_info.map(|prev| prev.digest()),
-            proven_vertex,
-            "included prev point digest does not match broadcasted one. \
-             This may be OK after DB deletion: try to restart the node a couple of times."
-        );
-
         let anchor_time = match anchor_proof {
             Link::ToSelf => {
                 let point = prev_info.expect("anchor candidate should exist");
@@ -279,6 +287,42 @@ impl Producer {
             Some(info) => anchor_time.max(info.data().time),
         };
 
-        (UnixTime::now().max(deps_time.next()), anchor_time)
+        let now = UnixTime::now();
+        let point_time = now.max(deps_time.next());
+        RoundCtx::own_point_time_skew(point_time.diff_f64(now));
+
+        (point_time, anchor_time)
+    }
+
+    /// DB removal is a corner case: local node tries to produce a point after some downloads
+    /// and also may download own point as a dependency of other's points.
+    /// So if we equivocated @ r-1, we should not produce @ r+0.
+    /// Otherwise, point @ r+0 most likely will be invalid, and we'll have to skip r+1.
+    /// This holds with 'release' build profile, while code panics with `debug_assert`.
+    ///
+    /// Other mismatches (Some vs None) is a coding error.
+    fn check_prev_point(
+        prev_info: Option<&PointInfo>,
+        proven_vertex: Option<&Digest>,
+    ) -> Result<(), ProduceError> {
+        match (prev_info.map(|prev| prev.digest()), proven_vertex) {
+            (None, None) => Ok(()),
+            (Some(a), Some(b)) if a == b => Ok(()),
+            (Some(&included), Some(&broadcasted)) => {
+                debug_assert_eq!(
+                    included, broadcasted,
+                    "included prev point digest does not match broadcasted one. \
+                     This may be OK after DB deletion: try to restart the node a couple of times \
+                     or rebuild the node in `release` profile to skip produce point at this round"
+                );
+                Err(ProduceError::PrevPointMismatch {
+                    included,
+                    broadcasted,
+                })
+            }
+            (included, broadcasted) => panic!(
+                "included prev point {included:?} does not match broadcasted {broadcasted:?}"
+            ),
+        }
     }
 }
