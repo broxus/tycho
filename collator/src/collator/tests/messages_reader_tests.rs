@@ -541,6 +541,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
                 reader_state,
                 anchors_cache,
+                load_statistics_params: Default::default(),
+                is_first_block_or_masterchain: true,
             },
             self.primary_mq_adapter.clone(),
         )?;
@@ -560,6 +562,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts,
                 reader_state: secondary_reader_state,
                 anchors_cache: secondary_anchors_cache,
+                load_statistics_params: Default::default(),
+                is_first_block_or_masterchain: true,
             },
             self.secondary_mq_adapter.clone(),
         )?;

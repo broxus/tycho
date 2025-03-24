@@ -112,24 +112,25 @@ fn test_statistics_check_statistics(
 ) -> anyhow::Result<()> {
     // check two diff statistics
     // there are 30000 messages in low partition, 2000 message in normal partition
-    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: QueueKey {
-            lt: 1,
-            hash: HashBytes::default(),
-        },
-        to: QueueKey {
-            lt: 36000,
-            hash: HashBytes::default(),
-        },
-    }])?;
+
+    let statistics_low_priority_partition =
+        queue.load_diff_statistics(&vec![1].into_iter().collect(), &[QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            },
+        }])?;
 
     let addr_1_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .unwrap();
+
     let addr_2_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_2_low_priority.to_int_addr())
         .unwrap();
 
@@ -137,7 +138,7 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 10000);
 
     let statistics_normal_priority_partition =
-        queue.load_statistics(QueuePartitionIdx::default(), &[QueueShardRange {
+        queue.load_diff_statistics(&vec![0].into_iter().collect(), &[QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
                 lt: 1,
@@ -150,30 +151,28 @@ fn test_statistics_check_statistics(
         }])?;
 
     let addr_3_stat = statistics_normal_priority_partition
-        .statistics()
         .get(&dest_3_normal_priority.to_int_addr())
         .unwrap();
     assert_eq!(*addr_3_stat, 2000);
 
     // check first diff, there are 15000 messages in low partition
-    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: QueueKey {
-            lt: 1,
-            hash: HashBytes::default(),
-        },
-        to: QueueKey {
-            lt: 16000,
-            hash: HashBytes::default(),
-        },
-    }])?;
+    let statistics_low_priority_partition =
+        queue.load_diff_statistics(&vec![1].into_iter().collect(), &[QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 16000,
+                hash: HashBytes::default(),
+            },
+        }])?;
 
     let addr_1_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .unwrap();
     let addr_2_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_2_low_priority.to_int_addr())
         .unwrap();
 
@@ -181,24 +180,23 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 5000);
 
     // check second diff, there are 15000 messages in low partition
-    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: QueueKey {
-            lt: 20000,
-            hash: HashBytes::default(),
-        },
-        to: QueueKey {
-            lt: 36000,
-            hash: HashBytes::default(),
-        },
-    }])?;
+    let statistics_low_priority_partition =
+        queue.load_diff_statistics(&vec![1].into_iter().collect(), &[QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 20000,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            },
+        }])?;
 
     let addr_1_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .unwrap();
     let addr_2_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_2_low_priority.to_int_addr())
         .unwrap();
 
@@ -855,10 +853,11 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         },
     };
 
-    let statistics = queue.load_statistics(1, &[stat_range1, stat_range2])?;
+    let partitions = &vec![0, 1].into_iter().collect();
+
+    let statistics = queue.load_diff_statistics(partitions, &[stat_range1, stat_range2])?;
 
     let stat = statistics
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .cloned()
         .unwrap_or_default();
@@ -1643,10 +1642,10 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
         },
     };
 
-    let statistics = queue.load_statistics(1, &[stat_range1, stat_range2])?;
+    let statistics =
+        queue.load_diff_statistics(&vec![1].into_iter().collect(), &[stat_range1, stat_range2])?;
 
     let stat = statistics
-        .statistics()
         .get(&low_priority.to_int_addr())
         .cloned()
         .unwrap_or_default();
