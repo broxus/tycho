@@ -355,7 +355,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         fully_read: bool,
         ranges: &[QueueShardRange],
     ) -> Result<()> {
-        let msgs_stats = self.mq_adapter.get_statistics(self.partition_id, ranges)?;
+        let msgs_stats = self
+            .mq_adapter
+            .get_statistics(&vec![self.partition_id].into_iter().collect(), ranges)?;
         let remaning_msgs_stats = match fully_read {
             true => QueueStatistics::default(),
             false => {
