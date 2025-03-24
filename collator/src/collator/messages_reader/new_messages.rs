@@ -51,15 +51,16 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         &self.partition_router
     }
 
-    pub fn init_partition_router<'a>(
+    pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
-        partition_all_ranges_msgs_stats: impl Iterator<Item = &'a QueueStatistics>,
+        partition_all_ranges_msgs_stats: &QueueStatistics,
+        par_0_msgs_count_limit: u64,
     ) {
-        for stats in partition_all_ranges_msgs_stats {
-            for account_addr in stats.statistics().keys() {
+        for (addr, count) in partition_all_ranges_msgs_stats.statistics() {
+            if *count > par_0_msgs_count_limit {
                 self.partition_router
-                    .insert_dst(account_addr, partition_id)
+                    .insert_dst(addr, partition_id)
                     .unwrap();
             }
         }

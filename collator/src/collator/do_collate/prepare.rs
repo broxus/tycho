@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use everscale_types::models::GlobalCapability;
 use tycho_executor::{ExecutorParams, ParsedConfig};
 
@@ -115,6 +114,8 @@ impl Phase<PrepareState> {
                 mc_top_shards_end_lts,
                 reader_state: self.extra.reader_state,
                 anchors_cache: self.extra.anchors_cache,
+                load_statistics_params: self.state.load_statistics_params.clone(),
+                is_first_block_or_masterchain: self.state.is_first_block_or_masterchain,
             },
             self.extra.mq_adapter.clone(),
         )?;
