@@ -15,39 +15,76 @@ env:
   CXX: /usr/bin/clang++
 
 jobs:
+  pre-build:
+    name: Pre-build Project Cache
+    runs-on: [self-hosted, linux]
+    if: github.event_name == 'merge_group'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize Environment (for Build)
+        uses: ./.github/actions/init
+        with:
+          setup-cache: true
+
+      - name: Pre-build Project (dev and Release Check)
+        shell: bash
+        run: |
+          echo "Building dev profile..."
+          just build
+
+          echo "Building release_check profile..."
+          env TYCHO_BUILD_PROFILE=release_check just build
+
+  # This job depends on pre-build, so it also effectively only runs on merge_group
   network-tests:
     name: Network Integration Tests - ${{ matrix.test_name }}
     runs-on: [self-hosted, linux]
+    # Add the 'if' condition here too for clarity and robustness
+    # It prevents the job from even starting if pre-build is skipped (on PR)
+    if: github.event_name == 'merge_group'
+    needs: pre-build # Makes this job wait for pre-build AND implicitly skip if pre-build skips
     timeout-minutes: 30
     strategy:
+      fail-fast: true
       matrix:
         include:
           - test_name: destroyable
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
+            profile: dev
           - test_name: ping-pong
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
+            profile: dev
           - test_name: one-to-many-internal-messages
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
-            env:
-              TYCHO_BUILD_PROFILE: release_check
-    steps:
-      - uses: actions/checkout@v4
-        if: github.event_name == 'merge_group'
+            profile: release_check
+          - test_name: fq-deploy
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-fq:latest
+            profile: release_check
+          - test_name: nft-index
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-nft-index:latest
+            profile: dev
 
-      - uses: ./.github/actions/init
-        if: github.event_name == 'merge_group'
+    env:
+      TYCHO_BUILD_PROFILE: ${{ matrix.profile }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize Environment
+        uses: ./.github/actions/init
         with:
+          setup-cache: true
           fake-procfs: true
 
-      - name: Install just
-        uses: extractions/setup-just@v2
-        if: github.event_name == 'merge_group'
-
       - name: Login to GHCR
-        if: github.event_name == 'merge_group'
+        shell: bash
         run: |
+          set -e
           echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
 
       - name: Run network tests
-        if: github.event_name == 'merge_group'
+        shell: bash
         run: ./scripts/run-network-tests.sh ${{ matrix.test_image }}
