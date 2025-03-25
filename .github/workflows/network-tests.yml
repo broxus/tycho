@@ -20,16 +20,29 @@ jobs:
     runs-on: [self-hosted, linux]
     timeout-minutes: 30
     strategy:
+      fail-fast: true
       matrix:
         include:
           - test_name: destroyable
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
+            profile: debug 
           - test_name: ping-pong
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
+            profile: debug 
           - test_name: one-to-many-internal-messages
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
-            env:
-              TYCHO_BUILD_PROFILE: release_check
+            profile: release_check
+          - test_name: fq-deploy
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-fq:latest
+            profile: release_check
+          - test_name: nft-index
+            test_image: ghcr.io/broxus/tycho-tests/tycho-tests-nft-index:latest
+            profile: debug 
+
+    
+    env:
+       TYCHO_BUILD_PROFILE: ${{ matrix.profile }}
+
     steps:
       - uses: actions/checkout@v4
         if: github.event_name == 'merge_group'
@@ -43,6 +56,20 @@ jobs:
         uses: extractions/setup-just@v2
         if: github.event_name == 'merge_group'
 
+      
+      # Build both profiles to populate the cache before tests run.
+      # This runs once per job *before* the matrix strategy causes test execution differences.
+      - name: Pre-build Project (Debug and Release Check)
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "Building debug profile..."
+          # Assuming 'just build' without TYCHO_BUILD_PROFILE builds the debug profile
+          just build
+
+          echo "Building release_check profile..."
+          env TYCHO_BUILD_PROFILE=release_check just build
+      
+      
       - name: Login to GHCR
         if: github.event_name == 'merge_group'
         run: |
