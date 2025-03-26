@@ -488,10 +488,7 @@ impl DagBack {
                                 None
                             }
                         }
-                        DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
-                        }
-                        DagPoint::NotFound(not_found) if not_found.is_certified() => {
+                        not_valid if not_valid.is_certified() => {
                             Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
                         DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
@@ -526,10 +523,7 @@ impl DagBack {
         };
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
-            DagPoint::Invalid(invalid) if invalid.is_certified() => {
-                Err(SyncError::HistoryConflict(dag_round.round()))
-            }
-            DagPoint::NotFound(not_found) if not_found.is_certified() => {
+            not_valid if not_valid.is_certified() => {
                 Err(SyncError::HistoryConflict(dag_round.round()))
             }
             dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {

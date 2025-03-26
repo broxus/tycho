@@ -285,7 +285,7 @@ mod test {
     use super::*;
     use crate::dag::threshold::Threshold;
     use crate::models::{
-        DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
+        Cert, DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
     };
     use crate::test_utils::default_test_config;
 
@@ -411,6 +411,6 @@ mod test {
             conf,
         ));
 
-        DagPoint::new_validated(info, &status)
+        DagPoint::new_validated(info, Cert::default(), &status)
     }
 }

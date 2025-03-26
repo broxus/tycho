@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use ahash::HashMapExt;
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::{BoxFuture, Either};
 use futures_util::{future, FutureExt};
@@ -9,6 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_network::PeerId;
 use tycho_util::futures::Shared;
 use tycho_util::sync::OnceTake;
+use tycho_util::FastHashMap;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
@@ -17,8 +19,9 @@ use crate::effects::{
 };
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
-    DagPoint, Digest, Point, PointId, PointInfo, PointRestore, PointStatusIllFormed,
-    PointStatusNotFound, PointStatusStored, PointStatusStoredRef, PointStatusValidated,
+    Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
+    PointStatusIllFormed, PointStatusNotFound, PointStatusStored, PointStatusStoredRef,
+    PointStatusValidated, WeakCert,
 };
 
 #[derive(Clone)]
@@ -31,8 +34,7 @@ impl future::Future for DagPointFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
             DagPointFutureType::Validate { task, .. }
-            | DagPointFutureType::Download { task, .. }
-            | DagPointFutureType::Simple(task) => match task.poll_unpin(cx) {
+            | DagPointFutureType::Download { task, .. } => match task.poll_unpin(cx) {
                 Poll::Ready((result, _)) => Poll::Ready(result),
                 Poll::Pending => Poll::Pending,
             },
@@ -46,16 +48,15 @@ enum DagPointFutureType {
         task: Shared<BoxFuture<'static, TaskResult<DagPoint>>>,
         // normally, if we are among the last nodes to validate some broadcast point,
         // we can receive its proof from author, check its signatures and skip validation of the vertex and its deps
-        certified: Arc<OnceTake<oneshot::Sender<()>>>,
+        cert: Cert,
     },
     Download {
         task: Shared<BoxFuture<'static, TaskResult<DagPoint>>>,
         // this could be a `Notify`, but both sender and receiver must be used only once
-        certified: Arc<OnceTake<oneshot::Sender<()>>>,
+        cert: Cert,
         dependers_tx: mpsc::UnboundedSender<PeerId>,
         resolve: Arc<OnceTake<oneshot::Sender<DownloadResult>>>,
     },
-    Simple(Shared<BoxFuture<'static, TaskResult<DagPoint>>>),
 }
 
 impl DagPointFuture {
@@ -68,12 +69,15 @@ impl DagPointFuture {
         key_pair: Option<&Arc<KeyPair>>,
         round_ctx: &RoundCtx,
     ) -> Self {
+        let cert = Cert::default();
+
         let task = round_ctx.task().spawn_blocking({
             let point = point.clone();
             let state = state.clone();
             let store = store.clone();
             let key_pair = key_pair.cloned();
             let round_ctx = round_ctx.clone();
+            let cert = cert.clone();
 
             move || {
                 let _span = round_ctx.span().enter();
@@ -87,7 +91,7 @@ impl DagPointFuture {
                     "local point must be first valid, got {status}"
                 );
 
-                let dag_point = DagPoint::new_validated(PointInfo::from(&point), &status);
+                let dag_point = DagPoint::new_validated(PointInfo::from(&point), cert, &status);
 
                 store.insert_point(
                     &point,
@@ -106,7 +110,10 @@ impl DagPointFuture {
             }
         });
 
-        Self(DagPointFutureType::Simple(Shared::new(task.boxed())))
+        Self(DagPointFutureType::Validate {
+            task: Shared::new(task.boxed()),
+            cert,
+        })
     }
 
     pub fn new_ill_formed_broadcast(
@@ -116,12 +123,15 @@ impl DagPointFuture {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
+        let cert = Cert::default();
+
         let task = round_ctx.task().spawn_blocking({
             let point = point.clone();
             let reason = reason.clone();
             let state = state.clone();
             let store = store.clone();
             let round_ctx = round_ctx.clone();
+            let cert = cert.clone();
 
             move || {
                 let _span = round_ctx.span().enter();
@@ -130,7 +140,7 @@ impl DagPointFuture {
                 let mut status = PointStatusIllFormed::default();
                 state.acquire(&id, &mut status); // only after persisted
 
-                let dag_point = DagPoint::new_ill_formed(id, &status, reason);
+                let dag_point = DagPoint::new_ill_formed(id, cert, &status, reason);
                 store.insert_point(
                     &point,
                     PointStatusStoredRef::IllFormed(&status),
@@ -142,7 +152,10 @@ impl DagPointFuture {
             }
         });
 
-        Self(DagPointFutureType::Simple(Shared::new(task.boxed())))
+        Self(DagPointFutureType::Validate {
+            task: Shared::new(task.boxed()),
+            cert,
+        })
     }
 
     pub fn new_broadcast(
@@ -160,8 +173,8 @@ impl DagPointFuture {
         let downloader = downloader.clone();
         let store = store.clone();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
-
-        let (certified_tx, certified_rx) = oneshot::channel();
+        let cert = Cert::default();
+        let cert_clone = cert.clone();
 
         let nested = round_ctx.task().spawn(async move {
             let point_id = point.id();
@@ -177,13 +190,13 @@ impl DagPointFuture {
                 point_dag_round,
                 downloader,
                 store.clone(),
-                certified_rx,
+                cert.clone(),
                 validate_ctx.clone(),
             )
             .await?;
             stored_fut.await?;
             let (dag_point, status) =
-                Self::acquire_validated(&state, info, validated, &validate_ctx);
+                Self::acquire_validated(&state, info, cert, validated, &validate_ctx);
             Ok(validate_ctx.task().spawn_blocking(move || {
                 store.set_status(point_id.round, &point_id.digest, status.as_ref());
                 state.resolve(&dag_point);
@@ -193,7 +206,7 @@ impl DagPointFuture {
 
         DagPointFuture(DagPointFutureType::Validate {
             task: Shared::new((async move { nested.await??.await }).boxed()),
-            certified: Arc::new(OnceTake::new(certified_tx)),
+            cert: cert_clone,
         })
     }
 
@@ -230,7 +243,8 @@ impl DagPointFuture {
             _ = dependers_tx.send(*depender);
         }
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
-        let (certified_tx, certified_rx) = oneshot::channel();
+        let cert = Cert::default();
+        let cert_clone = cert.clone();
 
         let nested = task_ctx.spawn(async move {
             let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
@@ -254,13 +268,13 @@ impl DagPointFuture {
                         point_dag_round,
                         downloader,
                         store.clone(),
-                        certified_rx,
+                        cert.clone(),
                         validate_ctx,
                     )
                     .await?;
                     storage_task.await?;
                     let (dag_point, status) =
-                        Self::acquire_validated(&state, info.clone(), validated, &into_round_ctx);
+                        Self::acquire_validated(&state, info, cert, validated, &into_round_ctx);
                     let ctx = into_round_ctx.clone();
                     Ok(into_round_ctx.task().spawn_blocking(move || {
                         let _guard = ctx.span().enter();
@@ -272,7 +286,7 @@ impl DagPointFuture {
                 Some(DownloadResult::IllFormed(point, reason)) => {
                     let mut status = PointStatusIllFormed::default();
                     state.acquire(&point_id, &mut status);
-                    let dag_point = DagPoint::new_ill_formed(point.id(), &status, reason);
+                    let dag_point = DagPoint::new_ill_formed(point.id(), cert, &status, reason);
                     let ctx = into_round_ctx.clone();
                     Ok(into_round_ctx.task().spawn_blocking(move || {
                         let _guard = ctx.span().enter();
@@ -293,7 +307,7 @@ impl DagPointFuture {
                     };
                     state.acquire(&point_id, &mut status);
                     let dag_point =
-                        DagPoint::new_not_found(point_id.round, &point_id.digest, &status);
+                        DagPoint::new_not_found(point_id.round, &point_id.digest, cert, &status);
                     let ctx = into_round_ctx.clone();
                     Ok(into_round_ctx.task().spawn_blocking(move || {
                         let _guard = ctx.span().enter();
@@ -311,7 +325,7 @@ impl DagPointFuture {
 
         DagPointFuture(DagPointFutureType::Download {
             task: Shared::new((async move { nested.await??.await }).boxed()),
-            certified: Arc::new(OnceTake::new(certified_tx)),
+            cert: cert_clone,
             dependers_tx,
             resolve: Arc::new(OnceTake::new(broadcast_tx)),
         })
@@ -325,22 +339,59 @@ impl DagPointFuture {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
+        let cert = Cert::default();
+        let cert_clone = cert.clone();
+
+        if let Some((includes, witness)) = match &point_restore {
+            PointRestore::Validated(info, _) => Some((&info.data().includes, &info.data().witness)),
+            PointRestore::IllFormed(_, _) // will not certify its dependencies, can be certified
+            | PointRestore::Exists(_, _) | PointRestore::NotFound(_, _, _) => None,
+        } {
+            let mut cert_deps = CertDirectDeps {
+                includes: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
+                witness: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
+            };
+            if let Some(r_1) = point_dag_round.prev().upgrade() {
+                cert_deps.includes.extend(r_1.select(|(peer, loc)| {
+                    includes.get(peer).and_then(|digest| {
+                        loc.versions.get(digest).map(|a| (*digest, a.weak_cert()))
+                    })
+                }));
+                if let Some(r_2) = r_1.prev().upgrade() {
+                    cert_deps.witness.extend(r_2.select(|(peer, loc)| {
+                        witness.get(peer).and_then(|digest| {
+                            loc.versions.get(digest).map(|a| (*digest, a.weak_cert()))
+                        })
+                    }));
+                }
+            }
+            cert.set_deps(cert_deps);
+        }
+        if match &point_restore {
+            PointRestore::Exists(_, _) => false,
+            PointRestore::Validated(_, status) => status.is_certified,
+            PointRestore::IllFormed(_, status) => status.is_certified,
+            PointRestore::NotFound(_, _, status) => status.is_certified,
+        } {
+            cert.certify();
+        }
+
         // keep this section sync so that call site may not wait for each result to resolve
         let validate_or_restore = match point_restore {
             PointRestore::Exists(info, prev_proof) => Either::Left((info, prev_proof)),
             PointRestore::Validated(info, status) => {
-                let dag_point = DagPoint::new_validated(info, &status);
+                let dag_point = DagPoint::new_validated(info, cert, &status);
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
             PointRestore::IllFormed(id, status) => {
                 let dag_point =
-                    DagPoint::new_ill_formed(id, &status, IllFormedReason::AfterLoadFromDb);
+                    DagPoint::new_ill_formed(id, cert, &status, IllFormedReason::AfterLoadFromDb);
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
             PointRestore::NotFound(round, digest, status) => {
-                let dag_point = DagPoint::new_not_found(round, &digest, &status);
+                let dag_point = DagPoint::new_not_found(round, &digest, cert, &status);
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
@@ -354,8 +405,7 @@ impl DagPointFuture {
                 let store = store.clone();
                 let round_ctx = round_ctx.clone();
                 let ctx = round_ctx.clone();
-
-                let (certified_tx, certified_rx) = oneshot::channel();
+                let cert = cert_clone.clone();
 
                 let future = async move {
                     let validate_ctx = ValidateCtx::new(&round_ctx, &verified);
@@ -365,12 +415,12 @@ impl DagPointFuture {
                         point_dag_round,
                         downloader,
                         store.clone(),
-                        certified_rx,
+                        cert.clone(),
                         validate_ctx,
                     )
                     .await;
                     let (dag_point, status) =
-                        Self::acquire_validated(&state, verified, validated?, &round_ctx);
+                        Self::acquire_validated(&state, verified, cert, validated?, &round_ctx);
                     let ctx = round_ctx.clone();
                     Ok(round_ctx.task().spawn_blocking(move || {
                         let _guard = ctx.span().enter();
@@ -382,13 +432,16 @@ impl DagPointFuture {
                 let lazy = (async move { ctx.task().spawn(future).await??.await }).boxed();
                 DagPointFuture(DagPointFutureType::Validate {
                     task: Shared::new(lazy),
-                    certified: Arc::new(OnceTake::new(certified_tx)),
+                    cert: cert_clone,
                 })
             }
             Either::Right(dag_point) => {
                 state.resolve(&dag_point);
                 let ready = future::ready(Ok(dag_point)).boxed();
-                DagPointFuture(DagPointFutureType::Simple(Shared::new(ready)))
+                DagPointFuture(DagPointFutureType::Validate {
+                    task: Shared::new(ready),
+                    cert: cert_clone,
+                })
             }
         }
     }
@@ -396,6 +449,7 @@ impl DagPointFuture {
     fn acquire_validated(
         state: &InclusionState,
         info: PointInfo,
+        cert: Cert,
         validated: ValidateResult,
         ctx: &impl Ctx,
     ) -> (DagPoint, PointStatusStored) {
@@ -404,21 +458,24 @@ impl DagPointFuture {
         let is_valid = matches!(validated, ValidateResult::Valid { .. });
         // TODO fill anchor flags in status
         match validated {
-            ValidateResult::Valid { is_certified } | ValidateResult::Invalid { is_certified } => {
+            ValidateResult::Valid | ValidateResult::Invalid => {
                 let mut status = PointStatusValidated::default();
                 status.is_valid = is_valid;
-                status.is_certified = is_certified;
+                status.is_certified = cert.is_certified();
                 state.acquire(&id, &mut status);
                 (
-                    DagPoint::new_validated(info, &status),
+                    DagPoint::new_validated(info, cert, &status),
                     PointStatusStored::Validated(status),
                 )
             }
             ValidateResult::IllFormed(reason) => {
-                let mut status = PointStatusIllFormed::default();
+                let mut status = PointStatusIllFormed {
+                    is_certified: cert.is_certified(),
+                    ..Default::default()
+                };
                 state.acquire(&id, &mut status);
                 (
-                    DagPoint::new_ill_formed(id, &status, reason),
+                    DagPoint::new_ill_formed(id, cert, &status, reason),
                     PointStatusStored::IllFormed(status),
                 )
             }
@@ -445,16 +502,10 @@ impl DagPointFuture {
         }
     }
 
-    pub fn mark_certified(&self) {
-        // every vertex is certified by definition,
-        // but also every vertex dependency is certified transitively
-        if let DagPointFutureType::Validate { certified, .. }
-        | DagPointFutureType::Download { certified, .. } = &self.0
-        {
-            if let Some(oneshot) = certified.take() {
-                // receiver is dropped upon completion
-                _ = oneshot.send(());
-            }
+    pub fn weak_cert(&self) -> WeakCert {
+        match &self.0 {
+            DagPointFutureType::Validate { cert, .. }
+            | DagPointFutureType::Download { cert, .. } => cert.downgrade(),
         }
     }
 }
