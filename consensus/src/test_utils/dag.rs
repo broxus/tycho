@@ -8,7 +8,6 @@ use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
 use rand::prelude::SliceRandom;
 use rand::{thread_rng, RngCore};
-use tokio::sync::oneshot;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
@@ -18,7 +17,7 @@ use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
+    AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
     Signature, Through, UnixTime,
 };
 
@@ -127,7 +126,6 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         point.verify_hash().unwrap();
         Verifier::verify(point, peer_schedule, round_ctx.conf()).expect("well-formed point");
         let info = PointInfo::from(point);
-        let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
         let validated = Verifier::validate(
             info,
@@ -135,7 +133,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             dag_round.downgrade(),
             downloader.clone(),
             store.clone(),
-            certified_tx,
+            Cert::default(),
             validate_ctx,
         )
         .await;

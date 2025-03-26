@@ -17,7 +17,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
 };
-use crate::models::{Link, Point, PointInfo};
+use crate::models::{Cert, Link, Point, PointInfo};
 
 pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
@@ -302,7 +302,6 @@ impl RoundTaskReady {
                 let _guard = round_ctx.span().enter();
                 panic!("Failed to verify own point: {error}, {:?}", point)
             }
-            let (_do_not_drop_or_send, do_not_certify_tx) = oneshot::channel();
             let info = PointInfo::from(&point);
             let validate_ctx = ValidateCtx::new(&round_ctx, &info);
             let validate = Verifier::validate(
@@ -311,7 +310,7 @@ impl RoundTaskReady {
                 point_round,
                 downloader,
                 store,
-                do_not_certify_tx,
+                Cert::default(), // off-line check that does not affect DAG
                 validate_ctx,
             );
             match validate.await? {
