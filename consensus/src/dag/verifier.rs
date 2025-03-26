@@ -1,13 +1,13 @@
 use std::cmp;
 
+use ahash::HashMapExt;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tokio::sync::oneshot;
-use tokio::sync::oneshot::error::TryRecvError;
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run_fifo;
+use tycho_util::FastHashMap;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
@@ -16,8 +16,8 @@ use crate::effects::{AltFormat, Ctx, MempoolStore, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, PrevPointProof, Round,
-    UnixTime,
+    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, Point, PointInfo,
+    PrevPointProof, Round, UnixTime,
 };
 
 // Note on equivocation.
@@ -86,8 +86,8 @@ pub enum IllFormedReason {
 
 #[derive(Debug)]
 pub enum ValidateResult {
-    Valid { is_certified: bool },
-    Invalid { is_certified: bool },
+    Valid,
+    Invalid,
     IllFormed(IllFormedReason),
 }
 
@@ -122,7 +122,7 @@ impl Verifier {
         r_0: WeakDagRound, // r+0
         downloader: Downloader,
         store: MempoolStore,
-        mut certified_rx: oneshot::Receiver<()>,
+        cert: Cert,
         ctx: ValidateCtx,
     ) -> TaskResult<ValidateResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
@@ -136,18 +136,14 @@ impl Verifier {
                 // for genesis point it's sufficient to be well-formed and pass integrity check,
                 // it cannot be validated against AnchorStage (as it knows nothing about genesis)
                 // and cannot contain dependencies
-                return ctx.validated(ValidateResult::Valid {
-                    is_certified: false,
-                });
+                return ctx.validated(&cert, ValidateResult::Valid);
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
         let Some(r_0_pre) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid {
-                is_certified: certified_rx.try_recv() != Err(TryRecvError::Empty),
-            });
+            return ctx.validated(&cert, ValidateResult::Invalid);
         };
         assert_eq!(
             r_0_pre.round(),
@@ -156,14 +152,15 @@ impl Verifier {
         );
 
         if !Self::is_self_links_ok(&info, &r_0_pre) {
-            return ctx.validated(ValidateResult::IllFormed(IllFormedReason::SelfLink));
+            return ctx.validated(&cert, ValidateResult::IllFormed(IllFormedReason::SelfLink));
         }
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
             .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre, ctx.conf()))
         {
-            return ctx.validated(ValidateResult::IllFormed(IllFormedReason::AnchorLink));
+            let reason = IllFormedReason::AnchorLink;
+            return ctx.validated(&cert, ValidateResult::IllFormed(reason));
         };
 
         drop(r_0_pre);
@@ -171,23 +168,24 @@ impl Verifier {
 
         // certified flag aborts proof check; checked proof mark dependencies as certified;
         // check depender's sig before new (down)load point futures are spawned
-        let proven_by_cert = if certified_rx.try_recv() != Err(TryRecvError::Empty) {
-            // FIXME either sent or sender dropped - all the same; make distinct and do not drop
-            Some(true)
+        let proven_by_cert = if cert.is_certified() {
+            Some(true) // do not spawn rayon task if we know it will be aborted
         } else if let Some(proof) = prev_proof {
             let mut signatures_fut = std::pin::pin!({
                 rayon_run_fifo(move || proof.signatures_match()).instrument(ctx.span().clone())
             });
+            let mut wait_certified = std::pin::pin!(cert.wait_certified());
             let certified = tokio::select! {
                 biased;
-                _ = &mut certified_rx => {
-                    true // certified; certifies
+                _ = &mut wait_certified => {
+                    true // the whole current point and all its deps are certified
                 },
                 is_sig_ok = &mut signatures_fut => {
                     if is_sig_ok {
-                        false // not certified; certifies
+                        false // not certified; certifies only own previous point and its deps
                     } else {
-                        return ctx.validated(ValidateResult::IllFormed(IllFormedReason::EvidenceSig));
+                        let reason = IllFormedReason::EvidenceSig;
+                        return ctx.validated(&cert, ValidateResult::IllFormed(reason));
                     }
                 }
             };
@@ -200,50 +198,42 @@ impl Verifier {
 
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ctx.validated(ValidateResult::Invalid {
-                is_certified: proven_by_cert.unwrap_or_default(),
-            });
+            return ctx.validated(&cert, ValidateResult::Invalid);
         };
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot validate point's 'includes', no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid {
-                is_certified: proven_by_cert.unwrap_or_default(),
-            });
+            return ctx.validated(&cert, ValidateResult::Invalid);
         };
 
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.data().witness.is_empty() {
             tracing::debug!("cannot validate point's 'witness', no round in local DAG");
-            return ctx.validated(ValidateResult::Invalid {
-                is_certified: proven_by_cert.unwrap_or_default(),
-            });
+            return ctx.validated(&cert, ValidateResult::Invalid);
         }
 
-        let direct_deps = Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
+        let (direct_deps, cert_deps) =
+            Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
 
-        let (proven_vertex_dep, prev_other_versions) = r_1
+        // if None - do nothing; if Some(true) - wii certify all deps when they are set
+        if proven_by_cert == Some(false) {
+            let prev_digest = (info.data().prev_digest()).expect("prev digest must be defined");
+            let weak_cert =
+                (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
+            // cannot be dropped because futures keep strong refs to Cert, but nevertheless
+            if let Some(cert) = weak_cert.upgrade() {
+                cert.certify();
+            }
+        }
+        cert.set_deps(cert_deps);
+
+        let prev_other_versions = r_1
             .view(&info.data().author, |loc| {
-                Self::versions_partitioned(loc, info.data().prev_digest())
+                Self::other_versions(loc, info.data().prev_digest())
             })
             .unwrap_or_default();
 
-        match proven_by_cert {
-            Some(true) => {
-                for shared in &direct_deps {
-                    shared.mark_certified(); // all dependencies
-                }
-            }
-            Some(false) => {
-                if let Some(vertex) = &proven_vertex_dep {
-                    vertex.mark_certified(); // just one among all
-                }
-            }
-            None => {}
-        }
-        let mut is_certified = proven_by_cert.unwrap_or_default();
-
-        let mut is_valid_fut = std::pin::pin!({
+        let is_valid_fut = {
             let deps_and_prev = direct_deps
                 .iter()
                 .cloned()
@@ -253,35 +243,20 @@ impl Verifier {
                 .chain(prev_other_versions.into_iter());
             Self::is_valid(info.clone(), deps_and_prev.collect(), ctx.conf())
                 .instrument(ctx.span().clone())
-        });
+        };
 
         // drop strong links before await
         drop(r_0);
         drop(r_1);
         drop(span_guard);
 
-        let valid = loop {
-            tokio::select! {
-                biased;
-                _ = &mut certified_rx, if !is_certified => {
-                    is_certified = true; // oneshot cannot be lagged, only closed
-                    for shared in &direct_deps {
-                        shared.mark_certified();
-                    }
-                },
-                is_valid = &mut is_valid_fut => {
-                    break is_valid?;
-                },
-            }
-        };
-
-        let status = if valid {
-            ValidateResult::Valid { is_certified }
+        let status = if is_valid_fut.await? {
+            ValidateResult::Valid
         } else {
-            ValidateResult::Invalid { is_certified }
+            ValidateResult::Invalid
         };
 
-        ctx.validated(status)
+        ctx.validated(&cert, status)
     }
 
     fn is_self_links_ok(
@@ -344,25 +319,19 @@ impl Verifier {
         true
     }
 
-    fn versions_partitioned(
+    fn other_versions(
         dag_location: &DagLocation,
-        searched: Option<&Digest>,
-    ) -> (Option<DagPointFuture>, Vec<DagPointFuture>) {
-        let mut found = None;
+        excluded: Option<&Digest>,
+    ) -> Vec<DagPointFuture> {
         let mut others = Vec::with_capacity(
-            dag_location
-                .versions
-                .len()
-                .saturating_sub(searched.is_some() as usize),
+            (dag_location.versions.len()).saturating_sub(excluded.is_some() as usize),
         );
         for (digest, shared) in &dag_location.versions {
-            if searched == Some(digest) {
-                found = Some(shared.clone());
-            } else {
+            if excluded != Some(digest) {
                 others.push(shared.clone());
             }
         }
-        (found, others)
+        others
     }
 
     fn spawn_direct_deps(
@@ -372,38 +341,39 @@ impl Verifier {
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> Vec<DagPointFuture> {
+    ) -> (Vec<DagPointFuture>, CertDirectDeps) {
         let mut dependencies =
             Vec::with_capacity(info.data().includes.len() + info.data().witness.len());
 
+        // allocate a bit more so it's unlikely to grow during certify procedure
+        let mut cert_deps = CertDirectDeps {
+            includes: FastHashMap::with_capacity(r_1.peer_count().full()),
+            witness: FastHashMap::with_capacity(r_1.peer_count().full()),
+        };
+
         // integrity check passed, so includes contain author's prev point proof
-        let includes = info
-            .data()
-            .includes
-            .iter()
-            .map(|(author, digest)| (r_1, author, digest));
+        let includes =
+            (info.data().includes.iter()).map(|(author, digest)| (r_1, true, author, digest));
 
         let witness = r_2_opt.iter().flat_map(|r_2| {
-            info.data()
-                .witness
-                .iter()
-                .map(move |(author, digest)| (r_2, author, digest))
+            (info.data().witness.iter()).map(move |(author, digest)| (r_2, false, author, digest))
         });
 
-        for (dag_round, author, digest) in includes.chain(witness) {
-            let shared = dag_round.add_dependency(
-                author,
-                digest,
-                &info.data().author,
-                downloader,
-                store,
-                ctx,
-            );
+        let curr_author = &info.data().author;
+        for (dag_round, is_includes, author, digest) in includes.chain(witness) {
+            let shared =
+                dag_round.add_dependency(author, digest, curr_author, downloader, store, ctx);
+
+            if is_includes {
+                cert_deps.includes.insert(*digest, shared.weak_cert());
+            } else {
+                cert_deps.witness.insert(*digest, shared.weak_cert());
+            }
 
             dependencies.push(shared);
         }
 
-        dependencies
+        (dependencies, cert_deps)
     }
 
     /// check only direct dependencies and location for previous point (let it jump over round)
@@ -767,28 +737,29 @@ impl ValidateCtx {
             .increment(1);
     }
 
-    fn validated(&self, result: ValidateResult) -> TaskResult<ValidateResult> {
+    fn validated(&self, cert: &Cert, result: ValidateResult) -> TaskResult<ValidateResult> {
         match &result {
             ValidateResult::IllFormed(reason) => {
                 tracing::error!(
                     parent: self.span(),
                     result = "ill-formed",
+                    is_certified = cert.is_certified(),
                     reason = display(reason),
                     "validated",
                 );
             }
-            ValidateResult::Invalid { is_certified } => {
+            ValidateResult::Invalid => {
                 tracing::warn!(
                     parent: self.span(),
-                    %is_certified,
+                    is_certified = cert.is_certified(),
                     result = "invalid",
                     "validated",
                 );
             }
-            ValidateResult::Valid { is_certified } => {
+            ValidateResult::Valid => {
                 tracing::debug!(
                     parent: self.span(),
-                    %is_certified,
+                    is_certified = cert.is_certified(),
                     result = "valid",
                     "validated",
                 );
