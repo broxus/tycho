@@ -3,10 +3,12 @@ name: Network Tests
 on:
   merge_group:
     branches: [master]
-  pull_request:
+  repository_dispatch:
+    types: [network-test-command]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Use PR number from pull_request event OR from repository_dispatch payload OR the ref for merge_group/other refs
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.client_payload.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -19,16 +21,17 @@ jobs:
     name: Network Integration Tests - ${{ matrix.test_name }}
     runs-on: [self-hosted, linux]
     timeout-minutes: 30
+    if: github.event_name == 'merge_group' || github.event_name == 'repository_dispatch'
     strategy:
       fail-fast: true
       matrix:
         include:
           - test_name: destroyable
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
-            profile: debug 
+            profile: debug
           - test_name: ping-pong
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
-            profile: debug 
+            profile: debug
           - test_name: one-to-many-internal-messages
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
             profile: release_check
@@ -37,30 +40,29 @@ jobs:
             profile: release_check
           - test_name: nft-index
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-nft-index:latest
-            profile: debug 
+            profile: debug
 
-    
     env:
-       TYCHO_BUILD_PROFILE: ${{ matrix.profile }}
+      TYCHO_BUILD_PROFILE: ${{ matrix.profile }}
 
     steps:
-      - uses: actions/checkout@v4
-        if: github.event_name == 'merge_group'
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # If triggered by dispatch, checkout the specific commit SHA of the PR head
+          # Otherwise (merge_group or pull_request trigger), checkout the default ref for that event
+          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request.head.sha || '' }}
 
       - uses: ./.github/actions/init
-        if: github.event_name == 'merge_group'
         with:
           fake-procfs: true
 
       - name: Install just
         uses: extractions/setup-just@v2
-        if: github.event_name == 'merge_group'
 
-      
       # Build both profiles to populate the cache before tests run.
       # This runs once per job *before* the matrix strategy causes test execution differences.
       - name: Pre-build Project (Debug and Release Check)
-        if: github.event_name == 'merge_group'
         run: |
           echo "Building debug profile..."
           # Assuming 'just build' without TYCHO_BUILD_PROFILE builds the debug profile
@@ -68,13 +70,10 @@ jobs:
 
           echo "Building release_check profile..."
           env TYCHO_BUILD_PROFILE=release_check just build
-      
-      
+
       - name: Login to GHCR
-        if: github.event_name == 'merge_group'
         run: |
           echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
 
       - name: Run network tests
-        if: github.event_name == 'merge_group'
         run: ./scripts/run-network-tests.sh ${{ matrix.test_image }}

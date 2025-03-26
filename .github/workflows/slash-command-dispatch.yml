@@ -1,0 +1,30 @@
+name: Slash Command Dispatch
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {} # Reset permissions initially
+
+jobs:
+  dispatch:
+    # Only run on comments on pull requests
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/test')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # Required to add reactions & read PR data
+      actions: write       # Required to trigger workflow dispatches
+
+    steps:
+      - name: Slash Command Dispatch
+        uses: peter-evans/slash-command-dispatch@v4
+        with:
+          # REQUIRED: Use a PAT with 'repo' scope (and 'read:org' if in an org).
+          token: ${{ secrets.GH_PAT_REPO_SCOPE }}
+          # If you want reactions from the PAT user, use ${{ secrets.GH_PAT_REPO_SCOPE }} here too.
+          reaction-token: ${{ secrets.GITHUB_TOKEN }}
+
+          # Required: Keep this to restrict commands to PRs
+          issue-type: pull-request
+          # Required: Define the command
+          commands: test
