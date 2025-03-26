@@ -83,25 +83,6 @@ pub(crate) fn merge(
             let Some(b_flags) = none_if_err_or_empty(key, b) else {
                 return a;
             };
-            // restart is definitely not reproducible if next errors occur
-            if a_flags.contains(StatusFlags::FirstResolved)
-                != b_flags.contains(StatusFlags::FirstResolved)
-            {
-                tracing::error!(
-                    target: MEMPOOL_DB_STATUS_MERGE,
-                    "FIRST_RESOLVED flag mismatch for {a_flags:?} and {b_flags:?}, key: {}",
-                    MempoolStorage::format_key(key)
-                );
-            }
-            if a_flags.contains(StatusFlags::FirstValid)
-                != b_flags.contains(StatusFlags::FirstValid)
-            {
-                tracing::error!(
-                    target: MEMPOOL_DB_STATUS_MERGE,
-                    "FIRST_VALID flag mismatch for {a_flags:?} and {b_flags:?}, key: {}",
-                    MempoolStorage::format_key(key)
-                );
-            }
             match (
                 a_flags.contains(StatusFlags::Found),
                 b_flags.contains(StatusFlags::Found),
@@ -118,7 +99,7 @@ pub(crate) fn merge(
                             MempoolStorage::format_key(key)
                         );
                     }
-                    return a;
+                    return a.max(b); // max by u8 for common length, else the longest
                 }
                 (true, true) => {} // continue
             }
