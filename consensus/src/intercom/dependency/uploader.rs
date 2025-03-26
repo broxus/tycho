@@ -29,6 +29,12 @@ impl Uploader {
                         Some(slice) => PointByIdResponse::Defined(slice),
                     }
                 }
+                Some(PointStatusStored::IllFormed(ill)) if ill.is_certified => {
+                    PointByIdResponse::TryLater
+                }
+                Some(PointStatusStored::NotFound(not_found)) if not_found.is_certified => {
+                    PointByIdResponse::TryLater
+                }
                 Some(PointStatusStored::Exists) | None => {
                     if head.last_back_bottom() <= point_id.round {
                         // may be downloading, unknown or resolving - dag may be incomplete
@@ -49,7 +55,7 @@ impl Uploader {
         tracing::debug!(
             parent: round_ctx.span(),
             result = display(result.alt()),
-            not_found = Some(status_opt.is_none()).filter(|x| *x),
+            not_found = status_opt.is_none().then_some(true),
             found = status_opt.map(display),
             peer = display(peer_id.alt()),
             author = display(point_id.author.alt()),

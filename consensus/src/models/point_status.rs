@@ -102,6 +102,7 @@ impl Debug for AltFmt<'_, PointRestore> {
     }
 }
 
+/// To read from DB
 #[derive(Debug)]
 pub enum PointStatusStored {
     Exists,
@@ -114,6 +115,8 @@ impl Display for PointStatusStored {
         Display::fmt(&self.as_ref(), f)
     }
 }
+
+/// To pass `impl PointStatus` to DB that must not implement Clone.
 pub enum PointStatusStoredRef<'a> {
     Exists,
     Validated(&'a PointStatusValidated),
@@ -151,6 +154,7 @@ pub trait PointStatus: Display {
     }
 }
 
+/// Must not implement neither Copy nor Clone to prevent coding errors.
 #[derive(Debug, Default)]
 pub struct PointStatusValidated {
     pub is_valid: bool,
@@ -214,15 +218,20 @@ impl PointStatus for PointStatusValidated {
     }
 }
 
+/// Must not implement neither Copy nor Clone to prevent coding errors.
 #[derive(Debug, Default)]
 pub struct PointStatusIllFormed {
     pub is_first_resolved: bool,
+    pub is_certified: bool,
 }
 impl Display for PointStatusIllFormed {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut tuple = f.debug_tuple("IllFormed");
         if self.is_first_resolved {
             tuple.field(&"first resolved");
+        }
+        if self.is_certified {
+            tuple.field(&"certified");
         }
         tuple.finish()
     }
@@ -241,11 +250,13 @@ impl PointStatus for PointStatusIllFormed {
         let mut flags = StatusFlags::empty();
         flags.insert(StatusFlags::Found);
         flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
+        flags.set(StatusFlags::Certified, self.is_certified);
 
         buffer.push(flags.bits());
     }
 }
 
+/// Must not implement neither Copy nor Clone to prevent coding errors.
 #[derive(Debug)]
 pub struct PointStatusNotFound {
     pub is_first_resolved: bool,
@@ -340,6 +351,7 @@ impl PointStatusStored {
             } else {
                 Self::IllFormed(PointStatusIllFormed {
                     is_first_resolved: flags.contains(StatusFlags::FirstResolved),
+                    is_certified: flags.contains(StatusFlags::Certified),
                 })
             }
         } else {
