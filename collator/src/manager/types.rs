@@ -15,7 +15,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, McData, ProcessedTo,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ProcessedTo,
     ShardDescriptionExt,
 };
 
@@ -265,7 +265,7 @@ pub(super) struct BlockCacheEntry {
 impl BlockCacheEntry {
     pub fn from_collated(
         candidate: Box<BlockCandidate>,
-        mc_data: Option<Arc<McData>>,
+        top_shard_blocks_info: Vec<(BlockId, bool)>,
     ) -> Result<Self> {
         let block_id = *candidate.block.id();
         let prev_blocks_ids = candidate.prev_blocks_ids.clone();
@@ -276,16 +276,6 @@ impl BlockCacheEntry {
             signatures: Default::default(),
             total_signature_weight: 0,
         };
-
-        let mut top_shard_blocks_info = vec![];
-        if let Some(mc_data) = mc_data {
-            for (shard_id, shard_descr) in mc_data.shards.iter() {
-                top_shard_blocks_info.push((
-                    shard_descr.get_block_id(*shard_id),
-                    shard_descr.top_sc_block_updated,
-                ));
-            }
-        }
 
         Ok(Self {
             block_id,

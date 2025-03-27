@@ -595,3 +595,20 @@ pub struct TopShardBlockInfo {
 }
 
 pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
+
+pub trait ShardIdentExt {
+    fn contains_prefix(&self, workchain_id: i32, prefix_without_tag: u64) -> bool;
+}
+
+impl ShardIdentExt for ShardIdent {
+    fn contains_prefix(&self, workchain_id: i32, prefix_without_tag: u64) -> bool {
+        if self.workchain() == workchain_id {
+            if self.prefix() == 0x8000_0000_0000_0000u64 {
+                return true;
+            }
+            let shift = 64 - self.prefix_len();
+            return (self.prefix() >> shift) == (prefix_without_tag >> shift);
+        }
+        false
+    }
+}
