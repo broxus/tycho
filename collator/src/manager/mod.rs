@@ -1585,9 +1585,6 @@ where
                             top_applied_seqno = border,
                             "previous queue diff skipped because it below top applied",
                         );
-                        // if current diff is below top applied diff
-                        // then we should check sequense for each next diff
-                        first_required_diffs.insert(prev_block_id.shard, BlockId::default());
                         continue;
                     }
                 }
@@ -1760,10 +1757,6 @@ where
                                 top_applied_seqno = border,
                                 "queue diff apply skipped because it is below top applied",
                             );
-                            // if current diff is below top applied diff
-                            // then we should check sequense for each next diff
-                            first_required_diffs
-                                .insert(block_entry.block_id.shard, BlockId::default());
                             continue;
                         }
                     }
