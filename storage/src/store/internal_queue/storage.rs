@@ -207,7 +207,7 @@ impl InternalQueueStorage {
                         let key = StatKey {
                             shard_ident: queue_diff.shard_ident,
                             partition,
-                            min_message: queue_diff.min_message,
+                            // min_message: queue_diff.min_message,
                             max_message: queue_diff.max_message,
                             dest: *dest,
                         };

@@ -15,7 +15,7 @@ use everscale_types::models::{
 };
 use everscale_types::num::Tokens;
 use tl_proto::TlWrite;
-use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::AccountMeta;
@@ -24,6 +24,7 @@ use tycho_util::FastHashMap;
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
+use crate::internal_queue::types::{AccountStatistics, QueueStatistics};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, TopShardBlockInfo};
@@ -1103,5 +1104,83 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
     fn open_ranges_limit(&self) -> usize {
         self.open_ranges_limit.max(2) as usize
+    }
+}
+
+type DiffMaxMessage = QueueKey;
+type DiffStatistics = BTreeMap<DiffMaxMessage, AccountStatistics>;
+
+#[derive(Default)]
+pub struct CumulativeStatistics {
+    /// Stores per-shard statistics, keyed by `ShardIdent`.
+    /// Each shard has a `BTreeMap<ProcessedToKey, AccountStatistics>`.
+    shards_statistics: FastHashMap<ShardIdent, DiffStatistics>,
+
+    /// The final aggregated statistics (across all shards).
+    result: AccountStatistics,
+
+    /// A flag indicating that data has changed, and we need to recalculate before returning `result`.
+    dirty: bool,
+}
+
+impl CumulativeStatistics {
+    /// Adds a `DiffStatistics` for a particular shard.
+    /// Overwrites any existing data for the same `shard_id`.
+    pub fn add(
+        &mut self,
+        shard_id: ShardIdent,
+        diff_max_message: DiffMaxMessage,
+        diff: AccountStatistics,
+    ) {
+        self.shards_statistics
+            .entry(shard_id)
+            .or_default()
+            .insert(diff_max_message, diff);
+
+        self.dirty = true;
+    }
+
+    /// Remove accounts from diffs which we already processed
+    pub fn remove_until(&mut self, shard_ident: ShardIdent, diff_max_message: &DiffMaxMessage) {
+        if let Some(diff_statistics) = self.shards_statistics.get_mut(&shard_ident) {
+            // Iterate with .iter_mut() so that `diff_statistics` is not consumed
+            for (current_diff_max_message, acc_stat) in diff_statistics.iter_mut() {
+                if current_diff_max_message <= diff_max_message {
+                    acc_stat.retain(|dest_acc, _| !shard_ident.contains_address(dest_acc));
+                }
+            }
+
+            diff_statistics.retain(|k, _| k > diff_max_message);
+        }
+        self.dirty = true;
+    }
+
+    /// Returns a reference to the aggregated result.
+    /// If the data is marked as dirty, it triggers a lazy recalculation first.
+    pub fn result(&mut self) -> QueueStatistics {
+        self.ensure_finalized();
+        QueueStatistics::with_statistics(self.result.clone())
+    }
+
+    /// A helper function to trigger a recalculation if `dirty` is set.
+    fn ensure_finalized(&mut self) {
+        if self.dirty {
+            self.recalculate();
+        }
+    }
+
+    /// Clears the existing result and aggregates all data from `shards_statistics`.
+    fn recalculate(&mut self) {
+        self.result.clear();
+
+        for diff_statistics in self.shards_statistics.values() {
+            for account_stats in diff_statistics.values() {
+                for (account, count) in account_stats.iter() {
+                    *self.result.entry(account.clone()).or_insert(0) += count;
+                }
+            }
+        }
+
+        self.dirty = false;
     }
 }

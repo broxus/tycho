@@ -21,6 +21,8 @@ pub struct PartitionRouter {
     partitions_stats: FastHashMap<QueuePartitionIdx, usize>,
 }
 
+pub type AccountStatistics = FastHashMap<IntAddr, u64>;
+
 impl PartitionRouter {
     pub fn new() -> Self {
         Self::default()
@@ -459,6 +461,19 @@ impl DiffStatistics {
 
     pub fn shards_messages_count(&self) -> &FastHashMap<ShardIdent, u64> {
         &self.inner.shards_messages_count
+    }
+
+    pub fn total_statistics(&self) -> FastHashMap<IntAddr, u64> {
+        let mut total_statistics = FastHashMap::default();
+        for (_, partition_statistics) in self.inner.statistics.iter() {
+            for (account_addr, msgs_count) in partition_statistics {
+                total_statistics
+                    .entry(account_addr.clone())
+                    .and_modify(|count| *count += msgs_count)
+                    .or_insert(*msgs_count);
+            }
+        }
+        total_statistics
     }
 }
 #[derive(Debug, Clone)]

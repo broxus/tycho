@@ -14,7 +14,7 @@ use self::new_messages::*;
 pub(super) use self::reader_state::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
-use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
+use super::types::{AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
@@ -68,6 +68,7 @@ pub(super) struct MessagesReader<V: InternalMessageValue> {
     internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
 
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
+    internal_queue_statistics: CumulativeStatistics,
 }
 
 #[derive(Default)]
@@ -81,6 +82,8 @@ pub(super) struct MessagesReaderContext {
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
     pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
+    pub load_statistics_params: FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
+    pub is_first_block_or_masterchain: bool,
 }
 
 impl<V: InternalMessageValue> MessagesReader<V> {
@@ -204,6 +207,35 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             cx.reader_state.externals,
         );
 
+        let mut cumulative_statistics = if cx.is_first_block_or_masterchain {
+            // TODO use dynamic partitions
+            let partitions = &vec![0, 1].into_iter().collect();
+            let mut cumulative_statistics = CumulativeStatistics::default();
+            for (shard_ident, (from, to)) in &cx.load_statistics_params {
+                let statistics = mq_adapter
+                    .load_separated_diff_statistics(partitions, shard_ident, from, to)
+                    .context("Failed to get statistics")?;
+
+                for (diff_max_message, statistics) in statistics {
+                    cumulative_statistics.add(*shard_ident, diff_max_message, statistics);
+                }
+            }
+            cumulative_statistics
+        } else {
+            cx.reader_state
+                .internals
+                .cumulative_statistics
+                .expect("cumulative statistics should exist")
+        };
+
+        let mut new_messages = NewMessagesState::new(cx.for_shard_id);
+
+        new_messages.init_partition_router(
+            1,
+            &cumulative_statistics.result(),
+            cx.msgs_exec_params.par_0_int_msgs_count_limit as u64,
+        );
+
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
 
@@ -211,12 +243,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
             metrics_by_partitions: Default::default(),
 
-            new_messages: NewMessagesState::new(cx.for_shard_id),
+            new_messages,
 
             externals_reader,
             internals_partition_readers: Default::default(),
 
             readers_stages: Default::default(),
+            internal_queue_statistics: cumulative_statistics,
         };
 
         // define the initial reader stage
@@ -265,6 +298,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             }
         };
         let par_reader_state = partition_reader_states.remove(&1).unwrap_or_default();
+
         let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
                 partition_id: 1,
@@ -284,15 +318,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         res.readers_stages.insert(1, initial_reader_stage);
 
         // get full statistics from partition 1 and init partition router in new messages state
-        let par_1_all_ranges_msgs_stats = res
-            .internals_partition_readers
-            .get(&1)
-            .unwrap()
-            .range_readers()
-            .values()
-            .filter_map(|r| r.reader_state.msgs_stats.as_ref());
-        res.new_messages
-            .init_partition_router(1, par_1_all_ranges_msgs_stats);
+        // let par_1_all_ranges_msgs_stats = res
+        //     .internals_partition_readers
+        //     .get(&1)
+        //     .unwrap()
+        //     .range_readers()
+        //     .values()
+        //     .filter_map(|r| r.reader_state.msgs_stats.as_ref());
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             readers_stages = ?res.readers_stages,
@@ -379,21 +411,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         // aggregated messages stats from all ranges
         // we need it to detect target ratition for new messages from queue diff
-        let mut aggregated_stats = QueueStatistics::default();
+        // let mut aggregated_stats = self.internal_queue_statistics.result();
 
         // collect internals partition readers states
         let mut internals_reader_state = InternalsReaderState::default();
         for (_par_id, par_reader) in self.internals_partition_readers.iter_mut() {
-            // collect aggregated messages stats
-            for range_reader in par_reader.range_readers().values() {
-                if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
-                    continue;
-                }
-                if let Some(msgs_stats) = &range_reader.reader_state.msgs_stats {
-                    aggregated_stats.append(msgs_stats);
-                }
-            }
-
             // check pending internals in iterators
             if !has_unprocessed_messages {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
@@ -453,19 +475,27 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             max_messages,
         );
 
-        aggregated_stats.append_diff_statistics(&queue_diff_msgs_stats);
+        self.internal_queue_statistics.add(
+            self.for_shard_id,
+            *queue_diff_msgs_stats.max_message(),
+            queue_diff_msgs_stats.total_statistics(),
+        );
+
+        if let Some(processed_to) = queue_diff_with_msgs.processed_to.get(&self.for_shard_id) {
+            self.internal_queue_statistics
+                .remove_until(self.for_shard_id, processed_to);
+        }
 
         // reset queue diff partition router
         // according to actual aggregated stats
         let moved_from_par_0_accounts = Self::reset_partition_router_by_stats(
             &self.msgs_exec_params,
             &mut queue_diff_with_msgs.partition_router,
-            aggregated_stats,
+            &self.internal_queue_statistics.result(),
             self.for_shard_id,
             diffs_info,
         )?;
 
-        // metrics: accounts count in isolated partitions
         {
             let partitions_stats = queue_diff_with_msgs.partition_router.partitions_stats();
             for par_id in self
@@ -501,6 +531,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .insert(par_id, par_reader.finalize(current_next_lt)?);
         }
 
+        internals_reader_state.cumulative_statistics = Some(self.internal_queue_statistics);
+
         // collect externals reader state
         let FinalizedExternalsReader {
             externals_reader_state,
@@ -523,20 +555,20 @@ impl<V: InternalMessageValue> MessagesReader<V> {
     pub fn reset_partition_router_by_stats(
         msgs_exec_params: &MsgsExecutionParams,
         partition_router: &mut PartitionRouter,
-        aggregated_stats: QueueStatistics,
+        aggregated_stats: &QueueStatistics,
         for_shard_id: ShardIdent,
         diffs_info: &FastHashMap<ShardIdent, (PartitionRouter, DiffStatistics)>,
     ) -> Result<FastHashSet<HashBytes>> {
         let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
 
-        for (dest_int_address, msgs_count) in aggregated_stats {
-            let existing_partition = partition_router.get_partition(None, &dest_int_address);
+        for (dest_int_address, msgs_count) in aggregated_stats.statistics() {
+            let existing_partition = partition_router.get_partition(None, dest_int_address);
             if existing_partition != 0 {
                 continue;
             }
 
-            if for_shard_id.contains_address(&dest_int_address) {
+            if for_shard_id.contains_address(dest_int_address) {
                 tracing::trace!(target: tracing_targets::COLLATOR,
                     "check address {} for partition 0 because it is in current shard",
                     dest_int_address,
@@ -544,12 +576,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
                 // if we have account for current shard then check if we need to move it to partition 1
                 // if we have less than limit then keep it in partition 0
-                if msgs_count > par_0_msgs_count_limit {
+                if *msgs_count > par_0_msgs_count_limit {
                     tracing::trace!(target: tracing_targets::COLLATOR,
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, msgs_count,
                     );
-                    partition_router.insert_dst(&dest_int_address, 1)?;
+                    partition_router.insert_dst(dest_int_address, 1)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             } else {
@@ -560,7 +592,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 // if we have account for another shard then take info from that shard
                 let acc_shard_diff_info = diffs_info
                     .iter()
-                    .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
+                    .find(|(shard_id, _)| shard_id.contains_address(dest_int_address))
                     .map(|(_, diff)| diff.clone());
 
                 // try to get remote partition from diff
@@ -579,7 +611,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                             dest_int_address,
                         );
                         // getting remote shard partition from diff
-                        let remote_shard_partition = router.get_partition(None, &dest_int_address);
+                        let remote_shard_partition = router.get_partition(None, dest_int_address);
 
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             "remote shard partition for address {} is {}",
@@ -592,7 +624,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                                 dest_int_address, remote_shard_partition, remote_shard_partition,
                             );
                             partition_router
-                                .insert_dst(&dest_int_address, remote_shard_partition)?;
+                                .insert_dst(dest_int_address, remote_shard_partition)?;
                             continue;
                         }
 
@@ -610,11 +642,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                                     "use partition 0 stats for address {} because we have partition 0 stats in diff",
                                     dest_int_address,
                                 );
-                                partition.get(&dest_int_address).copied().unwrap_or(0)
+                                partition.get(dest_int_address).copied().unwrap_or(0)
                             }
                         };
 
-                        msgs_count + remote_msgs_count
+                        &(msgs_count + remote_msgs_count)
                     }
                 };
 
@@ -622,12 +654,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     "total messages for address {} is {}",
                     dest_int_address, total_msgs,
                 );
-                if total_msgs > par_0_msgs_count_limit {
+                if *total_msgs > par_0_msgs_count_limit {
                     tracing::trace!(target: tracing_targets::COLLATOR,
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, total_msgs,
                     );
-                    partition_router.insert_dst(&dest_int_address, 1)?;
+                    partition_router.insert_dst(dest_int_address, 1)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             }

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -17,8 +18,8 @@ use crate::internal_queue::state::storage::{
     QueueState, QueueStateFactory, QueueStateImplFactory, QueueStateStdImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange, QueueStatistics,
+    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
+    QueueDiffWithMessages, QueueShardRange,
 };
 use crate::types::ProcessedTo;
 use crate::{internal_queue, tracing_targets};
@@ -63,8 +64,7 @@ pub struct QueueFactoryStdImpl {
 
 // TRAIT
 
-#[trait_variant::make(Queue: Send)]
-pub trait LocalQueue<V>
+pub trait Queue<V>: Send
 where
     V: InternalMessageValue + Send + Sync,
 {
@@ -95,11 +95,11 @@ where
     /// Returns the diffs tail len for the given shard
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
-    fn load_statistics(
+    fn load_diff_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
-    ) -> Result<QueueStatistics>;
+    ) -> Result<AccountStatistics>;
     /// Get diff for the given block from committed and uncommitted zones
     fn get_diff_info(
         &self,
@@ -111,6 +111,13 @@ where
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
     /// Get last committed mc block id
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        shard_ident: &ShardIdent,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
 }
 
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
@@ -395,16 +402,28 @@ where
         self.state.clear_uncommitted(partitions)
     }
 
-    fn load_statistics(
+    fn load_diff_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
-    ) -> Result<QueueStatistics> {
-        let statistics = self.state.load_statistics(partition, ranges)?;
+    ) -> Result<AccountStatistics> {
+        let result = self.state.load_diff_statistics(partitions, ranges)?;
 
-        let statistics = QueueStatistics::with_statistics(statistics);
+        Ok(result)
+    }
 
-        Ok(statistics)
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        shard_ident: &ShardIdent,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
+        let result =
+            self.state
+                .load_separated_diff_statistics(partitions, shard_ident, from, to)?;
+
+        Ok(result)
     }
 
     fn get_diff_info(

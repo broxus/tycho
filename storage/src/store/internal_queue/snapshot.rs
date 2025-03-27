@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{OwnedRawIterator, OwnedSnapshot};
 
 use crate::model::{
@@ -144,7 +146,7 @@ impl InternalQueueSnapshot {
     /// it's loading by diffs and adding to the result
     pub fn collect_stats_in_range(
         &self,
-        shard_ident: ShardIdent,
+        shard_ident: &ShardIdent,
         partition: QueuePartitionIdx,
         from: &QueueKey,
         to: &QueueKey,
@@ -154,26 +156,24 @@ impl InternalQueueSnapshot {
         read_config.set_snapshot(&self.snapshot);
 
         let from = StatKey {
-            shard_ident,
+            shard_ident: *shard_ident,
             partition,
-            min_message: *from,
-            max_message: QueueKey::MIN,
+            max_message: *from,
             dest: RouterAddr::MIN,
         };
 
         let to = StatKey {
-            shard_ident,
+            shard_ident: *shard_ident,
             partition,
-            min_message: *to,
-            max_message: QueueKey::MAX,
+            max_message: to.next_value(),
             dest: RouterAddr::MAX,
         };
 
         let from_bytes = from.to_vec();
         let to_bytes = to.to_vec();
 
-        read_config.set_iterate_lower_bound(from_bytes.as_slice());
-        read_config.set_iterate_upper_bound(to_bytes.as_slice());
+        read_config.set_iterate_lower_bound(&from_bytes[..StatKey::PREFIX_SIZE]);
+        read_config.set_iterate_upper_bound(&to_bytes[..StatKey::PREFIX_SIZE]);
 
         let cf = self.db.internal_message_stats.cf();
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
@@ -201,6 +201,82 @@ impl InternalQueueSnapshot {
         Ok(())
     }
 
+    /// Collects statistics in the specified [from..=to] range for a single `shard_ident`,
+    /// but across multiple `partitions`.
+    ///
+    /// The final result merges all data into a single structure:
+    ///   `BTreeMap<QueueKey, FastHashMap<IntAddr, u64>>`
+    ///
+    /// Where each `QueueKey` maps to a `FastHashMap<IntAddr, u64>` (destination -> count).
+    pub fn collect_separated_stats_in_range_for_partitions(
+        &self,
+        shard_ident: &ShardIdent,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        from: &QueueKey,
+        to: &QueueKey,
+    ) -> anyhow::Result<BTreeMap<QueueKey, FastHashMap<IntAddr, u64>>> {
+        let mut aggregated_result: BTreeMap<QueueKey, FastHashMap<IntAddr, u64>> = BTreeMap::new();
+
+        for &partition in partitions {
+            let mut read_config = self.db.internal_message_stats.new_read_config();
+            read_config.set_snapshot(&self.snapshot);
+
+            // We'll set the bounds for this specific partition, from..to.
+            let from_key = StatKey {
+                shard_ident: *shard_ident,
+                partition,
+                max_message: *from,
+                dest: RouterAddr::MIN,
+            };
+            let to_key = StatKey {
+                shard_ident: *shard_ident,
+                partition,
+                max_message: to.next_value(),
+                dest: RouterAddr::MAX,
+            };
+
+            let from_bytes = from_key.to_vec();
+            let to_bytes = to_key.to_vec();
+
+            // Restrict the iterator to only the specified prefix range.
+            read_config.set_iterate_lower_bound(&from_bytes[..StatKey::PREFIX_SIZE]);
+            read_config.set_iterate_upper_bound(&to_bytes[..StatKey::PREFIX_SIZE]);
+
+            let cf = self.db.internal_message_stats.cf();
+            let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+            iter.seek_to_first();
+
+            // Read each matching entry for this partition and aggregate results in `aggregated_result`.
+            loop {
+                let (key_bytes, value_bytes) = match iter.item() {
+                    Some(item) => item,
+                    None => {
+                        // No more items; check iterator status to detect errors.
+                        match iter.status() {
+                            Ok(()) => break,
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                };
+
+                let current_key = StatKey::from_slice(key_bytes);
+                let count = u64::from_le_bytes(value_bytes.try_into().unwrap());
+
+                // Insert into `aggregated_result`, grouped by the `current_key.max_message`.
+                // If a QueueKey already exists from a previous partition, we merge counts.
+                aggregated_result
+                    .entry(current_key.max_message)
+                    .or_default()
+                    .entry(current_key.dest.to_int_addr())
+                    .and_modify(|c| *c += count)
+                    .or_insert(count);
+
+                iter.next();
+            }
+        }
+
+        Ok(aggregated_result)
+    }
     /// Reads all commit pointers from the `internal_message_commit_pointer` CF.
     /// Returns a map: `ShardIdent` -> last committed `QueueKey`.
     pub fn read_commit_pointers(
@@ -257,5 +333,68 @@ impl InternalQueueSnapshot {
         }
 
         Ok(None)
+    }
+
+    /// Load cumulative stats for one diff
+    pub fn load_diff_statistics(
+        &self,
+        shard_ident: &ShardIdent,
+        partition: &QueuePartitionIdx,
+        from: &QueueKey,
+        to: &QueueKey,
+        result: &mut FastHashMap<IntAddr, u64>,
+    ) -> anyhow::Result<()> {
+        let table = &self.db.internal_message_stats;
+
+        let from = StatKey {
+            shard_ident: *shard_ident,
+            partition: *partition,
+            max_message: *from,
+            dest: RouterAddr::MIN,
+        };
+
+        let to = StatKey {
+            shard_ident: *shard_ident,
+            partition: *partition,
+            max_message: to.next_value(),
+            dest: RouterAddr::MAX,
+        };
+
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(&self.snapshot);
+        let prefix_size = StatKey::PREFIX_SIZE;
+
+        let from_bytes = from.to_vec();
+        let to_bytes = to.to_vec();
+
+        read_config.set_iterate_lower_bound(&from_bytes[..prefix_size]);
+        read_config.set_iterate_upper_bound(&to_bytes[..prefix_size]);
+
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&table.cf(), read_config);
+
+        iter.seek(&from_bytes[..prefix_size]);
+
+        while iter.valid() {
+            let (raw_k, raw_v) = match iter.item() {
+                Some(kv) => kv,
+                None => break,
+            };
+
+            let count = u64::from_le_bytes(raw_v.try_into().unwrap());
+
+            let key = StatKey::deserialize(&mut &*raw_k);
+            let dest_addr = key.dest;
+
+            *result.entry(dest_addr.to_int_addr()).or_insert(0) += count;
+
+            iter.next();
+        }
+
+        iter.status()?;
+
+        Ok(())
     }
 }
