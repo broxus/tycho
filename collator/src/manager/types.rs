@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::Lazy;
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ShardIdent};
 use tokio::sync::Notify;
@@ -343,8 +343,22 @@ impl BlockCacheEntry {
         self.block_id.as_short_id()
     }
 
-    pub fn iter_top_block_ids(&self) -> impl Iterator<Item = &BlockId> {
+    pub fn iter_top_shard_blocks_ids(&self) -> impl Iterator<Item = &BlockId> {
         self.top_shard_blocks_info.iter().map(|(id, _)| id)
+    }
+
+    pub fn get_top_blocks_keys(&self) -> Result<Vec<BlockCacheKey>> {
+        if !self.block_id.is_masterchain() {
+            bail!(
+                "get_top_blocks_keys can be called only for master block, current block_id is {}",
+                self.block_id,
+            )
+        }
+
+        let mut top_blocks_keys = vec![self.key()];
+        top_blocks_keys.extend(self.iter_top_shard_blocks_ids().map(|id| id.as_short_id()));
+
+        Ok(top_blocks_keys)
     }
 
     pub fn cached_state(&self) -> Result<&ShardStateStuff> {

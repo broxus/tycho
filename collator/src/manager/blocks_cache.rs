@@ -218,7 +218,7 @@ impl BlocksCache {
             );
 
             prev_shard_blocks_ids = mc_block_entry
-                .iter_top_block_ids()
+                .iter_top_shard_blocks_ids()
                 .map(|id| (*id, true))
                 .collect::<VecDeque<_>>();
         }
