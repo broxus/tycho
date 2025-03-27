@@ -17,6 +17,7 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
+use crate::types::ShardIdentExt;
 
 pub struct ExecutorWrapper {
     pub executor: MessagesExecutor,
@@ -281,7 +282,7 @@ fn new_transaction(
 
                 let dst_prefix = dst.prefix();
                 let dst_workchain = dst.workchain();
-                let dst_in_current_shard = contains_prefix(shard_id, dst_workchain, dst_prefix);
+                let dst_in_current_shard = shard_id.contains_prefix(dst_workchain, dst_prefix);
 
                 let out_msg = OutMsg::New(OutMsgNew {
                     out_msg_envelope: Lazy::new(&MsgEnvelope {
@@ -484,15 +485,4 @@ fn process_in_message(
     });
 
     Ok(())
-}
-
-pub fn contains_prefix(shard_id: &ShardIdent, workchain_id: i32, prefix_without_tag: u64) -> bool {
-    if shard_id.workchain() == workchain_id {
-        if shard_id.prefix() == 0x8000_0000_0000_0000u64 {
-            return true;
-        }
-        let shift = 64 - shard_id.prefix_len();
-        return (shard_id.prefix() >> shift) == (prefix_without_tag >> shift);
-    }
-    false
 }
