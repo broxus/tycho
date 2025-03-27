@@ -1362,11 +1362,11 @@ async fn test_queue_restore_on_sync() {
 
     //---------
     // CASE 04: emulate node restart (block cache will be empty)
-    //          node collate master block 10 but does not validate and commit it
+    //          node collates master block 10 but does not validate and commit it
     //          then it stops
-    //          then bc produce master block 11, but node is down and does not receive it
+    //          then bc produces master block 11, but node is down and does not receive it
     //          then node starts
-    //          then bc produce master block 12, node receives it and run sync
+    //          then bc produces master block 12, node receives it and run sync
     //          queue will be applied to master block 10 but committed to master block 09
     //          we should apply diffs from master block 10 (and shard block 13) again
     //---------
@@ -1472,6 +1472,9 @@ async fn test_queue_restore_on_sync() {
         extract_res,
         McBlockSubgraphExtract::AlreadyExtracted
     ));
+
+    // we should clear queue uncommitted state on node start
+    test_adapter.mq_adapter.clear_uncommitted_state().unwrap();
 
     // shard processed to shard block 11
     test_adapter
@@ -1639,6 +1642,316 @@ async fn test_queue_restore_on_sync() {
     assert!(queue_restore_res
         .applied_diffs_ids
         .contains(test_adapter.last_mc_blocks.get(&12).unwrap().id()));
+
+    test_adapter
+        .blocks_cache
+        .remove_next_collated_blocks_from_cache(&queue_restore_res.synced_to_blocks_keys);
+    test_adapter.blocks_cache.gc_prev_blocks();
+
+    //---------
+    // CASE 05: emulate node restart after producing incorrect ahsrd block
+    //          node collates shard block 17 that will be incorrect
+    //          then it stops
+    //          then bc produces different shard block 17
+    //          then produces more blocks up to shard block 19 and master block 14
+    //          then node starts
+    //          then bc produces shard block 21 and master block 15, node receives it and run sync
+    //          minimal required shard block 16 and master block 15
+    //          we should apply shard diffs from 17, master diffs from 15
+    //---------
+
+    // shard processed to shard block 14
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_sc_blocks.get(&14).unwrap());
+    // shard processed to master block 11
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_mc_blocks.get(&11).unwrap());
+
+    // collate shard block 17
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        17,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    test_adapter.store_as_candidate(generated_block_info);
+
+    // node was stopped here, blocks cache was dropped
+    test_adapter.blocks_cache = BlocksCache::new();
+
+    // create different shard block 17 but do not receive it (will not be stored into cache)
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        17,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    last_sc_block_stuff = generated_block_info.block_stuff;
+    test_adapter.save_last_info(&last_sc_block_stuff);
+
+    // master processed to shard block 17, and master block 12
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_sc_blocks.get(&17).unwrap(),
+    );
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_mc_blocks.get(&12).unwrap(),
+    );
+
+    // create master block 13 but do not receive it (will not be stored into cache)
+    let top_sc_block_updated = true;
+    let generated_block_info = test_adapter.gen_master_block(
+        13,
+        last_mc_block_stuff.prev_block_info(),
+        &last_sc_block_stuff.data,
+        top_sc_block_updated,
+        false,
+        5,
+    );
+    last_mc_block_stuff = generated_block_info.block_stuff;
+    test_adapter.save_last_info(&last_mc_block_stuff);
+
+    // shard processed to shard block 15
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_sc_blocks.get(&15).unwrap());
+    // shard processed to master block 12
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_mc_blocks.get(&12).unwrap());
+
+    // create shard block 18 but do not receive it (will not be stored into cache)
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        18,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    last_sc_block_stuff = generated_block_info.block_stuff;
+    test_adapter.save_last_info(&last_sc_block_stuff);
+
+    // shard processed to shard block 15
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_sc_blocks.get(&15).unwrap());
+    // shard processed to master block 13
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_mc_blocks.get(&13).unwrap());
+
+    // create shard block 19 but do not receive it (will not be stored into cache)
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        19,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    last_sc_block_stuff = generated_block_info.block_stuff;
+    test_adapter.save_last_info(&last_sc_block_stuff);
+
+    // master processed to shard block 19, and master block 13
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_sc_blocks.get(&19).unwrap(),
+    );
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_mc_blocks.get(&13).unwrap(),
+    );
+
+    // create master block 14 but do not receive it (will not be stored into cache)
+    let top_sc_block_updated = true;
+    let generated_block_info = test_adapter.gen_master_block(
+        14,
+        last_mc_block_stuff.prev_block_info(),
+        &last_sc_block_stuff.data,
+        top_sc_block_updated,
+        false,
+        5,
+    );
+    last_mc_block_stuff = generated_block_info.block_stuff;
+    test_adapter.save_last_info(&last_mc_block_stuff);
+
+    // we should clear queue uncommitted state on node start
+    test_adapter.mq_adapter.clear_uncommitted_state().unwrap();
+
+    // shard processed to shard block 15
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_sc_blocks.get(&15).unwrap());
+    // shard processed to master block 13
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_mc_blocks.get(&13).unwrap());
+
+    // receive shard block 20
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        20,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_received(generated_block_info).await;
+
+    // shard processed to shard block 15
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_sc_blocks.get(&15).unwrap());
+    // shard processed to master block 14
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_mc_blocks.get(&14).unwrap());
+
+    // receive shard block 21
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        21,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_received(generated_block_info).await;
+
+    // master processed to shard block 21, and master block 14
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_sc_blocks.get(&21).unwrap(),
+    );
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_mc_blocks.get(&14).unwrap(),
+    );
+
+    // receive master block 15
+    let top_sc_block_updated = true;
+    let generated_block_info = test_adapter.gen_master_block(
+        15,
+        last_mc_block_stuff.prev_block_info(),
+        &last_sc_block_stuff.data,
+        top_sc_block_updated,
+        false,
+        5,
+    );
+    StoreBlockResult {
+        block_stuff: last_mc_block_stuff,
+        ..
+    } = test_adapter.store_as_received(generated_block_info).await;
+    let _ = &last_mc_block_stuff;
+
+    // restore queue in case of sync
+    tracing::trace!("queue restore - case 05");
+    let first_applied_mc_block_key = test_adapter
+        .last_mc_blocks
+        .get(&15)
+        .unwrap()
+        .id()
+        .as_short_id();
+    tracing::trace!("first_applied_mc_block_key: {}", first_applied_mc_block_key);
+    let last_applied_mc_block_key = test_adapter
+        .last_mc_blocks
+        .get(&15)
+        .unwrap()
+        .id()
+        .as_short_id();
+    tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
+    let all_processed_to_by_shards = TestCollationManager::read_all_processed_to_for_mc_block(
+        &last_applied_mc_block_key,
+        &test_adapter.blocks_cache,
+        test_adapter.state_adapter.clone(),
+    )
+    .await
+    .unwrap();
+    tracing::trace!(
+        "all_processed_to_by_shards: {:?}",
+        all_processed_to_by_shards,
+    );
+    let min_processed_to_by_shards =
+        TestCollationManager::find_min_processed_to_by_shards(&all_processed_to_by_shards);
+    tracing::trace!(
+        "min_processed_to_by_shards: {:?}",
+        min_processed_to_by_shards,
+    );
+    let before_tail_block_ids = test_adapter
+        .blocks_cache
+        .read_before_tail_ids_of_mc_block(&first_applied_mc_block_key)
+        .unwrap();
+    tracing::trace!("before_tail_block_ids: {:?}", before_tail_block_ids);
+    let queue_diffs_applied_to_mc_block_id = test_adapter
+        .mq_adapter
+        .get_last_commited_mc_block_id()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        queue_diffs_applied_to_mc_block_id,
+        *test_adapter.last_mc_blocks.get(&12).unwrap().id()
+    );
+    let queue_diffs_applied_to_top_blocks = TestCollationManager::get_top_blocks_seqno(
+        &queue_diffs_applied_to_mc_block_id,
+        &test_adapter.blocks_cache,
+        test_adapter.state_adapter.clone(),
+    )
+    .await
+    .unwrap();
+    tracing::trace!(
+        "queue_diffs_applied_to_top_blocks: {:?}",
+        queue_diffs_applied_to_top_blocks,
+    );
+    let queue_restore_res = TestCollationManager::restore_queue(
+        &test_adapter.blocks_cache,
+        test_adapter.state_adapter.clone(),
+        test_adapter.mq_adapter.clone(),
+        first_applied_mc_block_key.seqno,
+        min_processed_to_by_shards,
+        before_tail_block_ids,
+        queue_diffs_applied_to_top_blocks,
+    )
+    .await
+    .unwrap();
+
+    assert!(!queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_sc_blocks.get(&16).unwrap().id()));
+    assert!(queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_sc_blocks.get(&17).unwrap().id()));
+    assert!(queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_sc_blocks.get(&18).unwrap().id()));
+    assert!(queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_sc_blocks.get(&19).unwrap().id()));
+    assert!(queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_sc_blocks.get(&20).unwrap().id()));
+    assert!(queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_sc_blocks.get(&21).unwrap().id()));
+    assert!(!queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_mc_blocks.get(&12).unwrap().id()));
+    assert!(!queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_mc_blocks.get(&13).unwrap().id()));
+    assert!(!queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_mc_blocks.get(&14).unwrap().id()));
+    assert!(queue_restore_res
+        .applied_diffs_ids
+        .contains(test_adapter.last_mc_blocks.get(&15).unwrap().id()));
 
     test_adapter
         .blocks_cache
