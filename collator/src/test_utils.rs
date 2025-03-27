@@ -1,5 +1,7 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
+use anyhow::Result;
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::CellBuilder;
 use everscale_types::models::{Block, BlockId, ShardStateUnsplit};
@@ -11,6 +13,11 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{NewBlockMeta, Storage};
+
+use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
+use crate::internal_queue::state::storage::QueueStateImplFactory;
+use crate::internal_queue::types::InternalMessageValue;
+use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {
     tracing_subscriber::registry()
@@ -142,4 +149,17 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
     }
 
     Ok((storage, tmp_dir))
+}
+
+pub async fn create_test_queue_adapter<V: InternalMessageValue>(
+) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
+    let (storage, tmp_dir) = Storage::new_temp().await?;
+    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
+    let queue_factory = QueueFactoryStdImpl {
+        state: queue_state_factory,
+        config: Default::default(),
+    };
+    let queue = queue_factory.create();
+    let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
+    Ok((Arc::new(message_queue_adapter), tmp_dir))
 }

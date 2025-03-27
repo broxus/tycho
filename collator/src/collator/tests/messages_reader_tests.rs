@@ -14,7 +14,6 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_network::PeerId;
-use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 
 use super::{
@@ -23,14 +22,12 @@ use super::{
 };
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
-use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
-use crate::internal_queue::state::storage::QueueStateImplFactory;
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue,
 };
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
-use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
-use crate::test_utils::try_init_test_tracing;
+use crate::queue_adapter::MessageQueueAdapter;
+use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
     BlockSeqno, Lt, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
@@ -128,26 +125,8 @@ async fn test_refill_messages() -> Result<()> {
     // INIT TEST ADAPTER
     //--------------
     // test messages factory and executor
-    let msgs_factory = TestMessageFactory {
-        rng: StdRng::seed_from_u64(1236),
-
-        mempool: BTreeMap::default(),
-
-        last_anchor_id: 0,
-        last_anchor_ct: 0,
-
-        ext_msgs_journal: Default::default(),
-        next_ext_idx: 0,
-
-        int_msgs_journal: Default::default(),
-        next_int_idx: 0,
-
-        create_int_msg_value_func: |info, cell| EnqueuedMessage { info, cell },
-
-        one_to_many_counter: 0,
-
-        dex_pairs,
-    };
+    let msgs_factory =
+        TestMessageFactory::new(dex_pairs, |info, cell| EnqueuedMessage { info, cell });
 
     // queue adapter
     let (primary_mq_adapter, _primary_tmp_dir) = create_test_queue_adapter().await?;
@@ -886,7 +865,7 @@ struct TestWorkingState {
     reader_state: ReaderState,
 }
 
-struct TestMessageFactory<V: InternalMessageValue, F>
+pub struct TestMessageFactory<V: InternalMessageValue, F>
 where
     F: Fn(IntMsgInfo, Cell) -> V,
 {
@@ -916,6 +895,29 @@ impl<V: InternalMessageValue, F> TestMessageFactory<V, F>
 where
     F: Fn(IntMsgInfo, Cell) -> V,
 {
+    pub fn new(dex_pairs: BTreeMap<u8, IntAddr>, create_int_msg_value_func: F) -> Self {
+        Self {
+            rng: StdRng::seed_from_u64(1236),
+
+            mempool: BTreeMap::default(),
+
+            last_anchor_id: 0,
+            last_anchor_ct: 0,
+
+            ext_msgs_journal: Default::default(),
+            next_ext_idx: 0,
+
+            int_msgs_journal: Default::default(),
+            next_int_idx: 0,
+
+            create_int_msg_value_func,
+
+            one_to_many_counter: 0,
+
+            dex_pairs,
+        }
+    }
+
     fn execute_group(
         &mut self,
         msg_group: MessageGroup,
@@ -1142,6 +1144,26 @@ where
             self.create_test_int_message(idx, src, next_step_addr, *account_lt, msg_type, body)?;
 
         Ok(Some(test_int_msg))
+    }
+
+    pub fn create_random_transfer_int_messages(
+        &mut self,
+        account_lt: &mut Lt,
+        transfers_wallets: &BTreeMap<u8, IntAddr>,
+        count: usize,
+    ) -> Result<Vec<TestInternalMessage<V>>> {
+        let mut res = vec![];
+
+        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        for _ in 0..count {
+            let (src, dst) = self.get_random_src_and_dst_addrs(transfers_wallets);
+
+            let test_int_msg = self.create_transfer_int_message(account_lt, src, dst)?;
+
+            res.push(test_int_msg);
+        }
+
+        Ok(res)
     }
 
     fn create_transfer_int_message(
@@ -1492,15 +1514,7 @@ where
             let idx = self.next_ext_idx;
             self.next_ext_idx += 1;
 
-            let transfer_wallets_keys: Vec<_> = transfers_wallets.keys().copied().collect();
-
-            // get random src wallet
-            let src_wallet_key = transfer_wallets_keys.choose(&mut self.rng).unwrap();
-            let src_wallet = transfers_wallets.get(src_wallet_key).unwrap().clone();
-
-            // get random dst wallet
-            let dst_wallet_key = transfer_wallets_keys.choose(&mut self.rng).unwrap();
-            let dst_wallet = transfers_wallets.get(dst_wallet_key).unwrap().clone();
+            let (src_wallet, dst_wallet) = self.get_random_src_and_dst_addrs(transfers_wallets);
 
             let msg_type = TestExternalMessageType::Transfer {
                 target_addr: dst_wallet.clone(),
@@ -1524,6 +1538,24 @@ where
         }
 
         Ok(res)
+    }
+
+    /// Returns: (source address, destination address)
+    pub fn get_random_src_and_dst_addrs(
+        &mut self,
+        addrs: &BTreeMap<u8, IntAddr>,
+    ) -> (IntAddr, IntAddr) {
+        let addrs_keys: Vec<_> = addrs.keys().copied().collect();
+
+        // get random src address
+        let src_addr_key = addrs_keys.choose(&mut self.rng).unwrap();
+        let src_addr = addrs.get(src_addr_key).unwrap().clone();
+
+        // get random dst address
+        let dst_addr_key = addrs_keys.choose(&mut self.rng).unwrap();
+        let dst_addr = addrs.get(dst_addr_key).unwrap().clone();
+
+        (src_addr, dst_addr)
     }
 
     fn create_dummy_messages(
@@ -1734,9 +1766,9 @@ enum SwapRoute {
     NativeBtc,
 }
 
-struct TestInternalMessage<V: InternalMessageValue> {
+pub struct TestInternalMessage<V: InternalMessageValue> {
     info: TestInternalMessageInfo,
-    msg: Arc<V>,
+    pub msg: Arc<V>,
 }
 
 struct TestInternalMessageState {
@@ -1809,17 +1841,4 @@ impl std::fmt::Debug for TestInternalMessageType {
             Self::Transfer => write!(f, "Transfer"),
         }
     }
-}
-
-async fn create_test_queue_adapter<V: InternalMessageValue>(
-) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
-    let (storage, tmp_dir) = Storage::new_temp().await?;
-    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
-    let queue_factory = QueueFactoryStdImpl {
-        state: queue_state_factory,
-        config: Default::default(),
-    };
-    let queue = queue_factory.create();
-    let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
-    Ok((Arc::new(message_queue_adapter), tmp_dir))
 }
