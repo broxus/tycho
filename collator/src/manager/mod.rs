@@ -989,8 +989,13 @@ where
                     .await?;
             }
 
-            // run validation
-            {
+            // process validation
+            if store_res.received_and_collated {
+                // NOTE: here commit will not cause on_block_accepted event
+                //      because block already exist in bc state
+
+                self.commit_valid_master_block(&block_id).await?;
+            } else {
                 let validator = self.validator.clone();
                 let validation_session_id = session_info.get_validation_session_id();
                 let dispatcher = self.dispatcher.clone();
@@ -1017,7 +1022,7 @@ where
                 });
             }
 
-            // if consensus config was changed execute master state update processing routines right now
+            // if consensus config was not changed execute master state update processing routines right now
             if consensus_config_changed != Some(true) {
                 self.process_mc_state_update(
                     collation_result.mc_data.unwrap(),
@@ -1677,12 +1682,7 @@ where
             }
 
             // we can gc to current master block when diffs were applied
-            let mut to_blocks_keys = vec![mc_block_entry.key()];
-            to_blocks_keys.extend(
-                mc_block_entry
-                    .iter_top_block_ids()
-                    .map(|id| id.as_short_id()),
-            );
+            let to_blocks_keys = mc_block_entry.get_top_blocks_keys()?;
             self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
 
             // on sync finish we commit diffs, notify mempool and refresh collation sessions
@@ -2780,6 +2780,9 @@ where
             mc_block_id.as_short_id(),
         );
 
+        // gc blocks from cache when commit finished
+        scopeguard::defer!(self.blocks_cache.gc_prev_blocks());
+
         let histogram = HistogramGuard::begin("tycho_collator_commit_valid_master_block_time");
         let histogram_extract =
             HistogramGuard::begin("tycho_collator_extract_master_block_subgraph_time");
@@ -2801,6 +2804,13 @@ where
                 shard_blocks,
             }) => {
                 extract_elapsed = histogram_extract.finish();
+
+                // we can gc upto to current master block after commit
+                // because we do not need to commit all previous blocks
+                // because all previous blocks are already in bc state
+                // and all previous diffs already committed by current one
+                let to_blocks_keys = master_block.get_top_blocks_keys()?;
+                self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
 
                 // send to sync only if was not received from bc
                 if matches!(&master_block.data, BlockCacheEntryData::Collated {
