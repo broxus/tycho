@@ -288,24 +288,6 @@ pub struct BlockStuffForSync {
 /// (`ShardIdent`, seqno, subset `short_hash`)
 pub(crate) type CollationSessionId = (ShardIdent, u32, u32);
 
-// pub(crate) trait SessionId {
-//     fn shard(&self) -> &ShardIdent;
-//     fn seqno(&self) -> u32;
-//     fn subset_short_hash(&self) -> u32;
-// }
-
-// impl SessionId for CollationSessionId {
-//     fn shard(&self) -> &ShardIdent {
-//         &self.0
-//     }
-//     fn seqno(&self) -> u32 {
-//         self.1
-//     }
-//     fn subset_short_hash(&self) -> u32 {
-//         self.2
-//     }
-// }
-
 #[derive(Clone)]
 pub struct CollationSessionInfo {
     shard: ShardIdent,
