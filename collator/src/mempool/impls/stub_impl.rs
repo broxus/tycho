@@ -19,6 +19,7 @@ use crate::mempool::{
     MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
+use crate::types::processed_upto::BlockSeqno;
 
 pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
@@ -177,7 +178,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
+    async fn handle_signed_mc_block(&self, _mc_block_seqno: BlockSeqno) -> Result<()> {
         Ok(())
     }
 

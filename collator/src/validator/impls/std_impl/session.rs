@@ -25,8 +25,8 @@ use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
 use crate::validator::{
-    proto, AddSession, BriefValidatorDescr, ValidationComplete, ValidationStatus,
-    ValidatorNetworkContext,
+    proto, AddSession, BriefValidatorDescr, CompositeValidationSessionId, ValidationComplete,
+    ValidationSessionId, ValidationStatus, ValidatorNetworkContext,
 };
 
 // Histograms
@@ -97,7 +97,7 @@ impl ValidatorSession {
         let overlay_id = compute_session_overlay_id(
             &net_context.zerostate_id,
             &info.shard_ident,
-            info.session_id,
+            &info.session_id,
         );
 
         let overlay = PrivateOverlay::builder(overlay_id)
@@ -168,7 +168,7 @@ impl ValidatorSession {
 
     #[tracing::instrument(
         skip_all,
-        fields(session_id = self.inner.session_id, %block_id)
+        fields(session_id = ?self.inner.session_id, %block_id)
     )]
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
         let _histogram = HistogramGuard::begin(METRIC_VALIDATE_BLOCK_TIME);
@@ -206,8 +206,9 @@ impl ValidatorSession {
             // TODO: Panic here?
             anyhow::bail!(
                 "block validation is already in progress. \
-                session_id={}, block_id={block_id}",
-                self.inner.session_id
+                session_id={:?}, block_id={}",
+                self.inner.session_id,
+                block_id,
             );
         }
 
@@ -452,7 +453,7 @@ impl fmt::Debug for DebugLogValidatorSesssion<'_> {
 
 struct Inner {
     start_block_seqno: u32,
-    session_id: u32,
+    session_id: ValidationSessionId,
     config: ValidatorStdImplConfig,
     client: ValidatorClient,
     key_pair: Arc<KeyPair>,
@@ -594,7 +595,7 @@ impl Drop for Inner {
         tracing::debug!(
             target: tracing_targets::VALIDATOR,
             shard_ident = %self.state.shard_ident,
-            session_id = self.session_id,
+            session_id = ?self.session_id,
             "validator session dropped"
         );
     }
@@ -887,13 +888,13 @@ impl Future for SignatureFuture<'_> {
 fn compute_session_overlay_id(
     zerostate_id: &BlockId,
     shard_ident: &ShardIdent,
-    session_id: u32,
+    session_id: &ValidationSessionId,
 ) -> OverlayId {
     OverlayId(tl_proto::hash(proto::OverlayIdData {
         zerostate_root_hash: zerostate_id.root_hash.0,
         zerostate_file_hash: zerostate_id.file_hash.0,
         shard_ident: *shard_ident,
-        session_id,
+        session_seqno: session_id.seqno(),
     }))
 }
 

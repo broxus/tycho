@@ -50,11 +50,11 @@ impl PeerScheduleLocked {
         is_applied
     }
 
-    pub(super) fn forget_previous(&mut self, parent: WeakPeerSchedule) {
+    pub(super) fn forget_oldest(&mut self, parent: WeakPeerSchedule) {
         // because used simultaneously with rotate()
         meter(false);
 
-        let to_forget = self.data.forget_previous();
+        let to_forget = self.data.forget_oldest();
         self.resolve_peers_task = None;
         let resolved_waiters = {
             let mut entries = self.overlay.write_entries();

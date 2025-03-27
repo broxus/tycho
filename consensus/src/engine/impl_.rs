@@ -52,7 +52,23 @@ impl Engine {
         } = handle;
 
         let conf = &merged_conf.conf;
-        let genesis = merged_conf.genesis();
+        let accessible_genesis = {
+            if (net.peer_schedule.atomic().peers_for(conf.genesis_round)).is_empty() {
+                // during fix history re-runs the genesis round may be evicted from schedule;
+                // consensus config change creates new genesis and resets fix history flag to false
+                assert!(
+                    fix_history.0,
+                    "genesis round must be accessible at the first mempool run in recovery loop"
+                );
+                None
+            } else {
+                let genesis = merged_conf.genesis();
+                (genesis.verify_hash()).expect("failed to verify genesis hash");
+                Verifier::verify(&genesis, &net.peer_schedule, conf)
+                    .expect("failed to verify genesis");
+                Some(genesis)
+            }
+        };
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(conf.genesis_round);
@@ -60,9 +76,6 @@ impl Engine {
 
         let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker);
         let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
-
-        genesis.verify_hash().expect("Failed to verify genesis");
-        Verifier::verify(&genesis, &net.peer_schedule, conf).expect("genesis failed to verify");
 
         let store = MempoolStore::new(&bind.mempool_adapter_store);
         let db_cleaner = DbCleaner::new(&bind.mempool_adapter_store);
@@ -90,7 +103,9 @@ impl Engine {
             let conf = conf.clone();
             move || {
                 store.init_storage(&overlay_id);
-                store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                if let Some(genesis) = accessible_genesis {
+                    store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                }
                 fix_history // just pass further
             }
         });
