@@ -4,7 +4,7 @@ use everscale_types::models::{BlockId, ShardIdent};
 use super::MasterBlocksCacheData;
 
 #[test]
-fn test_apllied_range_update() {
+fn test_applied_range_update() {
     let mut cache = MasterBlocksCacheData::default();
 
     // first we collated block 3405
