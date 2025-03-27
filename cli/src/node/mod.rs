@@ -14,7 +14,7 @@ use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFact
 use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
-use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
+use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
@@ -324,6 +324,10 @@ impl Node {
         };
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
+
+        // We should clear uncommitted queue state because it may contain incorrect diffs
+        // that were created before node restart. We will restore queue strictly above last committed state
+        message_queue_adapter.clear_uncommitted_state()?;
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
