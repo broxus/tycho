@@ -45,11 +45,14 @@ mod messages_reader;
 mod types;
 
 pub use error::CollationCancelReason;
-pub use types::ForceMasterCollation;
+pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory};
 
 // FACTORY
 

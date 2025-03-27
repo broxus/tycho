@@ -16,11 +16,12 @@ use super::types::{
     McBlockSubgraph, McBlockSubgraphExtract,
 };
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
+use crate::mempool::MempoolAnchorId;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedTo, TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -89,14 +90,14 @@ impl BlocksCache {
 
     pub fn get_top_shard_blocks(
         &self,
-        next_mc_block_id_short: BlockIdShort,
+        mc_block_id_short: BlockIdShort,
     ) -> Option<FastHashMap<ShardIdent, BlockSeqno>> {
         if let Some(master) = self
             .inner
             .masters
             .lock()
             .blocks
-            .get(&next_mc_block_id_short.seqno)
+            .get(&mc_block_id_short.seqno)
         {
             return Some(
                 master
@@ -294,7 +295,8 @@ impl BlocksCache {
     pub fn store_collated(
         &self,
         candidate: Box<BlockCandidate>,
-        mc_data: Option<Arc<McData>>,
+        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<BlockCacheStoreResult> {
         let block_id = *candidate.block.id();
 
@@ -303,9 +305,13 @@ impl BlocksCache {
         let applied_mc_queue_range;
 
         let block_mismatch;
-        if mc_data.is_some() {
+        if candidate.block.id().is_masterchain() {
             let mut masters_guard = self.inner.masters.lock();
-            let res = masters_guard.store_collated_block(candidate, mc_data)?;
+            let res = masters_guard.store_collated_block(
+                candidate,
+                top_shard_blocks_info,
+                top_processed_to_anchor,
+            )?;
             block_mismatch = res.block_mismatch;
             received_and_collated = res.received_and_collated;
             last_collated_mc_block_id = masters_guard.data.get_last_collated_block_id().cloned();
@@ -313,7 +319,7 @@ impl BlocksCache {
         } else {
             let res = {
                 let mut g = self.inner.shards.entry(block_id.shard).or_default();
-                g.store_collated_block(candidate, mc_data)?
+                g.store_collated_block(candidate, top_shard_blocks_info, top_processed_to_anchor)?
             };
 
             received_and_collated = res.received_and_collated;
@@ -762,7 +768,8 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
     fn store_collated_block(
         &mut self,
         candidate: Box<BlockCandidate>,
-        mc_data: Option<Arc<McData>>,
+        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<StoredBlock> {
         let block_id = *candidate.block.id();
         match self.blocks.entry(block_id.seqno) {
@@ -808,7 +815,11 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
             btree_map::Entry::Vacant(vacant) => {
                 self.data.on_insert_collated(&candidate)?;
 
-                vacant.insert(BlockCacheEntry::from_collated(candidate, mc_data)?);
+                vacant.insert(BlockCacheEntry::from_collated(
+                    candidate,
+                    top_shard_blocks_info,
+                    top_processed_to_anchor,
+                )?);
 
                 metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").increment(1);
 
@@ -1085,10 +1096,9 @@ impl ReceivedBlockContext {
             });
         }
 
-        let Some(block_handle) = state_node_adapter.load_block_handle(block_id).await? else {
+        let Some(ref_by_mc_seqno) = state_node_adapter.get_ref_by_mc_seqno(block_id).await? else {
             bail!("block not found: {block_id}");
         };
-        let ref_by_mc_seqno = block_handle.ref_by_mc_seqno();
 
         let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
             bail!("block not found: {block_id}");
