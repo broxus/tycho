@@ -740,7 +740,7 @@ async fn download_block_inner(
                 handle.reject();
             });
 
-            anyhow::ensure!(chunk.len() <= chunk_size as _, "received invalid chunk");
+            anyhow::ensure!(chunk.len() <= chunk_size as usize, "received invalid chunk");
 
             downloaded += chunk.len() as u32;
             tracing::debug!(
@@ -846,7 +846,7 @@ where
                 handle.reject();
             });
 
-            anyhow::ensure!(chunk.len() <= chunk_size as _, "received invalid chunk");
+            anyhow::ensure!(chunk.len() <= chunk_size as usize, "received invalid chunk");
 
             downloaded += chunk.len() as u64;
             tracing::debug!(
