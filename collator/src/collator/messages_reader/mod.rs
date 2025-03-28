@@ -80,10 +80,10 @@ pub(super) struct MessagesReaderContext {
     pub mc_state_gen_lt: Lt,
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
+    pub all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
     pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
-    pub load_statistics_params: FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
-    pub is_first_block_or_masterchain: bool,
+    pub is_first_block_after_prev_master: bool,
 }
 
 impl<V: InternalMessageValue> MessagesReader<V> {
@@ -207,19 +207,18 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             cx.reader_state.externals,
         );
 
-        let mut cumulative_statistics = if cx.is_first_block_or_masterchain {
+        let mut cumulative_statistics = if cx.is_first_block_after_prev_master {
             // TODO use dynamic partitions
-            let partitions = &vec![0, 1].into_iter().collect();
-            let mut cumulative_statistics = CumulativeStatistics::default();
-            for (shard_ident, (from, to)) in &cx.load_statistics_params {
-                let statistics = mq_adapter
-                    .load_separated_diff_statistics(partitions, shard_ident, from, to)
-                    .context("Failed to get statistics")?;
-
-                for (diff_max_message, statistics) in statistics {
-                    cumulative_statistics.add(*shard_ident, diff_max_message, statistics);
-                }
-            }
+            let partitions = vec![0, 1].into_iter().collect();
+            let mut cumulative_statistics = CumulativeStatistics::new(cx.all_shards_processed_to);
+            cumulative_statistics.load(
+                mq_adapter.clone(),
+                &cx.for_shard_id,
+                &partitions,
+                cx.prev_state_gen_lt,
+                cx.mc_state_gen_lt,
+                &cx.mc_top_shards_end_lts.iter().copied().collect(),
+            )?;
             cumulative_statistics
         } else {
             cx.reader_state
