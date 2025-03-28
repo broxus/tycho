@@ -277,16 +277,19 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "Received state update from mc block",
         );
 
-        config_guard.state_update_queue.push(new_cx);
+        if let Some(ctx) = config_guard.state_update_queue.push(new_cx)? {
+            self.process_state_update(&mut config_guard, &ctx).await?;
+            self.top_known_anchor
+                .set_max_raw(ctx.top_processed_to_anchor_id);
+        }
 
         Ok(())
     }
 
     async fn handle_signed_mc_block(&self, mc_block_seqno: BlockSeqno) -> Result<()> {
         let mut config_guard = self.config.lock().await;
-        let queued = config_guard.state_update_queue.drain(..=mc_block_seqno)?;
 
-        for ctx in queued {
+        for ctx in config_guard.state_update_queue.signed(mc_block_seqno)? {
             self.process_state_update(&mut config_guard, &ctx).await?;
             self.top_known_anchor
                 .set_max_raw(ctx.top_processed_to_anchor_id);
