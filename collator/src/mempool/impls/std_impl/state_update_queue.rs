@@ -1,7 +1,7 @@
-use std::ops::RangeToInclusive;
+use std::cmp;
+use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
-use indexmap::IndexMap;
+use anyhow::Result;
 
 use crate::mempool::{DebugStateUpdateContext, StateUpdateContext};
 use crate::tracing_targets;
@@ -9,57 +9,113 @@ use crate::types::processed_upto::BlockSeqno;
 
 #[derive(Default)]
 pub struct StateUpdateQueue {
-    by_seqno: IndexMap<BlockSeqno, StateUpdateContext, ahash::RandomState>,
-    last_drained_seqno: Option<BlockSeqno>,
+    unsigned: BTreeMap<BlockSeqno, StateUpdateContext>,
+    drained: BlockSeqno, // only signed versions are reported to mempool
+    signed: BlockSeqno,  // seqno=0 is stateinit
 }
 
 impl StateUpdateQueue {
-    pub fn push(&mut self, ctx: StateUpdateContext) {
-        if let Some(ctx) = self.by_seqno.insert(ctx.mc_block_id.seqno, ctx) {
+    pub fn push(&mut self, ctx: StateUpdateContext) -> Result<Option<StateUpdateContext>> {
+        let new_seqno = ctx.mc_block_id.seqno;
+        match new_seqno.cmp(&self.drained) {
+            cmp::Ordering::Less => {
+                tracing::warn!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    last_drained = self.drained,
+                    last_signed = self.signed,
+                    ignored = ?DebugStateUpdateContext(&ctx),
+                    "cannot accept mc state update after newer one was passed to mempool"
+                );
+                return Ok(None);
+            }
+            cmp::Ordering::Equal => {
+                if new_seqno == 0 {
+                    return Ok(Some(ctx)); // stateinit special case
+                }
+                tracing::error!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    last_drained = self.drained,
+                    last_signed = self.signed,
+                    ignored = ?DebugStateUpdateContext(&ctx),
+                    "another version with same seqno is already reported to mempool"
+                );
+                return Ok(None);
+            }
+            cmp::Ordering::Greater => {} // ok
+        }
+        if new_seqno <= self.signed {
+            tracing::info!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                new_seqno,
+                last_drained = self.drained,
+                last_signed = self.signed,
+                "mc state update received after being singed"
+            );
+            self.drained = new_seqno;
+            return Ok(Some(ctx));
+        }
+        if let Some(ctx) = self.unsigned.insert(new_seqno, ctx) {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 removed = ?DebugStateUpdateContext(&ctx),
                 "state update context was updated in queue by seqno"
             );
         };
+        Ok(None)
     }
 
-    pub fn drain(
-        &mut self,
-        range: RangeToInclusive<BlockSeqno>,
-    ) -> Result<Vec<StateUpdateContext>> {
-        let end_index = (self.by_seqno.get_index_of(&range.end)).with_context(|| {
-            format!(
-                "state update context with seq_no={} was not reported to mempool adapter",
-                range.end
-            )
-        })?;
+    pub fn signed(&mut self, signed: BlockSeqno) -> Result<Vec<StateUpdateContext>> {
+        if self.signed < signed {
+            self.signed = signed;
+            self.drain()
+        } else if signed == 0 {
+            Ok(Vec::new()) // stateinit returned from `push()`, do not warn
+        } else {
+            tracing::warn!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                new = signed,
+                prev = self.signed,
+                "signed mc block seqno was reported out of order"
+            );
+            Ok(Vec::new())
+        }
+    }
 
-        let result = (self.by_seqno)
-            .drain(..=end_index)
-            .map(|(_k, v)| v)
-            .collect::<Vec<_>>();
-
-        let seqnos = (self.last_drained_seqno.into_iter())
-            .chain(result.iter().map(|ctx| ctx.mc_block_id.seqno))
-            .collect::<Vec<_>>();
-
+    fn drain(&mut self) -> Result<Vec<StateUpdateContext>> {
         anyhow::ensure!(
-            seqnos.windows(2).all(|w| w[0] < w[1]), // unique with `last_drained_seqno`
-            "mc block seq_no insertion order is not strictly increasing: {seqnos:?}"
+            self.drained <= self.signed,
+            "coding error: drained unsigned state update ctx; \
+             last drained seqno={} last signed seqno={}",
+            self.drained,
+            self.signed,
         );
 
-        self.last_drained_seqno =
-            (result.last().map(|ctx| ctx.mc_block_id.seqno)).max(self.last_drained_seqno);
-
-        self.shrink();
-
-        Ok(result)
-    }
-
-    fn shrink(&mut self) {
-        if self.by_seqno.capacity() > self.by_seqno.len().saturating_mul(4) {
-            (self.by_seqno).shrink_to(self.by_seqno.len().saturating_mul(2));
+        if self.drained == self.signed {
+            return Ok(Vec::new());
         }
+
+        let mut vec =
+            Vec::with_capacity(((self.signed - self.drained) as usize).min(self.unsigned.len()));
+        while let Some(entry) = self.unsigned.first_entry() {
+            if *entry.key() > self.signed {
+                break;
+            }
+            vec.push(entry.remove());
+        }
+
+        if let Some(first_seqno) = (vec.first()).map(|ctx| ctx.mc_block_id.seqno) {
+            anyhow::ensure!(
+                self.drained < first_seqno,
+                "coding error: cannot report mc state update with repeating or lower seqno; \
+                 prev drained seqno = {}, new drained seqno {first_seqno}",
+                self.drained
+            );
+        }
+
+        if let Some(last_seqno) = (vec.last()).map(|ctx| ctx.mc_block_id.seqno) {
+            self.drained = last_seqno;
+        }
+
+        Ok(vec)
     }
 }
