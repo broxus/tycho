@@ -11,9 +11,12 @@ pub use self::jrpc::JrpcEndpointCache;
 pub use self::proto::ProtoEndpointCache;
 use crate::state::RpcState;
 
+mod error;
 mod jrpc;
 mod proto;
 mod tonapi;
+mod toncenter;
+mod utils;
 
 pub struct RpcEndpoint {
     listener: TcpListener,
@@ -47,6 +50,7 @@ impl RpcEndpoint {
             .route("/rpc", post(common_route))
             .route("/proto", post(common_route))
             .nest("/v2", tonapi::router())
+            .nest("/api/v2", toncenter::router())
             .layer(service)
             .with_state(self.state);
 
