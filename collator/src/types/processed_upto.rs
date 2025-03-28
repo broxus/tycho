@@ -7,7 +7,7 @@ use everscale_types::models::{
     ShardIdent, ShardIdentFull, ShardRange,
 };
 use tycho_block_util::queue::QueuePartitionIdx;
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::ProcessedTo;
 use crate::mempool::MempoolAnchorId;
@@ -366,4 +366,20 @@ impl ProcessedUptoInfoExtension for ProcessedUptoInfoStuff {
             });
         Ok(min_opt.unwrap_or_default())
     }
+}
+
+pub fn build_all_shards_processed_to(
+    current_shard: ShardIdent,
+    current_shard_processed_to: ProcessedTo,
+    mc_processed_to: ProcessedTo,
+    mc_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+) -> FastHashMap<ShardIdent, ProcessedTo> {
+    let mut res = mc_shards_processed_to;
+    if !current_shard.is_masterchain() {
+        // add processed_to from master
+        res.insert(ShardIdent::MASTERCHAIN, mc_processed_to);
+    }
+    // replace processed_to from current shard
+    res.insert(current_shard, current_shard_processed_to);
+    res
 }
