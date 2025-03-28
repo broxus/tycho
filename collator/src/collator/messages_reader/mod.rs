@@ -17,7 +17,8 @@ use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLi
 use super::types::{AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueShardRange,
+    QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -82,8 +83,8 @@ pub(super) struct MessagesReaderContext {
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
     pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
-    pub load_statistics_params: FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
-    pub is_first_block_or_masterchain: bool,
+    pub cumulative_stats_ranges: Vec<QueueShardRange>,
+    pub is_first_block_after_prev_master: bool,
 }
 
 impl<V: InternalMessageValue> MessagesReader<V> {
@@ -207,17 +208,17 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             cx.reader_state.externals,
         );
 
-        let mut cumulative_statistics = if cx.is_first_block_or_masterchain {
+        let mut cumulative_statistics = if cx.is_first_block_after_prev_master {
             // TODO use dynamic partitions
             let partitions = &vec![0, 1].into_iter().collect();
             let mut cumulative_statistics = CumulativeStatistics::default();
-            for (shard_ident, (from, to)) in &cx.load_statistics_params {
+            for range in cx.cumulative_stats_ranges {
                 let statistics = mq_adapter
-                    .load_separated_diff_statistics(partitions, shard_ident, from, to)
+                    .load_separated_diff_statistics(partitions, &range)
                     .context("Failed to get statistics")?;
 
                 for (diff_max_message, statistics) in statistics {
-                    cumulative_statistics.add(*shard_ident, diff_max_message, statistics);
+                    cumulative_statistics.add(range.shard_ident, diff_max_message, statistics);
                 }
             }
             cumulative_statistics

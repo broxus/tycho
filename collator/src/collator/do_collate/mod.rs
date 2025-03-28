@@ -115,16 +115,6 @@ impl CollatorStdImpl {
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
 
-        let load_statistics_params =
-            Self::compute_cumulative_statistics_params(&mc_data, next_block_id_short).await?;
-
-        let is_first_block_or_masterchain = Self::is_first_shard_block_or_masterchain(
-            &mc_data,
-            next_block_id_short,
-            &prev_shard_data,
-        )
-        .await?;
-
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
@@ -132,8 +122,6 @@ impl CollatorStdImpl {
             prev_shard_data,
             shard_id: self.shard_id,
             collation_is_cancelled: CancellationFlag::new(),
-            load_statistics_params,
-            is_first_block_or_masterchain,
         });
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
@@ -457,78 +445,6 @@ impl CollatorStdImpl {
             execute_result,
             final_result,
         })
-    }
-
-    async fn is_first_shard_block_or_masterchain(
-        mc_data: &Arc<McData>,
-        next_block_id_short: BlockIdShort,
-        prev_shard_data: &PrevData,
-    ) -> Result<bool> {
-        if next_block_id_short.shard.is_masterchain() {
-            return Ok(true);
-        }
-
-        let prev_block_id = match prev_shard_data.get_blocks_ref()? {
-            PrevBlockRef::Single(s) => s.as_block_id(next_block_id_short.shard),
-            PrevBlockRef::AfterMerge { .. } => {
-                panic!("PrevBlockRef::AfterMerge not supported");
-            }
-        };
-
-        for (shard, descr) in &mc_data.shards {
-            if shard == &prev_block_id.shard && descr.seqno >= prev_block_id.seqno {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
-    async fn compute_cumulative_statistics_params(
-        mc_data: &Arc<McData>,
-        next_block_id_short: BlockIdShort,
-    ) -> Result<FastHashMap<ShardIdent, (QueueKey, QueueKey)>> {
-        let mut ranges = FastHashMap::default();
-
-        if mc_data.block_id.seqno == 0 {
-            return Ok(ranges);
-        }
-
-        let mut from_ranges = mc_data
-            .processed_upto
-            .get_min_internals_processed_to_by_shards();
-
-        for processed_to_map in mc_data.shards_processed_to.values() {
-            for (shard, processed_to) in processed_to_map {
-                from_ranges
-                    .entry(*shard)
-                    .and_modify(|existing| {
-                        if processed_to < existing {
-                            *existing = *processed_to;
-                        }
-                    })
-                    .or_insert(*processed_to);
-            }
-        }
-
-        for (shard, processed_to) in from_ranges {
-            let from = processed_to.next_value();
-
-            if shard.is_masterchain() && shard == next_block_id_short.shard {
-                let to = QueueKey::MAX;
-                ranges.insert(shard, (from, to));
-            } else {
-                for (current_shard, descr) in &mc_data.shards {
-                    if current_shard == &shard {
-                        let to = QueueKey::max_for_lt(descr.end_lt);
-                        ranges.insert(shard, (from, to));
-                        break;
-                    }
-                }
-            }
-        }
-
-        Ok(ranges)
     }
 
     /// Get max LT from masterchain (and shardchain) then calc start LT
