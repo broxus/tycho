@@ -1902,10 +1902,11 @@ where
         Ok(())
     }
 
+    /// Returns top processed to anchor id if delayed state was processed
     async fn notify_to_mempool_and_process_delayed_mc_state_update(
         &self,
         block_id: &BlockId,
-    ) -> Result<()> {
+    ) -> Result<Option<MempoolAnchorId>> {
         let mut delayed_mc_data = None;
         {
             let mut guard = self.delayed_mc_state_update.lock();
@@ -1924,12 +1925,18 @@ where
         if let Some(mc_data) = delayed_mc_data {
             self.notify_mc_state_update_to_mempool(mc_data.clone())
                 .await?;
-            self.process_mc_state_update(mc_data, ProcessMcStateUpdateMode::StartCollation {
-                reset_collators: false,
-            })
+            self.process_mc_state_update(
+                mc_data.clone(),
+                ProcessMcStateUpdateMode::StartCollation {
+                    reset_collators: false,
+                },
+            )
             .await?;
+
+            Ok(Some(mc_data.top_processed_to_anchor))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     async fn notify_mc_state_update_to_mempool(&self, mc_data: Arc<McData>) -> Result<()> {
@@ -2783,16 +2790,16 @@ where
         // gc blocks from cache when commit finished
         scopeguard::defer!(self.blocks_cache.gc_prev_blocks());
 
+        // we can process delayed master state update now
+        let mut top_processed_to_anchor_to_notify = self
+            .notify_to_mempool_and_process_delayed_mc_state_update(mc_block_id)
+            .await?;
+
         let histogram = HistogramGuard::begin("tycho_collator_commit_valid_master_block_time");
         let histogram_extract =
             HistogramGuard::begin("tycho_collator_extract_master_block_subgraph_time");
         let mut extract_elapsed = Default::default();
         let mut sync_elapsed = Default::default();
-
-        // if current block was committed by received one
-        // then `on_block_accepted` will not be called further
-        // so we need to notify mempool here strongly after state update is notified
-        let mut top_processed_to_anchor_to_notify = None;
 
         // extract master block with all shard blocks if valid, and process them
         match self
@@ -2831,7 +2838,16 @@ where
                         total = sync_elapsed.as_millis(),
                         "send_blocks_to_sync timings",
                     );
+
+                    // if current master block was not applied to bc state yet
+                    // then we should not notify top processed to anchor to mempool now
+                    // because we are not sure that block will be applied
+                    // and should wait until block_accepted event is received
+                    top_processed_to_anchor_to_notify = None;
                 } else {
+                    // if current block was committed by received one
+                    // then `on_block_accepted` will not be called further
+                    // so we need to notify `top_processed_to_anchor` to mempool here
                     top_processed_to_anchor_to_notify = master_block.top_processed_to_anchor;
                 }
 
@@ -2858,10 +2874,6 @@ where
             sync = sync_elapsed.as_millis(),
             "commit_valid_master_block timings",
         );
-
-        // we can process delayed master state update now
-        self.notify_to_mempool_and_process_delayed_mc_state_update(mc_block_id)
-            .await?;
 
         // report last processed anchor to mempool
         if let Some(top_processed_to_anchor) = top_processed_to_anchor_to_notify {
