@@ -169,8 +169,6 @@ impl Phase<FinalizeState> {
             }
         };
 
-        //// !!! обновить ридер стейт
-
         let queue_diff = QueueDiffStuff::builder(
             self.state.shard_id,
             self.state.collation_data.block_id_short.seqno,

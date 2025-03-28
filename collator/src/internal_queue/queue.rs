@@ -114,9 +114,7 @@ where
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        shard_ident: &ShardIdent,
-        from: &QueueKey,
-        to: &QueueKey,
+        range: &QueueShardRange,
     ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
 }
 
@@ -415,13 +413,11 @@ where
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        shard_ident: &ShardIdent,
-        from: &QueueKey,
-        to: &QueueKey,
+        range: &QueueShardRange,
     ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
-        let result =
-            self.state
-                .load_separated_diff_statistics(partitions, shard_ident, from, to)?;
+        let result = self
+            .state
+            .load_separated_diff_statistics(partitions, range)?;
 
         Ok(result)
     }

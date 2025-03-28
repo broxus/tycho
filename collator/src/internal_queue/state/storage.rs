@@ -99,9 +99,7 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        shard_ident: &ShardIdent,
-        from: &QueueKey,
-        to: &QueueKey,
+        range: &QueueShardRange,
     ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
 
     /// Get last committed mc block id
@@ -226,18 +224,16 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        shard_ident: &ShardIdent,
-        from: &QueueKey,
-        to: &QueueKey,
+        range: &QueueShardRange,
     ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
 
         let result = snapshot.collect_separated_stats_in_range_for_partitions(
-            shard_ident,
+            &range.shard_ident,
             partitions,
-            from,
-            to,
+            &range.from,
+            &range.to,
         )?;
 
         Ok(result)
