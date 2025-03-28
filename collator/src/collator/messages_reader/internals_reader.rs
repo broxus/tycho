@@ -16,7 +16,9 @@ use crate::collator::messages_buffer::{
 };
 use crate::collator::types::{MsgsExecutionParamsExtension, ParsedMessage};
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{InternalMessageValue, QueueShardRange, QueueStatistics};
+use crate::internal_queue::types::{
+    DiffZone, InternalMessageValue, QueueShardRange, QueueStatistics,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};
@@ -441,7 +443,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 while next_seqno < self.block_seqno {
                     let diff = self
                         .mq_adapter
-                        .get_diff(&self.for_shard_id, next_seqno)
+                        .get_diff_info(&self.for_shard_id, next_seqno, DiffZone::Both)?
                         .ok_or_else(|| {
                             let diff_block_id = BlockIdShort {
                                 shard: self.for_shard_id,
@@ -456,11 +458,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                             ))
                         })?;
 
-                    range_to = *diff.max_message();
+                    range_to = diff.max_message;
 
-                    messages_count += diff
-                        .statistics()
-                        .get_messages_count_by_shard(&self.for_shard_id);
+                    messages_count += diff.get_messages_count_by_shard(&self.for_shard_id);
 
                     if messages_count > max_messages as u64 {
                         break;

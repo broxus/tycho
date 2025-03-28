@@ -8,6 +8,7 @@ use weedb::rocksdb;
 pub use self::config::*;
 pub use self::db::*;
 pub use self::store::*;
+use crate::storage::InternalQueueStorage;
 
 mod config;
 mod db;
