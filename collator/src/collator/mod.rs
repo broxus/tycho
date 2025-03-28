@@ -1301,8 +1301,8 @@ impl CollatorStdImpl {
                 // do not use anchors cache because we need to check
                 // only for pending internals in iterators
                 anchors_cache: Default::default(),
-                load_statistics_params: Default::default(),
-                is_first_block_or_masterchain: true,
+                cumulative_stats_ranges: Default::default(),
+                is_first_block_after_prev_master: true,
             },
             self.mq_adapter.clone(),
         )?;

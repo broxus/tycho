@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use everscale_types::models::GlobalCapability;
+use everscale_types::models::{BlockId, BlockIdShort, GlobalCapability, ShardIdent};
+use tycho_block_util::queue::QueueKey;
 use tycho_executor::{ExecutorParams, ParsedConfig};
 
 use super::execute::ExecuteState;
@@ -12,9 +13,10 @@ use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{MessagesReader, MessagesReaderContext, ReaderState};
 use crate::collator::types::AnchorsCache;
 use crate::collator::CollationCancelReason;
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{EnqueuedMessage, QueueShardRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
+use crate::types::{McData, ShardDescriptionShort};
 
 pub struct PrepareState {
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
@@ -113,8 +115,14 @@ impl Phase<PrepareState> {
                 mc_top_shards_end_lts,
                 reader_state: self.extra.reader_state,
                 anchors_cache: self.extra.anchors_cache,
-                load_statistics_params: self.state.load_statistics_params.clone(),
-                is_first_block_or_masterchain: self.state.is_first_block_or_masterchain,
+                cumulative_stats_ranges: compute_cumulative_stats_ranges(
+                    &self.state.mc_data,
+                    self.state.collation_data.block_id_short,
+                ),
+                is_first_block_after_prev_master: is_first_block_after_prev_master(
+                    self.state.prev_shard_data.blocks_ids()[0], // TODO: consider split/merge,
+                    &self.state.mc_data.shards,
+                ),
             },
             self.extra.mq_adapter.clone(),
         )?;
@@ -153,4 +161,76 @@ impl Phase<PrepareState> {
             state: self.state,
         })
     }
+}
+
+fn compute_cumulative_stats_ranges(
+    mc_data: &Arc<McData>,
+    next_block_id_short: BlockIdShort,
+) -> Vec<QueueShardRange> {
+    let mut ranges = vec![];
+
+    if mc_data.block_id.seqno == 0 {
+        return ranges;
+    }
+
+    let mut from_ranges = mc_data
+        .processed_upto
+        .get_min_internals_processed_to_by_shards();
+
+    for processed_to_map in mc_data.shards_processed_to.values() {
+        for (shard, processed_to) in processed_to_map {
+            from_ranges
+                .entry(*shard)
+                .and_modify(|existing| {
+                    if processed_to < existing {
+                        *existing = *processed_to;
+                    }
+                })
+                .or_insert(*processed_to);
+        }
+    }
+
+    for (shard, processed_to) in from_ranges {
+        let from = processed_to.next_value();
+
+        if shard.is_masterchain() && shard == next_block_id_short.shard {
+            let to = QueueKey::MAX;
+            ranges.push(QueueShardRange {
+                shard_ident: shard,
+                from,
+                to,
+            });
+        } else {
+            for (current_shard, descr) in &mc_data.shards {
+                if current_shard == &shard {
+                    let to = QueueKey::max_for_lt(descr.end_lt);
+                    ranges.push(QueueShardRange {
+                        shard_ident: shard,
+                        from,
+                        to,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    ranges
+}
+
+fn is_first_block_after_prev_master(
+    prev_block_id: BlockId,
+    mc_data_shards: &[(ShardIdent, ShardDescriptionShort)],
+) -> bool {
+    if prev_block_id.shard.is_masterchain() {
+        return true;
+    }
+
+    for (shard, descr) in mc_data_shards {
+        if shard == &prev_block_id.shard && descr.seqno >= prev_block_id.seqno {
+            return true;
+        }
+    }
+
+    false
 }
