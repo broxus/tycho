@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use do_collate::is_first_block_after_prev_master;
 use error::CollatorError;
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::*;
@@ -26,7 +27,7 @@ use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
-use crate::types::processed_upto::ProcessedUptoInfoExtension;
+use crate::types::processed_upto::{build_all_shards_processed_to, ProcessedUptoInfoExtension};
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
     DisplayBlockIdsIntoIter, McData, TopBlockDescription,
@@ -1288,6 +1289,19 @@ impl CollatorStdImpl {
 
         // finally check if has pending messages in iterators
 
+        let all_shards_processed_to = build_all_shards_processed_to(
+            working_state.next_block_id_short.shard,
+            working_state
+                .reader_state
+                .get_updated_processed_upto()
+                .get_min_internals_processed_to_by_shards(),
+            working_state
+                .mc_data
+                .processed_upto
+                .get_min_internals_processed_to_by_shards(),
+            working_state.mc_data.shards_processed_to.clone(),
+        );
+
         // create reader
         let mut messages_reader = MessagesReader::new(
             MessagesReaderContext {
@@ -1303,13 +1317,16 @@ impl CollatorStdImpl {
                     .iter()
                     .map(|(k, v)| (*k, v.end_lt))
                     .collect(),
+                all_shards_processed_to,
                 // extract reader state to use in the reader
                 reader_state: std::mem::take(&mut working_state.reader_state),
                 // do not use anchors cache because we need to check
                 // only for pending internals in iterators
                 anchors_cache: Default::default(),
-                load_statistics_params: Default::default(),
-                is_first_block_or_masterchain: true,
+                is_first_block_after_prev_master: is_first_block_after_prev_master(
+                    working_state.prev_shard_data_ref().blocks_ids()[0], /* TODO: consider split/merge */
+                    &working_state.mc_data.shards,
+                ),
             },
             self.mq_adapter.clone(),
         )?;
