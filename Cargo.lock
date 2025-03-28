@@ -3756,8 +3756,10 @@ dependencies = [
  "bytes",
  "everscale-types",
  "futures-util",
+ "hex",
  "metrics",
  "moka",
+ "num-bigint",
  "parking_lot",
  "prost",
  "serde",
@@ -3773,6 +3775,7 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+ "tycho-vm",
 ]
 
 [[package]]

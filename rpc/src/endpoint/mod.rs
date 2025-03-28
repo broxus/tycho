@@ -13,6 +13,7 @@ use crate::state::RpcState;
 
 mod jrpc;
 mod proto;
+mod tonapi;
 
 pub struct RpcEndpoint {
     listener: TcpListener,
@@ -45,6 +46,7 @@ impl RpcEndpoint {
             .route("/", post(common_route))
             .route("/rpc", post(common_route))
             .route("/proto", post(common_route))
+            .nest("/v2", tonapi::router())
             .layer(service)
             .with_state(self.state);
 
