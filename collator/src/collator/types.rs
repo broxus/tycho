@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::cell::{Cell, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
@@ -20,14 +20,17 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::AccountMeta;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
-use crate::internal_queue::types::{AccountStatistics, QueueStatistics};
+use crate::internal_queue::types::{
+    AccountStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
+};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
-use crate::types::{BlockCandidate, McData, TopShardBlockInfo};
+use crate::queue_adapter::MessageQueueAdapter;
+use crate::types::processed_upto::{BlockSeqno, Lt, ProcessedUptoInfoStuff};
+use crate::types::{BlockCandidate, McData, ProcessedTo, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -1110,8 +1113,10 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 type DiffMaxMessage = QueueKey;
 type DiffStatistics = BTreeMap<DiffMaxMessage, AccountStatistics>;
 
-#[derive(Default)]
 pub struct CumulativeStatistics {
+    /// Actual processed to info for master and each shard
+    all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+
     /// Stores per-shard statistics, keyed by `ShardIdent`.
     /// Each shard has a `BTreeMap<ProcessedToKey, AccountStatistics>`.
     shards_statistics: FastHashMap<ShardIdent, DiffStatistics>,
@@ -1124,6 +1129,86 @@ pub struct CumulativeStatistics {
 }
 
 impl CumulativeStatistics {
+    pub fn new(all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>) -> Self {
+        Self {
+            all_shards_processed_to,
+            shards_statistics: Default::default(),
+            result: Default::default(),
+            dirty: false,
+        }
+    }
+
+    pub fn load<V: InternalMessageValue>(
+        &mut self,
+        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+        current_shard: &ShardIdent,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        prev_state_gen_lt: Lt,
+        mc_state_gen_lt: Lt,
+        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
+    ) -> Result<()> {
+        let ranges = Self::compute_cumulative_stats_ranges(
+            current_shard,
+            &self.all_shards_processed_to,
+            prev_state_gen_lt,
+            mc_state_gen_lt,
+            mc_top_shards_end_lts,
+        );
+        for range in ranges {
+            let statistics = mq_adapter
+                .load_separated_diff_statistics(partitions, &range)
+                .with_context(|| format!("partitions: {:?}; range: {:?}", partitions, range))?;
+
+            for (diff_max_message, statistics) in statistics {
+                self.add(range.shard_ident, diff_max_message, statistics);
+            }
+        }
+        Ok(())
+    }
+
+    fn compute_cumulative_stats_ranges(
+        current_shard: &ShardIdent,
+        all_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+        prev_state_gen_lt: Lt,
+        mc_state_gen_lt: Lt,
+        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
+    ) -> Vec<QueueShardRange> {
+        let mut ranges = vec![];
+
+        // TODO: replace with a helper function from ProcessedUptoInfoStuff
+        let mut from_ranges = ProcessedTo::new();
+        for processed_to in all_shards_processed_to.values() {
+            for (&shard, &to_key) in processed_to {
+                from_ranges
+                    .entry(shard)
+                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
+                    .or_insert(to_key);
+            }
+        }
+
+        for (shard_ident, from) in from_ranges {
+            let from = from.next_value();
+
+            let to_lt = if shard_ident.is_masterchain() {
+                mc_state_gen_lt
+            } else if shard_ident == *current_shard {
+                prev_state_gen_lt
+            } else {
+                *mc_top_shards_end_lts.get(&shard_ident).unwrap()
+            };
+
+            let to = QueueKey::max_for_lt(to_lt);
+
+            ranges.push(QueueShardRange {
+                shard_ident,
+                from,
+                to,
+            });
+        }
+
+        ranges
+    }
+
     /// Adds a `DiffStatistics` for a particular shard.
     /// Overwrites any existing data for the same `shard_id`.
     pub fn add(
