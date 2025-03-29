@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{AnchorStage, DagRound, Verifier};
+use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
 use crate::effects::{MempoolStore, RoundCtx, ValidateCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
@@ -22,10 +22,10 @@ use crate::models::{
 };
 
 pub fn make_dag_parts<const PEER_COUNT: usize>(
-    peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
+    local_keys: &Arc<KeyPair>,
     genesis: &Point,
-    store: &MempoolStore,
-) -> (DagRound, PeerSchedule, Downloader) {
+) -> (PeerSchedule, Downloader) {
     let network = Network::builder()
         .with_random_private_key()
         .build("0.0.0.0:0", Router::builder().build())
@@ -36,8 +36,7 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
-    let local_keys = Arc::new(peers[0].1);
-
+    // any peer id will be ok, network is not used
     let peer_schedule = PeerSchedule::new(local_keys.clone(), private_overlay);
     peer_schedule.set_next_subset(
         &[],
@@ -50,17 +49,14 @@ pub fn make_dag_parts<const PEER_COUNT: usize>(
     let stub_downloader =
         Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
 
-    let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
-
-    genesis_round.insert_exact_sign(genesis, Some(&local_keys), store);
-
-    (genesis_round, peer_schedule, stub_downloader)
+    (peer_schedule, stub_downloader)
 }
 
 #[allow(clippy::too_many_arguments, reason = "ok in test")]
 pub async fn populate_points<const PEER_COUNT: usize>(
     dag_round: &DagRound,
-    peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
+    local_keys: &Arc<KeyPair>,
     peer_schedule: &PeerSchedule,
     downloader: &Downloader,
     store: &MempoolStore,
@@ -74,8 +70,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
-                .map(|p| p.valid().cloned().expect("must be trusted"))
-                .map(|p| p.info)
+                .map(|p| p.valid().expect("must be valid").info().clone())
                 .next()
         })
         .collect::<Vec<_>>();
@@ -133,7 +128,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         let info = PointInfo::from(point);
         let (_do_not_drop_or_send, certified_tx) = oneshot::channel();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
-        Verifier::validate(
+        let validated = Verifier::validate(
             info,
             point.prev_proof(),
             dag_round.downgrade(),
@@ -142,13 +137,17 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             certified_tx,
             validate_ctx,
         )
-        .await
-        .trusted()
-        .expect("trusted point");
+        .await;
+        assert!(
+            matches!(validated, ValidateResult::Valid { .. }),
+            "expected valid point, got {validated:?}"
+        );
     }
 
     for point in points.values() {
-        dag_round.insert_exact_sign(point, Some(&peers[0].1), store);
+        dag_round
+            .add_local(point, Some(local_keys), store, round_ctx)
+            .await;
     }
 }
 
@@ -156,7 +155,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
 fn point<const PEER_COUNT: usize>(
     round: Round,
     idx: usize,
-    peers: &[(PeerId, KeyPair); PEER_COUNT],
+    peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
     includes: &BTreeMap<PeerId, Digest>,
     max_prev_time: UnixTime,
     max_anchor_time: UnixTime,
