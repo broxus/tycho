@@ -115,6 +115,11 @@ impl CollatorStdImpl {
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
 
+        let is_first_block_after_prev_master = is_first_block_after_prev_master(
+            prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
+            &mc_data.shards,
+        );
+
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
@@ -122,6 +127,7 @@ impl CollatorStdImpl {
             prev_shard_data,
             shard_id: self.shard_id,
             collation_is_cancelled: CancellationFlag::new(),
+            is_first_block_after_prev_master,
         });
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
@@ -1216,4 +1222,21 @@ fn calculate_min_internals_processed_to(
     }
 
     min_processed_to
+}
+
+pub fn is_first_block_after_prev_master(
+    prev_block_id: BlockId,
+    mc_data_shards: &[(ShardIdent, ShardDescriptionShort)],
+) -> bool {
+    if prev_block_id.shard.is_masterchain() {
+        return true;
+    }
+
+    for (shard, descr) in mc_data_shards {
+        if shard == &prev_block_id.shard && descr.seqno >= prev_block_id.seqno {
+            return true;
+        }
+    }
+
+    false
 }

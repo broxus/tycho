@@ -21,4 +21,7 @@ pub struct ActualState {
     pub shard_id: ShardIdent,
     /// For graceful collation cancellation
     pub collation_is_cancelled: CancellationFlag,
+    /// Indicates if current collating block is first
+    /// after previous master block
+    pub is_first_block_after_prev_master: bool,
 }
