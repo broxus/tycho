@@ -1165,7 +1165,7 @@ impl CumulativeStatistics {
                 .with_context(|| format!("partitions: {:?}; range: {:?}", partitions, range))?;
 
             for (diff_max_message, statistics) in statistics {
-                self.add(range.shard_ident, diff_max_message, statistics);
+                self.apply(range.shard_ident, diff_max_message, statistics);
             }
         }
         Ok(())
@@ -1214,35 +1214,76 @@ impl CumulativeStatistics {
         ranges
     }
 
-    /// Adds a `DiffStatistics` for a particular shard.
+    /// Adds diff stats weeding processed accounts according to `processed_to` info
+    fn apply(
+        &mut self,
+        diff_shard: ShardIdent,
+        diff_max_message: DiffMaxMessage,
+        mut diff_stats: AccountStatistics,
+    ) {
+        for (dst_shard, shard_processed_to) in &self.all_shards_processed_to {
+            // get processed_to border for diff's shard in the destination shard
+            if let Some(to_key) = shard_processed_to.get(&diff_shard) {
+                // if diff is below processed_to border
+                // then remove accounts of destination shard from stats
+                if diff_max_message <= *to_key {
+                    diff_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
+                }
+            }
+        }
+
+        // finally add weeded stats
+        self.add(diff_shard, diff_max_message, diff_stats);
+    }
+
+    /// Adds diff stats for a particular shard.
     /// Overwrites any existing data for the same `shard_id`.
     pub fn add(
         &mut self,
-        shard_id: ShardIdent,
+        diff_shard: ShardIdent,
         diff_max_message: DiffMaxMessage,
-        diff: AccountStatistics,
+        diff_stats: AccountStatistics,
     ) {
         self.shards_statistics
-            .entry(shard_id)
+            .entry(diff_shard)
             .or_default()
-            .insert(diff_max_message, diff);
+            .insert(diff_max_message, diff_stats);
 
         self.dirty = true;
     }
 
-    /// Remove accounts from diffs which we already processed
-    pub fn remove_until(&mut self, shard_ident: ShardIdent, diff_max_message: &DiffMaxMessage) {
-        if let Some(diff_statistics) = self.shards_statistics.get_mut(&shard_ident) {
-            // Iterate with .iter_mut() so that `diff_statistics` is not consumed
-            for (current_diff_max_message, acc_stat) in diff_statistics.iter_mut() {
-                if current_diff_max_message <= diff_max_message {
-                    acc_stat.retain(|dest_acc, _| !shard_ident.contains_address(dest_acc));
+    /// Remove stats for accounts from processed diffs
+    pub fn handle_processed_to_update(
+        &mut self,
+        dst_shard: ShardIdent,
+        shard_processed_to: ProcessedTo,
+    ) {
+        for (src_shard, to_key) in &shard_processed_to {
+            let mut to_remove_diffs = vec![];
+            if let Some(diffs) = self.shards_statistics.get_mut(src_shard) {
+                // find diffs that below processed_to border and remove destination accounts from stats
+                for (diff_max_message, diff_stats) in diffs.iter_mut() {
+                    if diff_max_message <= to_key {
+                        diff_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
+                        if diff_stats.is_empty() {
+                            to_remove_diffs.push(*diff_max_message);
+                        }
+                        self.dirty = true;
+                    } else {
+                        // do not need to process diffs above processed_to border
+                        break;
+                    }
+                }
+                // remove drained diffs
+                for key in to_remove_diffs {
+                    diffs.remove(&key);
                 }
             }
-
-            diff_statistics.retain(|k, _| k > diff_max_message);
         }
-        self.dirty = true;
+
+        // update all processed_to state
+        self.all_shards_processed_to
+            .insert(dst_shard, shard_processed_to);
     }
 
     /// Returns a reference to the aggregated result.
