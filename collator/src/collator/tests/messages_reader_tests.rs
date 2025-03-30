@@ -34,7 +34,7 @@ use crate::test_utils::try_init_test_tracing;
 use crate::types::processed_upto::{
     BlockSeqno, Lt, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
-use crate::types::DebugDisplay;
+use crate::types::{DebugDisplay, ProcessedTo};
 
 const DEX_PAIR_USDC_NATIVE: u8 = 10;
 const DEX_PAIR_NATIVE_ETH: u8 = 11;
@@ -402,6 +402,10 @@ where
     F: Fn(IntMsgInfo, Cell) -> V,
 {
     fn test_collate_shards(&mut self, block_tx_limit: usize) -> Result<TestCollateResult> {
+        let collate_master_every = 3;
+
+        let all_shards_processed_to = self.get_all_shards_processed_to();
+
         let TestCollateResult {
             mut has_unprocessed_messages,
         } = self.sc_collator.test_collate_block_and_check_refill(
@@ -413,10 +417,14 @@ where
                 self.sc_collator.block_seqno,
                 self.sc_collator.last_block_gen_lt,
             )],
+            all_shards_processed_to,
+            (self.sc_collator.block_seqno + 1) % collate_master_every == 1,
         )?;
 
         // collate master every 3 shard blocks
-        if self.sc_collator.block_seqno % 3 == 0 {
+        if self.sc_collator.block_seqno % collate_master_every == 0 {
+            let all_shards_processed_to = self.get_all_shards_processed_to();
+
             let TestCollateResult {
                 has_unprocessed_messages: mc_has_unprocessed_messages,
             } = self.mc_collator.test_collate_block_and_check_refill(
@@ -428,12 +436,16 @@ where
                     self.sc_collator.block_seqno,
                     self.sc_collator.last_block_gen_lt,
                 )],
+                all_shards_processed_to,
+                true, // every master is first after previous
             )?;
             has_unprocessed_messages = has_unprocessed_messages || mc_has_unprocessed_messages;
         }
 
         // emulate that we commit previous master block when the 2d shard block after it is collated
-        if self.sc_collator.block_seqno % 2 == 0 && self.sc_collator.block_seqno != 2 {
+        if self.sc_collator.block_seqno % collate_master_every == 2
+            && self.sc_collator.block_seqno != 2
+        {
             let mut mc_top_blocks = vec![(self.mc_collator.get_block_id(), true)];
             mc_top_blocks.extend(self.mc_collator.last_mc_top_shards_blocks_info.iter().map(
                 |(shard_id, seqno, _)| {
@@ -457,6 +469,33 @@ where
         Ok(TestCollateResult {
             has_unprocessed_messages,
         })
+    }
+
+    fn get_all_shards_processed_to(&self) -> FastHashMap<ShardIdent, ProcessedTo> {
+        let mut res: FastHashMap<_, _> = self
+            .sc_collator
+            .primary_working_state
+            .as_ref()
+            .map(|ws| {
+                (
+                    self.sc_collator.shard_id,
+                    ws.reader_state
+                        .get_updated_processed_upto()
+                        .get_min_internals_processed_to_by_shards(),
+                )
+            })
+            .into_iter()
+            .collect();
+
+        if let Some(processed_to) = self.mc_collator.primary_working_state.as_ref().map(|ws| {
+            ws.reader_state
+                .get_updated_processed_upto()
+                .get_min_internals_processed_to_by_shards()
+        }) {
+            res.insert(ShardIdent::MASTERCHAIN, processed_to);
+        }
+
+        res
     }
 
     fn import_anchor_with_messages(&mut self, messages: Vec<TestExternalMessage>) {
@@ -506,6 +545,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         msgs_factory: &mut TestMessageFactory<V, F>,
         mc_gen_lt: Lt,
         mc_top_shards_blocks_info: Vec<(ShardIdent, BlockSeqno, Lt)>,
+        all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+        is_first_block_after_prev_master: bool,
     ) -> Result<TestCollateResult>
     where
         F: Fn(IntMsgInfo, Cell) -> V,
@@ -541,8 +582,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
                 reader_state,
                 anchors_cache,
-                cumulative_stats_ranges: Default::default(),
-                is_first_block_after_prev_master: true,
+                all_shards_processed_to: all_shards_processed_to.clone(),
+                is_first_block_after_prev_master,
             },
             self.primary_mq_adapter.clone(),
         )?;
@@ -562,7 +603,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts,
                 reader_state: secondary_reader_state,
                 anchors_cache: secondary_anchors_cache,
-                cumulative_stats_ranges: Default::default(),
+                all_shards_processed_to,
                 is_first_block_after_prev_master: true,
             },
             self.secondary_mq_adapter.clone(),
