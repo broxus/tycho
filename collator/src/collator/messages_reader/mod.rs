@@ -67,8 +67,10 @@ pub(super) struct MessagesReader<V: InternalMessageValue> {
     externals_reader: ExternalsReader,
     internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
 
-    readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
+    /// Cumulative queue stats
     internal_queue_statistics: CumulativeStatistics,
+
+    readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
 
 #[derive(Default)]
@@ -474,16 +476,18 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             max_messages,
         );
 
+        // add new diff stats to cumulative stats
         self.internal_queue_statistics.add(
             self.for_shard_id,
             *queue_diff_msgs_stats.max_message(),
             queue_diff_msgs_stats.total_statistics(),
         );
 
-        if let Some(processed_to) = queue_diff_with_msgs.processed_to.get(&self.for_shard_id) {
-            self.internal_queue_statistics
-                .remove_until(self.for_shard_id, processed_to);
-        }
+        // reduce stats of processed diffs
+        self.internal_queue_statistics.handle_processed_to_update(
+            self.for_shard_id,
+            queue_diff_with_msgs.processed_to.clone(),
+        );
 
         // reset queue diff partition router
         // according to actual aggregated stats
