@@ -112,5 +112,4 @@ where
     fn on_message(&self, _: ServiceRequest) -> Self::OnMessageFuture {
         futures_util::future::ready(())
     }
-
 }
