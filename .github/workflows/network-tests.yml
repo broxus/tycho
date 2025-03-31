@@ -13,10 +13,11 @@ env:
   CARGO_TERM_COLOR: always
   CC: /usr/bin/clang
   CXX: /usr/bin/clang++
+  TYCHO_BUILD_PROFILE: release_check
 
 jobs:
   pre-build:
-    name: Pre-build Project Cache
+    name: Pre-build Project Cache (Release Check)
     runs-on: [self-hosted, linux]
     if: github.event_name == 'merge_group'
     steps:
@@ -28,14 +29,11 @@ jobs:
         with:
           setup-cache: true
 
-      - name: Pre-build Project (dev and Release Check)
+      - name: Pre-build Project (Release Check)
         shell: bash
         run: |
-          echo "Building dev profile..."
-          just build
-
           echo "Building release_check profile..."
-          env TYCHO_BUILD_PROFILE=release_check just build
+          just build
 
   # This job depends on pre-build, so it also effectively only runs on merge_group
   network-tests:
@@ -52,22 +50,14 @@ jobs:
         include:
           - test_name: destroyable
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
-            profile: dev
           - test_name: ping-pong
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
-            profile: dev
           - test_name: one-to-many-internal-messages
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
-            profile: release_check
           - test_name: fq-deploy
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-fq:latest
-            profile: release_check
           - test_name: nft-index
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-nft-index:latest
-            profile: dev
-
-    env:
-      TYCHO_BUILD_PROFILE: ${{ matrix.profile }}
 
     steps:
       - name: Checkout code
