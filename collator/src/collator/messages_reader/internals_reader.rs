@@ -358,7 +358,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         let msgs_stats = self
             .mq_adapter
             .get_statistics(&vec![self.partition_id].into_iter().collect(), ranges)?;
-        let remaning_msgs_stats = match fully_read {
+        let remaining_msgs_stats = match fully_read {
             true => QueueStatistics::default(),
             false => {
                 let mut remaning_msgs_stats = msgs_stats.clone();
@@ -375,7 +375,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         };
 
         range_reader_state.msgs_stats = Some(msgs_stats);
-        range_reader_state.remaning_msgs_stats = Some(remaning_msgs_stats);
+        range_reader_state.remaning_msgs_stats = Some(remaining_msgs_stats);
 
         Ok(())
     }
@@ -939,7 +939,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
 
             let iterator =
                 self.mq_adapter
-                    .create_iterator(self.for_shard_id, self.partition_id, &ranges)?;
+                    .create_iterator(self.for_shard_id, self.partition_id, ranges)?;
 
             self.iterator_opt = Some(iterator);
         }
