@@ -230,12 +230,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         };
 
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
-
-        new_messages.init_partition_router(
-            1,
-            &cumulative_statistics.result(),
-            cx.msgs_exec_params.par_0_int_msgs_count_limit as u64,
-        );
+        if let Some(partition_stats) = cumulative_statistics.result().get(&1) {
+            new_messages.init_partition_router(1, partition_stats);
+        }
 
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
@@ -477,10 +474,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         );
 
         // add new diff stats to cumulative stats
-        self.internal_queue_statistics.add(
+        self.internal_queue_statistics.add_diff_stats(
             self.for_shard_id,
             *queue_diff_msgs_stats.max_message(),
-            queue_diff_msgs_stats.total_statistics(),
+            queue_diff_msgs_stats,
         );
 
         // reduce stats of processed diffs
@@ -494,7 +491,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         let moved_from_par_0_accounts = Self::reset_partition_router_by_stats(
             &self.msgs_exec_params,
             &mut queue_diff_with_msgs.partition_router,
-            &self.internal_queue_statistics.result(),
+            self.internal_queue_statistics.get_aggregated_result(),
             self.for_shard_id,
             diffs_info,
         )?;
@@ -558,20 +555,20 @@ impl<V: InternalMessageValue> MessagesReader<V> {
     pub fn reset_partition_router_by_stats(
         msgs_exec_params: &MsgsExecutionParams,
         partition_router: &mut PartitionRouter,
-        aggregated_stats: &QueueStatistics,
+        aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
         diffs_info: &FastHashMap<ShardIdent, (PartitionRouter, DiffStatistics)>,
     ) -> Result<FastHashSet<HashBytes>> {
         let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
 
-        for (dest_int_address, msgs_count) in aggregated_stats.statistics() {
-            let existing_partition = partition_router.get_partition(None, dest_int_address);
+        for (dest_int_address, msgs_count) in aggregated_stats {
+            let existing_partition = partition_router.get_partition(None, &dest_int_address);
             if existing_partition != 0 {
                 continue;
             }
 
-            if for_shard_id.contains_address(dest_int_address) {
+            if for_shard_id.contains_address(&dest_int_address) {
                 tracing::trace!(target: tracing_targets::COLLATOR,
                     "check address {} for partition 0 because it is in current shard",
                     dest_int_address,
@@ -579,12 +576,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
                 // if we have account for current shard then check if we need to move it to partition 1
                 // if we have less than limit then keep it in partition 0
-                if *msgs_count > par_0_msgs_count_limit {
+                if msgs_count > par_0_msgs_count_limit {
                     tracing::trace!(target: tracing_targets::COLLATOR,
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, msgs_count,
                     );
-                    partition_router.insert_dst(dest_int_address, 1)?;
+                    partition_router.insert_dst(&dest_int_address, 1)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             } else {
@@ -595,7 +592,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 // if we have account for another shard then take info from that shard
                 let acc_shard_diff_info = diffs_info
                     .iter()
-                    .find(|(shard_id, _)| shard_id.contains_address(dest_int_address))
+                    .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
                     .map(|(_, diff)| diff.clone());
 
                 // try to get remote partition from diff
@@ -614,7 +611,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                             dest_int_address,
                         );
                         // getting remote shard partition from diff
-                        let remote_shard_partition = router.get_partition(None, dest_int_address);
+                        let remote_shard_partition = router.get_partition(None, &dest_int_address);
 
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             "remote shard partition for address {} is {}",
@@ -627,7 +624,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                                 dest_int_address, remote_shard_partition, remote_shard_partition,
                             );
                             partition_router
-                                .insert_dst(dest_int_address, remote_shard_partition)?;
+                                .insert_dst(&dest_int_address, remote_shard_partition)?;
                             continue;
                         }
 
@@ -645,11 +642,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                                     "use partition 0 stats for address {} because we have partition 0 stats in diff",
                                     dest_int_address,
                                 );
-                                partition.get(dest_int_address).copied().unwrap_or(0)
+                                partition.get(&dest_int_address).copied().unwrap_or(0)
                             }
                         };
 
-                        &(msgs_count + remote_msgs_count)
+                        msgs_count + remote_msgs_count
                     }
                 };
 
@@ -657,12 +654,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     "total messages for address {} is {}",
                     dest_int_address, total_msgs,
                 );
-                if *total_msgs > par_0_msgs_count_limit {
+                if total_msgs > par_0_msgs_count_limit {
                     tracing::trace!(target: tracing_targets::COLLATOR,
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, total_msgs,
                     );
-                    partition_router.insert_dst(dest_int_address, 1)?;
+                    partition_router.insert_dst(&dest_int_address, 1)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             }
