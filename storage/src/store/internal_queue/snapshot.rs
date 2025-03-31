@@ -237,7 +237,7 @@ impl InternalQueueSnapshot {
             let to_key = StatKey {
                 shard_ident: *shard_ident,
                 partition,
-                max_message: to.next_value(),
+                max_message: *to,
                 dest: RouterAddr::MAX,
             };
 
