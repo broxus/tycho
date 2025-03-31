@@ -163,6 +163,7 @@ impl MempoolConfigBuilder {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MempoolNodeConfig {
     /// `true` to truncate hashes, signatures and use non-standard format for large structs
     /// that may be more readable
@@ -175,6 +176,12 @@ pub struct MempoolNodeConfig {
     /// that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
     /// to extend [`Dag`](crate::engine::ConsensusConfigExt) without downloading points
     pub cache_future_broadcasts_rounds: u16,
+
+    /// [`Tokio default upper limit`](tokio::runtime::Builder::max_blocking_threads) is 512.
+    ///
+    /// [`Tycho tread pool config`](tycho_util::cli::config::ThreadPoolConfig)
+    /// does not have a corresponding parameter and does not change tokio's default value.
+    pub max_blocking_tasks: u16,
 }
 
 impl Default for MempoolNodeConfig {
@@ -183,6 +190,7 @@ impl Default for MempoolNodeConfig {
             log_truncate_long_values: true,
             clean_db_period_rounds: NonZeroU16::new(105).unwrap(),
             cache_future_broadcasts_rounds: 105,
+            max_blocking_tasks: 300,
         }
     }
 }

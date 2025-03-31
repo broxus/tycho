@@ -69,17 +69,19 @@ impl DagPointFuture {
         key_pair: Option<&Arc<KeyPair>>,
         round_ctx: &RoundCtx,
     ) -> Self {
+        let point = point.clone();
+        let state = state.clone();
+        let store = store.clone();
+        let key_pair = key_pair.cloned();
+        let task_ctx = round_ctx.task();
+        let round_ctx = round_ctx.clone();
         let cert = Cert::default();
+        let cert_clone = cert.clone();
 
-        let task = round_ctx.task().spawn_blocking({
-            let point = point.clone();
-            let state = state.clone();
-            let store = store.clone();
-            let key_pair = key_pair.cloned();
-            let round_ctx = round_ctx.clone();
-            let cert = cert.clone();
-
-            move || {
+        #[allow(clippy::async_yields_async, reason = "spawn blocking task in async")]
+        let nested = task_ctx.spawn(async move {
+            let ctx = round_ctx.clone();
+            let full_fn = move || {
                 let _span = round_ctx.span().enter();
 
                 let mut status = PointStatusValidated::default();
@@ -107,12 +109,13 @@ impl DagPointFuture {
                     signed.as_ref().map(|r| r.as_ref().map(|s| s.alt()))
                 );
                 dag_point
-            }
+            };
+            ctx.task().spawn_blocking_limited(full_fn).await
         });
 
         Self(DagPointFutureType::Validate {
-            task: Shared::new(task.boxed()),
-            cert,
+            task: Shared::new((async move { nested.await?.await }).boxed()),
+            cert: cert_clone,
         })
     }
 
@@ -123,17 +126,19 @@ impl DagPointFuture {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
+        let point = point.clone();
+        let reason = reason.clone();
+        let state = state.clone();
+        let store = store.clone();
+        let task_ctx = round_ctx.task();
+        let round_ctx = round_ctx.clone();
         let cert = Cert::default();
+        let cert_clone = cert.clone();
 
-        let task = round_ctx.task().spawn_blocking({
-            let point = point.clone();
-            let reason = reason.clone();
-            let state = state.clone();
-            let store = store.clone();
-            let round_ctx = round_ctx.clone();
-            let cert = cert.clone();
-
-            move || {
+        #[allow(clippy::async_yields_async, reason = "spawn blocking task in async")]
+        let nested = task_ctx.spawn(async move {
+            let ctx = round_ctx.clone();
+            let full_fn = move || {
                 let _span = round_ctx.span().enter();
                 let id = point.id();
 
@@ -149,12 +154,13 @@ impl DagPointFuture {
 
                 state.resolve(&dag_point);
                 dag_point
-            }
+            };
+            ctx.task().spawn_blocking_limited(full_fn).await
         });
 
         Self(DagPointFutureType::Validate {
-            task: Shared::new(task.boxed()),
-            cert,
+            task: Shared::new((async move { nested.await?.await }).boxed()),
+            cert: cert_clone,
         })
     }
 
@@ -179,11 +185,15 @@ impl DagPointFuture {
         let nested = round_ctx.task().spawn(async move {
             let point_id = point.id();
             let prev_proof = point.prev_proof();
-            let stored_fut = validate_ctx.task().spawn_blocking({
+
+            let store_fn = {
                 let store = store.clone();
                 let ctx = validate_ctx.clone();
-                move || store.insert_point(&point, PointStatusStoredRef::Exists, ctx.conf())
-            });
+                let status_ref = PointStatusStoredRef::Exists;
+                move || store.insert_point(&point, status_ref, ctx.conf())
+            };
+            let store_task = validate_ctx.task().spawn_blocking_limited(store_fn).await;
+
             let validated = Verifier::validate(
                 info.clone(),
                 prev_proof,
@@ -194,14 +204,20 @@ impl DagPointFuture {
                 validate_ctx.clone(),
             )
             .await?;
-            stored_fut.await?;
+
+            store_task.await?;
+
             let (dag_point, status) =
                 Self::acquire_validated(&state, info, cert, validated, &validate_ctx);
-            Ok(validate_ctx.task().spawn_blocking(move || {
+
+            let store_fn = move || {
                 store.set_status(point_id.round, &point_id.digest, status.as_ref());
                 state.resolve(&dag_point);
                 dag_point
-            }))
+            };
+            let store_task = validate_ctx.task().spawn_blocking_limited(store_fn).await;
+
+            Ok(store_task)
         });
 
         DagPointFuture(DagPointFutureType::Validate {
@@ -256,11 +272,15 @@ impl DagPointFuture {
                 Some(DownloadResult::Verified(point)) => {
                     let info = PointInfo::from(&point);
                     let prev_proof = point.prev_proof();
-                    let storage_task = into_round_ctx.task().spawn_blocking({
+
+                    let store_fn = {
                         let store = store.clone();
                         let ctx = into_round_ctx.clone();
-                        move || store.insert_point(&point, PointStatusStoredRef::Exists, ctx.conf())
-                    });
+                        let status_ref = PointStatusStoredRef::Exists;
+                        move || store.insert_point(&point, status_ref, ctx.conf())
+                    };
+                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+
                     let validate_ctx = ValidateCtx::new(&into_round_ctx, &info);
                     let validated = Verifier::validate(
                         info.clone(),
@@ -272,32 +292,39 @@ impl DagPointFuture {
                         validate_ctx,
                     )
                     .await?;
-                    storage_task.await?;
+
+                    store_task.await?;
+
                     let (dag_point, status) =
                         Self::acquire_validated(&state, info, cert, validated, &into_round_ctx);
                     let ctx = into_round_ctx.clone();
-                    Ok(into_round_ctx.task().spawn_blocking(move || {
+
+                    let store_fn = move || {
                         let _guard = ctx.span().enter();
                         store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
                         state.resolve(&dag_point);
                         dag_point
-                    }))
+                    };
+                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+
+                    Ok(store_task)
                 }
                 Some(DownloadResult::IllFormed(point, reason)) => {
                     let mut status = PointStatusIllFormed::default();
                     state.acquire(&point_id, &mut status);
                     let dag_point = DagPoint::new_ill_formed(point.id(), cert, &status, reason);
                     let ctx = into_round_ctx.clone();
-                    Ok(into_round_ctx.task().spawn_blocking(move || {
+
+                    let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        store.insert_point(
-                            &point,
-                            PointStatusStoredRef::IllFormed(&status),
-                            ctx.conf(),
-                        );
+                        let status_ref = PointStatusStoredRef::IllFormed(&status);
+                        store.insert_point(&point, status_ref, ctx.conf());
                         state.resolve(&dag_point);
                         dag_point
-                    }))
+                    };
+                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+
+                    Ok(store_task)
                 }
                 None => {
                     let mut status = PointStatusNotFound {
@@ -309,16 +336,17 @@ impl DagPointFuture {
                     let dag_point =
                         DagPoint::new_not_found(point_id.round, &point_id.digest, cert, &status);
                     let ctx = into_round_ctx.clone();
-                    Ok(into_round_ctx.task().spawn_blocking(move || {
+
+                    let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        store.set_status(
-                            point_id.round,
-                            &point_id.digest,
-                            PointStatusStoredRef::NotFound(&status),
-                        );
+                        let status_ref = PointStatusStoredRef::NotFound(&status);
+                        store.set_status(point_id.round, &point_id.digest, status_ref);
                         state.resolve(&dag_point);
                         dag_point
-                    }))
+                    };
+                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+
+                    Ok(store_task)
                 }
             }
         });
@@ -422,12 +450,16 @@ impl DagPointFuture {
                     let (dag_point, status) =
                         Self::acquire_validated(&state, verified, cert, validated?, &round_ctx);
                     let ctx = round_ctx.clone();
-                    Ok(round_ctx.task().spawn_blocking(move || {
+
+                    let store_fn = move || {
                         let _guard = ctx.span().enter();
                         store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
                         state.resolve(&dag_point);
                         dag_point
-                    }))
+                    };
+                    let store_task = round_ctx.task().spawn_blocking_limited(store_fn).await;
+
+                    Ok(store_task)
                 };
                 let lazy = (async move { ctx.task().spawn(future).await??.await }).boxed();
                 DagPointFuture(DagPointFutureType::Validate {
