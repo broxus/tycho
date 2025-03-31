@@ -91,7 +91,7 @@ impl InternalQueueTransaction {
                     self.batch
                         .put_cf(&commit_pointers_cf, key, new_val.to_vec());
                 }
-                Ordering::Equal => {} // Ничего не делаем, если указатели равны
+                Ordering::Equal => {}
             }
         }
 

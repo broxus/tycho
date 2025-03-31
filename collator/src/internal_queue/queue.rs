@@ -92,14 +92,15 @@ where
     ) -> Result<()>;
     /// remove all data in uncommitted zone storage
     fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
-    /// Returns the diffs tail len for the given shard
+    /// Get diffs tail len from uncommitted state and committed state
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
     fn load_diff_statistics(
         &self,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
-    ) -> Result<AccountStatistics>;
+        partition: QueuePartitionIdx,
+        range: &QueueShardRange,
+        result: &mut AccountStatistics,
+    ) -> Result<()>;
     /// Get diff for the given block from committed and uncommitted zones
     fn get_diff_info(
         &self,
@@ -111,6 +112,7 @@ where
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
     /// Get last committed mc block id
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Load separated diff statistics for the specified partitions and range
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
@@ -402,12 +404,11 @@ where
 
     fn load_diff_statistics(
         &self,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
-    ) -> Result<AccountStatistics> {
-        let result = self.state.load_diff_statistics(partitions, ranges)?;
-
-        Ok(result)
+        partition: QueuePartitionIdx,
+        range: &QueueShardRange,
+        result: &mut AccountStatistics,
+    ) -> Result<()> {
+        self.state.load_diff_statistics(partition, range, result)
     }
 
     fn load_separated_diff_statistics(
