@@ -231,7 +231,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
         if let Some(partition_stats) = cumulative_statistics.result().get(&1) {
-            new_messages.init_partition_router(1, partition_stats);
+            new_messages.init_partition_router(1, partition_stats.statistics());
         }
 
         let mut res = Self {

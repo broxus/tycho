@@ -19,7 +19,7 @@ use crate::collator::messages_buffer::{
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::{
-    InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    AccountStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
 };
 use crate::tracing_targets;
 use crate::types::ProcessedTo;
@@ -54,9 +54,9 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
-        cumulative_partition_stats: &QueueStatistics,
+        cumulative_partition_stats: &AccountStatistics,
     ) {
-        for account_addr in cumulative_partition_stats.statistics().keys() {
+        for account_addr in cumulative_partition_stats.keys() {
             self.partition_router
                 .insert_dst(account_addr, partition_id)
                 .unwrap();
