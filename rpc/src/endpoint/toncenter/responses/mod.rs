@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::cell::{Cell, CellBuilder, CellFamily, HashBytes};
 use everscale_types::models::{AccountStatus, MsgInfo, StorageInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tycho_vm::{SafeRc, Stack, StackValue, StackValueType};
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TonCenterResponse<T> {
@@ -22,7 +23,7 @@ pub struct AddressInformation {
     pub code: Option<String>,
     pub data: Option<String>,
     pub last_transaction_id: TransactionId,
-    pub block_id: BlockId,
+    pub block_id: Option<BlockId>,
     pub frozen_hash: Option<String>,
     pub sync_utime: i64,
     #[serde(rename = "@extra")]
@@ -34,9 +35,9 @@ pub struct AddressInformation {
 pub struct BlockId {
     #[serde(rename = "@type")]
     pub type_field: String,
-    pub workchain: i64,
+    pub workchain: i32,
     pub shard: String,
-    pub seqno: i64,
+    pub seqno: u32,
     pub root_hash: String,
     pub file_hash: String,
 }
@@ -270,6 +271,15 @@ pub struct ExecGetMethodResponse {
     pub decoded: Option<String>,
 }
 
+pub fn status_to_string(account_status: AccountStatus) -> String {
+    match account_status {
+        AccountStatus::Active => "active".to_string(),
+        AccountStatus::Frozen => "frozen".to_string(),
+        AccountStatus::Uninit => "uninitialized".to_string(),
+        AccountStatus::NotExists => "not_exists".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "lowercase")]
@@ -279,13 +289,57 @@ pub enum TvmStackRecord {
     Num { num: String },
     Null,
     Nan,
+    Tuple { tuple: Vec<TvmStackRecord> },
 }
 
-pub fn status_to_string(account_status: AccountStatus) -> String {
-    match account_status {
-        AccountStatus::Active => "active".to_string(),
-        AccountStatus::Frozen => "frozen".to_string(),
-        AccountStatus::Uninit => "uninitialized".to_string(),
-        AccountStatus::NotExists => "not_exists".to_string(),
+pub fn parse_tvm_stack(stack: SafeRc<Stack>) -> anyhow::Result<Vec<TvmStackRecord>> {
+    let mut stack_response = vec![];
+    for arg in stack.items.iter() {
+        stack_response.push(parse_tvm_stack_value(arg)?);
     }
+    Ok(stack_response)
+}
+
+fn parse_tvm_stack_value(arg: &SafeRc<dyn StackValue>) -> anyhow::Result<TvmStackRecord> {
+    if arg.ty() == StackValueType::Null {
+        return Ok(TvmStackRecord::Nan);
+    }
+
+    if arg.ty() == StackValueType::Int {
+        let v = arg.as_int().unwrap();
+        return Ok(TvmStackRecord::Num { num: v.to_string() });
+    }
+
+    if arg.ty() == StackValueType::Cell {
+        let cell = arg.as_cell().unwrap();
+        return Ok(TvmStackRecord::Cell {
+            cell: Boc::encode_hex(cell),
+        });
+    }
+
+    if arg.ty() == StackValueType::Slice {
+        let slice = arg.as_cell_slice().unwrap();
+        let cell = CellBuilder::build_from(slice.apply())?;
+        return Ok(TvmStackRecord::Slice {
+            slice: Boc::encode_base64(cell),
+        });
+    }
+    if arg.ty() == StackValueType::Cont {
+        let mut builder = CellBuilder::new();
+        let cx = Cell::empty_context();
+        arg.store_as_stack_value(&mut builder, cx)?;
+        let cell = builder.build()?;
+        return Ok(TvmStackRecord::Slice {
+            slice: Boc::encode_base64(cell),
+        });
+    }
+
+    if arg.ty() == StackValueType::Tuple {
+        let mut tuple = vec![];
+        for arg in arg.as_tuple().unwrap() {
+            tuple.push(parse_tvm_stack_value(arg)?);
+        }
+        return Ok(TvmStackRecord::Tuple { tuple });
+    }
+    Ok(TvmStackRecord::Null)
 }

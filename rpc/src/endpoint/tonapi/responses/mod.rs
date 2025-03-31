@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::cell::{Cell, CellBuilder, CellFamily, HashBytes};
 use everscale_types::models::{
     AccountStatus, AccountStatusChange, ActionPhase, BouncePhase, ComputePhaseSkipReason,
     CreditPhase, ExecutedComputePhase, MsgInfo, MsgType, SkippedComputePhase, StorageInfo,
     StoragePhase,
 };
 use serde::{Deserialize, Serialize};
+use tycho_vm::{SafeRc, Stack, StackValue, StackValueType};
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetAccountResponse {
@@ -94,7 +95,7 @@ pub struct TransactionResponse {
     pub state_update_new: String,
     pub in_msg: Option<MsgResponse>,
     pub out_msgs: Vec<MsgResponse>,
-    pub block: String,
+    pub block: Option<String>,
     pub prev_trans_hash: Option<String>,
     pub prev_trans_lt: Option<u64>,
     pub compute_phase: Option<ComputePhaseResponse>,
@@ -384,6 +385,59 @@ pub enum TvmStackRecord {
     Num { num: String },
     Null,
     Nan,
+    Tuple { tuple: Vec<TvmStackRecord> },
+}
+
+pub fn parse_tvm_stack(stack: SafeRc<Stack>) -> anyhow::Result<Vec<TvmStackRecord>> {
+    let mut stack_response = vec![];
+    for arg in stack.items.iter() {
+        stack_response.push(parse_tvm_stack_value(arg)?);
+    }
+    Ok(stack_response)
+}
+
+fn parse_tvm_stack_value(arg: &SafeRc<dyn StackValue>) -> anyhow::Result<TvmStackRecord> {
+    if arg.ty() == StackValueType::Null {
+        return Ok(TvmStackRecord::Nan);
+    }
+
+    if arg.ty() == StackValueType::Int {
+        let v = arg.as_int().unwrap();
+        return Ok(TvmStackRecord::Num { num: v.to_string() });
+    }
+
+    if arg.ty() == StackValueType::Cell {
+        let cell = arg.as_cell().unwrap();
+        return Ok(TvmStackRecord::Cell {
+            cell: Boc::encode_hex(cell),
+        });
+    }
+
+    if arg.ty() == StackValueType::Slice {
+        let slice = arg.as_cell_slice().unwrap();
+        let cell = CellBuilder::build_from(slice.apply())?;
+        return Ok(TvmStackRecord::Slice {
+            slice: Boc::encode_base64(cell),
+        });
+    }
+    if arg.ty() == StackValueType::Cont {
+        let mut builder = CellBuilder::new();
+        let cx = Cell::empty_context();
+        arg.store_as_stack_value(&mut builder, cx)?;
+        let cell = builder.build()?;
+        return Ok(TvmStackRecord::Slice {
+            slice: Boc::encode_base64(cell),
+        });
+    }
+
+    if arg.ty() == StackValueType::Tuple {
+        let mut tuple = vec![];
+        for arg in arg.as_tuple().unwrap() {
+            tuple.push(parse_tvm_stack_value(arg)?);
+        }
+        return Ok(TvmStackRecord::Tuple { tuple });
+    }
+    Ok(TvmStackRecord::Null)
 }
 
 pub fn status_to_string(account_status: AccountStatus) -> String {

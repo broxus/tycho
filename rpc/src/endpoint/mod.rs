@@ -16,7 +16,6 @@ mod jrpc;
 mod proto;
 mod tonapi;
 mod toncenter;
-mod utils;
 
 pub struct RpcEndpoint {
     listener: TcpListener,

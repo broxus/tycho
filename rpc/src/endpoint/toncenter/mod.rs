@@ -6,18 +6,18 @@ use axum::routing::{get, post};
 use axum::Json;
 use everscale_types::boc::Boc;
 use everscale_types::cell::CellBuilder;
+use everscale_types::crc::crc_16;
 use everscale_types::models::{
     AccountState, IntAddr, MsgInfo, OwnedMessage, StateInit, StdAddr, Transaction,
 };
 use num_bigint::BigInt;
 use requests::{AddressInformationQuery, ExecMethodArgs, GetTransactionsQuery, SendMessageRequest};
 use responses::{
-    status_to_string, AddressInformation, AddressResponse, BlockId, TonCenterResponse,
-    TransactionId, TransactionResponse, TransactionsResponse, TvmStackRecord,
+    parse_tvm_stack, status_to_string, AddressInformation, AddressResponse, BlockId,
+    TonCenterResponse, TransactionId, TransactionResponse, TransactionsResponse, TvmStackRecord,
 };
 use tycho_vm::{GasParams, NaN, OwnedCellSlice, RcStackValue, SmcInfoBase, VmState};
 
-use super::utils::crc_16;
 use crate::endpoint::error::{Error, Result};
 use crate::state::LoadedAccountState;
 use crate::RpcState;
@@ -35,9 +35,9 @@ pub fn router() -> axum::Router<RpcState> {
 
 async fn get_address_information(
     Query(address): Query<AddressInformationQuery>,
-    State(state): State<RpcState>,
+    State(rpc_state): State<RpcState>,
 ) -> Result<Json<TonCenterResponse<AddressInformation>>> {
-    let Ok(item) = state.get_account_state(&address.address) else {
+    let Ok(item) = rpc_state.get_account_state(&address.address) else {
         return Ok(Json(TonCenterResponse {
             ok: false,
             result: None,
@@ -70,6 +70,27 @@ async fn get_address_information(
                         }
                     };
 
+                    let list = rpc_state.get_transactions(&address.address, None)?;
+
+                    let last_transaction_hash = list
+                        .map(|item| Boc::decode(item).ok().map(|root| *root.repr_hash()))
+                        .last()
+                        .flatten();
+
+                    let block_id = if let Some(hash) = last_transaction_hash {
+                        let block_id = rpc_state.get_transaction_block_id(&hash)?.unwrap();
+                        Some(BlockId {
+                            type_field: "ton.blockIdExt".to_string(),
+                            workchain: block_id.shard.workchain(),
+                            shard: block_id.shard.prefix().to_string(),
+                            seqno: block_id.seqno,
+                            root_hash: block_id.root_hash.to_string(),
+                            file_hash: block_id.file_hash.to_string(),
+                        })
+                    } else {
+                        None
+                    };
+
                     Ok(Json(TonCenterResponse {
                         ok: true,
                         result: Some(AddressInformation {
@@ -82,16 +103,7 @@ async fn get_address_information(
                                 lt: loaded.last_trans_lt.to_string(),
                                 hash: Some(state.last_trans_hash.to_string()),
                             },
-                            block_id: BlockId {
-                                type_field: "ton.blockIdExt".to_string(),
-                                workchain: 0, // TODO: fix workchain
-                                shard: "-9223372036854775808".to_string(), /* TODO: fix block_id shard */
-                                seqno: 44906584, // TODO: fix block_id seqno
-                                root_hash: "tgbt6ZqC1bYk4m9yMYQDHLUeNrmWRNtb5r/mhHoB9RA="
-                                    .to_string(), // TODO: fix block_id root_hash
-                                file_hash: "4vkWnBWGIHiDy1Z7W2m+zcd/1HvZkGB1lCthVs07woM="
-                                    .to_string(), // TODO: fix block_id file_hash
-                            },
+                            block_id,
                             frozen_hash,
                             sync_utime: 0, // TODO: fix sync utime
                             extra: "1739453311.547493:11:0.8618085632029536".to_string(), /* TODO: fix extra */
@@ -192,7 +204,7 @@ async fn get_blockchain_account_transactions(
 async fn exec_get_method_for_blockchain_account(
     Query(args): Query<ExecMethodArgs>,
     State(state): State<RpcState>,
-) -> Result<Json<TonCenterResponse<String>>> {
+) -> Result<Json<TonCenterResponse<Vec<TvmStackRecord>>>> {
     let item = state.get_account_state(&args.address)?;
 
     match &item {
@@ -220,72 +232,60 @@ async fn exec_get_method_for_blockchain_account(
                             let method_id = crc as u32 | 0x10000;
 
                             let mut stack = vec![RcStackValue::new_dyn_value(
-                                OwnedCellSlice::from(CellBuilder::build_from(&args.address)?),
+                                OwnedCellSlice::new_allow_exotic(CellBuilder::build_from(
+                                    &args.address,
+                                )?),
                             )];
-
-                            let mut stack_response = vec![TvmStackRecord::Slice {
-                                slice: args.address.to_string(),
-                            }];
 
                             for args_stack in args.stack {
                                 for arg in args_stack {
                                     // TODO: check args
                                     if arg == "NaN" {
                                         stack.push(RcStackValue::new_dyn_value(NaN));
-                                        stack_response.push(TvmStackRecord::Nan);
                                         continue;
                                     }
 
                                     if arg == "Null" {
                                         stack.push(RcStackValue::new_dyn_value(()));
-                                        stack_response.push(TvmStackRecord::Null);
                                         continue;
                                     }
 
                                     if let Ok(v) = BigInt::from_str(&arg) {
                                         stack.push(RcStackValue::new_dyn_value(v));
-                                        stack_response.push(TvmStackRecord::Num { num: arg });
                                         continue;
                                     }
 
                                     if let Ok(v) = hex::decode(&arg) {
                                         if let Some(v) = BigInt::parse_bytes(&v, 16) {
                                             stack.push(RcStackValue::new_dyn_value(v));
-                                            stack_response.push(TvmStackRecord::Num { num: arg });
                                             continue;
                                         }
                                     }
 
                                     if let Ok(cell) = Boc::decode_base64(&arg) {
                                         stack.push(RcStackValue::new_dyn_value(
-                                            OwnedCellSlice::from(cell),
+                                            OwnedCellSlice::new_allow_exotic(cell),
                                         ));
-                                        stack_response.push(TvmStackRecord::Cell { cell: arg });
                                         continue;
                                     }
                                     if let Ok(cell) = Boc::decode(&arg) {
                                         stack.push(RcStackValue::new_dyn_value(
-                                            OwnedCellSlice::from(cell),
+                                            OwnedCellSlice::new_allow_exotic(cell),
                                         ));
-                                        stack_response.push(TvmStackRecord::Slice { slice: arg });
                                         continue;
                                     }
                                     if let Ok(address) = IntAddr::from_str(&arg) {
                                         stack.push(RcStackValue::new_dyn_value(
-                                            OwnedCellSlice::from(CellBuilder::build_from(
-                                                &address,
-                                            )?),
+                                            OwnedCellSlice::new_allow_exotic(
+                                                CellBuilder::build_from(&address)?,
+                                            ),
                                         ));
-                                        stack_response.push(TvmStackRecord::Slice { slice: arg });
                                         continue;
                                     }
                                 }
                             }
 
                             stack.push(RcStackValue::new_dyn_value(BigInt::from(method_id)));
-                            stack_response.push(TvmStackRecord::Num {
-                                num: method_id.to_string(),
-                            });
 
                             let mut vm_state = VmState::builder()
                                 .with_smc_info(smc_info)
@@ -297,10 +297,13 @@ async fn exec_get_method_for_blockchain_account(
 
                             let exit_code = vm_state.run();
                             let success = exit_code == 0;
+                            let stack = vm_state.stack;
+
+                            let result = parse_tvm_stack(stack).ok();
 
                             Ok(Json(TonCenterResponse {
                                 ok: success,
-                                result: None, // TODO: fill with correct result
+                                result,
                                 error: None,
                                 code: None,
                             }))

@@ -5,6 +5,7 @@ use axum::routing::{get, post};
 use axum::Json;
 use everscale_types::boc::Boc;
 use everscale_types::cell::CellBuilder;
+use everscale_types::crc::crc_16;
 use everscale_types::models::{
     AccountState, ComputePhase, IntAddr, MsgInfo, OwnedMessage, StateInit, StdAddr, Transaction,
     TxInfo,
@@ -14,11 +15,10 @@ use tycho_vm::{GasParams, NaN, OwnedCellSlice, RcStackValue, SmcInfoBase, VmStat
 
 use super::requests::{ExecMethodArgs, Pagination, SendMessageRequest};
 use super::responses::{
-    bounce_phase_to_string, status_to_string, AccountResponse, ExecGetMethodResponse,
-    LibraryResponse, TransactionAccountResponse, TransactionResponse, TransactionsResponse,
-    TvmStackRecord,
+    bounce_phase_to_string, parse_tvm_stack, status_to_string, AccountResponse,
+    ExecGetMethodResponse, LibraryResponse, TransactionAccountResponse, TransactionResponse,
+    TransactionsResponse,
 };
-use super::utils::crc_16;
 use crate::endpoint::error::{Error, Result};
 use crate::state::LoadedAccountState;
 use crate::RpcState;
@@ -192,6 +192,8 @@ async fn get_blockchain_account_transactions(
 
             let state_update = t.state_update.load()?;
 
+            let block_id = state.get_transaction_block_id(&hash)?;
+
             Ok(TransactionResponse {
                 hash: hash.to_string(),
                 lt: t.lt,
@@ -213,7 +215,8 @@ async fn get_blockchain_account_transactions(
                 state_update_new: state_update.new.to_string(),
                 in_msg,
                 out_msgs,
-                block: "(-1,4234234,8000000000000000)".to_string(), // TODO: fill with correct block
+                block: block_id
+                    .map(|b| format!("({},{},{})", b.shard.workchain(), b.seqno, b.shard.prefix())),
                 prev_trans_hash: Some(t.prev_trans_hash.to_string()),
                 prev_trans_lt: Some(t.prev_trans_lt),
                 compute_phase,
@@ -259,67 +262,57 @@ async fn exec_get_method_for_blockchain_account(
                             let method_id = crc as u32 | 0x10000;
 
                             let mut stack = vec![RcStackValue::new_dyn_value(
-                                OwnedCellSlice::from(CellBuilder::build_from(&address)?),
+                                OwnedCellSlice::new_allow_exotic(CellBuilder::build_from(
+                                    &address,
+                                )?),
                             )];
-
-                            let mut stack_response = vec![TvmStackRecord::Slice {
-                                slice: address.to_string(),
-                            }];
 
                             for arg in args.args {
                                 if arg == "NaN" {
                                     stack.push(RcStackValue::new_dyn_value(NaN));
-                                    stack_response.push(TvmStackRecord::Nan);
                                     continue;
                                 }
 
                                 if arg == "Null" {
                                     stack.push(RcStackValue::new_dyn_value(()));
-                                    stack_response.push(TvmStackRecord::Null);
                                     continue;
                                 }
 
                                 if let Ok(v) = BigInt::from_str(&arg) {
                                     stack.push(RcStackValue::new_dyn_value(v));
-                                    stack_response.push(TvmStackRecord::Num { num: arg });
                                     continue;
                                 }
 
                                 if let Ok(v) = hex::decode(&arg) {
                                     if let Some(v) = BigInt::parse_bytes(&v, 16) {
                                         stack.push(RcStackValue::new_dyn_value(v));
-                                        stack_response.push(TvmStackRecord::Num { num: arg });
                                         continue;
                                     }
                                 }
 
                                 if let Ok(cell) = Boc::decode_base64(&arg) {
-                                    stack.push(RcStackValue::new_dyn_value(OwnedCellSlice::from(
-                                        cell,
-                                    )));
-                                    stack_response.push(TvmStackRecord::Cell { cell: arg });
+                                    stack.push(RcStackValue::new_dyn_value(
+                                        OwnedCellSlice::new_allow_exotic(cell),
+                                    ));
                                     continue;
                                 }
                                 if let Ok(cell) = Boc::decode(&arg) {
-                                    stack.push(RcStackValue::new_dyn_value(OwnedCellSlice::from(
-                                        cell,
-                                    )));
-                                    stack_response.push(TvmStackRecord::Slice { slice: arg });
+                                    stack.push(RcStackValue::new_dyn_value(
+                                        OwnedCellSlice::new_allow_exotic(cell),
+                                    ));
                                     continue;
                                 }
                                 if let Ok(address) = IntAddr::from_str(&arg) {
-                                    stack.push(RcStackValue::new_dyn_value(OwnedCellSlice::from(
-                                        CellBuilder::build_from(&address)?,
-                                    )));
-                                    stack_response.push(TvmStackRecord::Slice { slice: arg });
+                                    stack.push(RcStackValue::new_dyn_value(
+                                        OwnedCellSlice::new_allow_exotic(CellBuilder::build_from(
+                                            &address,
+                                        )?),
+                                    ));
                                     continue;
                                 }
                             }
 
                             stack.push(RcStackValue::new_dyn_value(BigInt::from(method_id)));
-                            stack_response.push(TvmStackRecord::Num {
-                                num: method_id.to_string(),
-                            });
 
                             let mut vm_state = VmState::builder()
                                 .with_smc_info(smc_info)
@@ -330,12 +323,16 @@ async fn exec_get_method_for_blockchain_account(
                                 .build();
 
                             let exit_code = vm_state.run();
+                            let stack = vm_state.stack;
+
+                            let stack = parse_tvm_stack(stack)?;
+
                             let success = exit_code == 0;
 
                             Ok(Json(ExecGetMethodResponse {
                                 success,
                                 exit_code,
-                                stack: stack_response,
+                                stack,
                                 decoded: None,
                             }))
                         }
