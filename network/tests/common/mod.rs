@@ -100,7 +100,6 @@ impl Service<ServiceRequest> for PingPongService {
     fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
         futures_util::future::ready(())
     }
-
 }
 
 #[derive(Debug, Copy, Clone, TlRead, TlWrite)]

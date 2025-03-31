@@ -139,7 +139,7 @@ impl BuildCommand {
             .arg("-t")
             .arg("tycho-network")
             .arg("-f")
-            .arg(&config.project_root.join("network.Dockerfile"))
+            .arg(config.project_root.join("network.Dockerfile"))
             .arg(&config.project_root)
             .env("DOCKER_BUILDKIT", "1")
             .stdout(std::process::Stdio::inherit())

@@ -238,7 +238,6 @@ impl Service<ServiceRequest> for OverlayService {
         tracing::debug!("failed to deserialize message: {e:?}");
         BoxFutureOrNoop::Noop
     }
-
 }
 
 impl Routable for OverlayService {

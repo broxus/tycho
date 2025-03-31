@@ -480,7 +480,6 @@ impl Service<ServiceRequest> for DhtService {
 
         futures_util::future::ready(())
     }
-
 }
 
 impl Routable for DhtService {
