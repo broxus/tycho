@@ -22,6 +22,9 @@ pub struct PartitionRouter {
 }
 
 pub type AccountStatistics = FastHashMap<IntAddr, u64>;
+pub type StatisticsByPartitions = FastHashMap<QueuePartitionIdx, AccountStatistics>;
+pub type SeparatedStatisticsByPartitions =
+    FastHashMap<QueuePartitionIdx, BTreeMap<QueueKey, AccountStatistics>>;
 
 impl PartitionRouter {
     pub fn new() -> Self {
@@ -344,15 +347,15 @@ pub struct QueueRange {
 
 #[derive(Debug, Default, Clone)]
 pub struct QueueStatistics {
-    statistics: FastHashMap<IntAddr, u64>,
+    statistics: AccountStatistics,
 }
 
 impl QueueStatistics {
-    pub fn with_statistics(statistics: FastHashMap<IntAddr, u64>) -> Self {
+    pub fn with_statistics(statistics: AccountStatistics) -> Self {
         Self { statistics }
     }
 
-    pub fn statistics(&self) -> &FastHashMap<IntAddr, u64> {
+    pub fn statistics(&self) -> &AccountStatistics {
         &self.statistics
     }
 
@@ -431,7 +434,7 @@ pub struct DiffStatistics {
 }
 
 impl DiffStatistics {
-    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartitionIdx, &FastHashMap<IntAddr, u64>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&QueuePartitionIdx, &AccountStatistics)> {
         self.inner.statistics.iter()
     }
 
@@ -447,7 +450,7 @@ impl DiffStatistics {
         &self.inner.max_message
     }
 
-    pub fn partition(&self, partition: QueuePartitionIdx) -> Option<&FastHashMap<IntAddr, u64>> {
+    pub fn partition(&self, partition: QueuePartitionIdx) -> Option<&AccountStatistics> {
         self.inner.statistics.get(&partition)
     }
 
@@ -463,7 +466,7 @@ impl DiffStatistics {
         &self.inner.shards_messages_count
     }
 
-    pub fn total_statistics(&self) -> FastHashMap<IntAddr, u64> {
+    pub fn total_statistics(&self) -> AccountStatistics {
         let mut total_statistics = FastHashMap::default();
         for (_, partition_statistics) in self.inner.statistics.iter() {
             for (account_addr, msgs_count) in partition_statistics {
@@ -481,7 +484,7 @@ struct DiffStatisticsInner {
     shard_ident: ShardIdent,
     min_message: QueueKey,
     max_message: QueueKey,
-    statistics: FastHashMap<QueuePartitionIdx, FastHashMap<IntAddr, u64>>,
+    statistics: StatisticsByPartitions,
     shards_messages_count: FastHashMap<ShardIdent, u64>,
 }
 
@@ -490,7 +493,7 @@ impl DiffStatistics {
         shard_ident: ShardIdent,
         min_message: QueueKey,
         max_message: QueueKey,
-        statistics: FastHashMap<QueuePartitionIdx, FastHashMap<IntAddr, u64>>,
+        statistics: StatisticsByPartitions,
         shards_messages_count: FastHashMap<ShardIdent, u64>,
     ) -> Self {
         Self {
