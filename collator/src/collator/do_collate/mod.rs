@@ -396,10 +396,8 @@ impl CollatorStdImpl {
             ));
         }
 
-        let diff_tail_len = mq_adapter.get_diffs_tail_len(
-            &shard_id,
-            &min_processed_to.unwrap_or_default().next_value(),
-        ) + 1;
+        let diff_tail_len =
+            mq_adapter.get_diffs_tail_len(&shard_id, &min_processed_to.unwrap_or_default()) + 1;
 
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(

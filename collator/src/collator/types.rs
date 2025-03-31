@@ -1195,8 +1195,6 @@ impl CumulativeStatistics {
         }
 
         for (shard_ident, from) in from_ranges {
-            let from = from.next_value();
-
             let to_lt = if shard_ident.is_masterchain() {
                 mc_state_gen_lt
             } else if shard_ident == *current_shard {
