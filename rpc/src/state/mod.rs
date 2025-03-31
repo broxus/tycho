@@ -316,14 +316,19 @@ impl BlockSubscriber for RpcBlockSubscriber {
 
     fn handle_block<'a>(
         &'a self,
-        _: &'a BlockSubscriberContext,
+        ctx: &'a BlockSubscriberContext,
         prepared: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        Box::pin(async {
-            match prepared.await {
-                Ok(res) => res,
-                Err(e) => Err(e.into()),
+        Box::pin(async move {
+            prepared.await??;
+            if ctx.block.id().is_masterchain() {
+                // NOTE: Update snapshot only for masterchain because it is handled last.
+                // It is updated only after processing all shards and mc block.
+                if let Some(rpc_storage) = self.inner.storage.rpc_storage() {
+                    rpc_storage.update_snapshot();
+                }
             }
+            Ok(())
         })
     }
 }
@@ -475,11 +480,6 @@ impl Inner {
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             rpc_storage.update(block.clone()).await?;
-
-            if is_masterchain {
-                // NOTE: Update snapshot only for masterchain because it is handled last
-                rpc_storage.update_snapshot();
-            }
         }
         Ok(())
     }

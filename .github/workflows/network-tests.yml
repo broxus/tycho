@@ -117,3 +117,28 @@ jobs:
         run: |
           # The script will use the TYCHO_BIN_PATH env
           ./scripts/run-network-tests.sh ${{ matrix.test_image }}
+  network_tests_status:
+      name: Network Tests Status Check # This is the name to require in branch protection
+      runs-on: ubuntu-latest
+      # Depends on the matrix job, but runs even if it's skipped or fails
+      needs: network-tests
+      if: always() # Ensures this job runs even if 'network-tests' is skipped (on PR) or fails
+
+      steps:
+        - name: Check network tests matrix outcome
+          shell: bash
+          run: |
+            echo "Event: ${{ github.event_name }}"
+            echo "Network Tests Matrix Job Result: ${{ needs.network-tests.result }}"
+
+            # If on merge_group and the matrix failed or was cancelled, fail this status check
+            if [[ "${{ github.event_name }}" == "merge_group" && \
+                  ("${{ needs.network-tests.result }}" == "failure" || \
+                   "${{ needs.network-tests.result }}" == "cancelled") ]]; then
+              echo "Network tests failed or were cancelled on merge_group run."
+              exit 1
+            else
+              # Otherwise (on PR where matrix is skipped, or on merge_group where matrix succeeded)
+              echo "Network tests status check passed."
+              exit 0
+            fi
