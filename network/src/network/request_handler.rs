@@ -20,7 +20,6 @@ const METRIC_IN_MESSAGES_TIME: &str = "tycho_net_in_messages_time";
 // Counters
 const METRIC_IN_QUERIES_TOTAL: &str = "tycho_net_in_queries_total";
 const METRIC_IN_MESSAGES_TOTAL: &str = "tycho_net_in_messages_total";
-const METRIC_IN_DATAGRAMS_TOTAL: &str = "tycho_net_in_datagrams_total";
 
 // Gauges
 const METRIC_REQ_HANDLERS: &str = "tycho_net_req_handlers";
@@ -108,30 +107,6 @@ impl InboundRequestHandler {
                     }
                     Err(e) => {
                         tracing::trace!("failed to accept an incoming bi stream: {e:?}");
-                        break e;
-                    }
-                },
-                datagram = self.connection.read_datagram() => match datagram {
-                    Ok(datagram) => {
-                        tracing::trace!(byte_len = datagram.len(), "incoming datagram");
-
-                        inflight_requests.spawn({
-                            let metadata = self.connection.request_meta().clone();
-                            let service = self.service.clone();
-                            async move {
-                                service
-                                    .on_datagram(ServiceRequest {
-                                        metadata,
-                                        body: datagram,
-                                    })
-                                    .await;
-                            }
-                        });
-                        metrics::counter!(METRIC_IN_DATAGRAMS_TOTAL).increment(1);
-                        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
-                    },
-                    Err(e) => {
-                        tracing::trace!("failed to read datagram: {e:?}");
                         break e;
                     }
                 },

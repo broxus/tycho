@@ -150,7 +150,6 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
     type QueryResponse = Response;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
     type OnMessageFuture = BoxFutureOrNoop<()>;
-    type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(level = "debug", name = "on_blockchain_service_query", skip_all)]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
@@ -344,10 +343,6 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
         }
     }
 
-    #[inline]
-    fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
-        futures_util::future::ready(())
-    }
 }
 
 struct Inner<B> {
