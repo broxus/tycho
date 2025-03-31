@@ -119,12 +119,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        mut ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
 
         let start_time = std::time::Instant::now();
-        let mut ranges = ranges;
 
         for range in ranges.iter_mut() {
             range.from = range.from.next_value();
@@ -156,10 +155,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
         let mut result = AccountStatistics::default();
 
-        for range in ranges.to_vec().iter_mut() {
+        let mut ranges = ranges.to_vec();
+
+        for range in ranges.iter_mut() {
+            range.from = range.from.next_value();
+            range.to = range.to.next_value();
             for partition in partitions {
-                range.from = range.from.next_value();
-                range.to = range.to.next_value();
                 self.queue
                     .load_diff_statistics(*partition, range, &mut result)?;
             }
