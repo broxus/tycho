@@ -29,6 +29,7 @@ pub fn default_test_config() -> MempoolMergedConfig {
         log_truncate_long_values: true,
         clean_db_period_rounds: NonZeroU16::new(10).unwrap(),
         cache_future_broadcasts_rounds: 105,
+        max_blocking_tasks: 300,
     };
 
     let mut builder = MempoolConfigBuilder::new(&node_config);

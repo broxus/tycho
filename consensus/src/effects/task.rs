@@ -1,9 +1,19 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
 use futures_util::FutureExt;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
+
+use crate::engine::NodeConfig;
+
+static LIMIT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(
+        NodeConfig::get().max_blocking_tasks as usize,
+    ))
+});
 
 #[derive(thiserror::Error, Debug, Copy, Clone)]
 #[error("task is cancelled")]
@@ -55,6 +65,23 @@ impl TaskCtx<'_> {
             handle: self.0.spawn_blocking(task),
             completed: false,
         }
+    }
+
+    pub async fn spawn_blocking_limited<F, R>(&self, task: F) -> Task<R>
+    where
+        F: FnOnce() -> R,
+        F: Send + 'static,
+        R: Send + 'static,
+    {
+        let permit = match LIMIT.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_closed) => return Task::aborted(),
+        };
+        self.spawn_blocking(move || {
+            let res = task();
+            drop(permit);
+            res
+        })
     }
 }
 
