@@ -26,6 +26,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       shell: ${{ steps.filter.outputs.shell }}
+      proto: ${{ steps.filter.outputs.proto }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -154,7 +155,7 @@ jobs:
         run: just update_rpc_proto
       - name: Check for uncommitted changes
         run: git diff --exit-code
-        
+
   check-cli-reference:
     name: Check CLI Reference
     needs: [changes]
