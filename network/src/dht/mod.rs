@@ -385,7 +385,6 @@ impl Service<ServiceRequest> for DhtService {
     type QueryResponse = Response;
     type OnQueryFuture = futures_util::future::Ready<Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
-    type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
         level = "debug",
@@ -482,10 +481,6 @@ impl Service<ServiceRequest> for DhtService {
         futures_util::future::ready(())
     }
 
-    #[inline]
-    fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
-        futures_util::future::ready(())
-    }
 }
 
 impl Routable for DhtService {

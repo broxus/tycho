@@ -58,7 +58,6 @@ impl Service<ServiceRequest> for Responder {
     type QueryResponse = Response;
     type OnQueryFuture = future::Ready<Option<Self::QueryResponse>>;
     type OnMessageFuture = future::Ready<()>;
-    type OnDatagramFuture = future::Ready<()>;
 
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
@@ -68,11 +67,6 @@ impl Service<ServiceRequest> for Responder {
 
     #[inline]
     fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
-        future::ready(())
-    }
-
-    #[inline]
-    fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
         future::ready(())
     }
 }

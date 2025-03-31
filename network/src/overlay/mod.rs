@@ -118,7 +118,6 @@ impl Service<ServiceRequest> for OverlayService {
     type QueryResponse = Response;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
     type OnMessageFuture = BoxFutureOrNoop<()>;
-    type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
         level = "debug",
@@ -240,10 +239,6 @@ impl Service<ServiceRequest> for OverlayService {
         BoxFutureOrNoop::Noop
     }
 
-    #[inline]
-    fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
-        futures_util::future::ready(())
-    }
 }
 
 impl Routable for OverlayService {

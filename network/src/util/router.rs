@@ -16,11 +16,6 @@ pub trait Routable {
     fn message_ids(&self) -> impl IntoIterator<Item = u32> {
         std::iter::empty()
     }
-
-    #[inline]
-    fn datagram_ids(&self) -> impl IntoIterator<Item = u32> {
-        std::iter::empty()
-    }
 }
 
 pub struct RouterBuilder<Request, Q> {
@@ -41,10 +36,6 @@ impl<Request, Q> RouterBuilder<Request, Q> {
             let prev = self.inner.message_handlers.insert(id, index);
             assert!(prev.is_none(), "duplicate message id: {:08x}", id);
         }
-        for id in service.datagram_ids() {
-            let prev = self.inner.datagram_handlers.insert(id, index);
-            assert!(prev.is_none(), "duplicate datagram id: {:08x}", id);
-        }
 
         self.inner.services.push(service.boxed());
         self
@@ -64,7 +55,6 @@ impl<Request, Q> Default for RouterBuilder<Request, Q> {
                 services: Vec::new(),
                 query_handlers: FastHashMap::default(),
                 message_handlers: FastHashMap::default(),
-                datagram_handlers: FastHashMap::default(),
                 _response: PhantomData,
             },
         }
@@ -98,7 +88,6 @@ where
     type QueryResponse = Q;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
     type OnMessageFuture = BoxFutureOrNoop<()>;
-    type OnDatagramFuture = BoxFutureOrNoop<()>;
 
     fn on_query(&self, req: Request) -> Self::OnQueryFuture {
         match find_handler(&req, &self.inner.query_handlers, &self.inner.services) {
@@ -110,13 +99,6 @@ where
     fn on_message(&self, req: Request) -> Self::OnMessageFuture {
         match find_handler(&req, &self.inner.message_handlers, &self.inner.services) {
             Some(service) => BoxFutureOrNoop::Boxed(service.on_message(req)),
-            None => BoxFutureOrNoop::Noop,
-        }
-    }
-
-    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
-        match find_handler(&req, &self.inner.datagram_handlers, &self.inner.services) {
-            Some(service) => BoxFutureOrNoop::Boxed(service.on_datagram(req)),
             None => BoxFutureOrNoop::Noop,
         }
     }
@@ -141,7 +123,6 @@ struct Inner<Request, Q> {
     services: Vec<BoxService<Request, Q>>,
     query_handlers: FastHashMap<u32, usize>,
     message_handlers: FastHashMap<u32, usize>,
-    datagram_handlers: FastHashMap<u32, usize>,
     _response: PhantomData<Q>,
 }
 
