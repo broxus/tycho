@@ -183,10 +183,6 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetKeyBlockProof(p) => {
-            if !state.config().allow_huge_requests {
-                return error_to_response(req.id, RpcStateError::NotSupported);
-            }
-
             let res = match state.jrpc_cache().get_key_block_proof_response(p.seqno) {
                 Some(value) => value,
                 None => {
