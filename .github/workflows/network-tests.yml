@@ -14,38 +14,55 @@ env:
   CC: /usr/bin/clang
   CXX: /usr/bin/clang++
   TYCHO_BUILD_PROFILE: release_check
+  TYCHO_ARTIFACT_NAME: tycho-binary-${{ github.run_id }}
 
 jobs:
-  pre-build:
-    name: Pre-build Project Cache (Release Check)
+  # artifact name has postfix with job id so it's unique and always fresh.
+  # We don't delete it because 1d retention is enough.
+  # It's faster than build node even with cache(job timed out after 30m)
+  build-node:
+    name: Build Tycho Binary
     runs-on: [self-hosted, linux]
     if: github.event_name == 'merge_group'
+    outputs:
+      binary_path: ${{ steps.get_path.outputs.path }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Initialize Environment (for Build)
         uses: ./.github/actions/init
         with:
           setup-cache: true
-
-      - name: Pre-build Project (Release Check)
+      - name: Build Project
         shell: bash
         run: |
-          echo "Building release_check profile..."
+          echo "Building ${{ env.TYCHO_BUILD_PROFILE }} profile..."
           just build
 
-  # This job depends on pre-build, so it also effectively only runs on merge_group
+      - name: Determine Binary Path
+        id: get_path
+        shell: bash
+        run: |
+          # This will now just echo the path since the build is done
+          binary_path=$(./scripts/build-node.sh)
+          echo "Binary built at: $binary_path"
+          # Output the path relative to workspace root for artifact upload
+          echo "path=${binary_path#${GITHUB_WORKSPACE}/}" >> $GITHUB_OUTPUT
+
+      - name: Upload Tycho Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TYCHO_ARTIFACT_NAME }}
+          path: ${{ steps.get_path.outputs.path }}
+          retention-days: 1 # Keep artifact only for 1 day
   network-tests:
     name: Network Integration Tests - ${{ matrix.test_name }}
     runs-on: [self-hosted, linux]
-    # Add the 'if' condition here too for clarity and robustness
-    # It prevents the job from even starting if pre-build is skipped (on PR)
+    needs: build-node
     if: github.event_name == 'merge_group'
-    needs: pre-build # Makes this job wait for pre-build AND implicitly skip if pre-build skips
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      fail-fast: false # Allow other tests to run even if one fails
       matrix:
         include:
           - test_name: destroyable
@@ -66,8 +83,28 @@ jobs:
       - name: Initialize Environment
         uses: ./.github/actions/init
         with:
-          setup-cache: true
+          setup-cache: false
           fake-procfs: true
+
+      - name: Download Tycho Binary Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.TYCHO_ARTIFACT_NAME }}
+          path: ./downloaded_bin/
+
+      - name: Prepare Binary and Set Path
+        shell: bash
+        run: |
+          downloaded_binary=$(find ./downloaded_bin/ -type f)
+          if [ -z "$downloaded_binary" ]; then
+            echo "ERROR: Downloaded binary not found in ./downloaded_bin/"
+            exit 1
+          fi
+          echo "Found downloaded binary: $downloaded_binary"
+          chmod +x "$downloaded_binary"
+          # Set the environment variable to the absolute path of the binary
+          echo "TYCHO_BIN_PATH=$(readlink -f "$downloaded_binary")" >> $GITHUB_ENV
+          echo "Using TYCHO_BIN_PATH=${TYCHO_BIN_PATH}"
 
       - name: Login to GHCR
         shell: bash
@@ -77,4 +114,6 @@ jobs:
 
       - name: Run network tests
         shell: bash
-        run: ./scripts/run-network-tests.sh ${{ matrix.test_image }}
+        run: |
+          # The script will use the TYCHO_BIN_PATH env
+          ./scripts/run-network-tests.sh ${{ matrix.test_image }}

@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -eE
 
+
+# If TYCHO_BIN_PATH env is provided and valid, use it instead of building
+if [ -n "$TYCHO_BIN_PATH" ]; then
+    if [ -x "$TYCHO_BIN_PATH" ]; then
+        echo "$TYCHO_BIN_PATH"
+        exit 0
+    else
+        echo "ERROR: TYCHO_BIN_PATH ('$TYCHO_BIN_PATH') is set but is not executable or not found." >&2
+        exit 1
+    fi
+fi
+
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 root_dir=$(cd "${script_dir}/../" && pwd -P)
 
