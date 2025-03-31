@@ -1357,7 +1357,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     assert_eq!(diff_info_mc2.max_message, QueueKey::min_for_lt(4));
     // -- test case 3
     // exclude committed diff by range
-    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1);
     // uncommitted: 1; committed: 0 (1)
     assert_eq!(diff_len_mc, 1);
 
@@ -1386,7 +1386,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // -- test case 5
     // exclude committed diff by range
-    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1.next_value());
+    let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &end_key_mc1);
     // uncommitted: 0; committed: 0 (1)
     assert_eq!(diff_len_mc, 0);
 
