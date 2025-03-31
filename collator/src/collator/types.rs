@@ -1123,7 +1123,7 @@ pub struct CumulativeStatistics {
     shards_stats_by_partitions: FastHashMap<ShardIdent, SeparatedStatisticsByPartitions>,
 
     /// The final aggregated statistics (across all shards) by partitions.
-    result: FastHashMap<QueuePartitionIdx, AccountStatistics>,
+    result: FastHashMap<QueuePartitionIdx, QueueStatistics>,
 
     /// A flag indicating that data has changed, and we need to recalculate before returning `result`.
     dirty: bool,
@@ -1318,36 +1318,27 @@ impl CumulativeStatistics {
             .insert(dst_shard, shard_processed_to);
     }
 
-    /// Returns aggregated stats by partitions.
+    /// Returns  a reference to the aggregated stats by partitions.
     /// If the data is marked as dirty, it triggers a lazy recalculation first.
-    pub fn result(&mut self) -> FastHashMap<QueuePartitionIdx, QueueStatistics> {
+    pub fn result(&mut self) -> &FastHashMap<QueuePartitionIdx, QueueStatistics> {
         self.ensure_finalized();
-
-        self.result
-            .iter()
-            .map(|(&partition, stats)| (partition, QueueStatistics::with_statistics(stats.clone())))
-            .collect()
+        &self.result
     }
 
-    /// Returns aggregated stats among all partitions.
+    /// Calc aggregated stats among all partitions.
     /// If the data is marked as dirty, it triggers a lazy recalculation first.
     pub fn get_aggregated_result(&mut self) -> QueueStatistics {
         self.ensure_finalized();
 
-        let mut res: Option<AccountStatistics> = None;
+        let mut res: Option<QueueStatistics> = None;
         for stats in self.result.values() {
             if let Some(aggregated) = res.as_mut() {
-                for (addr, &count) in stats {
-                    aggregated
-                        .entry(addr.clone())
-                        .and_modify(|c| *c += count)
-                        .or_insert(count);
-                }
+                aggregated.append(stats);
             } else {
                 res.replace(stats.clone());
             }
         }
-        QueueStatistics::with_statistics(res.unwrap_or_default())
+        res.unwrap_or_default()
     }
 
     /// A helper function to trigger a recalculation if `dirty` is set.
@@ -1372,7 +1363,8 @@ impl CumulativeStatistics {
                             .or_insert(count);
                     }
                 }
-                self.result.insert(partition, partition_stats);
+                self.result
+                    .insert(partition, QueueStatistics::with_statistics(partition_stats));
             }
         }
 
