@@ -92,13 +92,12 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
     /// Load statistics for given partition and ranges
     fn load_diff_statistics(
         &self,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        range: &[QueueShardRange],
-    ) -> Result<AccountStatistics>;
+        partition: QueuePartitionIdx,
+        range: &QueueShardRange,
+        result: &mut AccountStatistics,
+    ) -> Result<()>;
 
     /// Load separated diff statistics for the specified partitions and range
-    /// `range.from` = diff with `max_message == range.from` will be excluded in statistics
-    /// `range.to` = diff with `max_message == range.to` will be included in statistics
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
@@ -109,7 +108,6 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
     /// Returns None if no block was applied
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get diffs tail len from uncommitted state and committed state
-    /// `from` - start key for the tail. Diff with `max_message` == `from` will be excluded from the tail
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Get diff info by diff seqno
     fn get_diff_info(
@@ -161,12 +159,8 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         let mut shards_iters = Vec::new();
 
         for range in ranges {
-            // exclude from key
-            let from_key = range.from.next_value();
-            let from = ShardsInternalMessagesKey::new(partition, range.shard_ident, from_key);
-            // include to key
-            let to_key = range.to.next_value();
-            let to = ShardsInternalMessagesKey::new(partition, range.shard_ident, to_key);
+            let from = ShardsInternalMessagesKey::new(partition, range.shard_ident, range.from);
+            let to = ShardsInternalMessagesKey::new(partition, range.shard_ident, range.to);
             shards_iters.push((snapshot.iter_messages(from, to), range.shard_ident));
         }
 
@@ -203,26 +197,19 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 
     fn load_diff_statistics(
         &self,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
-    ) -> Result<AccountStatistics> {
+        partition: QueuePartitionIdx,
+        range: &QueueShardRange,
+        result: &mut AccountStatistics,
+    ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
-        let mut result = FastHashMap::default();
-
-        for range in ranges {
-            for partition in partitions {
-                snapshot.collect_stats_in_range(
-                    &range.shard_ident,
-                    *partition,
-                    &range.from,
-                    &range.to,
-                    &mut result,
-                )?;
-            }
-        }
-
-        Ok(result)
+        snapshot.collect_stats_in_range(
+            &range.shard_ident,
+            partition,
+            &range.from,
+            &range.to,
+            result,
+        )
     }
 
     fn load_separated_diff_statistics(
@@ -236,8 +223,8 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         let result = snapshot.collect_separated_stats_in_range_for_partitions(
             &range.shard_ident,
             partitions,
-            &range.from.next_value(), // exclude first processed diff stat
-            &range.to.next_value(),   // include last diff stat
+            &range.from,
+            &range.to,
         )?;
 
         Ok(result)
@@ -250,12 +237,9 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
-
-        // exclude from key
-        let from = from.next_value();
         snapshot.calc_diffs_tail(&DiffTailKey {
             shard_ident: *shard_ident,
-            max_message: from,
+            max_message: *from,
         })
     }
 
