@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, IntAddr, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_storage::model::{
     CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey, StatKey,
@@ -17,7 +17,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
 use crate::internal_queue::types::{
     AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
-    QueueDiffWithMessages, QueueShardRange,
+    QueueDiffWithMessages, QueueShardRange, SeparatedStatisticsByPartitions,
 };
 use crate::types::ProcessedTo;
 // CONFIG
@@ -94,13 +94,13 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &[QueueShardRange],
-    ) -> Result<FastHashMap<IntAddr, u64>>;
+    ) -> Result<AccountStatistics>;
 
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
-    ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
+    ) -> Result<SeparatedStatisticsByPartitions>;
 
     /// Get last committed mc block id
     /// Returns None if no block was applied
@@ -201,7 +201,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
-    ) -> Result<FastHashMap<IntAddr, u64>> {
+    ) -> Result<AccountStatistics> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
         let mut result = FastHashMap::default();
@@ -225,7 +225,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
-    ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
+    ) -> Result<SeparatedStatisticsByPartitions> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
 

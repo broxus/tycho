@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
@@ -14,8 +12,8 @@ use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::{
-    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
-    QueueDiffWithMessages, QueueShardRange, QueueStatistics,
+    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
+    QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTupleRef};
@@ -94,7 +92,7 @@ where
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
-    ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
+    ) -> Result<SeparatedStatisticsByPartitions>;
     /// Get partition router and statistics for the specified block
     fn get_router_and_statistics(
         &self,
@@ -334,7 +332,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
-    ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
+    ) -> Result<SeparatedStatisticsByPartitions> {
         self.queue.load_separated_diff_statistics(partitions, range)
     }
 

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use ahash::HashMapExt;
 use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::cell::{Cell, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
@@ -25,7 +26,8 @@ use tycho_util::{FastHashMap, FastHashSet};
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
 use crate::internal_queue::types::{
-    AccountStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
+    AccountStatistics, DiffStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
+    SeparatedStatisticsByPartitions,
 };
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -1116,18 +1118,17 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 }
 
 type DiffMaxMessage = QueueKey;
-type DiffStatistics = BTreeMap<DiffMaxMessage, AccountStatistics>;
 
 pub struct CumulativeStatistics {
     /// Actual processed to info for master and each shard
     all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
 
     /// Stores per-shard statistics, keyed by `ShardIdent`.
-    /// Each shard has a `BTreeMap<ProcessedToKey, AccountStatistics>`.
-    shards_statistics: FastHashMap<ShardIdent, DiffStatistics>,
+    /// Each shard has a `FastHashMap<QueuePartitionIdx, BTreeMap<QueueKey, AccountStatistics>>`
+    shards_stats_by_partitions: FastHashMap<ShardIdent, SeparatedStatisticsByPartitions>,
 
-    /// The final aggregated statistics (across all shards).
-    result: AccountStatistics,
+    /// The final aggregated statistics (across all shards) by partitions.
+    result: FastHashMap<QueuePartitionIdx, QueueStatistics>,
 
     /// A flag indicating that data has changed, and we need to recalculate before returning `result`.
     dirty: bool,
@@ -1137,7 +1138,7 @@ impl CumulativeStatistics {
     pub fn new(all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>) -> Self {
         Self {
             all_shards_processed_to,
-            shards_statistics: Default::default(),
+            shards_stats_by_partitions: Default::default(),
             result: Default::default(),
             dirty: false,
         }
@@ -1160,12 +1161,19 @@ impl CumulativeStatistics {
             mc_top_shards_end_lts,
         );
         for range in ranges {
-            let statistics = mq_adapter
+            let stats_by_partitions = mq_adapter
                 .load_separated_diff_statistics(partitions, &range)
                 .with_context(|| format!("partitions: {:?}; range: {:?}", partitions, range))?;
 
-            for (diff_max_message, statistics) in statistics {
-                self.apply(range.shard_ident, diff_max_message, statistics);
+            for (partition, partition_stats) in stats_by_partitions {
+                for (diff_max_message, diff_partition_stats) in partition_stats {
+                    self.apply(
+                        partition,
+                        range.shard_ident,
+                        diff_max_message,
+                        diff_partition_stats,
+                    );
+                }
             }
         }
         Ok(())
@@ -1217,9 +1225,10 @@ impl CumulativeStatistics {
     /// Adds diff stats weeding processed accounts according to `processed_to` info
     fn apply(
         &mut self,
+        partition: QueuePartitionIdx,
         diff_shard: ShardIdent,
         diff_max_message: DiffMaxMessage,
-        mut diff_stats: AccountStatistics,
+        mut diff_partition_stats: AccountStatistics,
     ) {
         for (dst_shard, shard_processed_to) in &self.all_shards_processed_to {
             // get processed_to border for diff's shard in the destination shard
@@ -1227,29 +1236,53 @@ impl CumulativeStatistics {
                 // if diff is below processed_to border
                 // then remove accounts of destination shard from stats
                 if diff_max_message <= *to_key {
-                    diff_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
+                    diff_partition_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
                 }
             }
         }
 
         // finally add weeded stats
-        self.add(diff_shard, diff_max_message, diff_stats);
+        self.add_diff_partition_stats(
+            partition,
+            diff_shard,
+            diff_max_message,
+            diff_partition_stats,
+        );
     }
 
-    /// Adds diff stats for a particular shard.
+    fn add_diff_partition_stats(
+        &mut self,
+        partition: QueuePartitionIdx,
+        diff_shard: ShardIdent,
+        diff_max_message: DiffMaxMessage,
+        diff_partition_stats: AccountStatistics,
+    ) {
+        self.shards_stats_by_partitions
+            .entry(diff_shard)
+            .or_default()
+            .entry(partition)
+            .or_default()
+            .insert(diff_max_message, diff_partition_stats);
+
+        self.dirty = true;
+    }
+
+    /// Adds diff stats for a particular shard, split by partitions.
     /// Overwrites any existing data for the same `shard_id`.
-    pub fn add(
+    pub fn add_diff_stats(
         &mut self,
         diff_shard: ShardIdent,
         diff_max_message: DiffMaxMessage,
-        diff_stats: AccountStatistics,
+        diff_stats: DiffStatistics,
     ) {
-        self.shards_statistics
-            .entry(diff_shard)
-            .or_default()
-            .insert(diff_max_message, diff_stats);
-
-        self.dirty = true;
+        for (&partition, diff_partition_stats) in diff_stats.iter() {
+            self.add_diff_partition_stats(
+                partition,
+                diff_shard,
+                diff_max_message,
+                diff_partition_stats.clone(),
+            );
+        }
     }
 
     /// Remove stats for accounts from processed diffs
@@ -1259,24 +1292,28 @@ impl CumulativeStatistics {
         shard_processed_to: ProcessedTo,
     ) {
         for (src_shard, to_key) in &shard_processed_to {
-            let mut to_remove_diffs = vec![];
-            if let Some(diffs) = self.shards_statistics.get_mut(src_shard) {
-                // find diffs that below processed_to border and remove destination accounts from stats
-                for (diff_max_message, diff_stats) in diffs.iter_mut() {
-                    if diff_max_message <= to_key {
-                        diff_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
-                        if diff_stats.is_empty() {
-                            to_remove_diffs.push(*diff_max_message);
+            if let Some(shard_stats_by_partitions) =
+                self.shards_stats_by_partitions.get_mut(src_shard)
+            {
+                for (_partition, diffs) in shard_stats_by_partitions.iter_mut() {
+                    let mut to_remove_diffs = vec![];
+                    // find diffs that below processed_to border and remove destination accounts from stats
+                    for (diff_max_message, diff_stats) in diffs.iter_mut() {
+                        if diff_max_message <= to_key {
+                            diff_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
+                            if diff_stats.is_empty() {
+                                to_remove_diffs.push(*diff_max_message);
+                            }
+                            self.dirty = true;
+                        } else {
+                            // do not need to process diffs above processed_to border
+                            break;
                         }
-                        self.dirty = true;
-                    } else {
-                        // do not need to process diffs above processed_to border
-                        break;
                     }
-                }
-                // remove drained diffs
-                for key in to_remove_diffs {
-                    diffs.remove(&key);
+                    // remove drained diffs
+                    for key in to_remove_diffs {
+                        diffs.remove(&key);
+                    }
                 }
             }
         }
@@ -1286,11 +1323,27 @@ impl CumulativeStatistics {
             .insert(dst_shard, shard_processed_to);
     }
 
-    /// Returns a reference to the aggregated result.
+    /// Returns  a reference to the aggregated stats by partitions.
     /// If the data is marked as dirty, it triggers a lazy recalculation first.
-    pub fn result(&mut self) -> QueueStatistics {
+    pub fn result(&mut self) -> &FastHashMap<QueuePartitionIdx, QueueStatistics> {
         self.ensure_finalized();
-        QueueStatistics::with_statistics(self.result.clone())
+        &self.result
+    }
+
+    /// Calc aggregated stats among all partitions.
+    /// If the data is marked as dirty, it triggers a lazy recalculation first.
+    pub fn get_aggregated_result(&mut self) -> QueueStatistics {
+        self.ensure_finalized();
+
+        let mut res: Option<QueueStatistics> = None;
+        for stats in self.result.values() {
+            if let Some(aggregated) = res.as_mut() {
+                aggregated.append(stats);
+            } else {
+                res.replace(stats.clone());
+            }
+        }
+        res.unwrap_or_default()
     }
 
     /// A helper function to trigger a recalculation if `dirty` is set.
@@ -1304,11 +1357,19 @@ impl CumulativeStatistics {
     fn recalculate(&mut self) {
         self.result.clear();
 
-        for diff_statistics in self.shards_statistics.values() {
-            for account_stats in diff_statistics.values() {
-                for (account, count) in account_stats.iter() {
-                    *self.result.entry(account.clone()).or_insert(0) += count;
+        for shard_stats_by_partitions in self.shards_stats_by_partitions.values() {
+            for (&partition, diffs) in shard_stats_by_partitions {
+                let mut partition_stats = AccountStatistics::new();
+                for diff_stats in diffs.values() {
+                    for (account, &count) in diff_stats {
+                        partition_stats
+                            .entry(account.clone())
+                            .and_modify(|c| *c += count)
+                            .or_insert(count);
+                    }
                 }
+                self.result
+                    .insert(partition, QueueStatistics::with_statistics(partition_stats));
             }
         }
 

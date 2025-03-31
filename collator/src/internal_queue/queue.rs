@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -12,6 +11,7 @@ use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
+use super::types::SeparatedStatisticsByPartitions;
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::state::storage::{
@@ -115,7 +115,7 @@ where
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
-    ) -> Result<BTreeMap<QueueKey, AccountStatistics>>;
+    ) -> Result<SeparatedStatisticsByPartitions>;
 }
 
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
@@ -414,7 +414,7 @@ where
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
-    ) -> Result<BTreeMap<QueueKey, AccountStatistics>> {
+    ) -> Result<SeparatedStatisticsByPartitions> {
         let result = self
             .state
             .load_separated_diff_statistics(partitions, range)?;
