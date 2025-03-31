@@ -248,14 +248,16 @@ impl RpcState {
     pub async fn get_key_block_proof(
         &self,
         key_block_seqno: u32,
-    ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
+    ) -> Option<(BlockId, impl AsRef<[u8]> + Send + Sync + 'static)> {
         let blocks = self.inner.storage.block_storage();
         let handles = self.inner.storage.block_handle_storage();
 
         let handle = handles.load_key_block_handle(key_block_seqno)?;
-        blocks.load_block_proof_raw(&handle).await.ok()
+        let data = blocks.load_block_proof_raw(&handle).await.ok()?;
+        Some((*handle.id(), data))
     }
 
+    // TODO: Remove.
     pub async fn get_block_proof(
         &self,
         block_id: &BlockId,
@@ -267,6 +269,7 @@ impl RpcState {
         blocks.load_block_proof_raw(&handle).await.ok()
     }
 
+    // TODO: Remove.
     pub async fn get_block_data(
         &self,
         block_id: &BlockId,

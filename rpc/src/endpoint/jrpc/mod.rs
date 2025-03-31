@@ -318,10 +318,11 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
             "getContractState",
             "sendMessage",
             "getLibraryCell",
+            "getKeyBlockProof",
         ];
 
         if state.config().allow_huge_requests {
-            capabilities.extend(["getKeyBlockProof", "getBlockProof", "getBlockData"]);
+            capabilities.extend(["getBlockProof", "getBlockData"]);
         }
 
         if state.is_full() {

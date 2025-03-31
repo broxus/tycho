@@ -4,12 +4,12 @@ use arc_swap::ArcSwapOption;
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{Block, BlockchainConfig};
+use everscale_types::models::{Block, BlockId, BlockchainConfig};
 use everscale_types::prelude::Cell;
 use moka::sync::Cache;
 use serde::Serialize;
 use serde_json::value::RawValue;
-use tycho_util::FastHasherState;
+use tycho_util::{serde_helpers, FastHasherState};
 
 pub struct JrpcEndpointCache {
     libraries: Cache<HashBytes, CachedJson, FastHasherState>,
@@ -62,16 +62,22 @@ impl JrpcEndpointCache {
     pub fn insert_key_block_proof_response(
         &self,
         seqno: u32,
-        proof: Option<impl AsRef<[u8]>>,
+        proof: Option<(BlockId, impl AsRef<[u8]>)>,
     ) -> CachedJson {
         static EMPTY: OnceLock<CachedJson> = OnceLock::new();
 
         match proof {
             None => EMPTY
-                .get_or_init(|| make_cached(BlockProofResponse { proof: None }))
+                .get_or_init(|| {
+                    make_cached(BlockProofResponse {
+                        block_id: None,
+                        proof: None,
+                    })
+                })
                 .clone(),
-            Some(proof) => {
+            Some((block_id, proof)) => {
                 let res = make_cached(BlockProofResponse {
+                    block_id: Some(block_id),
                     proof: Some(BASE64_STANDARD.encode(proof)),
                 });
                 self.key_block_proofs.insert(seqno, res.clone());
@@ -128,7 +134,13 @@ struct GetLibraryCellResponse {
 
 // TODO: Add last_known_mc_seqno.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BlockProofResponse {
+    #[serde(
+        with = "serde_helpers::option_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    block_id: Option<BlockId>,
     proof: Option<String>,
 }
 
