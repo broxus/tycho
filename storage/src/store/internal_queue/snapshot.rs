@@ -170,7 +170,7 @@ impl InternalQueueSnapshot {
         let to = StatKey {
             shard_ident: *shard_ident,
             partition,
-            max_message: to.next_value(),
+            max_message: *to,
             dest: RouterAddr::MAX,
         };
 
@@ -237,7 +237,7 @@ impl InternalQueueSnapshot {
             let to_key = StatKey {
                 shard_ident: *shard_ident,
                 partition,
-                max_message: to.next_value(),
+                max_message: *to,
                 dest: RouterAddr::MAX,
             };
 
@@ -339,68 +339,5 @@ impl InternalQueueSnapshot {
         }
 
         Ok(None)
-    }
-
-    /// Load cumulative stats for one diff
-    pub fn load_diff_statistics(
-        &self,
-        shard_ident: &ShardIdent,
-        partition: &QueuePartitionIdx,
-        from: &QueueKey,
-        to: &QueueKey,
-        result: &mut FastHashMap<IntAddr, u64>,
-    ) -> anyhow::Result<()> {
-        let table = &self.db.internal_message_stats;
-
-        let from = StatKey {
-            shard_ident: *shard_ident,
-            partition: *partition,
-            max_message: *from,
-            dest: RouterAddr::MIN,
-        };
-
-        let to = StatKey {
-            shard_ident: *shard_ident,
-            partition: *partition,
-            max_message: to.next_value(),
-            dest: RouterAddr::MAX,
-        };
-
-        let mut read_config = table.new_read_config();
-        read_config.set_snapshot(&self.snapshot);
-        let prefix_size = StatKey::PREFIX_SIZE;
-
-        let from_bytes = from.to_vec();
-        let to_bytes = to.to_vec();
-
-        read_config.set_iterate_lower_bound(&from_bytes[..prefix_size]);
-        read_config.set_iterate_upper_bound(&to_bytes[..prefix_size]);
-
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&table.cf(), read_config);
-
-        iter.seek(&from_bytes[..prefix_size]);
-
-        while iter.valid() {
-            let (raw_k, raw_v) = match iter.item() {
-                Some(kv) => kv,
-                None => break,
-            };
-
-            let count = u64::from_le_bytes(raw_v.try_into().unwrap());
-
-            let key = StatKey::deserialize(&mut &*raw_k);
-            let dest_addr = key.dest;
-
-            *result.entry(dest_addr.to_int_addr()).or_insert(0) += count;
-
-            iter.next();
-        }
-
-        iter.status()?;
-
-        Ok(())
     }
 }
