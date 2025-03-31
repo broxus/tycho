@@ -262,6 +262,18 @@ pub mod response {
         pub block_id: ::core::option::Option<BlockId>,
     }
     #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct KeyBlockProof {
+        #[prost(bytes = "bytes", tag = "1")]
+        pub proof: ::prost::bytes::Bytes,
+        #[prost(message, optional, tag = "2")]
+        pub block_id: ::core::option::Option<BlockId>,
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct GetKeyBlockProof {
+        #[prost(message, optional, tag = "1")]
+        pub key_block: ::core::option::Option<KeyBlockProof>,
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct BlockProof {
         #[prost(bytes = "bytes", optional, tag = "1")]
         pub proof: ::core::option::Option<::prost::bytes::Bytes>,
@@ -298,7 +310,7 @@ pub mod response {
         #[prost(message, tag = "12")]
         GetTransactionBlockId(GetTransactionBlockId),
         #[prost(message, tag = "13")]
-        GetKeyBlockProof(BlockProof),
+        GetKeyBlockProof(GetKeyBlockProof),
         #[prost(message, tag = "14")]
         GetBlockProof(BlockProof),
         #[prost(message, tag = "15")]

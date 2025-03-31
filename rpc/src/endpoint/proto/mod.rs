@@ -324,30 +324,20 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             match state.get_transaction_block_id(&hash) {
                 Ok(block_id) => ok_to_response(response::Result::GetTransactionBlockId(
                     response::GetTransactionBlockId {
-                        block_id: block_id.map(|id| response::BlockId {
-                            workchain: id.shard.workchain(),
-                            shard: id.shard.prefix(),
-                            seqno: id.seqno,
-                            root_hash: Bytes::copy_from_slice(id.root_hash.as_ref()),
-                            file_hash: Bytes::copy_from_slice(id.file_hash.as_ref()),
-                        }),
+                        block_id: block_id.map(make_response_block_id),
                     },
                 )),
                 Err(e) => error_to_response(e),
             }
         }
         request::Call::GetKeyBlockProof(p) => {
-            if !state.config().allow_huge_requests {
-                return error_to_response(RpcStateError::NotSupported);
-            }
-
             let res = match state.proto_cache().get_key_block_proof_response(p.seqno) {
                 Some(value) => value,
                 None => {
                     let proof = state
                         .get_key_block_proof(p.seqno)
                         .await
-                        .map(|r| Bytes::copy_from_slice(r.as_ref()));
+                        .map(|(block_id, r)| (block_id, Bytes::copy_from_slice(r.as_ref())));
 
                     state
                         .proto_cache()
@@ -414,10 +404,11 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
             "getContractState",
             "sendMessage",
             "getLibraryCell",
+            "getKeyBlockProof",
         ];
 
         if state.config().allow_huge_requests {
-            capabilities.extend(["getKeyBlockProof", "getBlockProof", "getBlockData"]);
+            capabilities.extend(["getBlockProof", "getBlockData"]);
         }
 
         if state.is_full() {
@@ -486,6 +477,16 @@ fn get_block_id(block_id: request::GetBlock) -> Option<BlockId> {
         root_hash: hash_from_bytes(block_id.root_hash)?,
         file_hash: hash_from_bytes(block_id.file_hash)?,
     })
+}
+
+fn make_response_block_id(id: BlockId) -> response::BlockId {
+    response::BlockId {
+        workchain: id.shard.workchain(),
+        shard: id.shard.prefix(),
+        seqno: id.seqno,
+        root_hash: Bytes::copy_from_slice(id.root_hash.as_ref()),
+        file_hash: Bytes::copy_from_slice(id.file_hash.as_ref()),
+    }
 }
 
 fn serialize_account(account: &Account) -> Result<Bytes, everscale_types::error::Error> {

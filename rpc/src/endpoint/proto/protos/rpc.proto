@@ -166,6 +166,15 @@ message Response {
     optional BlockId block_id = 1;
   }
 
+  message KeyBlockProof {
+    bytes proof = 1;
+    BlockId block_id = 2;
+  }
+
+  message GetKeyBlockProof {
+    optional KeyBlockProof key_block = 1;
+  }
+
   message BlockProof {
     optional bytes proof = 1;
   }
@@ -187,7 +196,7 @@ message Response {
     google.protobuf.Empty   send_message = 10;
     GetLibraryCell          get_library_cell = 11;
     GetTransactionBlockId   get_transaction_block_id = 12;
-    BlockProof              get_key_block_proof = 13;
+    GetKeyBlockProof        get_key_block_proof = 13;
     BlockProof              get_block_proof = 14;
     BlockData               get_block_data = 15;
   }

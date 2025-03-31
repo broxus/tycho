@@ -4,11 +4,12 @@ use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::Cell;
-use everscale_types::models::{Block, BlockchainConfig};
+use everscale_types::models::{Block, BlockId, BlockchainConfig};
 use everscale_types::prelude::HashBytes;
 use tycho_util::FastHasherState;
 
 use super::extractor::{ProtoOkResponse, RawProtoOkResponse};
+use super::make_response_block_id;
 use super::protos::rpc::response;
 
 pub struct ProtoEndpointCache {
@@ -66,22 +67,27 @@ impl ProtoEndpointCache {
     pub fn insert_key_block_proof_response(
         &self,
         seqno: u32,
-        proof: Option<Bytes>,
+        proof: Option<(BlockId, Bytes)>,
     ) -> RawProtoOkResponse {
         static EMPTY: OnceLock<RawProtoOkResponse> = OnceLock::new();
 
         match proof {
             None => EMPTY
                 .get_or_init(|| {
-                    make_cached(response::Result::GetKeyBlockProof(response::BlockProof {
-                        proof: None,
-                    }))
+                    make_cached(response::Result::GetKeyBlockProof(
+                        response::GetKeyBlockProof { key_block: None },
+                    ))
                 })
                 .clone(),
-            Some(proof) => {
-                let res = make_cached(response::Result::GetKeyBlockProof(response::BlockProof {
-                    proof: Some(proof),
-                }));
+            Some((block_id, proof)) => {
+                let res = make_cached(response::Result::GetKeyBlockProof(
+                    response::GetKeyBlockProof {
+                        key_block: Some(response::KeyBlockProof {
+                            block_id: Some(make_response_block_id(block_id)),
+                            proof,
+                        }),
+                    },
+                ));
                 self.key_block_proofs.insert(seqno, res.clone());
                 res
             }
