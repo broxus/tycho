@@ -84,7 +84,7 @@ impl AsRef<[u8]> for Request {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Response {
     pub version: Version,
     #[serde(with = "serde_body")]
