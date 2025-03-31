@@ -58,6 +58,12 @@ pub struct NetworkConfig {
     /// Default: 128.
     pub active_peers_event_channel_capacity: usize,
 
+    /// Maximum number of concurrent requests (uni and bi streams) allowed from a single peer.
+    /// When this limit is reached, new incoming streams will be rejected.
+    ///
+    /// Default: 128.
+    pub max_concurrent_requests_per_peer: usize,
+
     /// Default: 1 minute.
     #[serde(with = "serde_helpers::humantime")]
     pub shutdown_idle_timeout: Duration,
@@ -83,6 +89,7 @@ impl Default for NetworkConfig {
             max_concurrent_outstanding_connections: 100,
             max_concurrent_connections: None,
             active_peers_event_channel_capacity: 128,
+            max_concurrent_requests_per_peer: 128,
             shutdown_idle_timeout: Duration::from_secs(60),
             enable_0rtt: false,
             connection_metrics: None,

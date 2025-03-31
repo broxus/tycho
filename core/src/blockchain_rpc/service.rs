@@ -342,7 +342,6 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             }
         }
     }
-
 }
 
 struct Inner<B> {

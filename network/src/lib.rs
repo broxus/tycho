@@ -7,7 +7,7 @@ pub use dht::{
 pub use network::{
     Connection, ConnectionError, KnownPeerHandle, KnownPeers, KnownPeersError, Network,
     NetworkBuilder, NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream,
-    ToSocket, WeakKnownPeerHandle, WeakNetwork,
+    ToSocket, WeakKnownPeerHandle, WeakNetwork, LIMIT_EXCEEDED_ERROR_CODE,
 };
 pub use quinn;
 pub use types::{
