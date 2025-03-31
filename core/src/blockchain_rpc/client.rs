@@ -846,7 +846,7 @@ where
                 handle.reject();
             });
 
-            anyhow::ensure!(chunk.len() <= chunk_size as usize, "received invalid chunk");
+            anyhow::ensure!(chunk.len() <= chunk_size, "received invalid chunk");
 
             downloaded += chunk.len() as u64;
             tracing::debug!(
