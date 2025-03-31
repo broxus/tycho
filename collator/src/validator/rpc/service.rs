@@ -69,7 +69,6 @@ where
     type QueryResponse = Response;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
-    type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
         name = "on_validator_query",
@@ -114,8 +113,4 @@ where
         futures_util::future::ready(())
     }
 
-    #[inline]
-    fn on_datagram(&self, _: ServiceRequest) -> Self::OnDatagramFuture {
-        futures_util::future::ready(())
-    }
 }

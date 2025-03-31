@@ -4,9 +4,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
 use metrics::Label;
-use quinn::{ConnectionError, SendDatagramError};
+use quinn::ConnectionError;
 use webpki::types::CertificateDer;
 
 use crate::network::config::ConnectionMetricsLevel;
@@ -82,11 +81,11 @@ impl Connection {
                 ]);
 
                 emit_gauges!("tycho_network_connection_rx_", stats.udp_rx, labels, [
-                    datagrams, bytes
+                    bytes
                 ]);
 
                 emit_gauges!("tycho_network_connection_tx_", stats.udp_tx, labels, [
-                    datagrams, bytes
+                    bytes
                 ]);
 
                 // Frame RX
@@ -99,7 +98,6 @@ impl Connection {
                         crypto,
                         connection_close,
                         data_blocked,
-                        datagram,
                         max_data,
                         max_stream_data,
                         ping,
@@ -117,7 +115,6 @@ impl Connection {
                     crypto,
                     connection_close,
                     data_blocked,
-                    datagram,
                     max_data,
                     max_stream_data,
                     ping,
@@ -189,14 +186,6 @@ impl Connection {
 
     pub async fn accept_uni(&self) -> Result<RecvStream, ConnectionError> {
         self.inner.accept_uni().await.map(RecvStream)
-    }
-
-    pub fn send_datagram(&self, data: Bytes) -> Result<(), SendDatagramError> {
-        self.inner.send_datagram(data)
-    }
-
-    pub async fn read_datagram(&self) -> Result<Bytes, ConnectionError> {
-        self.inner.read_datagram().await
     }
 
     pub fn stats(&self) -> quinn::ConnectionStats {

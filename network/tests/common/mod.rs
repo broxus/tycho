@@ -81,7 +81,6 @@ impl Service<ServiceRequest> for PingPongService {
     type QueryResponse = Response;
     type OnQueryFuture = futures_util::future::Ready<Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
-    type OnDatagramFuture = futures_util::future::Ready<()>;
 
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         futures_util::future::ready(match req.parse_tl() {
@@ -102,10 +101,6 @@ impl Service<ServiceRequest> for PingPongService {
         futures_util::future::ready(())
     }
 
-    #[inline]
-    fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
-        futures_util::future::ready(())
-    }
 }
 
 #[derive(Debug, Copy, Clone, TlRead, TlWrite)]

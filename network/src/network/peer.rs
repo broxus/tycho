@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::Bytes;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tycho_util::metrics::{GaugeGuard, HistogramGuard};
 
@@ -64,11 +63,6 @@ impl Peer {
         send_stream.get_mut().finish()?;
         _ = send_stream.get_mut().stopped().await;
 
-        Ok(())
-    }
-
-    pub fn send_datagram(&self, request: Bytes) -> Result<()> {
-        self.connection.send_datagram(request)?;
         Ok(())
     }
 }
