@@ -54,15 +54,12 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
-        partition_all_ranges_msgs_stats: &QueueStatistics,
-        par_0_msgs_count_limit: u64,
+        cumulative_partition_stats: &QueueStatistics,
     ) {
-        for (addr, count) in partition_all_ranges_msgs_stats.statistics() {
-            if *count > par_0_msgs_count_limit {
-                self.partition_router
-                    .insert_dst(addr, partition_id)
-                    .unwrap();
-            }
+        for account_addr in cumulative_partition_stats.statistics().keys() {
+            self.partition_router
+                .insert_dst(account_addr, partition_id)
+                .unwrap();
         }
     }
 
