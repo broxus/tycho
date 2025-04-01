@@ -168,6 +168,7 @@ pub(super) enum BlockCacheEntryData {
         /// Whether the block was received after collation
         received_after_collation: bool,
 
+        // TODO: use ref from candidate
         /// Processed to info for every partition
         processed_upto: ProcessedUptoInfoStuff,
     },

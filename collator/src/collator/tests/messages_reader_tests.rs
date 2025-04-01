@@ -31,7 +31,7 @@ use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
     BlockSeqno, Lt, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
-use crate::types::{DebugDisplay, ProcessedTo};
+use crate::types::{DebugDisplay, ProcessedToByPartitions};
 
 const DEX_PAIR_USDC_NATIVE: u8 = 10;
 const DEX_PAIR_NATIVE_ETH: u8 = 11;
@@ -383,7 +383,8 @@ where
     fn test_collate_shards(&mut self, block_tx_limit: usize) -> Result<TestCollateResult> {
         let collate_master_every = 3;
 
-        let all_shards_processed_to = self.get_all_shards_processed_to();
+        let all_shards_processed_to_by_partitions =
+            self.get_all_shards_processed_to_by_partitions();
 
         let TestCollateResult {
             mut has_unprocessed_messages,
@@ -396,13 +397,13 @@ where
                 self.sc_collator.block_seqno,
                 self.sc_collator.last_block_gen_lt,
             )],
-            all_shards_processed_to,
+            all_shards_processed_to_by_partitions,
             (self.sc_collator.block_seqno + 1) % collate_master_every == 1,
         )?;
 
         // collate master every 3 shard blocks
         if self.sc_collator.block_seqno % collate_master_every == 0 {
-            let all_shards_processed_to = self.get_all_shards_processed_to();
+            let all_shards_processed_to = self.get_all_shards_processed_to_by_partitions();
 
             let TestCollateResult {
                 has_unprocessed_messages: mc_has_unprocessed_messages,
@@ -450,7 +451,9 @@ where
         })
     }
 
-    fn get_all_shards_processed_to(&self) -> FastHashMap<ShardIdent, ProcessedTo> {
+    fn get_all_shards_processed_to_by_partitions(
+        &self,
+    ) -> FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)> {
         let mut res: FastHashMap<_, _> = self
             .sc_collator
             .primary_working_state
@@ -458,20 +461,25 @@ where
             .map(|ws| {
                 (
                     self.sc_collator.shard_id,
-                    ws.reader_state
-                        .get_updated_processed_upto()
-                        .get_min_internals_processed_to_by_shards(),
+                    (
+                        true,
+                        ws.reader_state
+                            .get_updated_processed_upto()
+                            .get_internals_processed_to_by_partitions(),
+                    ),
                 )
             })
             .into_iter()
             .collect();
 
-        if let Some(processed_to) = self.mc_collator.primary_working_state.as_ref().map(|ws| {
-            ws.reader_state
-                .get_updated_processed_upto()
-                .get_min_internals_processed_to_by_shards()
-        }) {
-            res.insert(ShardIdent::MASTERCHAIN, processed_to);
+        if let Some(processed_to_by_partitions) =
+            self.mc_collator.primary_working_state.as_ref().map(|ws| {
+                ws.reader_state
+                    .get_updated_processed_upto()
+                    .get_internals_processed_to_by_partitions()
+            })
+        {
+            res.insert(ShardIdent::MASTERCHAIN, (true, processed_to_by_partitions));
         }
 
         res
@@ -524,7 +532,10 @@ impl<V: InternalMessageValue> TestCollator<V> {
         msgs_factory: &mut TestMessageFactory<V, F>,
         mc_gen_lt: Lt,
         mc_top_shards_blocks_info: Vec<(ShardIdent, BlockSeqno, Lt)>,
-        all_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+        all_shards_processed_to_by_partitions: FastHashMap<
+            ShardIdent,
+            (bool, ProcessedToByPartitions),
+        >,
         is_first_block_after_prev_master: bool,
     ) -> Result<TestCollateResult>
     where
@@ -561,7 +572,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
                 reader_state,
                 anchors_cache,
-                all_shards_processed_to: all_shards_processed_to.clone(),
+                all_shards_processed_to_by_partitions: all_shards_processed_to_by_partitions
+                    .clone(),
                 is_first_block_after_prev_master,
             },
             self.primary_mq_adapter.clone(),
@@ -582,7 +594,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts,
                 reader_state: secondary_reader_state,
                 anchors_cache: secondary_anchors_cache,
-                all_shards_processed_to,
+                all_shards_processed_to_by_partitions,
                 is_first_block_after_prev_master: true,
             },
             self.secondary_mq_adapter.clone(),
@@ -680,6 +692,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             queue_diff_with_msgs,
             reader_state,
             anchors_cache,
+            ..
         } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
 
         // create diff and compute hash

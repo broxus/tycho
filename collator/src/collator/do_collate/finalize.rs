@@ -146,6 +146,7 @@ impl Phase<FinalizeState> {
             has_unprocessed_messages,
             queue_diff_with_msgs,
             reader_state,
+            processed_upto,
             anchors_cache,
         } = {
             let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
@@ -237,6 +238,7 @@ impl Phase<FinalizeState> {
                 queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
+                processed_upto,
                 anchors_cache,
 
                 create_queue_diff_elapsed,
@@ -677,27 +679,30 @@ impl Phase<FinalizeState> {
                     processed_to_anchor_id,
                 );
 
-                let mut shards_processed_to = FastHashMap::default();
-
-                for (shard_id, _) in shards.iter() {
-                    // Extract processed information for updated shards
-                    let shard_processed_to = self
+                // update processed to information for updated shards
+                let mut shards_processed_to_by_partitions = FastHashMap::default();
+                for (shard_id, shard_descr) in shards.iter() {
+                    // get from updated shard
+                    let shard_processed_to_by_partitions = self
                         .state
                         .collation_data
                         .top_shard_blocks
                         .iter()
                         .find(|top_block_info| top_block_info.block_id.shard == *shard_id)
-                        .map(|top_block_info| top_block_info.processed_to.clone())
+                        .map(|top_block_info| top_block_info.processed_to_by_partitions.clone())
                         .or_else(|| {
+                            // or get the previous value
                             self.state
                                 .mc_data
-                                .shards_processed_to
+                                .shards_processed_to_by_partitions
                                 .get(shard_id)
+                                .map(|(_, value)| value)
                                 .cloned()
                         });
 
-                    if let Some(value) = shard_processed_to {
-                        shards_processed_to.insert(*shard_id, value);
+                    if let Some(value) = shard_processed_to_by_partitions {
+                        shards_processed_to_by_partitions
+                            .insert(*shard_id, (shard_descr.top_sc_block_updated, value));
                     }
                 }
 
@@ -720,7 +725,8 @@ impl Phase<FinalizeState> {
                     processed_upto: processed_upto.clone(),
                     top_processed_to_anchor,
                     ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
-                    shards_processed_to,
+                    shards_processed_to_by_partitions,
+                    shards_processed_to: Default::default(),
                 }))
             }
         };
