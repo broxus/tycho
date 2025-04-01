@@ -138,6 +138,9 @@ weedb::tables! {
         pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
         pub internal_message_diff_info: tables::InternalMessageDiffInfo,
         pub internal_message_commit_pointer: tables::InternalMessageCommitPointer,
+        // tables are empty, but they cannot be deleted because they are in a storage config
+        _int_msg_stats_uncommited: tables::InternalMessageStatsUncommited,
+        _shard_int_msgs_uncommited: tables::ShardInternalMessagesUncommited,
     }
 }
 
