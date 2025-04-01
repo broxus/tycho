@@ -34,8 +34,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
-    TopBlockDescription, TopShardBlockInfo,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedToByPartitions,
+    ShardDescriptionShort, TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -336,6 +336,7 @@ impl CollatorStdImpl {
                 queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
+                mut processed_upto,
                 anchors_cache,
                 create_queue_diff_elapsed,
             },
@@ -344,7 +345,6 @@ impl CollatorStdImpl {
 
         let finalize_block_timer = std::time::Instant::now();
 
-        let mut processed_upto = reader_state.get_updated_processed_upto();
         // store actual messages execution params
         processed_upto.msgs_exec_params = Some(
             finalize_phase
@@ -369,6 +369,9 @@ impl CollatorStdImpl {
                 .set(par.internals.ranges.len() as f64);
         }
 
+        // TODO: use build_all_shards_processed_to_by_partitions() and find_min_processed_to_by_shards()
+        //      to unify the min_processed_to calculation logic
+
         // get min processed to for current shard from shard and mc_data
         let current_min_processed_to = processed_upto
             .get_min_internals_processed_to_by_shards()
@@ -380,16 +383,15 @@ impl CollatorStdImpl {
             .get(&shard_id)
             .cloned();
 
-        // calculate minimal internals processed_to for this shard
-        let min_processed_to = calculate_min_internals_processed_to(
+        // calculate minimal internals processed_to for current shard
+        let min_processed_to = calculate_min_internals_processed_to_for_shard(
             &shard_id,
             current_min_processed_to,
             min_processed_to_from_mc_data,
-            &mc_data.shards,
-            &mc_data.shards_processed_to,
+            &mc_data.shards_processed_to_by_partitions,
         );
 
-        // exit collation if cancelled and do not trim diffs
+        // exit collation if cancelled
         if collation_is_cancelled.check() {
             return Err(CollatorError::Cancelled(
                 CollationCancelReason::ExternalCancel,
@@ -665,6 +667,7 @@ impl CollatorStdImpl {
                 #[cfg(feature = "block-creator-stats")]
                 creators,
                 processed_to,
+                processed_to_by_partitions,
             } = top_block_descr;
 
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
@@ -725,6 +728,7 @@ impl CollatorStdImpl {
             let top_shard_block_info = TopShardBlockInfo {
                 block_id,
                 processed_to,
+                processed_to_by_partitions,
             };
 
             collation_data_builder
@@ -1150,34 +1154,34 @@ impl CollatorStdImpl {
     }
 }
 
-fn calculate_min_internals_processed_to(
+fn calculate_min_internals_processed_to_for_shard(
     shard_id: &ShardIdent,
-    current_min_processed_to: Option<QueueKey>,
-    min_processed_to_from_mc_data: Option<QueueKey>,
-    mc_data_shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
-    mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+    shard_min_processed_to: Option<QueueKey>,
+    mc_data_min_processed_to: Option<QueueKey>,
+    mc_data_shards_processed_to: &FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 ) -> Option<QueueKey> {
     fn find_min_processed_to(
-        shards: &Vec<(ShardIdent, ShardDescriptionShort)>,
-        mc_data_shards_processed_to: &FastHashMap<ShardIdent, ProcessedTo>,
+        mc_data_shards_processed_to: &FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
         shard_id: &ShardIdent,
         min_processed_to: &mut Option<QueueKey>,
         skip_condition: impl Fn(&ShardIdent) -> bool,
     ) {
         // Iterate through shards with updated top shard blocks and find min processed_to
-        for (shard, descr) in shards {
+        for (shard, (updated, processed_to_by_partitions)) in mc_data_shards_processed_to {
+            if !*updated {
+                continue;
+            }
+
             if skip_condition(shard) {
                 continue;
             }
 
-            if descr.top_sc_block_updated {
-                if let Some(value) = mc_data_shards_processed_to.get(shard) {
-                    if let Some(v) = value.get(shard_id) {
-                        *min_processed_to = match *min_processed_to {
-                            Some(current_min) => Some(current_min.min(*v)),
-                            None => Some(*v),
-                        };
-                    }
+            for partition_processed_to in processed_to_by_partitions.values() {
+                if let Some(to_key) = partition_processed_to.get(shard_id) {
+                    *min_processed_to = match *min_processed_to {
+                        Some(min) => Some(min.min(*to_key)),
+                        None => Some(*to_key),
+                    };
                 }
             }
         }
@@ -1187,7 +1191,6 @@ fn calculate_min_internals_processed_to(
 
     if shard_id.is_masterchain() {
         find_min_processed_to(
-            mc_data_shards,
             mc_data_shards_processed_to,
             shard_id,
             &mut min_processed_to,
@@ -1195,13 +1198,12 @@ fn calculate_min_internals_processed_to(
         );
 
         // Combine with current and masterchain values
-        min_processed_to = [current_min_processed_to, min_processed_to]
+        min_processed_to = [shard_min_processed_to, min_processed_to]
             .into_iter()
             .flatten()
             .min();
     } else {
         find_min_processed_to(
-            mc_data_shards,
             mc_data_shards_processed_to,
             shard_id,
             &mut min_processed_to,
@@ -1210,9 +1212,9 @@ fn calculate_min_internals_processed_to(
 
         // Combine with current and masterchain values and shard values
         min_processed_to = [
-            current_min_processed_to,
+            shard_min_processed_to,
             min_processed_to,
-            min_processed_to_from_mc_data,
+            mc_data_min_processed_to,
         ]
         .into_iter()
         .flatten()
