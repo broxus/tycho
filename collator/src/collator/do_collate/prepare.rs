@@ -15,7 +15,7 @@ use crate::collator::CollationCancelReason;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::build_all_shards_processed_to;
+use crate::types::processed_upto::build_all_shards_processed_to_by_partitions;
 
 pub struct PrepareState {
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
@@ -103,17 +103,18 @@ impl Phase<PrepareState> {
                 .collect()
         };
 
-        let all_shards_processed_to = build_all_shards_processed_to(
-            self.state.shard_id,
+        let all_shards_processed_to_by_partitions = build_all_shards_processed_to_by_partitions(
+            self.state.collation_data.block_id_short,
             self.extra
                 .reader_state
                 .get_updated_processed_upto()
-                .get_min_internals_processed_to_by_shards(),
+                .get_internals_processed_to_by_partitions(),
             self.state
                 .mc_data
                 .processed_upto
-                .get_min_internals_processed_to_by_shards(),
-            self.state.mc_data.shards_processed_to.clone(),
+                .get_internals_processed_to_by_partitions(),
+            self.state.mc_data.shards_processed_to_by_partitions.clone(),
+            &self.state.mc_data.shards,
         );
 
         // create messages reader
@@ -126,7 +127,7 @@ impl Phase<PrepareState> {
                 mc_state_gen_lt: self.state.mc_data.gen_lt,
                 prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
                 mc_top_shards_end_lts,
-                all_shards_processed_to,
+                all_shards_processed_to_by_partitions,
                 reader_state: self.extra.reader_state,
                 anchors_cache: self.extra.anchors_cache,
                 is_first_block_after_prev_master: self.state.is_first_block_after_prev_master,

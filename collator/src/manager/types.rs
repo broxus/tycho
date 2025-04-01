@@ -16,8 +16,8 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ProcessedTo,
-    ShardDescriptionExt, ShardHashesExt,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionExt,
+    ShardHashesExt,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 
@@ -170,6 +170,7 @@ pub(super) enum BlockCacheEntryData {
         /// Whether the block was received after collation
         received_after_collation: bool,
 
+        // TODO: use ref from candidate
         /// Processed to info for every partition
         processed_upto: ProcessedUptoInfoStuff,
     },
@@ -383,15 +384,6 @@ impl BlockCacheEntry {
                 "Block should be `Received` to contain `cached_state` ({})",
                 self.block_id
             )
-        }
-    }
-
-    pub fn int_processed_to(&self) -> &ProcessedTo {
-        match &self.data {
-            BlockCacheEntryData::Collated {
-                candidate_stuff, ..
-            } => &candidate_stuff.candidate.queue_diff_aug.diff().processed_to,
-            BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_to,
         }
     }
 }

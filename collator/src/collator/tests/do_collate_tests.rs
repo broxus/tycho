@@ -1,11 +1,9 @@
-use std::collections::BTreeMap;
-
 use everscale_types::models::*;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
-use crate::collator::do_collate::calculate_min_internals_processed_to;
-use crate::types::ShardDescriptionShort;
+use crate::collator::do_collate::calculate_min_internals_processed_to_for_shard;
+use crate::types::ProcessedToByPartitions;
 
 #[test]
 fn test_calculate_min_processed_to_masterchain() {
@@ -18,48 +16,42 @@ fn test_calculate_min_processed_to_masterchain() {
     let updated_shard = ShardIdent::new_full(0);
     let not_updated_shard = ShardIdent::new_full(1);
 
-    let mc_data_shards = vec![
-        (updated_shard, ShardDescriptionShort {
-            top_sc_block_updated: true,
-            ..Default::default()
-        }),
-        (not_updated_shard, ShardDescriptionShort {
-            top_sc_block_updated: false,
-            ..Default::default()
-        }),
-    ];
+    let mut mc_data_shards_processed_to_by_partitions = FastHashMap::default();
 
-    let mut mc_data_shards_processed_to = FastHashMap::default();
-    let mut processed_to = BTreeMap::new();
-    processed_to.insert(shard_id, QueueKey::max_for_lt(4));
+    let mut processed_to_by_partitions = ProcessedToByPartitions::default();
+    processed_to_by_partitions.insert(
+        0,
+        [(shard_id, QueueKey::max_for_lt(4))].into_iter().collect(),
+    );
+    processed_to_by_partitions.insert(
+        1,
+        [(shard_id, QueueKey::max_for_lt(3))].into_iter().collect(),
+    );
 
     // check updated
-    mc_data_shards_processed_to.insert(updated_shard, processed_to);
+    mc_data_shards_processed_to_by_partitions
+        .insert(updated_shard, (true, processed_to_by_partitions.clone()));
 
-    let result = calculate_min_internals_processed_to(
+    let result = calculate_min_internals_processed_to_for_shard(
         &shard_id,
         current_processed_to,
         mc_processed_to,
-        &mc_data_shards,
-        &mc_data_shards_processed_to,
+        &mc_data_shards_processed_to_by_partitions,
     );
 
     // updated shard should override current_processed_to
-    assert_eq!(result, Some(QueueKey::max_for_lt(4)));
+    assert_eq!(result, Some(QueueKey::max_for_lt(3)));
 
-    let mut mc_data_shards_processed_to = FastHashMap::default();
-    let mut processed_to = BTreeMap::new();
-    processed_to.insert(shard_id, QueueKey::max_for_lt(4));
+    // check not updated
+    mc_data_shards_processed_to_by_partitions.clear();
+    mc_data_shards_processed_to_by_partitions
+        .insert(not_updated_shard, (false, processed_to_by_partitions));
 
-    // check updated
-    mc_data_shards_processed_to.insert(not_updated_shard, processed_to);
-
-    let result = calculate_min_internals_processed_to(
+    let result = calculate_min_internals_processed_to_for_shard(
         &shard_id,
         current_processed_to,
         mc_processed_to,
-        &mc_data_shards,
-        &mc_data_shards_processed_to,
+        &mc_data_shards_processed_to_by_partitions,
     );
 
     // not updated shard should not override current_processed_to
@@ -71,73 +63,80 @@ fn test_calculate_min_processed_to_shard() {
     // Mock data for shard test
     let shard_id = ShardIdent::new_full(2);
 
-    let current_processed_to = Some(QueueKey::max_for_lt(10));
+    let current_processed_to = Some(QueueKey::max_for_lt(11));
 
     let updated_shard = ShardIdent::new_full(3);
     let not_updated_shard = ShardIdent::new_full(4);
 
-    let mc_data_shards = vec![
-        (updated_shard, ShardDescriptionShort {
-            top_sc_block_updated: true,
-            ..Default::default()
-        }),
-        (not_updated_shard, ShardDescriptionShort {
-            top_sc_block_updated: false,
-            ..Default::default()
-        }),
-    ];
-
-    let mut mc_data_shards_processed_to = FastHashMap::default();
-    let mut processed_to = BTreeMap::new();
-    processed_to.insert(shard_id, QueueKey::max_for_lt(8));
-    let mc_processed_to = Some(QueueKey::max_for_lt(9));
+    let mut mc_data_shards_processed_to_by_partitions = FastHashMap::default();
 
     // Check updated shard
-    mc_data_shards_processed_to.insert(updated_shard, processed_to);
+    let mut processed_to_by_partitions = ProcessedToByPartitions::default();
+    processed_to_by_partitions.insert(
+        0,
+        [(shard_id, QueueKey::max_for_lt(8))].into_iter().collect(),
+    );
+    processed_to_by_partitions.insert(
+        1,
+        [(shard_id, QueueKey::max_for_lt(7))].into_iter().collect(),
+    );
 
-    let result = calculate_min_internals_processed_to(
+    mc_data_shards_processed_to_by_partitions
+        .insert(updated_shard, (true, processed_to_by_partitions.clone()));
+
+    let mc_processed_to = Some(QueueKey::max_for_lt(9));
+
+    let result = calculate_min_internals_processed_to_for_shard(
         &shard_id,
         current_processed_to,
         mc_processed_to,
-        &mc_data_shards,
-        &mc_data_shards_processed_to,
+        &mc_data_shards_processed_to_by_partitions,
     );
 
     // Updated shard should override current_processed_to
-    assert_eq!(result, Some(QueueKey::max_for_lt(8)));
+    assert_eq!(result, Some(QueueKey::max_for_lt(7)));
 
-    // Reset processed_to for not-updated shard
-    let mut mc_data_shards_processed_to = FastHashMap::default();
-    let mut processed_to = BTreeMap::new();
-    processed_to.insert(shard_id, QueueKey::max_for_lt(8));
-    let mc_processed_to = Some(QueueKey::max_for_lt(11));
     // Check not updated shard
-    mc_data_shards_processed_to.insert(not_updated_shard, processed_to);
+    mc_data_shards_processed_to_by_partitions.clear();
+    mc_data_shards_processed_to_by_partitions
+        .insert(not_updated_shard, (false, processed_to_by_partitions));
 
-    let result = calculate_min_internals_processed_to(
+    let mc_processed_to = Some(QueueKey::max_for_lt(12));
+
+    let result = calculate_min_internals_processed_to_for_shard(
         &shard_id,
         current_processed_to,
         mc_processed_to,
-        &mc_data_shards,
-        &mc_data_shards_processed_to,
+        &mc_data_shards_processed_to_by_partitions,
     );
 
     // Not updated shard should not override current_processed_to
-    assert_eq!(result, Some(QueueKey::max_for_lt(10)));
+    assert_eq!(result, Some(QueueKey::max_for_lt(11)));
 
     // Verify combination with masterchain value
-    let mc_data_shards_processed_to = FastHashMap::default();
+    let mut processed_to_by_partitions = ProcessedToByPartitions::default();
+    processed_to_by_partitions.insert(
+        0,
+        [(shard_id, QueueKey::max_for_lt(12))].into_iter().collect(),
+    );
+    processed_to_by_partitions.insert(
+        1,
+        [(shard_id, QueueKey::max_for_lt(10))].into_iter().collect(),
+    );
+
+    mc_data_shards_processed_to_by_partitions.clear();
+    mc_data_shards_processed_to_by_partitions
+        .insert(updated_shard, (true, processed_to_by_partitions.clone()));
 
     let mc_processed_to = Some(QueueKey::max_for_lt(9));
 
-    let result = calculate_min_internals_processed_to(
+    let result = calculate_min_internals_processed_to_for_shard(
         &shard_id,
         current_processed_to,
         mc_processed_to,
-        &mc_data_shards,
-        &mc_data_shards_processed_to,
+        &mc_data_shards_processed_to_by_partitions,
     );
 
-    // Minimum value should be returned
+    // Minimum value from master should be returned
     assert_eq!(result, Some(QueueKey::max_for_lt(9)));
 }
