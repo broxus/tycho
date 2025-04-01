@@ -333,7 +333,7 @@ pub mod option_string {
             T: FromStr,
             T::Err: std::fmt::Display;
 
-        Helper::deserialize(deserializer).map(|Helper(v)| Some(v))
+        Option::<Helper<T>>::deserialize(deserializer).map(|x| x.map(|Helper(x)| x))
     }
 }
 
@@ -517,5 +517,28 @@ impl<'de, const M: usize> Visitor<'de> for BytesVisitor<M> {
         }
 
         array_from_iterator(SeqIter::new(seq), &self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn struct_with_option_string() {
+        #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+        struct Test {
+            #[serde(with = "option_string")]
+            value: Option<u64>,
+        }
+
+        for value in [Test { value: None }, Test { value: Some(123) }, Test {
+            value: Some(u64::MAX),
+        }] {
+            let test = serde_json::to_string(&value).unwrap();
+            println!("{test}");
+            let parsed: Test = serde_json::from_str(&test).unwrap();
+            assert_eq!(value, parsed);
+        }
     }
 }
