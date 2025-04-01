@@ -336,7 +336,7 @@ impl CollatorStdImpl {
                 queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
-                processed_upto,
+                mut processed_upto,
                 anchors_cache,
                 create_queue_diff_elapsed,
             },
@@ -345,7 +345,6 @@ impl CollatorStdImpl {
 
         let finalize_block_timer = std::time::Instant::now();
 
-        let mut processed_upto = processed_upto;
         // store actual messages execution params
         processed_upto.msgs_exec_params = Some(
             finalize_phase
