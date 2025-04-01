@@ -37,7 +37,10 @@ use crate::manager::McBlockSubgraphExtract;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
-use crate::types::processed_upto::{Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff};
+use crate::types::processed_upto::{
+    find_min_processed_to_by_shards, InternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff,
+    ProcessedUptoPartitionStuff,
+};
 use crate::types::{
     BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionExt as _,
     ShardDescriptionShort, ShardHashesExt, ShardIdentExt,
@@ -929,19 +932,20 @@ async fn test_queue_restore_on_sync() {
         .id()
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
-    let all_processed_to_by_shards = TestCollationManager::read_all_processed_to_for_mc_block(
-        &last_applied_mc_block_key,
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-    )
-    .await
-    .unwrap();
+    let all_shards_processed_to_by_partitions =
+        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+            &last_applied_mc_block_key,
+            &test_adapter.blocks_cache,
+            test_adapter.state_adapter.clone(),
+        )
+        .await
+        .unwrap();
     tracing::trace!(
-        "all_processed_to_by_shards: {:?}",
-        all_processed_to_by_shards,
+        "all_shards_processed_to_by_partitions: {:?}",
+        all_shards_processed_to_by_partitions,
     );
     let min_processed_to_by_shards =
-        TestCollationManager::find_min_processed_to_by_shards(&all_processed_to_by_shards);
+        find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
     tracing::trace!(
         "min_processed_to_by_shards: {:?}",
         min_processed_to_by_shards,
@@ -1278,19 +1282,20 @@ async fn test_queue_restore_on_sync() {
         .id()
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
-    let all_processed_to_by_shards = TestCollationManager::read_all_processed_to_for_mc_block(
-        &last_applied_mc_block_key,
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-    )
-    .await
-    .unwrap();
+    let all_shards_processed_to_by_partitions =
+        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+            &last_applied_mc_block_key,
+            &test_adapter.blocks_cache,
+            test_adapter.state_adapter.clone(),
+        )
+        .await
+        .unwrap();
     tracing::trace!(
-        "all_processed_to_by_shards: {:?}",
-        all_processed_to_by_shards,
+        "all_shards_processed_to_by_partitions: {:?}",
+        all_shards_processed_to_by_partitions,
     );
     let min_processed_to_by_shards =
-        TestCollationManager::find_min_processed_to_by_shards(&all_processed_to_by_shards);
+        find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
     tracing::trace!(
         "min_processed_to_by_shards: {:?}",
         min_processed_to_by_shards,
@@ -1561,19 +1566,20 @@ async fn test_queue_restore_on_sync() {
         .id()
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
-    let all_processed_to_by_shards = TestCollationManager::read_all_processed_to_for_mc_block(
-        &last_applied_mc_block_key,
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-    )
-    .await
-    .unwrap();
+    let all_shards_processed_to_by_partitions =
+        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+            &last_applied_mc_block_key,
+            &test_adapter.blocks_cache,
+            test_adapter.state_adapter.clone(),
+        )
+        .await
+        .unwrap();
     tracing::trace!(
-        "all_processed_to_by_shards: {:?}",
-        all_processed_to_by_shards,
+        "all_shards_processed_to_by_partitions: {:?}",
+        all_shards_processed_to_by_partitions,
     );
     let min_processed_to_by_shards =
-        TestCollationManager::find_min_processed_to_by_shards(&all_processed_to_by_shards);
+        find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
     tracing::trace!(
         "min_processed_to_by_shards: {:?}",
         min_processed_to_by_shards,
@@ -1868,19 +1874,20 @@ async fn test_queue_restore_on_sync() {
         .id()
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
-    let all_processed_to_by_shards = TestCollationManager::read_all_processed_to_for_mc_block(
-        &last_applied_mc_block_key,
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-    )
-    .await
-    .unwrap();
+    let all_shards_processed_to_by_partitions =
+        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+            &last_applied_mc_block_key,
+            &test_adapter.blocks_cache,
+            test_adapter.state_adapter.clone(),
+        )
+        .await
+        .unwrap();
     tracing::trace!(
         "all_processed_to_by_shards: {:?}",
-        all_processed_to_by_shards,
+        all_shards_processed_to_by_partitions,
     );
     let min_processed_to_by_shards =
-        TestCollationManager::find_min_processed_to_by_shards(&all_processed_to_by_shards);
+        find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
     tracing::trace!(
         "min_processed_to_by_shards: {:?}",
         min_processed_to_by_shards,
@@ -1975,21 +1982,29 @@ impl BlockStuffExt for BlockStuffAug {
 }
 
 struct TestProcessedToStuff {
-    sc_processed_to_info: BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>,
-    mc_processed_to_info: BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>,
+    sc_processed_to_info:
+        FastHashMap<QueuePartitionIdx, BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>>,
+    mc_processed_to_info:
+        FastHashMap<QueuePartitionIdx, BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>>,
 }
 impl TestProcessedToStuff {
     fn new(shard: ShardIdent) -> Self {
+        let default_partition_processed_to: BTreeMap<_, _> = [
+            (shard, (0, QueueKey::min_for_lt(0))),
+            (ShardIdent::MASTERCHAIN, (0, QueueKey::min_for_lt(0))),
+        ]
+        .into_iter()
+        .collect();
         Self {
             sc_processed_to_info: [
-                (shard, (0, QueueKey::min_for_lt(0))),
-                (ShardIdent::MASTERCHAIN, (0, QueueKey::min_for_lt(0))),
+                (0, default_partition_processed_to.clone()),
+                (1, default_partition_processed_to.clone()),
             ]
             .into_iter()
             .collect(),
             mc_processed_to_info: [
-                (shard, (0, QueueKey::min_for_lt(0))),
-                (ShardIdent::MASTERCHAIN, (0, QueueKey::min_for_lt(0))),
+                (0, default_partition_processed_to.clone()),
+                (1, default_partition_processed_to.clone()),
             ]
             .into_iter()
             .collect(),
@@ -2002,33 +2017,96 @@ impl TestProcessedToStuff {
             QueueKey::max_for_lt(block_stuff.end_lt()),
         );
         if shard.is_masterchain() {
-            self.mc_processed_to_info
-                .insert(block_stuff.id().shard, value);
+            for (_, partition_processed_to) in self.mc_processed_to_info.iter_mut() {
+                partition_processed_to.insert(block_stuff.id().shard, value);
+            }
         } else {
-            self.sc_processed_to_info
-                .insert(block_stuff.id().shard, value);
+            for (_, partition_processed_to) in self.sc_processed_to_info.iter_mut() {
+                partition_processed_to.insert(block_stuff.id().shard, value);
+            }
         }
     }
 
-    fn get_sc_processed_to(&self) -> ProcessedTo {
-        self.sc_processed_to_info
-            .iter()
-            .map(|(shard, (_seqno, key))| (*shard, *key))
-            .collect()
+    fn get_min_processed_to_from(
+        processed_to_info: &FastHashMap<
+            QueuePartitionIdx,
+            BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>,
+        >,
+    ) -> ProcessedTo {
+        let mut min_processed_to = ProcessedTo::default();
+        for partition_processed_to in processed_to_info.values() {
+            for (&shard, (_, to_key)) in partition_processed_to {
+                min_processed_to
+                    .entry(shard)
+                    .and_modify(|min| *min = std::cmp::min(*min, *to_key))
+                    .or_insert(*to_key);
+            }
+        }
+        min_processed_to
     }
 
-    fn get_mc_processed_to(&self) -> ProcessedTo {
-        self.mc_processed_to_info
-            .iter()
-            .map(|(shard, (_seqno, key))| (*shard, *key))
-            .collect()
+    fn get_min_sc_processed_to(&self) -> ProcessedTo {
+        Self::get_min_processed_to_from(&self.sc_processed_to_info)
+    }
+
+    fn get_min_mc_processed_to(&self) -> ProcessedTo {
+        Self::get_min_processed_to_from(&self.mc_processed_to_info)
+    }
+
+    fn get_min_seqno_for_shard(
+        shard: &ShardIdent,
+        processed_to_info: &FastHashMap<
+            QueuePartitionIdx,
+            BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>,
+        >,
+    ) -> BlockSeqno {
+        let mut min_seqno = BlockSeqno::MAX;
+        for partition_processed_to in processed_to_info.values() {
+            let (seqno, _) = partition_processed_to.get(shard).unwrap();
+            min_seqno = std::cmp::min(min_seqno, *seqno);
+        }
+        min_seqno
     }
 
     fn calc_tail_len(&self, shard: &ShardIdent, next_seqno: BlockSeqno) -> u32 {
-        let (mc_processed_to_seqno, _) = self.mc_processed_to_info.get(shard).unwrap();
-        let (sc_processed_to_seqno, _) = self.mc_processed_to_info.get(shard).unwrap();
-        let min_processed_to_seqno = mc_processed_to_seqno.min(sc_processed_to_seqno);
-        next_seqno - *min_processed_to_seqno
+        let mc_min_seqno = Self::get_min_seqno_for_shard(shard, &self.mc_processed_to_info);
+        let sc_min_seqno = Self::get_min_seqno_for_shard(shard, &self.sc_processed_to_info);
+        let min_processed_to_seqno = mc_min_seqno.min(sc_min_seqno);
+        next_seqno - min_processed_to_seqno
+    }
+
+    fn gen_processed_upto(
+        processed_to_info: &FastHashMap<
+            QueuePartitionIdx,
+            BTreeMap<ShardIdent, (BlockSeqno, QueueKey)>,
+        >,
+    ) -> ProcessedUptoInfoStuff {
+        ProcessedUptoInfoStuff {
+            msgs_exec_params: None,
+            partitions: processed_to_info
+                .iter()
+                .map(|(par_id, par)| {
+                    (*par_id, ProcessedUptoPartitionStuff {
+                        internals: InternalsProcessedUptoStuff {
+                            processed_to: par
+                                .iter()
+                                .map(|(shard, (_, to_key))| (*shard, *to_key))
+                                .collect(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    fn gen_sc_processed_upto(&self) -> ProcessedUptoInfoStuff {
+        Self::gen_processed_upto(&self.sc_processed_to_info)
+    }
+
+    fn gen_mc_processed_upto(&self) -> ProcessedUptoInfoStuff {
+        Self::gen_processed_upto(&self.mc_processed_to_info)
     }
 }
 
@@ -2091,9 +2169,10 @@ where
                 msgs_count,
             )
             .unwrap();
-        let processed_to = self.processed_to_stuff.get_sc_processed_to();
+        let processed_to = self.processed_to_stuff.get_min_sc_processed_to();
         let queue_diff_with_msgs =
             create_queue_diff_with_msgs(into_messages(test_messages), processed_to.clone());
+        let processed_upto = self.processed_to_stuff.gen_sc_processed_upto();
         self.state_adapter
             .add_shard_block(
                 shard,
@@ -2106,6 +2185,7 @@ where
                 prev_block_end_lt,
                 ref_mc_block_id,
                 ref_mc_block_end_lt,
+                processed_upto,
             )
             .unwrap()
     }
@@ -2129,9 +2209,10 @@ where
                 msgs_count,
             )
             .unwrap();
-        let processed_to = self.processed_to_stuff.get_mc_processed_to();
+        let processed_to = self.processed_to_stuff.get_min_mc_processed_to();
         let queue_diff_with_msgs =
             create_queue_diff_with_msgs(into_messages(test_messages), processed_to.clone());
+        let processed_upto = self.processed_to_stuff.gen_mc_processed_upto();
         self.state_adapter
             .add_master_block(
                 seqno,
@@ -2145,6 +2226,7 @@ where
                 shard_block_stuff,
                 top_sc_block_updated,
                 mc_is_key_block,
+                processed_upto,
             )
             .unwrap()
     }
@@ -2347,6 +2429,7 @@ impl TestStateNodeAdapter {
         master_ref_opt: Option<BlockRef>,
         shards_descr_opt: Option<FastHashMap<ShardIdent, ShardDescription>>,
         mc_is_key_block: bool,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<CreatedBlockInfo<V>> {
         let prev_block_seqno = seqno.saturating_sub(1);
 
@@ -2473,23 +2556,13 @@ impl TestStateNodeAdapter {
             last_key_block: None,
             block_create_stats: None,
         });
+
         let shard_state = ShardStateUnsplit {
             shard_ident: shard,
             seqno,
             min_ref_mc_seqno: 0,
             custom: mc_state_extra_opt.as_ref().map(Lazy::new).transpose()?,
-            processed_upto: Lazy::new(
-                &(ProcessedUptoInfoStuff {
-                    partitions: [
-                        (0, ProcessedUptoPartitionStuff::default()),
-                        (1, ProcessedUptoPartitionStuff::default()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    msgs_exec_params: None,
-                }
-                .try_into()?),
-            )?,
+            processed_upto: Lazy::new(&(processed_upto.try_into()?))?,
             ..Default::default()
         };
 
@@ -2536,6 +2609,7 @@ impl TestStateNodeAdapter {
         prev_block_end_lt: Lt,
         ref_mc_block_id: BlockId,
         ref_mc_block_end_lt: Lt,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<CreatedBlockInfo<V>> {
         let master_ref = BlockRef {
             end_lt: ref_mc_block_end_lt,
@@ -2556,6 +2630,7 @@ impl TestStateNodeAdapter {
             Some(master_ref),
             None,
             false,
+            processed_upto,
         )
     }
 
@@ -2572,6 +2647,7 @@ impl TestStateNodeAdapter {
         top_shard_block: &BlockStuff,
         top_sc_block_updated: bool,
         mc_is_key_block: bool,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<CreatedBlockInfo<V>> {
         let shard = ShardIdent::MASTERCHAIN;
 
@@ -2599,6 +2675,7 @@ impl TestStateNodeAdapter {
             None,
             Some(shards_descr),
             mc_is_key_block,
+            processed_upto,
         )
     }
 }

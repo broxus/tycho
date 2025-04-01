@@ -21,7 +21,7 @@ use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedTo, TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -60,11 +60,10 @@ impl BlocksCache {
         for mut shard_cache in self.inner.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
-                    let processed_to = entry
-                        .int_processed_to()
-                        .iter()
-                        .map(|(shard, queue_key)| (*shard, *queue_key))
-                        .collect();
+                    let processed_to_by_partitions = entry
+                        .data
+                        .processed_upto()
+                        .get_internals_processed_to_by_partitions();
 
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
@@ -77,7 +76,8 @@ impl BlocksCache {
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
                             #[cfg(feature = "block-creator-stats")]
                             creators: std::mem::take(&mut shard_cache.data.creators),
-                            processed_to,
+                            processed_to: Default::default(),
+                            processed_to_by_partitions,
                         });
                         break;
                     }
@@ -147,17 +147,17 @@ impl BlocksCache {
         )
     }
 
-    pub fn get_all_processed_to_by_mc_block_from_cache(
+    pub fn get_top_blocks_processed_to_by_partitions(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, Option<ProcessedTo>>> {
-        let mut all_processed_to = FastHashMap::default();
+    ) -> Result<FastHashMap<BlockId, (bool, Option<ProcessedToByPartitions>)>> {
+        let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
-            return Ok(all_processed_to);
+            return Ok(result);
         }
 
-        let updated_top_shard_block_ids;
+        let top_shard_block_ids;
         {
             let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
@@ -167,36 +167,41 @@ impl BlocksCache {
                 )
             };
 
-            let processed_to = mc_block_entry.int_processed_to().clone();
+            let processed_to_by_partitions = mc_block_entry
+                .data
+                .processed_upto()
+                .get_internals_processed_to_by_partitions();
+            result.insert(
+                mc_block_entry.block_id,
+                (true, Some(processed_to_by_partitions)),
+            );
 
-            updated_top_shard_block_ids = mc_block_entry
-                .top_shard_blocks_info
-                .iter()
-                .filter(|(_, updated)| *updated)
-                .map(|(id, _)| id)
-                .cloned()
-                .collect::<Vec<_>>();
-            all_processed_to.insert(mc_block_entry.block_id, Some(processed_to));
+            top_shard_block_ids = mc_block_entry.top_shard_blocks_info.clone();
         }
 
-        for top_sc_block_id in updated_top_shard_block_ids {
+        for (top_sc_block_id, updated) in top_shard_block_ids {
             if top_sc_block_id.seqno == 0 {
                 continue;
             }
 
-            let mut processed_to_opt = None;
+            let mut processed_to_by_partitions_opt = None;
 
             // try to find in cache
             if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
+                    processed_to_by_partitions_opt = Some(
+                        sc_block_entry
+                            .data
+                            .processed_upto()
+                            .get_internals_processed_to_by_partitions(),
+                    );
                 }
             }
 
-            all_processed_to.insert(top_sc_block_id, processed_to_opt);
+            result.insert(top_sc_block_id, (updated, processed_to_by_partitions_opt));
         }
 
-        Ok(all_processed_to)
+        Ok(result)
     }
 
     /// If we have
