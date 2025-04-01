@@ -27,7 +27,9 @@ use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
-use crate::types::processed_upto::{build_all_shards_processed_to, ProcessedUptoInfoExtension};
+use crate::types::processed_upto::{
+    build_all_shards_processed_to_by_partitions, ProcessedUptoInfoExtension,
+};
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
     DisplayBlockIdsIntoIter, McData, TopBlockDescription,
@@ -1282,17 +1284,21 @@ impl CollatorStdImpl {
 
         // finally check if has pending messages in iterators
 
-        let all_shards_processed_to = build_all_shards_processed_to(
-            working_state.next_block_id_short.shard,
+        let all_shards_processed_to_by_partitions = build_all_shards_processed_to_by_partitions(
+            working_state.next_block_id_short,
             working_state
                 .reader_state
                 .get_updated_processed_upto()
-                .get_min_internals_processed_to_by_shards(),
+                .get_internals_processed_to_by_partitions(),
             working_state
                 .mc_data
                 .processed_upto
-                .get_min_internals_processed_to_by_shards(),
-            working_state.mc_data.shards_processed_to.clone(),
+                .get_internals_processed_to_by_partitions(),
+            working_state
+                .mc_data
+                .shards_processed_to_by_partitions
+                .clone(),
+            &working_state.mc_data.shards,
         );
 
         // create reader
@@ -1310,7 +1316,7 @@ impl CollatorStdImpl {
                     .iter()
                     .map(|(k, v)| (*k, v.end_lt))
                     .collect(),
-                all_shards_processed_to,
+                all_shards_processed_to_by_partitions,
                 // extract reader state to use in the reader
                 reader_state: std::mem::take(&mut working_state.reader_state),
                 // do not use anchors cache because we need to check
