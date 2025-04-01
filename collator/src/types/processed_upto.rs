@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    ExternalsRange, InternalsRange, MsgsExecutionParams, ProcessedUptoInfo, ProcessedUptoPartition,
-    ShardIdent, ShardIdentFull, ShardRange,
+    BlockIdShort, ExternalsRange, InternalsRange, MsgsExecutionParams, ProcessedUptoInfo,
+    ProcessedUptoPartition, ShardIdent, ShardIdentFull, ShardRange,
 };
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use super::ProcessedTo;
+use super::{ProcessedTo, ProcessedToByPartitions, ShardDescriptionShort};
 use crate::mempool::MempoolAnchorId;
 
 pub type Lt = u64;
@@ -37,17 +37,25 @@ impl ProcessedUptoInfoStuff {
         })
     }
 
+    pub fn get_internals_processed_to_by_partitions(&self) -> ProcessedToByPartitions {
+        self.partitions
+            .iter()
+            .map(|(&par_id, par)| (par_id, par.internals.processed_to.clone()))
+            .collect()
+    }
+
+    // TODO: rename into get_min_internals_processed_to
     pub fn get_min_internals_processed_to_by_shards(&self) -> ProcessedTo {
-        let mut shards_processed_to = ProcessedTo::default();
+        let mut shards_min_processed_to = ProcessedTo::default();
         for par in self.partitions.values() {
             for (shard_id, key) in &par.internals.processed_to {
-                shards_processed_to
+                shards_min_processed_to
                     .entry(*shard_id)
                     .and_modify(|min_key| *min_key = std::cmp::min(*min_key, *key))
                     .or_insert(*key);
             }
         }
-        shards_processed_to
+        shards_min_processed_to
     }
 
     pub fn get_partitions(&self) -> FastHashSet<QueuePartitionIdx> {
@@ -368,18 +376,64 @@ impl ProcessedUptoInfoExtension for ProcessedUptoInfoStuff {
     }
 }
 
-pub fn build_all_shards_processed_to(
-    current_shard: ShardIdent,
-    current_shard_processed_to: ProcessedTo,
-    mc_processed_to: ProcessedTo,
-    mc_shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
-) -> FastHashMap<ShardIdent, ProcessedTo> {
+pub fn build_all_shards_processed_to_by_partitions(
+    next_block_id_short: BlockIdShort,
+    current_shard_processed_to: ProcessedToByPartitions,
+    mc_processed_to: ProcessedToByPartitions,
+    mc_shards_processed_to: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+    mc_shards: &[(ShardIdent, ShardDescriptionShort)],
+) -> FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)> {
     let mut res = mc_shards_processed_to;
-    if !current_shard.is_masterchain() {
+
+    if !next_block_id_short.shard.is_masterchain() {
         // add processed_to from master
-        res.insert(ShardIdent::MASTERCHAIN, mc_processed_to);
+        res.insert(ShardIdent::MASTERCHAIN, (true, mc_processed_to));
     }
+
+    // detect if shard is updated or not
+    let current_shard_updated = if next_block_id_short.shard.is_masterchain() {
+        true
+    } else {
+        let (_, shard_descr) = mc_shards
+            .iter()
+            .find(|(shard_id, _)| *shard_id == next_block_id_short.shard)
+            .unwrap();
+        // shard was updated in master
+        shard_descr.top_sc_block_updated
+        // next block is after the first one after master
+        || (next_block_id_short.seqno - shard_descr.seqno) > 1
+    };
+
     // replace processed_to from current shard
-    res.insert(current_shard, current_shard_processed_to);
+    res.insert(
+        next_block_id_short.shard,
+        (current_shard_updated, current_shard_processed_to),
+    );
+
     res
+}
+
+pub fn find_min_processed_to_by_shards(
+    all_shards_processed_to_by_partitions: &FastHashMap<
+        ShardIdent,
+        (bool, ProcessedToByPartitions),
+    >,
+) -> ProcessedTo {
+    let mut result = ProcessedTo::default();
+
+    for (_, shard_processed_to_by_partitions) in all_shards_processed_to_by_partitions
+        .values()
+        .filter(|(updated, _)| *updated)
+    {
+        for partition_processed_to in shard_processed_to_by_partitions.values() {
+            for (&shard_id, &to_key) in partition_processed_to {
+                result
+                    .entry(shard_id)
+                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
+                    .or_insert(to_key);
+            }
+        }
+    }
+
+    result
 }

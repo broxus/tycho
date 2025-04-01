@@ -39,11 +39,13 @@ use crate::mempool::{
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
-use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
+use crate::types::processed_upto::{
+    find_min_processed_to_by_shards, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
+};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedTo, ShardDescriptionExt,
-    ShardDescriptionShort, ShardHashesExt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedTo,
+    ProcessedToByPartitions, ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -1512,16 +1514,17 @@ where
 
         // get internals processed_to from master and all shards
         // for last applied master block
-        let all_processed_to_by_shards = Self::read_all_processed_to_for_mc_block(
-            &last_applied_mc_block_key,
-            &self.blocks_cache,
-            self.state_node_adapter.clone(),
-        )
-        .await?;
+        let all_shards_processed_to_by_partitions =
+            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
+                &last_applied_mc_block_key,
+                &self.blocks_cache,
+                self.state_node_adapter.clone(),
+            )
+            .await?;
 
         // find internals min processed_to
         let min_processed_to_by_shards =
-            Self::find_min_processed_to_by_shards(&all_processed_to_by_shards);
+            find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ?min_processed_to_by_shards,
@@ -1608,7 +1611,8 @@ where
         // because next we will start to collate new shard blocks after the sync
         self.blocks_cache.reset_top_shard_blocks_additional_info();
 
-        let mc_data = McData::load_from_state(&last_mc_state, all_processed_to_by_shards)?;
+        let mc_data =
+            McData::load_from_state(&last_mc_state, all_shards_processed_to_by_partitions)?;
 
         self.blocks_cache
             .remove_next_collated_blocks_from_cache(&queue_restore_res.synced_to_blocks_keys);
@@ -1640,6 +1644,41 @@ where
         }
 
         Ok(true)
+    }
+
+    async fn get_all_shards_processed_to_by_partitions_for_mc_block(
+        mc_block_key: &BlockCacheKey,
+        blocks_cache: &BlocksCache,
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
+    ) -> Result<FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>> {
+        let mut result = FastHashMap::default();
+
+        if mc_block_key.seqno == 0 {
+            return Ok(result);
+        }
+
+        let from_cache = blocks_cache.get_top_blocks_processed_to_by_partitions(mc_block_key)?;
+
+        for (top_block_id, (updated, processed_to_opt)) in from_cache {
+            let processed_to = match processed_to_opt {
+                Some(processed_to) => processed_to,
+                None => {
+                    if top_block_id.seqno == 0 {
+                        FastHashMap::default()
+                    } else {
+                        // get from state
+                        let state = state_node_adapter.load_state(&top_block_id).await?;
+                        let processed_upto = state.state().processed_upto.load()?;
+                        let processed_upto = ProcessedUptoInfoStuff::try_from(processed_upto)?;
+                        processed_upto.get_internals_processed_to_by_partitions()
+                    }
+                }
+            };
+
+            result.insert(top_block_id.shard, (updated, processed_to));
+        }
+
+        Ok(result)
     }
 
     /// Get all processed to info from master and each shard
@@ -1676,21 +1715,6 @@ where
         }
 
         Ok(result)
-    }
-
-    fn find_min_processed_to_by_shards(
-        all_processed_to_by_shards: &FastHashMap<ShardIdent, ProcessedTo>,
-    ) -> ProcessedTo {
-        let mut result = ProcessedTo::default();
-        for shard_processed_to in all_processed_to_by_shards.values() {
-            for (&shard_id, &to_key) in shard_processed_to {
-                result
-                    .entry(shard_id)
-                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
-                    .or_insert(to_key);
-            }
-        }
-        result
     }
 
     // Returns top master block id upto which all queue diffs applied

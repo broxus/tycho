@@ -336,6 +336,7 @@ impl CollatorStdImpl {
                 queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
+                processed_upto,
                 anchors_cache,
                 create_queue_diff_elapsed,
             },
@@ -344,7 +345,7 @@ impl CollatorStdImpl {
 
         let finalize_block_timer = std::time::Instant::now();
 
-        let mut processed_upto = reader_state.get_updated_processed_upto();
+        let mut processed_upto = processed_upto;
         // store actual messages execution params
         processed_upto.msgs_exec_params = Some(
             finalize_phase
@@ -380,6 +381,7 @@ impl CollatorStdImpl {
             .get(&shard_id)
             .cloned();
 
+        // TODO: use mc_data.shards_processed_to_by_partitions
         // calculate minimal internals processed_to for this shard
         let min_processed_to = calculate_min_internals_processed_to(
             &shard_id,
@@ -665,6 +667,7 @@ impl CollatorStdImpl {
                 #[cfg(feature = "block-creator-stats")]
                 creators,
                 processed_to,
+                processed_to_by_partitions,
             } = top_block_descr;
 
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
@@ -725,6 +728,7 @@ impl CollatorStdImpl {
             let top_shard_block_info = TopShardBlockInfo {
                 block_id,
                 processed_to,
+                processed_to_by_partitions,
             };
 
             collation_data_builder
