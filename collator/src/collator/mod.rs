@@ -45,11 +45,14 @@ mod messages_reader;
 mod types;
 
 pub use error::CollationCancelReason;
-pub use types::ForceMasterCollation;
+pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory};
 
 // FACTORY
 
@@ -1322,7 +1325,7 @@ impl CollatorStdImpl {
             mut reader_state, ..
         } = messages_reader.finalize(
             0, // can pass 0 because new messages reader was not initialized in this case
-            Default::default(),
+            &Default::default(),
         )?;
         std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
