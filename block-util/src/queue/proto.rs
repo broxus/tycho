@@ -197,8 +197,16 @@ impl QueueKey {
         let mut new_hash = self.hash;
 
         if new_hash.0 == [0xff; 32] {
-            new_lt += 1;
-            new_hash = HashBytes::ZERO;
+            // check if lt is already max then do nothing
+            if new_lt == u64::MAX {
+                return Self {
+                    lt: u64::MAX,
+                    hash: HashBytes([0xff; 32]),
+                };
+            } else {
+                new_lt += 1;
+                new_hash = HashBytes::ZERO;
+            }
         } else {
             let carry = 1u8;
             for byte in new_hash.0.iter_mut().rev() {

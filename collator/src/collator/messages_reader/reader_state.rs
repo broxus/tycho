@@ -8,6 +8,7 @@ use super::super::messages_buffer::MessagesBuffer;
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessagesBufferLimits,
 };
+use crate::collator::types::CumulativeStatistics;
 use crate::internal_queue::types::QueueStatistics;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{
@@ -57,6 +58,7 @@ impl ReaderState {
                     .iter()
                     .map(|(k, v)| (*k, (&v.internals).into()))
                     .collect(),
+                cumulative_statistics: None,
             },
             externals: ext_reader_state,
         }
@@ -342,6 +344,7 @@ impl From<ExternalKey> for (MempoolAnchorId, u64) {
 #[derive(Default)]
 pub struct InternalsReaderState {
     pub partitions: BTreeMap<QueuePartitionIdx, InternalsPartitionReaderState>,
+    pub cumulative_statistics: Option<CumulativeStatistics>,
 }
 
 impl InternalsReaderState {

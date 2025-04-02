@@ -4,6 +4,7 @@ use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_storage::model::DiffInfo;
+use tycho_storage::snapshot::AccountStatistics;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -13,7 +14,7 @@ use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManag
 use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange, QueueStatistics,
+    QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::tracing_targets;
 use crate::types::{DisplayIter, DisplayTupleRef};
@@ -31,14 +32,14 @@ where
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
+        ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
 
     /// Returns statistics for the specified ranges by partition
     /// and source shards (equal to iterator ranges)
     fn get_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics>;
 
@@ -87,8 +88,17 @@ where
     /// Get last committed mc block id
     fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>>;
     /// Get diffs tail len from uncommitted state and committed state
+    /// `from` - start key for the tail. Diff with `max_message` == `from` will be excluded from the tail
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
-    /// Get partition router and statistics for the specified block and diff
+    /// Load separated diff statistics for the specified partitions and range
+    /// `range.from` = diff with `max_message == range.from` will be excluded in statistics
+    /// `range.to` = diff with `max_message == range.to` will be included in statistics
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        range: &QueueShardRange,
+    ) -> Result<SeparatedStatisticsByPartitions>;
+    /// Get partition router and statistics for the specified block
     fn get_router_and_statistics(
         &self,
         block_id_short: &BlockIdShort,
@@ -109,15 +119,20 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
+        mut ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
 
         let start_time = std::time::Instant::now();
 
+        for range in ranges.iter_mut() {
+            range.from = range.from.next_value();
+            range.to = range.to.next_value();
+        }
+
         metrics::counter!("tycho_collator_queue_adapter_iterators_count").increment(1);
 
-        let state_iterator = self.queue.iterator(partition, ranges, for_shard_id)?;
+        let state_iterator = self.queue.iterator(partition, &ranges, for_shard_id)?;
         let states_iterators_manager = StatesIteratorsManager::new(state_iterator);
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
 
@@ -133,12 +148,25 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     #[instrument(skip_all, fields(partition, ranges = ?ranges))]
     fn get_statistics(
         &self,
-        partition: QueuePartitionIdx,
+        partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardRange],
     ) -> Result<QueueStatistics> {
         let start_time = std::time::Instant::now();
 
-        let stats = self.queue.load_statistics(partition, ranges)?;
+        let mut result = AccountStatistics::default();
+
+        let mut ranges = ranges.to_vec();
+
+        for range in ranges.iter_mut() {
+            range.from = range.from.next_value();
+            range.to = range.to.next_value();
+            for partition in partitions {
+                self.queue
+                    .load_diff_statistics(*partition, range, &mut result)?;
+            }
+        }
+
+        let stats = QueueStatistics::with_statistics(result);
 
         let elapsed = start_time.elapsed();
         tracing::info!(
@@ -310,7 +338,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
         let start_time = std::time::Instant::now();
-        let tail_len = self.queue.get_diffs_tail_len(shard_ident, from);
+        let from = from.next_value();
+        let tail_len = self.queue.get_diffs_tail_len(shard_ident, &from);
         let elapsed = start_time.elapsed();
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
@@ -319,6 +348,19 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             "get_diffs_tail_len completed"
         );
         tail_len
+    }
+
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        range: &QueueShardRange,
+    ) -> Result<SeparatedStatisticsByPartitions> {
+        let mut range = range.clone();
+        range.from = range.from.next_value();
+        range.to = range.to.next_value();
+
+        self.queue
+            .load_separated_diff_statistics(partitions, &range)
     }
 
     fn get_router_and_statistics(
@@ -337,10 +379,15 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let statistics_range = QueueShardRange {
             shard_ident: block_id_short.shard,
             from: diff_info.min_message,
-            to: diff_info.max_message,
+            to: diff_info.max_message.next_value(),
         };
 
-        let queue_statistics = self.get_statistics(partition, &[statistics_range])?;
+        let mut statistics = AccountStatistics::default();
+
+        self.queue
+            .load_diff_statistics(partition, &statistics_range, &mut statistics)?;
+
+        let queue_statistics = QueueStatistics::with_statistics(statistics.clone());
 
         let mut diff_statistics = FastHashMap::default();
         diff_statistics.insert(partition, queue_statistics.statistics().clone());

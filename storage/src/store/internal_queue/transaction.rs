@@ -91,7 +91,7 @@ impl InternalQueueTransaction {
                     self.batch
                         .put_cf(&commit_pointers_cf, key, new_val.to_vec());
                 }
-                Ordering::Equal => {} // Ничего не делаем, если указатели равны
+                Ordering::Equal => {}
             }
         }
 
@@ -166,16 +166,14 @@ impl InternalQueueTransaction {
             let start_stat_key = StatKey {
                 shard_ident: range.shard_ident,
                 partition: range.partition,
-                min_message: range.from,
-                max_message: QueueKey::MIN,
+                max_message: range.from,
                 dest: RouterAddr::MIN,
             };
 
             let end_stat_key = StatKey {
                 shard_ident: range.shard_ident,
                 partition: range.partition,
-                min_message: range.to,
-                max_message: QueueKey::MAX,
+                max_message: range.to,
                 dest: RouterAddr::MAX,
             };
 

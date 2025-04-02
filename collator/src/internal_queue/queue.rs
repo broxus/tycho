@@ -11,14 +11,15 @@ use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
+use super::types::SeparatedStatisticsByPartitions;
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::state::storage::{
     QueueState, QueueStateFactory, QueueStateImplFactory, QueueStateStdImpl,
 };
 use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange, QueueStatistics,
+    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
+    QueueDiffWithMessages, QueueShardRange,
 };
 use crate::types::ProcessedTo;
 use crate::{internal_queue, tracing_targets};
@@ -63,8 +64,7 @@ pub struct QueueFactoryStdImpl {
 
 // TRAIT
 
-#[trait_variant::make(Queue: Send)]
-pub trait LocalQueue<V>
+pub trait Queue<V>: Send
 where
     V: InternalMessageValue + Send + Sync,
 {
@@ -92,14 +92,15 @@ where
     ) -> Result<()>;
     /// remove all data in uncommitted zone storage
     fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
-    /// Returns the diffs tail len for the given shard
+    /// Get diffs tail len from uncommitted state and committed state
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
-    fn load_statistics(
+    fn load_diff_statistics(
         &self,
         partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
-    ) -> Result<QueueStatistics>;
+        range: &QueueShardRange,
+        result: &mut AccountStatistics,
+    ) -> Result<()>;
     /// Get diff for the given block from committed and uncommitted zones
     fn get_diff_info(
         &self,
@@ -111,6 +112,12 @@ where
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
     /// Get last committed mc block id
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
+    /// Load separated diff statistics for the specified partitions and range
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        range: &QueueShardRange,
+    ) -> Result<SeparatedStatisticsByPartitions>;
 }
 
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
@@ -395,16 +402,25 @@ where
         self.state.clear_uncommitted(partitions)
     }
 
-    fn load_statistics(
+    fn load_diff_statistics(
         &self,
         partition: QueuePartitionIdx,
-        ranges: &[QueueShardRange],
-    ) -> Result<QueueStatistics> {
-        let statistics = self.state.load_statistics(partition, ranges)?;
+        range: &QueueShardRange,
+        result: &mut AccountStatistics,
+    ) -> Result<()> {
+        self.state.load_diff_statistics(partition, range, result)
+    }
 
-        let statistics = QueueStatistics::with_statistics(statistics);
+    fn load_separated_diff_statistics(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        range: &QueueShardRange,
+    ) -> Result<SeparatedStatisticsByPartitions> {
+        let result = self
+            .state
+            .load_separated_diff_statistics(partitions, range)?;
 
-        Ok(statistics)
+        Ok(result)
     }
 
     fn get_diff_info(

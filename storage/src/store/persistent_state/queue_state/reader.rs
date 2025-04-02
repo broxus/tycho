@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_types::boc::de::ProcessedCells;
 use everscale_types::cell::{Cell, CellFamily};
 use everscale_types::models::OutMsgQueueUpdates;
@@ -16,7 +16,8 @@ pub struct QueueStateReader<'a> {
 impl<'a> QueueStateReader<'a> {
     pub fn begin_from_mapped(data: &'a [u8], top_update: &OutMsgQueueUpdates) -> Result<Self> {
         let packet = &mut std::convert::identity(data);
-        let state = QueueStateRef::<'a>::read_from(packet)?;
+        let state =
+            QueueStateRef::<'a>::read_from(packet).context("failed to init QueueStateRef")?;
         // TODO: Does this check really needed?
         anyhow::ensure!(packet.is_empty(), "data not fully read");
 

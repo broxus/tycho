@@ -10,7 +10,7 @@ use everscale_types::prelude::*;
 use processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
-use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
+use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -144,13 +144,16 @@ pub struct McData {
 
     pub ref_mc_state_handle: RefMcStateHandle,
 
-    pub shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+    pub shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 }
 
 impl McData {
     pub fn load_from_state(
         state_stuff: &ShardStateStuff,
-        shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
+        all_shards_processed_to_by_partitions: FastHashMap<
+            ShardIdent,
+            (bool, ProcessedToByPartitions),
+        >,
     ) -> Result<Arc<Self>> {
         let block_id = *state_stuff.block_id();
         let extra = state_stuff.state_extra()?;
@@ -172,6 +175,11 @@ impl McData {
             processed_upto.get_min_externals_processed_to()?.0,
         );
 
+        let shards_processed_to_by_partitions = all_shards_processed_to_by_partitions
+            .into_iter()
+            .filter(|(shard_id, _)| !shard_id.is_masterchain())
+            .collect();
+
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -192,7 +200,7 @@ impl McData {
             top_processed_to_anchor,
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
-            shards_processed_to,
+            shards_processed_to_by_partitions,
         }))
     }
 
@@ -362,6 +370,7 @@ pub struct TopBlockDescription {
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
     pub processed_to: ProcessedTo,
+    pub processed_to_by_partitions: ProcessedToByPartitions,
 }
 
 #[derive(Debug)]
@@ -592,9 +601,11 @@ where
 pub struct TopShardBlockInfo {
     pub block_id: BlockId,
     pub processed_to: ProcessedTo,
+    pub processed_to_by_partitions: ProcessedToByPartitions,
 }
 
 pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
+pub type ProcessedToByPartitions = FastHashMap<QueuePartitionIdx, ProcessedTo>;
 
 pub trait ShardIdentExt {
     fn contains_prefix(&self, workchain_id: i32, prefix_without_tag: u64) -> bool;

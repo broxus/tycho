@@ -1,1 +1,2 @@
 scripts/*.sh text eol=lf
+*.bin -diff

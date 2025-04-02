@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,8 +7,8 @@ use everscale_types::cell::{Cell, CellSliceRange, HashBytes, Lazy};
 use everscale_types::models::{
     AccountStatus, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason, CurrencyCollection,
     HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, MsgEnvelope, MsgInfo, OrdinaryTxInfo,
-    OutMsg, OutMsgDescr, OutMsgNew, OwnedMessage, ShardIdent, SkippedComputePhase, StdAddr,
-    Transaction, TxInfo,
+    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, OwnedMessage, ShardIdent,
+    SkippedComputePhase, StdAddr, Transaction, TxInfo,
 };
 use everscale_types::num::Tokens;
 use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr};
@@ -17,9 +18,10 @@ use tycho_collator::internal_queue::queue::{
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use tycho_collator::internal_queue::state::storage::{QueueStateImplFactory, QueueStateStdImpl};
 use tycho_collator::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange,
+    DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
+    QueueDiffWithMessages, QueueShardRange,
 };
+use tycho_storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
 use tycho_storage::Storage;
 use tycho_util::FastHashSet;
 
@@ -112,32 +114,11 @@ fn test_statistics_check_statistics(
 ) -> anyhow::Result<()> {
     // check two diff statistics
     // there are 30000 messages in low partition, 2000 message in normal partition
-    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: QueueKey {
-            lt: 1,
-            hash: HashBytes::default(),
-        },
-        to: QueueKey {
-            lt: 36000,
-            hash: HashBytes::default(),
-        },
-    }])?;
 
-    let addr_1_stat = statistics_low_priority_partition
-        .statistics()
-        .get(&dest_1_low_priority.to_int_addr())
-        .unwrap();
-    let addr_2_stat = statistics_low_priority_partition
-        .statistics()
-        .get(&dest_2_low_priority.to_int_addr())
-        .unwrap();
-
-    assert_eq!(*addr_1_stat, 20000);
-    assert_eq!(*addr_2_stat, 10000);
-
-    let statistics_normal_priority_partition =
-        queue.load_statistics(QueuePartitionIdx::default(), &[QueueShardRange {
+    let mut statistics_low_priority_partition = AccountStatistics::default();
+    queue.load_diff_statistics(
+        1,
+        &QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
                 lt: 1,
@@ -146,34 +127,70 @@ fn test_statistics_check_statistics(
             to: QueueKey {
                 lt: 36000,
                 hash: HashBytes::default(),
+            }
+            .next_value(),
+        },
+        &mut statistics_low_priority_partition,
+    )?;
+
+    let addr_1_stat = statistics_low_priority_partition
+        .get(&dest_1_low_priority.to_int_addr())
+        .unwrap();
+
+    let addr_2_stat = statistics_low_priority_partition
+        .get(&dest_2_low_priority.to_int_addr())
+        .unwrap();
+
+    assert_eq!(*addr_1_stat, 20000);
+    assert_eq!(*addr_2_stat, 10000);
+
+    let mut statistics_normal_priority_partition = AccountStatistics::default();
+
+    queue.load_diff_statistics(
+        0,
+        &QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
             },
-        }])?;
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            }
+            .next_value(),
+        },
+        &mut statistics_normal_priority_partition,
+    )?;
 
     let addr_3_stat = statistics_normal_priority_partition
-        .statistics()
         .get(&dest_3_normal_priority.to_int_addr())
         .unwrap();
     assert_eq!(*addr_3_stat, 2000);
 
+    let mut statistics_low_priority_partition = AccountStatistics::default();
     // check first diff, there are 15000 messages in low partition
-    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: QueueKey {
-            lt: 1,
-            hash: HashBytes::default(),
+    queue.load_diff_statistics(
+        1,
+        &QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 16000,
+                hash: HashBytes::default(),
+            }
+            .next_value(),
         },
-        to: QueueKey {
-            lt: 16000,
-            hash: HashBytes::default(),
-        },
-    }])?;
+        &mut statistics_low_priority_partition,
+    )?;
 
     let addr_1_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .unwrap();
     let addr_2_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_2_low_priority.to_int_addr())
         .unwrap();
 
@@ -181,24 +198,29 @@ fn test_statistics_check_statistics(
     assert_eq!(*addr_2_stat, 5000);
 
     // check second diff, there are 15000 messages in low partition
-    let statistics_low_priority_partition = queue.load_statistics(1, &[QueueShardRange {
-        shard_ident: ShardIdent::new_full(0),
-        from: QueueKey {
-            lt: 20000,
-            hash: HashBytes::default(),
+    let mut statistics_low_priority_partition = AccountStatistics::default();
+
+    queue.load_diff_statistics(
+        1,
+        &QueueShardRange {
+            shard_ident: ShardIdent::new_full(0),
+            from: QueueKey {
+                lt: 20000,
+                hash: HashBytes::default(),
+            },
+            to: QueueKey {
+                lt: 36000,
+                hash: HashBytes::default(),
+            }
+            .next_value(),
         },
-        to: QueueKey {
-            lt: 36000,
-            hash: HashBytes::default(),
-        },
-    }])?;
+        &mut statistics_low_priority_partition,
+    )?;
 
     let addr_1_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .unwrap();
     let addr_2_stat = statistics_low_priority_partition
-        .statistics()
         .get(&dest_2_low_priority.to_int_addr())
         .unwrap();
 
@@ -554,11 +576,13 @@ async fn test_queue() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 10000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 15500,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     ranges.push(queue_range);
@@ -593,11 +617,13 @@ async fn test_queue() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 0,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 36000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     ranges.push(queue_range);
@@ -809,11 +835,13 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 0,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 30000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     let queue_range2 = QueueShardRange {
@@ -821,11 +849,13 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 10000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 20000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     ranges.push(queue_range1);
@@ -836,11 +866,13 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 1,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 150000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     let stat_range2 = QueueShardRange {
@@ -848,17 +880,25 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 1,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 250000,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
+    let r = vec![stat_range1, stat_range2];
+    let mut statistics = AccountStatistics::default();
 
-    let statistics = queue.load_statistics(1, &[stat_range1, stat_range2])?;
+    for partition in &[1, 0] {
+        for range in &r {
+            queue.load_diff_statistics(*partition, range, &mut statistics)?;
+        }
+    }
+    assert_eq!(statistics.len(), 2);
 
     let stat = statistics
-        .statistics()
         .get(&dest_1_low_priority.to_int_addr())
         .cloned()
         .unwrap_or_default();
@@ -945,11 +985,13 @@ async fn test_queue_clear() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 1,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 4,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     ranges.push(queue_range);
@@ -1597,11 +1639,13 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 0,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 200,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     let queue_range2 = QueueShardRange {
@@ -1609,11 +1653,13 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 200,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
         to: QueueKey {
             lt: 400,
             hash: HashBytes::default(),
-        },
+        }
+        .next_value(),
     };
 
     ranges.push(queue_range1);
@@ -1628,7 +1674,8 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
         to: QueueKey {
             lt: 100,
             hash: [2; 32].into(),
-        },
+        }
+        .next_value(),
     };
 
     let stat_range2 = QueueShardRange {
@@ -1640,13 +1687,16 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
         to: QueueKey {
             lt: 400,
             hash: [4; 32].into(),
-        },
+        }
+        .next_value(),
     };
 
-    let statistics = queue.load_statistics(1, &[stat_range1, stat_range2])?;
+    let mut statistics = AccountStatistics::default();
+
+    queue.load_diff_statistics(1, &stat_range1, &mut statistics)?;
+    queue.load_diff_statistics(1, &stat_range2, &mut statistics)?;
 
     let stat = statistics
-        .statistics()
         .get(&low_priority.to_int_addr())
         .cloned()
         .unwrap_or_default();
@@ -1726,6 +1776,175 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
     assert!(res.is_none());
     let res = queue.get_diff_info(&ShardIdent::MASTERCHAIN, 4, DiffZone::Uncommitted)?;
     assert!(res.is_none());
+
+    Ok(())
+}
+
+async fn prepare_data_from_prepared_persistent_state(
+    file_path: &str,
+    block_id_str: &str,
+    diff_hash_str: &str,
+    tail_len: u32,
+    storage: &Storage,
+) -> anyhow::Result<(BlockId, OutMsgQueueUpdates)> {
+    let diff_hash = HashBytes::from_str(diff_hash_str)?;
+    let top_update = OutMsgQueueUpdates {
+        diff_hash,
+        tail_len,
+    };
+
+    let block_id = BlockId::from_str(block_id_str)?;
+
+    let file = std::fs::File::open(file_path)?;
+
+    let internal_queue = storage.internal_queue_storage();
+    internal_queue
+        .import_from_file(&top_update, file, block_id)
+        .await?;
+
+    Ok((block_id, top_update))
+}
+
+#[tokio::test]
+async fn test_import_persistent_state() -> anyhow::Result<()> {
+    // init storage
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
+
+    // init queue
+    let queue_factory = QueueFactoryStdImpl {
+        state: QueueStateImplFactory {
+            storage: storage.clone(),
+        },
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+    };
+
+    let queue: QueueImpl<QueueStateStdImpl, EnqueuedMessage> = queue_factory.create();
+
+    // import shard persistent state
+    let (shard_block_id, shard_top_update) = prepare_data_from_prepared_persistent_state(
+        "../test/data/internals/persistent_state/shard.bin",
+        // block_id_str
+        "0:8000000000000000:160:f54b2c09be8c873670374271571ea70aeacbfbdbef9ac45252451cb035f11a33:0097ee79d8551854a353dd80991c17dafdaaa933abfcb012f93437f3a25c0365",
+        // diff_hash_str
+        "794fe9ce31b7919d2b6ca9ae0f97501f4017382a273b8f3ee512dcfcb5b14482",
+        // tail_len
+        3,
+        &storage
+    ).await?;
+
+    // should be none because it mc block state is not imported
+    let last_committed_block = queue.get_last_committed_mc_block_id()?;
+    assert!(last_committed_block.is_none());
+
+    // import mc persistent state
+    let (mc_block_id, mc_top_update) = prepare_data_from_prepared_persistent_state(
+        "../test/data/internals/persistent_state/master.bin",
+        // block_id_str
+        "-1:8000000000000000:90:9e6e3bdbefda3a64a9dab50387f64a8c30b33a04b6fd638a8058e1344bf8a9d1:60ac6a64e15fb70a1c5629f0bb38890f3fd45aa7ba77e4b847cbf0f48d5d5818",
+        // diff_hash_str
+        "5795ca5d1b8d0c1ce96394eef851bde718ff2e14fd2840098ed2bb7640f278c5",
+        // tail_len
+        1,
+        &storage,
+    ).await?;
+
+    let snapshot = storage.internal_queue_storage().make_snapshot();
+
+    // check shard queue
+    check_imported_queue(&queue, &shard_block_id, &shard_top_update, &snapshot)?;
+    // check mc queue
+    check_imported_queue(&queue, &mc_block_id, &mc_top_update, &snapshot)?;
+
+    // common checks
+    let last_committed_pointer = snapshot.read_commit_pointers()?;
+    assert_eq!(last_committed_pointer.len(), 2);
+
+    let last_committed_block = queue.get_last_committed_mc_block_id()?.unwrap();
+    assert_eq!(last_committed_block, mc_block_id);
+
+    Ok(())
+}
+
+fn check_imported_queue(
+    queue: &QueueImpl<QueueStateStdImpl, EnqueuedMessage>,
+    block_id: &BlockId,
+    top_update: &OutMsgQueueUpdates,
+    snapshot: &InternalQueueSnapshot,
+) -> anyhow::Result<()> {
+    let diff_tail = queue.get_diffs_tail_len(&block_id.shard, &QueueKey::MIN);
+    assert_eq!(diff_tail, top_update.tail_len);
+
+    let last_applied_block_seqno = snapshot
+        .get_last_applied_diff_seqno(&block_id.shard)?
+        .unwrap();
+    assert_eq!(last_applied_block_seqno, block_id.seqno);
+
+    let separated_stats = snapshot.collect_separated_stats_in_range_for_partitions(
+        &block_id.shard,
+        &vec![0, 1].into_iter().collect(),
+        &QueueKey::MIN,
+        &QueueKey::MAX,
+    )?;
+
+    let mut total_stats = AccountStatistics::default();
+    for stat in separated_stats.values() {
+        for acc_stat in stat.values() {
+            for (key, value) in acc_stat {
+                total_stats
+                    .entry(key.clone())
+                    .and_modify(|v| *v += value)
+                    .or_insert(*value);
+            }
+        }
+    }
+
+    let mut stat = AccountStatistics::default();
+    snapshot.collect_stats_in_range(
+        &block_id.shard,
+        0,
+        &QueueKey::MIN,
+        &QueueKey::MAX,
+        &mut stat,
+    )?;
+
+    assert_eq!(stat, total_stats);
+
+    let mut total_messages_by_stat = 0;
+    for s in stat.values() {
+        total_messages_by_stat += s;
+    }
+
+    // if tail_len > 1, then we should have at least one message when tail len == 1 its not guaranteed that diff has messages
+    if top_update.tail_len > 1 {
+        assert!(total_messages_by_stat > 0);
+    }
+
+    let iter_range = vec![QueueShardRange {
+        shard_ident: block_id.shard,
+        from: QueueKey::MIN.next_value(),
+        to: QueueKey::MAX.next_value(),
+    }];
+
+    let mut read_messages = 0;
+
+    let mut iterator = queue.iterator(0, &iter_range, ShardIdent::MASTERCHAIN)?;
+    while iterator.next()?.is_some() {
+        read_messages += 1;
+    }
+
+    let mut iterator = queue.iterator(0, &iter_range, ShardIdent::BASECHAIN)?;
+
+    while iterator.next()?.is_some() {
+        read_messages += 1;
+    }
+
+    assert_eq!(read_messages, total_messages_by_stat);
+
+    let last_committed_pointer = snapshot.read_commit_pointers()?;
+    let pointer = last_committed_pointer.get(&block_id.shard).unwrap();
+    assert_eq!(pointer.seqno, block_id.seqno);
 
     Ok(())
 }

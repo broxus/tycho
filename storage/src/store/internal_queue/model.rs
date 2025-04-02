@@ -137,23 +137,22 @@ impl StoredValue for RouterAddr {
 pub struct StatKey {
     pub shard_ident: ShardIdent,
     pub partition: QueuePartitionIdx,
-    pub min_message: QueueKey,
     pub max_message: QueueKey,
     pub dest: RouterAddr,
 }
 
 impl StatKey {
+    pub(crate) const PREFIX_SIZE: usize =
+        ShardIdent::SIZE_HINT + QueuePartitionIdx::SIZE_HINT + QueueKey::SIZE_HINT;
     pub fn new(
         shard_ident: ShardIdent,
         partition: QueuePartitionIdx,
-        min_message: QueueKey,
         max_message: QueueKey,
         dest: RouterAddr,
     ) -> Self {
         Self {
             shard_ident,
             partition,
-            min_message,
             max_message,
             dest,
         }
@@ -190,7 +189,7 @@ impl DiffInfoKey {
 impl StoredValue for StatKey {
     const SIZE_HINT: usize = ShardIdent::SIZE_HINT
         + QueuePartitionIdx::SIZE_HINT
-        + QueueKey::SIZE_HINT * 2
+        + QueueKey::SIZE_HINT
         + RouterAddr::SIZE_HINT;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
@@ -198,7 +197,6 @@ impl StoredValue for StatKey {
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
         self.shard_ident.serialize(buffer);
         self.partition.serialize(buffer);
-        self.min_message.serialize(buffer);
         self.max_message.serialize(buffer);
         self.dest.serialize(buffer);
     }
@@ -210,14 +208,12 @@ impl StoredValue for StatKey {
 
         let shard_ident = ShardIdent::deserialize(reader);
         let partition = QueuePartitionIdx::deserialize(reader);
-        let min_message = QueueKey::deserialize(reader);
         let max_message = QueueKey::deserialize(reader);
         let dest = RouterAddr::deserialize(reader);
 
         Self {
             shard_ident,
             partition,
-            min_message,
             max_message,
             dest,
         }

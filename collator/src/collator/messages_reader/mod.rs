@@ -14,15 +14,15 @@ use self::new_messages::*;
 pub(super) use self::reader_state::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
-use super::types::{AnchorsCache, MsgsExecutionParamsExtension};
+use super::types::{AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::{BlockSeqno, Lt};
-use crate::types::{DebugIter, IntAdrExt, ProcessedTo};
+use crate::types::processed_upto::{BlockSeqno, Lt, ProcessedUptoInfoStuff};
+use crate::types::{DebugIter, IntAdrExt, ProcessedTo, ProcessedToByPartitions};
 
 mod externals_reader;
 mod internals_reader;
@@ -36,6 +36,7 @@ pub(super) mod tests;
 pub(super) struct FinalizedMessagesReader<V: InternalMessageValue> {
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
+    pub processed_upto: ProcessedUptoInfoStuff,
     pub anchors_cache: AnchorsCache,
     pub queue_diff_with_msgs: QueueDiffWithMessages<V>,
 }
@@ -67,6 +68,9 @@ pub(super) struct MessagesReader<V: InternalMessageValue> {
     externals_reader: ExternalsReader,
     internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
 
+    /// Cumulative queue stats
+    internal_queue_statistics: CumulativeStatistics,
+
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
 
@@ -79,8 +83,11 @@ pub(super) struct MessagesReaderContext {
     pub mc_state_gen_lt: Lt,
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
+    pub all_shards_processed_to_by_partitions:
+        FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
     pub reader_state: ReaderState,
     pub anchors_cache: AnchorsCache,
+    pub is_first_block_after_prev_master: bool,
 }
 
 impl<V: InternalMessageValue> MessagesReader<V> {
@@ -193,6 +200,33 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             slot_vert_size: group_vert_size,
         };
 
+        // get cumulative internals stats
+        let mut cumulative_statistics = if cx.is_first_block_after_prev_master {
+            // TODO use dynamic partitions
+            let partitions = vec![0, 1].into_iter().collect();
+            let mut cumulative_statistics =
+                CumulativeStatistics::new(cx.all_shards_processed_to_by_partitions);
+            cumulative_statistics.load(
+                mq_adapter.clone(),
+                &cx.for_shard_id,
+                &partitions,
+                cx.prev_state_gen_lt,
+                cx.mc_state_gen_lt,
+                &cx.mc_top_shards_end_lts.iter().copied().collect(),
+            )?;
+            cumulative_statistics
+        } else {
+            cx.reader_state
+                .internals
+                .cumulative_statistics
+                .expect("cumulative statistics should exist")
+        };
+
+        let mut new_messages = NewMessagesState::new(cx.for_shard_id);
+        if let Some(partition_stats) = cumulative_statistics.result().get(&1) {
+            new_messages.init_partition_router(1, partition_stats.statistics());
+        }
+
         // create externals reader
         let externals_reader = ExternalsReader::new(
             cx.for_shard_id,
@@ -211,12 +245,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
             metrics_by_partitions: Default::default(),
 
-            new_messages: NewMessagesState::new(cx.for_shard_id),
+            new_messages,
 
             externals_reader,
             internals_partition_readers: Default::default(),
 
             readers_stages: Default::default(),
+            internal_queue_statistics: cumulative_statistics,
         };
 
         // define the initial reader stage
@@ -265,6 +300,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             }
         };
         let par_reader_state = partition_reader_states.remove(&1).unwrap_or_default();
+
         let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
                 partition_id: 1,
@@ -284,15 +320,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         res.readers_stages.insert(1, initial_reader_stage);
 
         // get full statistics from partition 1 and init partition router in new messages state
-        let par_1_all_ranges_msgs_stats = res
-            .internals_partition_readers
-            .get(&1)
-            .unwrap()
-            .range_readers()
-            .values()
-            .filter_map(|r| r.reader_state.msgs_stats.as_ref());
-        res.new_messages
-            .init_partition_router(1, par_1_all_ranges_msgs_stats);
+        // let par_1_all_ranges_msgs_stats = res
+        //     .internals_partition_readers
+        //     .get(&1)
+        //     .unwrap()
+        //     .range_readers()
+        //     .values()
+        //     .filter_map(|r| r.reader_state.msgs_stats.as_ref());
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             readers_stages = ?res.readers_stages,
@@ -379,21 +413,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         // aggregated messages stats from all ranges
         // we need it to detect target ratition for new messages from queue diff
-        let mut aggregated_stats = QueueStatistics::default();
+        // let mut aggregated_stats = self.internal_queue_statistics.result();
 
         // collect internals partition readers states
         let mut internals_reader_state = InternalsReaderState::default();
         for (_par_id, par_reader) in self.internals_partition_readers.iter_mut() {
-            // collect aggregated messages stats
-            for range_reader in par_reader.range_readers().values() {
-                if range_reader.fully_read && range_reader.reader_state.buffer.msgs_count() == 0 {
-                    continue;
-                }
-                if let Some(msgs_stats) = &range_reader.reader_state.msgs_stats {
-                    aggregated_stats.append(msgs_stats);
-                }
-            }
-
             // check pending internals in iterators
             if !has_unprocessed_messages {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
@@ -445,27 +469,16 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             .cloned()
             .unwrap_or_default();
 
-        // get current queue diff messages stats and merge with aggregated stats
-        let queue_diff_msgs_stats = DiffStatistics::from_diff(
-            &queue_diff_with_msgs,
-            self.for_shard_id,
-            min_messages,
-            max_messages,
-        );
-
-        aggregated_stats.append_diff_statistics(&queue_diff_msgs_stats);
-
         // reset queue diff partition router
         // according to actual aggregated stats
         let moved_from_par_0_accounts = Self::reset_partition_router_by_stats(
             &self.msgs_exec_params,
             &mut queue_diff_with_msgs.partition_router,
-            aggregated_stats,
+            self.internal_queue_statistics.get_aggregated_result(),
             self.for_shard_id,
             diffs_info,
         )?;
 
-        // metrics: accounts count in isolated partitions
         {
             let partitions_stats = queue_diff_with_msgs.partition_router.partitions_stats();
             for par_id in self
@@ -507,14 +520,41 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             anchors_cache,
         } = self.externals_reader.finalize()?;
 
-        let reader_state = ReaderState {
+        let mut reader_state = ReaderState {
             externals: externals_reader_state,
             internals: internals_reader_state,
         };
 
+        let processed_upto = reader_state.get_updated_processed_upto();
+
+        // get current queue diff messages stats and merge with aggregated stats
+        let queue_diff_msgs_stats = DiffStatistics::from_diff(
+            &queue_diff_with_msgs,
+            self.for_shard_id,
+            min_messages,
+            max_messages,
+        );
+
+        // add new diff stats to cumulative stats
+        self.internal_queue_statistics.add_diff_stats(
+            self.for_shard_id,
+            *queue_diff_msgs_stats.max_message(),
+            queue_diff_msgs_stats,
+        );
+
+        // reduce stats of processed diffs
+        self.internal_queue_statistics.handle_processed_to_update(
+            self.for_shard_id,
+            processed_upto.get_internals_processed_to_by_partitions(),
+        );
+
+        // add updated cumulative stats
+        reader_state.internals.cumulative_statistics = Some(self.internal_queue_statistics);
+
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
             reader_state,
+            processed_upto,
             anchors_cache,
             queue_diff_with_msgs,
         })
