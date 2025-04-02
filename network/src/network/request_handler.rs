@@ -28,8 +28,7 @@ const METRIC_IN_REQUESTS_REJECTED_TOTAL: &str = "tycho_net_in_requests_rejected_
 
 // Gauges
 const METRIC_REQ_HANDLERS: &str = "tycho_net_req_handlers";
-const METRIC_INFLIGHT_PER_PEER_HANDLERS: &str = "tycho_inflight_per_peer_handlers";
-const METRIC_CONCURRENT_REQUESTS_PER_PEER: &str = "tycho_net_concurrent_requests_per_peer";
+const METRIC_REQ_HANDLERS_PER_PEER: &str = "tycho_net_req_handlers_per_peer";
 
 pub(crate) struct InboundRequestHandler {
     config: Arc<NetworkConfig>,
@@ -226,11 +225,8 @@ impl<'a> RequestTracker<'a> {
     fn update_inflight_metrics(&self) {
         let metrics = &self.config.connection_metrics;
         if metrics.is_some_and(|x| x.should_export_peer_id()) {
-            let inflight_count = self.inflight_requests_len as f64;
-
-            let labels = [("peer_id", self.peer_id_str.clone())];
-            metrics::gauge!(METRIC_INFLIGHT_PER_PEER_HANDLERS, &labels).set(inflight_count);
-            metrics::gauge!(METRIC_CONCURRENT_REQUESTS_PER_PEER, &labels).set(inflight_count);
+            metrics::gauge!(METRIC_REQ_HANDLERS_PER_PEER, "peer_id" => self.peer_id_str.clone())
+                .set(self.inflight_requests_len as f64);
         }
     }
 }
