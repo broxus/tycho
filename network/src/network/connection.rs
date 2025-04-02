@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use metrics::Label;
-use quinn::ConnectionError;
+use quinn::{ConnectionError, VarInt};
 use webpki::types::CertificateDer;
 
 use crate::network::config::ConnectionMetricsLevel;
@@ -28,6 +28,8 @@ macro_rules! emit_gauges {
 }
 
 impl Connection {
+    pub const LIMIT_EXCEEDED_ERROR_CODE: VarInt = VarInt::from_u32(0xdead);
+
     pub fn with_peer_id(
         inner: quinn::Connection,
         origin: Direction,

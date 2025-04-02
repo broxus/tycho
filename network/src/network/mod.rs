@@ -5,7 +5,6 @@ use std::sync::{Arc, Weak};
 use anyhow::Context;
 use anyhow::Result;
 use everscale_crypto::ed25519;
-pub use request_handler::LIMIT_EXCEEDED_ERROR_CODE;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use self::config::EndpointConfig;

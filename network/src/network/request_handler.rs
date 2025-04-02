@@ -1,8 +1,11 @@
+use std::future::IntoFuture;
 use std::sync::Arc;
 
 use anyhow::Result;
-use quinn::{ConnectionError, ReadError, VarInt, WriteError};
-use tokio::task::JoinSet;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
+use quinn::ConnectionError;
+use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tycho_util::metrics::HistogramGuard;
 
@@ -27,8 +30,6 @@ const METRIC_IN_REQUESTS_REJECTED_TOTAL: &str = "tycho_net_in_requests_rejected_
 const METRIC_REQ_HANDLERS: &str = "tycho_net_req_handlers";
 const METRIC_INFLIGHT_PER_PEER_HANDLERS: &str = "tycho_inflight_per_peer_handlers";
 const METRIC_CONCURRENT_REQUESTS_PER_PEER: &str = "tycho_net_concurrent_requests_per_peer";
-
-pub const LIMIT_EXCEEDED_ERROR_CODE: VarInt = unsafe { VarInt::from_u64_unchecked(0xdead) };
 
 pub(crate) struct InboundRequestHandler {
     config: Arc<NetworkConfig>,
@@ -55,69 +56,30 @@ impl InboundRequestHandler {
     pub async fn start(self) {
         tracing::debug!(peer_id = %self.connection.peer_id(), "request handler started");
 
-        let mut guard =
-            RequestHandlerGuard::new(self.config.clone(), &self.connection, &self.active_peers);
+        let mut tracker =
+            RequestTracker::new(self.config.as_ref(), &self.connection, &self.active_peers);
 
         let reason: ConnectionError = loop {
-            guard.update_inflight_metrics();
+            tracker.update_inflight_metrics();
 
             tokio::select! {
-                // drain completed requests first
                 biased;
-                Some(req) = guard.inflight_requests.join_next() => {
-                    metrics::gauge!(METRIC_REQ_HANDLERS).decrement(1);
-                    if let Err(e) = req {
-                        if e.is_panic() {
-                            tracing::error!("request handler panicked");
-                            std::panic::resume_unwind(e.into_panic());
-                        }
-                    }
-                }
 
+                // Drain completed requests first.
+                true = tracker.join_next() => {}
+
+                // Messages have higher priority.
                 uni = self.connection.accept_uni() => match uni {
-                    Ok(mut stream) => {
-                        tracing::trace!(id = %stream.id(), "incoming uni stream");
-                        if guard.is_limit_reached() {
-                             guard.reject_uni_stream(&mut stream);
-                            continue;
-                        }
-
-                        let handler = UniStreamRequestHandler::new(
-                            &self.config,
-                            self.connection.request_meta().clone(),
-                            self.service.clone(),
-                            stream,
-                        );
-
-                        guard.inflight_requests.spawn(handler.handle());
-                        metrics::counter!(METRIC_IN_MESSAGES_TOTAL).increment(1);
-                        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
-                    },
+                    Ok(stream) => tracker.track_uni(&self.service, stream),
                     Err(e) => {
                         tracing::trace!("failed to accept an incoming uni stream: {e:?}");
                         break e;
                     }
                 },
+
+                // Queries are handled last.
                 bi = self.connection.accept_bi() => match bi {
-                    Ok((mut tx, mut rx)) => {
-                        tracing::trace!(id = %tx.id(), "incoming bi stream");
-
-                         if guard.is_limit_reached() {
-                            guard.reject_bi_stream(&mut tx, &mut rx);
-                            continue;
-                        }
-
-                        let handler = BiStreamRequestHandler::new(
-                            &self.config,
-                            self.connection.request_meta().clone(),
-                            self.service.clone(),
-                            tx,
-                            rx,
-                        );
-                        guard.inflight_requests.spawn(handler.handle());
-                        metrics::counter!(METRIC_IN_QUERIES_TOTAL).increment(1);
-                        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
-                    }
+                    Ok((tx, rx)) => tracker.track_bi(&self.service, tx, rx),
                     Err(e) => {
                         tracing::trace!("failed to accept an incoming bi stream: {e:?}");
                         break e;
@@ -126,79 +88,168 @@ impl InboundRequestHandler {
             }
         };
 
-        guard.reason = reason.into();
+        tracker.reason = reason.into();
+        tracker.shutdown().await;
     }
 }
 
-struct RequestHandlerGuard<'a> {
-    config: Arc<NetworkConfig>,
+struct RequestTracker<'a> {
+    config: &'a NetworkConfig,
     connection: &'a Connection,
     active_peers: &'a ActivePeers,
-    inflight_requests: JoinSet<()>,
+    inflight_requests_len: usize,
+    inflight_requests: FuturesUnordered<JoinHandle<()>>,
     reason: DisconnectReason,
+    peer_id_str: Arc<str>,
 }
 
-impl<'a> RequestHandlerGuard<'a> {
+impl<'a> RequestTracker<'a> {
     fn new(
-        config: Arc<NetworkConfig>,
+        config: &'a NetworkConfig,
         connection: &'a Connection,
         active_peers: &'a ActivePeers,
     ) -> Self {
+        let peer_id_str = Arc::from(connection.peer_id().to_string());
+
         Self {
             config,
             connection,
             active_peers,
-            inflight_requests: JoinSet::new(),
+            inflight_requests_len: 0,
+            inflight_requests: Default::default(),
             reason: DisconnectReason::LocallyClosed,
+            peer_id_str,
         }
     }
 
     fn is_limit_reached(&self) -> bool {
-        self.inflight_requests.len() >= self.config.max_concurrent_requests_per_peer
+        self.inflight_requests_len >= self.config.max_concurrent_requests_per_peer
     }
 
-    fn reject_uni_stream(&self, stream: &mut RecvStream) {
-        tracing::debug!(
-            peer_id = %self.connection.peer_id(),
-            "request limit reached, rejecting uni stream"
-        );
-        let _ = stream.stop(LIMIT_EXCEEDED_ERROR_CODE);
-        metrics::counter!(METRIC_IN_REQUESTS_REJECTED_TOTAL).increment(1);
+    async fn shutdown(&mut self) {
+        // Abort all tasks.
+        for handle in &self.inflight_requests {
+            handle.abort();
+        }
+
+        // Wait until all tasks are completed.
+        while self.join_next().await {}
     }
 
-    fn reject_bi_stream(&self, tx: &mut SendStream, rx: &mut RecvStream) {
-        tracing::debug!(
-            peer_id = %self.connection.peer_id(),
-            "request limit reached, rejecting bi stream"
+    async fn join_next(&mut self) -> bool {
+        let Some(req) = self.inflight_requests.next().await else {
+            return false;
+        };
+
+        self.inflight_requests_len -= 1;
+        metrics::gauge!(METRIC_REQ_HANDLERS).decrement(1);
+
+        if let Err(e) = req {
+            if e.is_panic() {
+                tracing::error!("request handler panicked");
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
+
+        true
+    }
+
+    #[inline]
+    fn track_uni(
+        &mut self,
+        service: &BoxCloneService<ServiceRequest, Response>,
+        mut stream: RecvStream,
+    ) {
+        tracing::trace!(id = %stream.id(), "incoming uni stream");
+        if self.is_limit_reached() {
+            tracing::debug!(
+                peer_id = %self.peer_id_str,
+                "request limit reached, rejecting uni stream"
+            );
+            let _ = stream.stop(Connection::LIMIT_EXCEEDED_ERROR_CODE);
+            metrics::counter!(METRIC_IN_REQUESTS_REJECTED_TOTAL).increment(1);
+            return;
+        }
+
+        let handler = UniStreamRequestHandler::new(
+            self.config,
+            self.connection.request_meta().clone(),
+            service.clone(),
+            stream,
         );
-        let _ = tx.reset(LIMIT_EXCEEDED_ERROR_CODE);
-        let _ = rx.stop(LIMIT_EXCEEDED_ERROR_CODE);
-        metrics::counter!(METRIC_IN_REQUESTS_REJECTED_TOTAL).increment(1);
+
+        self.spawn_handler(handler.handle());
+        metrics::counter!(METRIC_IN_MESSAGES_TOTAL).increment(1);
+    }
+
+    #[inline]
+    fn track_bi(
+        &mut self,
+        service: &BoxCloneService<ServiceRequest, Response>,
+        mut tx: SendStream,
+        mut rx: RecvStream,
+    ) {
+        tracing::trace!(id = %tx.id(), "incoming bi stream");
+        if self.is_limit_reached() {
+            tracing::debug!(
+                peer_id = %self.peer_id_str,
+                "request limit reached, rejecting bi stream"
+            );
+            let _ = tx.reset(Connection::LIMIT_EXCEEDED_ERROR_CODE);
+            let _ = rx.stop(Connection::LIMIT_EXCEEDED_ERROR_CODE);
+            metrics::counter!(METRIC_IN_REQUESTS_REJECTED_TOTAL).increment(1);
+            return;
+        }
+
+        let handler = BiStreamRequestHandler::new(
+            self.config,
+            self.connection.request_meta().clone(),
+            service.clone(),
+            tx,
+            rx,
+        );
+
+        self.spawn_handler(handler.handle());
+        metrics::counter!(METRIC_IN_QUERIES_TOTAL).increment(1);
+    }
+
+    fn spawn_handler<F>(&mut self, handler: F)
+    where
+        F: IntoFuture<Output = (), IntoFuture: Send + 'static>,
+    {
+        self.inflight_requests_len += 1;
+        self.inflight_requests
+            .push(tokio::spawn(handler.into_future()));
+        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
     }
 
     fn update_inflight_metrics(&self) {
-        let inflight_count = self.inflight_requests.len() as f64;
-        if self
-            .config
-            .connection_metrics
-            .is_some_and(|x| x.should_export_peer_id())
-        {
-            metrics::gauge!(METRIC_INFLIGHT_PER_PEER_HANDLERS, "peer_id" => self.connection.peer_id().to_string()).set(inflight_count);
-            metrics::gauge!(METRIC_CONCURRENT_REQUESTS_PER_PEER, "peer_id" => self.connection.peer_id().to_string()).set(inflight_count);
+        let metrics = &self.config.connection_metrics;
+        if metrics.is_some_and(|x| x.should_export_peer_id()) {
+            let inflight_count = self.inflight_requests_len as f64;
+
+            let labels = [("peer_id", self.peer_id_str.clone())];
+            metrics::gauge!(METRIC_INFLIGHT_PER_PEER_HANDLERS, &labels).set(inflight_count);
+            metrics::gauge!(METRIC_CONCURRENT_REQUESTS_PER_PEER, &labels).set(inflight_count);
         }
     }
 }
 
-impl Drop for RequestHandlerGuard<'_> {
+impl Drop for RequestTracker<'_> {
     fn drop(&mut self) {
         self.update_inflight_metrics();
-        self.inflight_requests.abort_all();
+
+        // Abort all tasks.
+        for handle in &self.inflight_requests {
+            handle.abort();
+        }
+
         self.active_peers.remove_with_stable_id(
             self.connection.peer_id(),
             self.connection.stable_id(),
             self.reason,
         );
-        tracing::debug!(peer_id = %self.connection.peer_id(), "request handler stopped");
+        tracing::debug!(peer_id = %self.peer_id_str, "request handler stopped");
     }
 }
 
@@ -269,16 +320,7 @@ impl BiStreamRequestHandler {
         let _histogram = HistogramGuard::begin(METRIC_IN_QUERIES_TIME);
 
         if let Err(e) = self.do_handle().await {
-            let is_expected_error = e
-                .downcast_ref::<WriteError>()
-                .is_some_and(|e| matches!(e, WriteError::Stopped(_)))
-                || e.downcast_ref::<ReadError>()
-                    .is_some_and(|e| matches!(e, ReadError::Reset(_)));
-            if !is_expected_error {
-                tracing::debug!("bi stream handler failed: {e}");
-            } else {
-                tracing::trace!("bi stream ended: {e}");
-            }
+            tracing::trace!("request handler task failed: {e}");
         }
     }
 
