@@ -84,6 +84,8 @@ impl InternalQueueStorage {
             let diff_infos_cf = this.db.internal_message_diff_info.cf();
             let commit_pointers_cf = this.db.internal_message_commit_pointer.cf();
 
+            let mut first_diff_read = false;
+
             let mut batch = weedb::rocksdb::WriteBatch::default();
 
             let mut buffer = Vec::new();
@@ -151,6 +153,26 @@ impl InternalQueueStorage {
 
                 let queue_diff = part.queue_diff();
 
+                if !first_diff_read {
+                    // set commit pointer
+                    let commit_pointer_key = CommitPointerKey {
+                        shard_ident: queue_diff.shard_ident,
+                    };
+
+                    let commit_pointer_value = CommitPointerValue {
+                        queue_key: queue_diff.max_message,
+                        seqno: queue_diff.seqno,
+                    };
+
+                    batch.put_cf(
+                        &commit_pointers_cf,
+                        commit_pointer_key.to_vec(),
+                        commit_pointer_value.to_vec(),
+                    );
+                }
+
+                first_diff_read = true;
+
                 // insert diff tail
                 let diff_tail_key = DiffTailKey {
                     shard_ident: queue_diff.shard_ident,
@@ -186,22 +208,6 @@ impl InternalQueueStorage {
                     tl_proto::serialize(diff_info),
                 );
 
-                // set commit pointer
-                let commit_pointer_key = CommitPointerKey {
-                    shard_ident: queue_diff.shard_ident,
-                };
-
-                let commit_pointer_value = CommitPointerValue {
-                    queue_key: queue_diff.max_message,
-                    seqno: queue_diff.seqno,
-                };
-
-                batch.put_cf(
-                    &commit_pointers_cf,
-                    commit_pointer_key.to_vec(),
-                    commit_pointer_value.to_vec(),
-                );
-
                 for (partition, statistics) in statistics.drain() {
                     for (dest, count) in statistics.iter() {
                         let key = StatKey {
@@ -217,11 +223,13 @@ impl InternalQueueStorage {
             }
 
             // insert last applied diff
-            batch.put_cf(
-                &var_cf,
-                INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
-                block_id.to_vec(),
-            );
+            if block_id.is_masterchain() {
+                batch.put_cf(
+                    &var_cf,
+                    INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
+                    block_id.to_vec(),
+                );
+            }
 
             reader.finish()?;
 
