@@ -21,9 +21,9 @@ use tycho_collator::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
     QueueDiffWithMessages, QueueShardRange,
 };
-use tycho_storage::snapshot::AccountStatistics;
+use tycho_storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
 use tycho_storage::Storage;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredObject {
@@ -1785,14 +1785,32 @@ async fn prepare_data_from_prepared_persistent_state(
     block_id_str: &str,
     diff_hash_str: &str,
     tail_len: u32,
-) -> anyhow::Result<(
-    Storage,
-    QueueImpl<QueueStateStdImpl, EnqueuedMessage>,
-    BlockId,
-    OutMsgQueueUpdates,
-)> {
+    storage: &Storage,
+) -> anyhow::Result<(BlockId, OutMsgQueueUpdates)> {
+    let diff_hash = HashBytes::from_str(diff_hash_str)?;
+    let top_update = OutMsgQueueUpdates {
+        diff_hash,
+        tail_len,
+    };
+
+    let block_id = BlockId::from_str(block_id_str)?;
+
+    let file = std::fs::File::open(file_path)?;
+
+    let internal_queue = storage.internal_queue_storage();
+    internal_queue
+        .import_from_file(&top_update, file, block_id)
+        .await?;
+
+    Ok((block_id, top_update))
+}
+
+#[tokio::test]
+async fn test_import_persistent_state() -> anyhow::Result<()> {
+    // init storage
     let (storage, _tmp_dir) = Storage::new_temp().await?;
 
+    // init queue
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory {
             storage: storage.clone(),
@@ -1804,43 +1822,59 @@ async fn prepare_data_from_prepared_persistent_state(
 
     let queue: QueueImpl<QueueStateStdImpl, EnqueuedMessage> = queue_factory.create();
 
-    let diff_hash = HashBytes::from_str(diff_hash_str)?;
-    let top_update = OutMsgQueueUpdates {
-        diff_hash,
-        tail_len,
-    };
-
-    let block_id = BlockId::from_str(block_id_str)?;
-
-    let file = std::fs::File::open(&file_path)?;
-
-    let internal_queue = storage.internal_queue_storage();
-    internal_queue
-        .import_from_file(&top_update, file, block_id)
-        .await?;
-
-    Ok((storage, queue, block_id, top_update))
-}
-
-#[tokio::test]
-async fn test_import_persistent_state_sc() -> anyhow::Result<()> {
-    let (storage, queue, block_id, top_update) = prepare_data_from_prepared_persistent_state(
-        "tests/test_data/sb.bin",
+    // import shard persistent state
+    let (shard_block_id, shard_top_update) = prepare_data_from_prepared_persistent_state(
+        "../test/data/internals/persistent_state/shard.bin",
         // block_id_str
         "0:8000000000000000:160:f54b2c09be8c873670374271571ea70aeacbfbdbef9ac45252451cb035f11a33:0097ee79d8551854a353dd80991c17dafdaaa933abfcb012f93437f3a25c0365",
         // diff_hash_str
         "794fe9ce31b7919d2b6ca9ae0f97501f4017382a273b8f3ee512dcfcb5b14482",
         // tail_len
         3,
+        &storage
+    ).await?;
+
+    // should be none because it mc block state is not imported
+    let last_committed_block = queue.get_last_committed_mc_block_id()?;
+    assert!(last_committed_block.is_none());
+
+    // import mc persistent state
+    let (mc_block_id, mc_top_update) = prepare_data_from_prepared_persistent_state(
+        "../test/data/internals/persistent_state/master.bin",
+        // block_id_str
+        "-1:8000000000000000:90:9e6e3bdbefda3a64a9dab50387f64a8c30b33a04b6fd638a8058e1344bf8a9d1:60ac6a64e15fb70a1c5629f0bb38890f3fd45aa7ba77e4b847cbf0f48d5d5818",
+        // diff_hash_str
+        "5795ca5d1b8d0c1ce96394eef851bde718ff2e14fd2840098ed2bb7640f278c5",
+        // tail_len
+        1,
+        &storage,
     ).await?;
 
     let snapshot = storage.internal_queue_storage().make_snapshot();
 
+    // check shard queue
+    check_imported_queue(&queue, &shard_block_id, &shard_top_update, &snapshot)?;
+    // check mc queue
+    check_imported_queue(&queue, &mc_block_id, &mc_top_update, &snapshot)?;
+
+    // common checks
+    let last_committed_pointer = snapshot.read_commit_pointers()?;
+    assert_eq!(last_committed_pointer.len(), 2);
+
+    let last_committed_block = queue.get_last_committed_mc_block_id()?.unwrap();
+    assert_eq!(last_committed_block, mc_block_id);
+
+    Ok(())
+}
+
+fn check_imported_queue(
+    queue: &QueueImpl<QueueStateStdImpl, EnqueuedMessage>,
+    block_id: &BlockId,
+    top_update: &OutMsgQueueUpdates,
+    snapshot: &InternalQueueSnapshot,
+) -> anyhow::Result<()> {
     let diff_tail = queue.get_diffs_tail_len(&block_id.shard, &QueueKey::MIN);
     assert_eq!(diff_tail, top_update.tail_len);
-
-    let last_committed_block = queue.get_last_committed_mc_block_id()?;
-    assert!(last_committed_block.is_none());
 
     let last_applied_block_seqno = snapshot
         .get_last_applied_diff_seqno(&block_id.shard)?
@@ -1866,15 +1900,6 @@ async fn test_import_persistent_state_sc() -> anyhow::Result<()> {
         }
     }
 
-    let mut stats = FastHashMap::default();
-    snapshot.collect_stats_in_range(
-        &block_id.shard,
-        0,
-        &QueueKey::MIN,
-        &QueueKey::MAX,
-        &mut stats,
-    )?;
-
     let mut stat = AccountStatistics::default();
     snapshot.collect_stats_in_range(
         &block_id.shard,
@@ -1884,65 +1909,40 @@ async fn test_import_persistent_state_sc() -> anyhow::Result<()> {
         &mut stat,
     )?;
 
+    assert_eq!(stat, total_stats);
+
     let mut total_messages_by_stat = 0;
     for s in stat.values() {
         total_messages_by_stat += s;
     }
 
-    let iter_range_1 = QueueShardRange {
-        shard_ident: ShardIdent::BASECHAIN,
+    // if tail_len > 1, then we should have at least one message when tail len == 1 its not guaranteed that diff has messages
+    if top_update.tail_len > 1 {
+        assert!(total_messages_by_stat > 0);
+    }
+
+    let iter_range = vec![QueueShardRange {
+        shard_ident: block_id.shard,
         from: QueueKey::MIN.next_value(),
         to: QueueKey::MAX.next_value(),
-    };
-
-    let mut iterator = queue.iterator(0, &vec![iter_range_1], block_id.shard)?;
+    }];
 
     let mut read_messages = 0;
-    while let Some(_) = iterator.next()? {
+
+    let mut iterator = queue.iterator(0, &iter_range, ShardIdent::MASTERCHAIN)?;
+    while iterator.next()?.is_some() {
+        read_messages += 1;
+    }
+
+    let mut iterator = queue.iterator(0, &iter_range, ShardIdent::BASECHAIN)?;
+
+    while iterator.next()?.is_some() {
         read_messages += 1;
     }
 
     assert_eq!(read_messages, total_messages_by_stat);
 
     let last_committed_pointer = snapshot.read_commit_pointers()?;
-
-    assert_eq!(last_committed_pointer.len(), 1);
-
-    let pointer = last_committed_pointer.get(&block_id.shard).unwrap();
-    assert_eq!(pointer.seqno, block_id.seqno);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_import_persistent_state_mc() -> anyhow::Result<()> {
-    let (storage, queue, block_id, top_update) = prepare_data_from_prepared_persistent_state(
-        "tests/test_data/mb.bin",
-        // block_id_str
-        "-1:8000000000000000:90:9e6e3bdbefda3a64a9dab50387f64a8c30b33a04b6fd638a8058e1344bf8a9d1:60ac6a64e15fb70a1c5629f0bb38890f3fd45aa7ba77e4b847cbf0f48d5d5818",
-        // diff_hash_str
-        "5795ca5d1b8d0c1ce96394eef851bde718ff2e14fd2840098ed2bb7640f278c5",
-        // tail_len
-        1,
-    ).await?;
-
-    let snapshot = storage.internal_queue_storage().make_snapshot();
-
-    let diff_tail = queue.get_diffs_tail_len(&block_id.shard, &QueueKey::MIN);
-    assert_eq!(diff_tail, top_update.tail_len);
-
-    let last_committed_block = queue.get_last_committed_mc_block_id()?.unwrap();
-    assert_eq!(last_committed_block, block_id);
-
-    let last_applied_block_seqno = snapshot
-        .get_last_applied_diff_seqno(&block_id.shard)?
-        .unwrap();
-    assert_eq!(last_applied_block_seqno, block_id.seqno);
-
-    let last_committed_pointer = snapshot.read_commit_pointers()?;
-
-    assert_eq!(last_committed_pointer.len(), 1);
-
     let pointer = last_committed_pointer.get(&block_id.shard).unwrap();
     assert_eq!(pointer.seqno, block_id.seqno);
 
