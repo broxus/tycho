@@ -20,8 +20,7 @@ use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedTo, ProcessedToByPartitions,
-    TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -225,58 +224,6 @@ impl BlocksCache {
         }
 
         Ok(result)
-    }
-
-    pub fn get_all_processed_to_by_mc_block_from_cache(
-        &self,
-        mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, Option<ProcessedTo>>> {
-        let mut all_processed_to = FastHashMap::default();
-
-        if mc_block_key.seqno == 0 {
-            return Ok(all_processed_to);
-        }
-
-        let updated_top_shard_block_ids;
-        {
-            let master_cache = self.inner.masters.lock();
-            let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
-                bail!(
-                    "get_all_processed_to_by_mc_block_from_cache: Master block not found in cache! ({})",
-                    mc_block_key,
-                )
-            };
-
-            let processed_to = mc_block_entry.int_processed_to().clone();
-
-            updated_top_shard_block_ids = mc_block_entry
-                .top_shard_blocks_info
-                .iter()
-                .filter(|(_, updated)| *updated)
-                .map(|(id, _)| id)
-                .cloned()
-                .collect::<Vec<_>>();
-            all_processed_to.insert(mc_block_entry.block_id, Some(processed_to));
-        }
-
-        for top_sc_block_id in updated_top_shard_block_ids {
-            if top_sc_block_id.seqno == 0 {
-                continue;
-            }
-
-            let mut processed_to_opt = None;
-
-            // try to find in cache
-            if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard) {
-                if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
-                }
-            }
-
-            all_processed_to.insert(top_sc_block_id, processed_to_opt);
-        }
-
-        Ok(all_processed_to)
     }
 
     /// If we have

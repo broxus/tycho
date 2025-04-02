@@ -726,7 +726,6 @@ impl Phase<FinalizeState> {
                     top_processed_to_anchor,
                     ref_mc_state_handle: self.state.prev_shard_data.ref_mc_state_handle().clone(),
                     shards_processed_to_by_partitions,
-                    shards_processed_to: Default::default(),
                 }))
             }
         };

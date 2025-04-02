@@ -15,8 +15,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ProcessedTo,
-    ShardDescriptionExt,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionExt,
 };
 
 pub(super) type BlockCacheKey = BlockIdShort;
@@ -353,15 +352,6 @@ impl BlockCacheEntry {
                 "Block should be `Received` to contain `cached_state` ({})",
                 self.block_id
             )
-        }
-    }
-
-    pub fn int_processed_to(&self) -> &ProcessedTo {
-        match &self.data {
-            BlockCacheEntryData::Collated {
-                candidate_stuff, ..
-            } => &candidate_stuff.candidate.queue_diff_aug.diff().processed_to,
-            BlockCacheEntryData::Received { queue_diff, .. } => &queue_diff.diff().processed_to,
         }
     }
 }

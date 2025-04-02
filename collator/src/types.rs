@@ -145,7 +145,6 @@ pub struct McData {
     pub ref_mc_state_handle: RefMcStateHandle,
 
     pub shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
-    pub shards_processed_to: FastHashMap<ShardIdent, ProcessedTo>,
 }
 
 impl McData {
@@ -202,7 +201,6 @@ impl McData {
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
             shards_processed_to_by_partitions,
-            shards_processed_to: Default::default(), // TODO: remove
         }))
     }
 

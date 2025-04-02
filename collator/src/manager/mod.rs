@@ -44,8 +44,8 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedTo,
-    ProcessedToByPartitions, ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
+    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -1676,42 +1676,6 @@ where
             };
 
             result.insert(top_block_id.shard, (updated, processed_to));
-        }
-
-        Ok(result)
-    }
-
-    /// Get all processed to info from master and each shard
-    async fn read_all_processed_to_for_mc_block(
-        mc_block_key: &BlockCacheKey,
-        blocks_cache: &BlocksCache,
-        state_node_adapter: Arc<dyn StateNodeAdapter>,
-    ) -> Result<FastHashMap<ShardIdent, ProcessedTo>> {
-        let mut result = FastHashMap::default();
-
-        if mc_block_key.seqno == 0 {
-            return Ok(result);
-        }
-
-        let all_processed_to_from_cache =
-            blocks_cache.get_all_processed_to_by_mc_block_from_cache(mc_block_key)?;
-
-        for (top_block_id, processed_to_opt) in all_processed_to_from_cache {
-            let processed_to = match processed_to_opt {
-                Some(processed_to) => processed_to,
-                None => {
-                    // try get from storage
-                    utils::load_only_queue_diff_stuff(state_node_adapter.as_ref(), &top_block_id)
-                        .await?
-                        .as_ref()
-                        .processed_to
-                        .clone()
-                        .into_iter()
-                        .collect()
-                }
-            };
-
-            result.insert(top_block_id.shard, processed_to.clone());
         }
 
         Ok(result)
