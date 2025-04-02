@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,8 +7,8 @@ use everscale_types::cell::{Cell, HashBytes, Lazy};
 use everscale_types::models::{
     AccountStatus, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason, CurrencyCollection,
     HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, MsgEnvelope, MsgInfo, OrdinaryTxInfo,
-    OutMsg, OutMsgDescr, OutMsgNew, OwnedMessage, ShardIdent, SkippedComputePhase, StdAddr,
-    Transaction, TxInfo,
+    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, OwnedMessage, ShardIdent,
+    SkippedComputePhase, StdAddr, Transaction, TxInfo,
 };
 use everscale_types::num::Tokens;
 use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr};
@@ -17,12 +18,12 @@ use tycho_collator::internal_queue::queue::{
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use tycho_collator::internal_queue::state::storage::{QueueStateImplFactory, QueueStateStdImpl};
 use tycho_collator::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange,
+    DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
+    QueueDiffWithMessages, QueueShardRange,
 };
 use tycho_storage::snapshot::AccountStatistics;
 use tycho_storage::Storage;
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashMap, FastHashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredObject {
@@ -1773,6 +1774,175 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
     assert!(res.is_none());
     let res = queue.get_diff_info(&ShardIdent::MASTERCHAIN, 4, DiffZone::Uncommitted)?;
     assert!(res.is_none());
+
+    Ok(())
+}
+
+async fn prepare_data_from_prepared_persistent_state(
+    file_path: &str,
+    block_id_str: &str,
+    diff_hash_str: &str,
+    tail_len: u32,
+) -> anyhow::Result<(
+    Storage,
+    QueueImpl<QueueStateStdImpl, EnqueuedMessage>,
+    BlockId,
+    OutMsgQueueUpdates,
+)> {
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
+
+    let queue_factory = QueueFactoryStdImpl {
+        state: QueueStateImplFactory {
+            storage: storage.clone(),
+        },
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+    };
+
+    let queue: QueueImpl<QueueStateStdImpl, EnqueuedMessage> = queue_factory.create();
+
+    let diff_hash = HashBytes::from_str(diff_hash_str)?;
+    let top_update = OutMsgQueueUpdates {
+        diff_hash,
+        tail_len,
+    };
+
+    let block_id = BlockId::from_str(block_id_str)?;
+
+    let file = std::fs::File::open(&file_path)?;
+
+    let internal_queue = storage.internal_queue_storage();
+    internal_queue
+        .import_from_file(&top_update, file, block_id)
+        .await?;
+
+    Ok((storage, queue, block_id, top_update))
+}
+
+#[tokio::test]
+async fn test_import_persistent_state_sc() -> anyhow::Result<()> {
+    let (storage, queue, block_id, top_update) = prepare_data_from_prepared_persistent_state(
+        "tests/test_data/sb.bin",
+        // block_id_str
+        "0:8000000000000000:160:f54b2c09be8c873670374271571ea70aeacbfbdbef9ac45252451cb035f11a33:0097ee79d8551854a353dd80991c17dafdaaa933abfcb012f93437f3a25c0365",
+        // diff_hash_str
+        "794fe9ce31b7919d2b6ca9ae0f97501f4017382a273b8f3ee512dcfcb5b14482",
+        // tail_len
+        3,
+    ).await?;
+
+    let snapshot = storage.internal_queue_storage().make_snapshot();
+
+    let diff_tail = queue.get_diffs_tail_len(&block_id.shard, &QueueKey::MIN);
+    assert_eq!(diff_tail, top_update.tail_len);
+
+    let last_committed_block = queue.get_last_committed_mc_block_id()?;
+    assert!(last_committed_block.is_none());
+
+    let last_applied_block_seqno = snapshot
+        .get_last_applied_diff_seqno(&block_id.shard)?
+        .unwrap();
+    assert_eq!(last_applied_block_seqno, block_id.seqno);
+
+    let separated_stats = snapshot.collect_separated_stats_in_range_for_partitions(
+        &block_id.shard,
+        &vec![0, 1].into_iter().collect(),
+        &QueueKey::MIN,
+        &QueueKey::MAX,
+    )?;
+
+    let mut total_stats = AccountStatistics::default();
+    for stat in separated_stats.values() {
+        for acc_stat in stat.values() {
+            for (key, value) in acc_stat {
+                total_stats
+                    .entry(key.clone())
+                    .and_modify(|v| *v += value)
+                    .or_insert(*value);
+            }
+        }
+    }
+
+    let mut stats = FastHashMap::default();
+    snapshot.collect_stats_in_range(
+        &block_id.shard,
+        0,
+        &QueueKey::MIN,
+        &QueueKey::MAX,
+        &mut stats,
+    )?;
+
+    let mut stat = AccountStatistics::default();
+    snapshot.collect_stats_in_range(
+        &block_id.shard,
+        0,
+        &QueueKey::MIN,
+        &QueueKey::MAX,
+        &mut stat,
+    )?;
+
+    let mut total_messages_by_stat = 0;
+    for s in stat.values() {
+        total_messages_by_stat += s;
+    }
+
+    let iter_range_1 = QueueShardRange {
+        shard_ident: ShardIdent::BASECHAIN,
+        from: QueueKey::MIN.next_value(),
+        to: QueueKey::MAX.next_value(),
+    };
+
+    let mut iterator = queue.iterator(0, &vec![iter_range_1], block_id.shard)?;
+
+    let mut read_messages = 0;
+    while let Some(_) = iterator.next()? {
+        read_messages += 1;
+    }
+
+    assert_eq!(read_messages, total_messages_by_stat);
+
+    let last_committed_pointer = snapshot.read_commit_pointers()?;
+
+    assert_eq!(last_committed_pointer.len(), 1);
+
+    let pointer = last_committed_pointer.get(&block_id.shard).unwrap();
+    assert_eq!(pointer.seqno, block_id.seqno);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_import_persistent_state_mc() -> anyhow::Result<()> {
+    let (storage, queue, block_id, top_update) = prepare_data_from_prepared_persistent_state(
+        "tests/test_data/mb.bin",
+        // block_id_str
+        "-1:8000000000000000:90:9e6e3bdbefda3a64a9dab50387f64a8c30b33a04b6fd638a8058e1344bf8a9d1:60ac6a64e15fb70a1c5629f0bb38890f3fd45aa7ba77e4b847cbf0f48d5d5818",
+        // diff_hash_str
+        "5795ca5d1b8d0c1ce96394eef851bde718ff2e14fd2840098ed2bb7640f278c5",
+        // tail_len
+        1,
+    ).await?;
+
+    let snapshot = storage.internal_queue_storage().make_snapshot();
+
+    let diff_tail = queue.get_diffs_tail_len(&block_id.shard, &QueueKey::MIN);
+    assert_eq!(diff_tail, top_update.tail_len);
+
+    let last_committed_block = queue.get_last_committed_mc_block_id()?.unwrap();
+    assert_eq!(last_committed_block, block_id);
+
+    let last_applied_block_seqno = snapshot
+        .get_last_applied_diff_seqno(&block_id.shard)?
+        .unwrap();
+    assert_eq!(last_applied_block_seqno, block_id.seqno);
+
+    let last_committed_pointer = snapshot.read_commit_pointers()?;
+
+    assert_eq!(last_committed_pointer.len(), 1);
+
+    let pointer = last_committed_pointer.get(&block_id.shard).unwrap();
+    assert_eq!(pointer.seqno, block_id.seqno);
 
     Ok(())
 }
