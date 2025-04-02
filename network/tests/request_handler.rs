@@ -6,8 +6,8 @@ use anyhow::Result;
 use futures_util::future::{ready, Ready};
 use tokio::time::sleep;
 use tycho_network::{
-    Network, NetworkConfig, NetworkExt, Request, Response, Routable, Router, Service,
-    ServiceRequest, LIMIT_EXCEEDED_ERROR_CODE,
+    Connection, Network, NetworkConfig, NetworkExt, Request, Response, Routable, Router, Service,
+    ServiceRequest,
 };
 use tycho_util::test::init_logger;
 
@@ -166,7 +166,7 @@ async fn test_inbound_request_rate_limit() -> Result<()> {
     let err = second_request_result.err().unwrap();
     let is_rate_limit_error = err
         .to_string()
-        .contains(&LIMIT_EXCEEDED_ERROR_CODE.to_string());
+        .contains(&Connection::LIMIT_EXCEEDED_ERROR_CODE.to_string());
 
     assert!(
         is_rate_limit_error,
