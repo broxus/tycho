@@ -157,6 +157,8 @@ impl QuicConfig {
         config.max_concurrent_bidi_streams(make_varint(self.max_concurrent_bidi_streams));
         config.max_concurrent_uni_streams(make_varint(self.max_concurrent_uni_streams));
 
+        config.datagram_receive_buffer_size(None);
+
         if let Some(stream_receive_window) = self.stream_receive_window {
             config.stream_receive_window(make_varint(stream_receive_window));
         }
