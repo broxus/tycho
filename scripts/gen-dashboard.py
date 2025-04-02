@@ -309,21 +309,25 @@ def blockchain_stats() -> RowPanel:
         Stat(
             targets=[
                 Target(
-                    expr=f"""{expr_max(
-                        'tycho_last_applied_block_seqno',
-                        label_selectors=['workchain="-1"'],
-                        by_labels=[]
-                    )}""",
+                    expr=f"""{
+                        expr_max(
+                            "tycho_last_applied_block_seqno",
+                            label_selectors=['workchain="-1"'],
+                            by_labels=[],
+                        )
+                    }""",
                     legendFormat="Last Applied MC Block",
                     instant=True,
                     datasource=DATASOURCE,
                 ),
                 Target(
-                    expr=f"""{expr_max(
-                        'tycho_last_processed_to_anchor_id',
-                        label_selectors=['workchain="-1"'],
-                        by_labels=[]
-                    )}""",
+                    expr=f"""{
+                        expr_max(
+                            "tycho_last_processed_to_anchor_id",
+                            label_selectors=['workchain="-1"'],
+                            by_labels=[],
+                        )
+                    }""",
                     legendFormat="Last Used Anchor",
                     instant=True,
                     datasource=DATASOURCE,
@@ -625,10 +629,15 @@ def net_request_handler() -> RowPanel:
             "tycho_net_in_messages_total", "Number of incoming messages over time"
         ),
         create_counter_panel(
-            "tycho_net_in_datagrams_total", "Number of incoming datagrams over time"
+            "tycho_net_in_requests_rejected_total",
+            "Number of rejected incoming messages over time",
         ),
         create_gauge_panel(
             "tycho_net_req_handlers", "Current number of incoming request handlers"
+        ),
+        create_gauge_panel(
+            "tycho_net_req_handlers_per_peer",
+            "Current number of incoming request handlers per peer",
         ),
     ]
     return create_row("network: Request Handler", metrics)
@@ -2044,8 +2053,7 @@ def mempool_engine() -> RowPanel:
             "Engine committed anchor: time latency",
         ),
         create_counter_panel(
-            "tycho_mempool_points_verify_ok",
-            "Verifier: verify() OK points (rate)"
+            "tycho_mempool_points_verify_ok", "Verifier: verify() OK points (rate)"
         ),
         create_counter_panel(
             "tycho_mempool_points_resolved_ok",
@@ -2074,7 +2082,7 @@ def mempool_engine() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_points_resolved_err",
-                label_selectors=['kind=~"$kind"','ord="first"'],
+                label_selectors=['kind=~"$kind"', 'ord="first"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2082,19 +2090,19 @@ def mempool_engine() -> RowPanel:
             legend_format="{{instance}} - {{kind}}",
         ),
         create_counter_panel(
-                expr_sum_increase(
-                    "tycho_mempool_points_resolved_ok",
-                    label_selectors=['ord="alt"'],
-                    range_selector="$__interval",
-                    by_labels=["instance"],
-                ),
+            expr_sum_increase(
+                "tycho_mempool_points_resolved_ok",
+                label_selectors=['ord="alt"'],
+                range_selector="$__interval",
+                by_labels=["instance"],
+            ),
             "Engine: alt valid points resolved (total at moment)",
             legend_format="{{instance}}",
         ),
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_points_resolved_err",
-                label_selectors=['kind=~"$kind"','ord="alt"'],
+                label_selectors=['kind=~"$kind"', 'ord="alt"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2241,6 +2249,7 @@ def mempool_peers() -> RowPanel:
         ),
     ]
     return create_row("Mempool peers", metrics)
+
 
 def mempool_storage() -> RowPanel:
     metrics = [
