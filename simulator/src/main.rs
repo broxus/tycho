@@ -39,6 +39,7 @@ fn test_prerequisites() -> Result<()> {
         .arg("buildx")
         .arg("--version")
         .output()?;
+    Command::new("helm").arg("version").output()?;
     Command::new("cargo").arg("--version").output()?;
     Ok(())
 }
