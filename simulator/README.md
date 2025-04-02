@@ -18,6 +18,10 @@
 > properly.
 
 ### Usage
+prepare k3s
+```bash
+  chmod 644 /etc/rancher/k3s/k3s.yaml
+```
 
 ```bash
 cargo install --path ./simulator
@@ -25,7 +29,7 @@ cargo install --path ./simulator
 
 simulator prepare
 simulator build
-simulator node start
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && simulator node start
 simulator node logs -f
 simulator node exec
 simulator clean
@@ -46,7 +50,7 @@ helm repo update prometheus-community
 kubectl create namespace monitoring
 helm install grafana grafana/grafana --namespace monitoring --set adminPassword=admin
 helm install prometheus prometheus-community/prometheus --namespace monitoring
-helm install prometheus-operator prometheus-community/kube-prometheus-stack --namespace monitoring
+helm install prometheus-operator prometheus-community/kube-prometheus-stack --namespace monitoring --set alertmanager.enabled=false
 
 
 export POD_NAME=$(kubectl get pods --namespace monitoring -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=grafana" -o jsonpath="{.items[0].metadata.name}")
