@@ -487,7 +487,7 @@ impl DagPointFuture {
     ) -> (DagPoint, PointStatusStored) {
         let _guard = ctx.span().enter();
         let id = info.id();
-        let is_valid = matches!(validated, ValidateResult::Valid { .. });
+        let is_valid = matches!(validated, ValidateResult::Valid);
         // TODO fill anchor flags in status
         match validated {
             ValidateResult::Valid | ValidateResult::Invalid => {

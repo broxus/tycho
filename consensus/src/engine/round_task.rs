@@ -314,8 +314,8 @@ impl RoundTaskReady {
                 validate_ctx,
             );
             match validate.await? {
-                ValidateResult::Valid { .. } => Ok(()),
-                ValidateResult::Invalid { .. } => {
+                ValidateResult::Valid => Ok(()),
+                ValidateResult::Invalid => {
                     let _guard = round_ctx.span().enter();
                     panic!("Failed to validate own point: Invalid {point:?}")
                 }
