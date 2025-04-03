@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tycho_util::metrics::spawn_metrics_loop;
-use tycho_util::FastDashSet;
 use weedb::rocksdb;
 
 pub use self::config::*;
@@ -17,6 +16,7 @@ mod store;
 
 mod util {
     pub use self::instance_id::*;
+    pub use self::rpc_blacklist::*;
     pub use self::slot_subscriptions::*;
     pub use self::stored_value::*;
 
@@ -157,7 +157,7 @@ impl StorageBuilder {
 
         let node_state_storage = NodeStateStorage::new(base_db.clone());
 
-        let rpc_blacklist = Arc::new(FastDashSet::default());
+        let rpc_blacklist = Arc::new(Default::default());
         let rpc_state = rpc_db.map(|db| RpcStorage::new(db, &rpc_blacklist));
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());

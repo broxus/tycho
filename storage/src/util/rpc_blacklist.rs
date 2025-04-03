@@ -7,7 +7,9 @@ use everscale_types::models::StdAddr;
 use serde::{Deserialize, Serialize};
 use tycho_util::{serde_helpers, FastDashSet};
 
-pub fn watcher_init(config: &Option<PathBuf>, blacklist: Arc<FastDashSet<[u8; 33]>>) {
+pub type AccountBlackList = ArcSwap<FastDashSet<[u8; 33]>>;
+
+pub fn watcher_init(config: &Option<PathBuf>, blacklist: Arc<AccountBlackList>) {
     if let Some(rpc_blacklist_config) = config {
         let rpc_blacklist_config = rpc_blacklist_config.clone();
         tokio::spawn(async move {
@@ -22,7 +24,7 @@ pub fn watcher_init(config: &Option<PathBuf>, blacklist: Arc<FastDashSet<[u8; 33
                     .and_then(|m| m.modified().ok())
             };
 
-            let handle = |config: BlackListConfig, blacklist: &ArcSwap<FastDashSet<[u8; 33]>>| {
+            let handle = |config: BlackListConfig, blacklist: &AccountBlackList| {
                 let new_list = Arc::new(
                     config
                         .accounts
@@ -37,10 +39,8 @@ pub fn watcher_init(config: &Option<PathBuf>, blacklist: Arc<FastDashSet<[u8; 33
                 );
 
                 // Atomic swap blacklist values
-                blacklist.store(new_list);
+                blacklist.swap(new_list);
             };
-
-            let blacklist = ArcSwap::from(blacklist);
 
             let mut last_modified = None;
 

@@ -11,7 +11,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::{FastDashSet, FastHashMap};
+use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
@@ -23,11 +23,11 @@ pub struct RpcStorage {
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
     snapshot: ArcSwapOption<OwnedSnapshot>,
-    account_blacklist: Weak<FastDashSet<[u8; 33]>>,
+    account_blacklist: Weak<AccountBlackList>,
 }
 
 impl RpcStorage {
-    pub fn new(db: RpcDb, account_blacklist: &Arc<FastDashSet<[u8; 33]>>) -> Self {
+    pub fn new(db: RpcDb, account_blacklist: &Arc<AccountBlackList>) -> Self {
         let this = Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
@@ -601,7 +601,7 @@ impl RpcStorage {
         let span = tracing::Span::current();
         let db = self.db.clone();
 
-        let account_blacklist = self.account_blacklist.upgrade();
+        let account_blacklist = self.account_blacklist.upgrade().map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {

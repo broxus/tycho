@@ -46,4 +46,5 @@ $tycho_bin node run \
     --global-config "${base_dir}/global-config.json" \
     --import-zerostate "${base_dir}/zerostate.boc" \
     --logger-config "${root_dir}/logger.json" \
+    --rpc-blacklist-config "${root_dir}/rpc-blacklist.json" \
     --control-socket "${base_dir}/control${N}.sock"
