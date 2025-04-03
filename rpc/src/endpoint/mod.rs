@@ -48,8 +48,8 @@ impl RpcEndpoint {
             .route("/", post(common_route))
             .route("/rpc", post(common_route))
             .route("/proto", post(common_route))
-            .nest("/v2", tonapi::router())
-            .nest("/api/v2", toncenter::router())
+            .nest("/tonapi", tonapi::router())
+            .nest("/toncenter", toncenter::router())
             .layer(service)
             .with_state(self.state);
 

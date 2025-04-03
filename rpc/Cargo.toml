@@ -20,7 +20,7 @@ futures-util = { workspace = true }
 hex = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true }
-num-bigint = "0.4"
+num-bigint = { workspace = true }
 parking_lot = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }

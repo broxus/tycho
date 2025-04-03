@@ -215,8 +215,14 @@ async fn get_blockchain_account_transactions(
                 state_update_new: state_update.new.to_string(),
                 in_msg,
                 out_msgs,
-                block: block_id
-                    .map(|b| format!("({},{},{})", b.shard.workchain(), b.seqno, b.shard.prefix())),
+                block: block_id.map(|b| {
+                    format!(
+                        "({},{},{:016x})",
+                        b.shard.workchain(),
+                        b.seqno,
+                        b.shard.prefix()
+                    )
+                }),
                 prev_trans_hash: Some(t.prev_trans_hash.to_string()),
                 prev_trans_lt: Some(t.prev_trans_lt),
                 compute_phase,
