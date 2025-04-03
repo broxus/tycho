@@ -58,7 +58,7 @@ pub fn watcher_init(config: &Option<PathBuf>, blacklist: Arc<AccountBlackList>) 
                 match BlackListConfig::load_from(&rpc_blacklist_config) {
                     Ok(config) => handle(config, &blacklist),
                     Err(e) => {
-                        tracing::error!("failed to load logger config: {e}");
+                        tracing::error!("failed to load blacklist config: {e}");
                     }
                 }
             }

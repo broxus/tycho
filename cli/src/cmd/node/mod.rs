@@ -60,10 +60,6 @@ struct CmdRun {
     #[clap(long)]
     logger_config: Option<PathBuf>,
 
-    /// Path to the RPC blacklist config.
-    #[clap(long)]
-    rpc_blacklist_config: Option<PathBuf>,
-
     /// List of zerostate files to import.
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
@@ -136,15 +132,12 @@ impl CmdRun {
 
             let control_socket = args.control_socket_path(self.control_socket.as_ref());
 
-            let rpc_blacklist = self.rpc_blacklist_config;
-
             Node::new(
                 socket_addr,
                 node_keys,
                 node_config,
                 global_config,
                 control_socket,
-                rpc_blacklist,
             )
             .await?
         };

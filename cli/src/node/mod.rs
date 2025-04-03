@@ -81,7 +81,6 @@ impl Node {
         node_config: NodeConfig,
         global_config: GlobalConfig,
         control_socket: PathBuf,
-        rpc_blacklist: Option<PathBuf>,
     ) -> Result<Self> {
         // Setup network
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
@@ -142,7 +141,12 @@ impl Node {
                     .as_ref()
                     .is_some_and(|x| x.storage.is_full()),
             )
-            .with_rpc_blacklist(rpc_blacklist)
+            .with_rpc_blacklist(
+                node_config
+                    .rpc
+                    .as_ref()
+                    .and_then(|x| x.storage.blacklist_path()),
+            )
             .build()
             .await
             .context("failed to create storage")?;

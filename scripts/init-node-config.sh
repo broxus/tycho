@@ -6,7 +6,6 @@ root_dir=$(cd "${script_dir}/../" && pwd -P)
 
 config_path="$root_dir/config.json"
 logger_path="$root_dir/logger.json"
-rpc_blacklist_path="$root_dir/rpc-blacklist.json"
 
 tycho_bin=$(/usr/bin/env bash "$script_dir/build-node.sh")
 
@@ -34,14 +33,6 @@ if ! [ -f "$logger_path" ]; then
     "collator::read_next_externals": "warn",
     "exec_manager": "error",
     "tycho_consensus::engine::input_buffer": "error"
-}
-EOF
-fi
-
-if ! [ -f "$rpc_blacklist_path" ]; then
-    cat << EOF > "$rpc_blacklist_path"
-{
-    "accounts": []
 }
 EOF
 fi

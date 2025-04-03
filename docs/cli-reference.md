@@ -181,7 +181,6 @@ Run a Tycho node
 * `--keys <KEYS>` — Path to the node keys. Default: `$TYCHO_HOME/node_keys.json`
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `--logger-config <LOGGER_CONFIG>` — Path to the logger config
-* `--rpc-blacklist-config <RPC_BLACKLIST_CONFIG>` — Path to the RPC blacklist config
 * `--import-zerostate <IMPORT_ZEROSTATE>` — List of zerostate files to import
 
 

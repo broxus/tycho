@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,11 @@ pub enum RpcStorage {
         ///
         /// Default: `false`.
         force_reindex: bool,
+
+        /// Path to account blacklist file. RPC skips storing transactions for this list.
+        ///
+        /// Default: `None`.
+        blacklist_path: Option<PathBuf>,
     },
     /// Only store the state, no transactions and code hashes.
     StateOnly,
@@ -74,6 +80,13 @@ impl RpcStorage {
             Self::StateOnly => false,
         }
     }
+
+    pub fn blacklist_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Full { blacklist_path, .. } => blacklist_path.clone(),
+            Self::StateOnly => None,
+        }
+    }
 }
 
 impl Default for RpcConfig {
@@ -87,6 +100,7 @@ impl Default for RpcConfig {
             storage: RpcStorage::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,
+                blacklist_path: None,
             },
         }
     }
