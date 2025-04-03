@@ -165,7 +165,7 @@ pub struct TransactionsParams {
     #[expect(unused)]
     #[serde(default, with = "serde_option_tonlib_hash")]
     pub hash: Option<HashBytes>,
-    #[serde(default)]
+    #[serde(default, with = "serde_helpers::string")]
     pub to_lt: u64,
 }
 

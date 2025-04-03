@@ -78,6 +78,7 @@ pub struct Jrpc<ID, T: ParseParams> {
 #[async_trait]
 impl<S, T, ID> FromRequest<S> for Jrpc<ID, T>
 where
+    JrpcErrorResponse<ID>: IntoResponse,
     ID: Serialize + for<'de> Deserialize<'de>,
     T: ParseParams + for<'de> Deserialize<'de>,
     S: Send + Sync,
@@ -173,7 +174,8 @@ impl<ID, T> JrpcOkResponse<ID, T> {
     }
 }
 
-impl<ID: Serialize, T: Serialize> Serialize for JrpcOkResponse<ID, T> {
+// Default JRPC OK response.
+impl<T: Serialize> Serialize for JrpcOkResponse<i64, T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -188,7 +190,27 @@ impl<ID: Serialize, T: Serialize> Serialize for JrpcOkResponse<ID, T> {
     }
 }
 
-impl<ID: Serialize, T: Serialize> IntoResponse for JrpcOkResponse<ID, T> {
+// Strange JRPC OK response.
+impl<T: Serialize> Serialize for JrpcOkResponse<String, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", 4)?;
+        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+        ser.serialize_field("id", &self.id)?;
+        ser.serialize_field("result", &self.result)?;
+        ser.serialize_field("ok", &true)?;
+        ser.end()
+    }
+}
+
+impl<ID, T> IntoResponse for JrpcOkResponse<ID, T>
+where
+    Self: Serialize,
+{
     fn into_response(self) -> Response {
         (StatusCode::OK, axum::Json(self)).into_response()
     }
@@ -200,18 +222,12 @@ pub struct JrpcErrorResponse<ID> {
     pub message: Cow<'static, str>,
 }
 
-impl<ID: Serialize> Serialize for JrpcErrorResponse<ID> {
+impl Serialize for JrpcErrorResponse<i64> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-
-        #[derive(Serialize)]
-        struct Error<'a> {
-            code: i32,
-            message: &'a str,
-        }
 
         let mut ser = serializer.serialize_struct("JrpcResponse", 3)?;
         ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
@@ -224,12 +240,40 @@ impl<ID: Serialize> Serialize for JrpcErrorResponse<ID> {
     }
 }
 
-impl<ID: Serialize> IntoResponse for JrpcErrorResponse<ID> {
+impl Serialize for JrpcErrorResponse<String> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", 4)?;
+        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+        ser.serialize_field("id", &self.id)?;
+        ser.serialize_field("error", &Error {
+            code: self.code,
+            message: &self.message,
+        })?;
+        ser.serialize_field("ok", &false)?;
+        ser.end()
+    }
+}
+
+impl<ID> IntoResponse for JrpcErrorResponse<ID>
+where
+    Self: Serialize,
+{
     fn into_response(self) -> Response {
         metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
 
         (StatusCode::OK, axum::Json(self)).into_response()
     }
+}
+
+#[derive(Serialize)]
+struct Error<'a> {
+    code: i32,
+    message: &'a str,
 }
 
 const JSONRPC_FIELD: &str = "jsonrpc";
