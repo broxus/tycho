@@ -65,15 +65,15 @@ async fn handle_get_address_information(id: String, state: RpcState, p: AccountP
             sync_utime = timings.gen_utime;
         }
         LoadedAccountState::Found {
+            timings,
             mc_block_id,
             state,
-            gen_utime,
             mc_ref_handle,
         } => {
             last_transaction_id =
                 TonlibTransactionId::new(state.last_trans_lt, state.last_trans_hash);
             block_id = TonlibBlockId::from(*mc_block_id);
-            sync_utime = gen_utime;
+            sync_utime = timings.gen_utime;
 
             match state.load_account() {
                 Ok(Some(loaded)) => {
@@ -209,7 +209,9 @@ impl AddressInformationResponse {
 pub struct TonlibTransactionId {
     #[serde(rename = "@type")]
     pub ty: &'static str,
+    #[serde(with = "serde_helpers::string")]
     pub lt: u64,
+    #[serde(with = "serde_tonlib_hash")]
     pub hash: HashBytes,
 }
 
@@ -263,7 +265,7 @@ impl From<BlockId> for TonlibBlockId {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum TonlibAccountStatus {
     Uninitialized,
     Frozen,
@@ -288,7 +290,7 @@ impl std::fmt::Display for TonlibExtra {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs_f32();
+            .as_secs_f64();
 
         let rand: f32 = rand::thread_rng().gen();
 

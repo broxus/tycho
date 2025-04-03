@@ -98,27 +98,23 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
             };
 
             let account;
-            ok_to_response(req.id, match &item {
-                &LoadedAccountState::NotFound { timings, .. } => {
+            let _mc_ref_handle;
+            ok_to_response(req.id, match item {
+                LoadedAccountState::NotFound { timings, .. } => {
                     GetContractStateResponse::NotExists { timings }
                 }
-                LoadedAccountState::Found {
-                    state, gen_utime, ..
-                } if Some(state.last_trans_lt) <= p.last_transaction_lt => {
-                    GetContractStateResponse::Unchanged {
-                        timings: GenTimings {
-                            gen_lt: state.last_trans_lt,
-                            gen_utime: *gen_utime,
-                        },
-                    }
+                LoadedAccountState::Found { state, timings, .. }
+                    if Some(state.last_trans_lt) <= p.last_transaction_lt =>
+                {
+                    GetContractStateResponse::Unchanged { timings }
                 }
                 LoadedAccountState::Found {
-                    state, gen_utime, ..
+                    state,
+                    timings,
+                    mc_ref_handle,
+                    ..
                 } => {
-                    let timings = GenTimings {
-                        gen_lt: state.last_trans_lt,
-                        gen_utime: *gen_utime,
-                    };
+                    _mc_ref_handle = mc_ref_handle;
                     match state.load_account() {
                         Ok(Some(loaded)) => {
                             account = loaded;

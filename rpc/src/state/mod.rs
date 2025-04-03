@@ -53,6 +53,17 @@ impl RpcStateBuilder {
                 config: self.config,
                 storage,
                 blockchain_rpc_client,
+                mc_info: RwLock::new(LatestMcInfo {
+                    block_id: Arc::new(BlockId {
+                        shard: ShardIdent::MASTERCHAIN,
+                        seqno: 0,
+                        ..Default::default()
+                    }),
+                    timings: GenTimings {
+                        gen_lt: 0,
+                        gen_utime: 0,
+                    },
+                }),
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
                 download_block_semaphore,
@@ -291,11 +302,7 @@ impl StateSubscriber for RpcStateSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        futures_util::future::ready(self.inner.update_accounts_cache(
-            &cx.mc_block_id,
-            &cx.block,
-            &cx.state,
-        ))
+        futures_util::future::ready(self.inner.update_accounts_cache(&cx.block, &cx.state))
     }
 }
 
@@ -327,6 +334,8 @@ impl BlockSubscriber for RpcBlockSubscriber {
         Box::pin(async move {
             prepared.await??;
             if ctx.block.id().is_masterchain() {
+                self.inner.update_mc_info(&ctx.block)?;
+
                 // NOTE: Update snapshot only for masterchain because it is handled last.
                 // It is updated only after processing all shards and mc block.
                 if let Some(rpc_storage) = self.inner.storage.rpc_storage() {
@@ -342,6 +351,7 @@ struct Inner {
     config: RpcConfig,
     storage: Storage,
     blockchain_rpc_client: BlockchainRpcClient,
+    mc_info: RwLock<LatestMcInfo>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
     download_block_semaphore: Semaphore,
@@ -352,6 +362,12 @@ struct Inner {
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct LatestMcInfo {
+    block_id: Arc<BlockId>,
+    timings: GenTimings,
 }
 
 impl Inner {
@@ -385,42 +401,42 @@ impl Inner {
             }
         }
 
-        let mc_state = shard_states.load_state(mc_block_id).await?;
+        let mut mc_state = shard_states.load_state(mc_block_id).await?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             let node_instance_id = self.storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
 
-            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
-                let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
-                    let state_info = state.as_ref();
-                    Ok(CachedAccounts {
-                        mc_block_id: Arc::new(*mc_block_id),
-                        libraries: Default::default(),
-                        accounts: state_info.load_accounts()?.dict().clone(),
-                        mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+            let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
+                let state_info = state.as_ref();
+                Ok(CachedAccounts {
+                    libraries: Default::default(),
+                    accounts: state_info.load_accounts()?.dict().clone(),
+                    mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+                    timings: GenTimings {
+                        gen_lt: state_info.gen_lt,
                         gen_utime: state_info.gen_utime,
-                    })
-                };
+                    },
+                })
+            };
 
-                let shards = mc_state.shards()?.clone();
+            let shards = mc_state.shards()?.clone();
 
-                // Reset masterchain accounts and fill the cache
-                *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
+            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
+                // Reset masterchain accounts.
+                // NOTE: Consume shard state to prevent if from being fully loaded.
                 rpc_storage
                     .reset_accounts(mc_state, self.config.shard_split_depth)
                     .await?;
 
                 for item in shards.latest_blocks() {
                     let block_id = item?;
+
                     let state = shard_states.load_state(&block_id).await?;
 
-                    // Reset shard accounts and fill the cache
-                    self.sc_accounts
-                        .write()
-                        .insert(block_id.shard, make_cached_accounts(&state)?);
-
+                    // Reset shard accounts.
+                    // NOTE: Consume shard state to prevent if from being fully loaded.
                     rpc_storage
                         .reset_accounts(state, self.config.shard_split_depth)
                         .await?;
@@ -428,6 +444,22 @@ impl Inner {
 
                 // Rewrite RPC instance id
                 rpc_storage.store_instance_id(node_instance_id);
+
+                // Reload mc state.
+                mc_state = shard_states.load_state(mc_block_id).await?;
+            }
+
+            // Fill masterchain cache
+            *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
+
+            for item in shards.latest_blocks() {
+                let block_id = item?;
+                let state = shard_states.load_state(&block_id).await?;
+
+                // Fill accounts cache.
+                self.sc_accounts
+                    .write()
+                    .insert(block_id.shard, make_cached_accounts(&state)?);
             }
         }
 
@@ -442,37 +474,36 @@ impl Inner {
             // Search in masterchain cache
             match &*self.mc_accounts.read() {
                 None => Err(RpcStateError::NotReady),
-                Some(cache) => cache.get(&address.address),
+                Some(cache) => {
+                    let mc_info = self.mc_info.read().clone();
+                    cache.get(mc_info, &address.address)
+                }
             }
         } else {
             let cache = self.sc_accounts.read();
+            let mc_info = self.mc_info.read().clone();
+
             let mut state = Err(RpcStateError::NotReady);
 
             // Search in all shard caches
             let mut gen_utime = 0;
             let mut found = false;
             for (shard, cache) in &*cache {
-                if !shard.contains_account(&address.address) || cache.gen_utime < gen_utime {
+                if !shard.contains_account(&address.address) || cache.timings.gen_utime < gen_utime
+                {
                     continue;
                 }
 
-                gen_utime = cache.gen_utime;
-                state = cache.get(&address.address);
+                gen_utime = cache.timings.gen_utime;
+                state = cache.get(mc_info.clone(), &address.address);
                 found = true;
             }
 
             // Handle case when account is not found in any shard
             if !found && gen_utime > 0 {
                 state = Ok(LoadedAccountState::NotFound {
-                    mc_block_id: Arc::new(BlockId {
-                        shard: ShardIdent::MASTERCHAIN,
-                        seqno: 0,
-                        ..Default::default()
-                    }),
-                    timings: GenTimings {
-                        gen_lt: 0,
-                        gen_utime,
-                    },
+                    mc_block_id: mc_info.block_id,
+                    timings: mc_info.timings,
                 });
             }
 
@@ -526,6 +557,19 @@ impl Inner {
         Ok(())
     }
 
+    fn update_mc_info(&self, block: &BlockStuff) -> Result<()> {
+        let info = block.load_info()?;
+        let block_id = Arc::new(*block.id());
+        *self.mc_info.write() = LatestMcInfo {
+            block_id,
+            timings: GenTimings {
+                gen_lt: info.end_lt,
+                gen_utime: info.gen_utime,
+            },
+        };
+        Ok(())
+    }
+
     fn update_timings(&self, mc_gen_utime: u32, seqno: u32) {
         let time_diff = now_sec() as i64 - mc_gen_utime as i64;
         self.timings.store(Arc::new(StateTimings {
@@ -541,12 +585,7 @@ impl Inner {
         self.proto_cache.handle_config(global_id, seqno, config);
     }
 
-    fn update_accounts_cache(
-        &self,
-        mc_block_id: &BlockId,
-        block: &BlockStuff,
-        state: &ShardStateStuff,
-    ) -> Result<()> {
+    fn update_accounts_cache(&self, block: &BlockStuff, state: &ShardStateStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_accounts_cache_time");
 
         let shard = block.id().shard;
@@ -558,11 +597,13 @@ impl Inner {
         let libraries = state.state().libraries.clone();
 
         let cached = CachedAccounts {
-            mc_block_id: Arc::new(*mc_block_id),
             libraries,
             accounts,
             mc_ref_hanlde: state.ref_mc_state_handle().clone(),
-            gen_utime: block_info.gen_utime,
+            timings: GenTimings {
+                gen_lt: block_info.end_lt,
+                gen_utime: block_info.gen_utime,
+            },
         };
 
         if shard.is_masterchain() {
@@ -634,34 +675,33 @@ pub enum LoadedAccountState {
         mc_block_id: Arc<BlockId>,
         state: ShardAccount,
         mc_ref_handle: RefMcStateHandle,
-        gen_utime: u32,
+        timings: GenTimings,
     },
 }
 
 struct CachedAccounts {
-    mc_block_id: Arc<BlockId>,
     libraries: Dict<HashBytes, LibDescr>,
     accounts: ShardAccountsDict,
     mc_ref_hanlde: RefMcStateHandle,
-    gen_utime: u32,
+    timings: GenTimings,
 }
 
 impl CachedAccounts {
-    fn get(&self, account: &HashBytes) -> Result<LoadedAccountState, RpcStateError> {
-        let mc_block_id = self.mc_block_id.clone();
+    fn get(
+        &self,
+        mc_info: LatestMcInfo,
+        account: &HashBytes,
+    ) -> Result<LoadedAccountState, RpcStateError> {
         match self.accounts.get(account) {
             Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
-                mc_block_id,
+                mc_block_id: mc_info.block_id,
                 state,
                 mc_ref_handle: self.mc_ref_hanlde.clone(),
-                gen_utime: self.gen_utime,
+                timings: self.timings.max_by_lt(mc_info.timings),
             }),
             Ok(None) => Ok(LoadedAccountState::NotFound {
-                mc_block_id,
-                timings: GenTimings {
-                    gen_lt: 0,
-                    gen_utime: self.gen_utime,
-                },
+                mc_block_id: mc_info.block_id,
+                timings: self.timings.max_by_lt(mc_info.timings),
             }),
             Err(e) => Err(RpcStateError::Internal(e.into())),
         }

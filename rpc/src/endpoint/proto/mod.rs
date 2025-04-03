@@ -157,24 +157,22 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                         },
                     )),
                 },
-                LoadedAccountState::Found {
-                    state, gen_utime, ..
-                } if Some(state.last_trans_lt) <= p.last_transaction_lt => {
+                LoadedAccountState::Found { state, timings, .. }
+                    if Some(state.last_trans_lt) <= p.last_transaction_lt =>
+                {
                     response::GetContractState {
                         state: Some(response::get_contract_state::State::Unchanged(
                             response::get_contract_state::Timings {
-                                gen_lt: state.last_trans_lt,
-                                gen_utime: *gen_utime,
+                                gen_lt: timings.gen_lt,
+                                gen_utime: timings.gen_utime,
                             },
                         )),
                     }
                 }
-                LoadedAccountState::Found {
-                    state, gen_utime, ..
-                } => {
+                LoadedAccountState::Found { state, timings, .. } => {
                     let timings = response::get_contract_state::Timings {
-                        gen_lt: state.last_trans_lt,
-                        gen_utime: *gen_utime,
+                        gen_lt: timings.gen_lt,
+                        gen_utime: timings.gen_utime,
                     };
 
                     let state = match state.load_account() {
