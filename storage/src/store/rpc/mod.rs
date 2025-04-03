@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -11,7 +11,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::FastHashMap;
+use tycho_util::{FastDashSet, FastHashMap};
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
@@ -23,15 +23,17 @@ pub struct RpcStorage {
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
     snapshot: ArcSwapOption<OwnedSnapshot>,
+    account_blacklist: Weak<FastDashSet<[u8; 33]>>,
 }
 
 impl RpcStorage {
-    pub fn new(db: RpcDb) -> Self {
+    pub fn new(db: RpcDb, account_blacklist: &Arc<FastDashSet<[u8; 33]>>) -> Self {
         let this = Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
             min_tx_lt_guard: Default::default(),
             snapshot: Default::default(),
+            account_blacklist: Arc::downgrade(account_blacklist),
         };
 
         let state = &this.db.state;
@@ -599,6 +601,8 @@ impl RpcStorage {
         let span = tracing::Span::current();
         let db = self.db.clone();
 
+        let account_blacklist = self.account_blacklist.upgrade();
+
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
             let prepare_batch_histogram =
@@ -696,6 +700,13 @@ impl RpcStorage {
                         };
                         if let Some(action_phase) = action_phase {
                             has_special_actions |= action_phase.special_actions > 0;
+                        }
+                    }
+
+                    // Don't write tx for account from blacklist
+                    if let Some(blacklist) = &account_blacklist {
+                        if blacklist.contains(&tx_info[..33]) {
+                            continue;
                         }
                     }
 

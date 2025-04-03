@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tycho_util::metrics::spawn_metrics_loop;
+use tycho_util::FastDashSet;
 use weedb::rocksdb;
 
 pub use self::config::*;
@@ -19,6 +21,7 @@ mod util {
     pub use self::stored_value::*;
 
     pub mod instance_id;
+    pub mod rpc_blacklist;
     mod slot_subscriptions;
     mod stored_value;
 }
@@ -31,6 +34,7 @@ const MEMPOOL_SUBDIR: &str = "mempool";
 pub struct StorageBuilder {
     config: StorageConfig,
     init_rpc_storage: bool,
+    rpc_blacklist: Option<PathBuf>,
 }
 
 impl StorageBuilder {
@@ -153,7 +157,8 @@ impl StorageBuilder {
 
         let node_state_storage = NodeStateStorage::new(base_db.clone());
 
-        let rpc_state = rpc_db.map(RpcStorage::new);
+        let rpc_blacklist = Arc::new(FastDashSet::default());
+        let rpc_state = rpc_db.map(|db| RpcStorage::new(db, &rpc_blacklist));
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
 
@@ -169,6 +174,8 @@ impl StorageBuilder {
                 .build()?;
 
         let mempool_storage = MempoolStorage { db: mempool_db };
+
+        util::rpc_blacklist::watcher_init(&self.rpc_blacklist, rpc_blacklist);
 
         let inner = Arc::new(Inner {
             root,
@@ -208,6 +215,11 @@ impl StorageBuilder {
         self.init_rpc_storage = init_rpc_storage;
         self
     }
+
+    pub fn with_rpc_blacklist(mut self, rpc_blacklist: Option<PathBuf>) -> Self {
+        self.rpc_blacklist = rpc_blacklist;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -221,6 +233,7 @@ impl Storage {
         StorageBuilder {
             config: StorageConfig::default(),
             init_rpc_storage: false,
+            rpc_blacklist: None,
         }
     }
 
