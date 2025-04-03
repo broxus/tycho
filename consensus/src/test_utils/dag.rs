@@ -138,7 +138,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         )
         .await;
         assert!(
-            matches!(validated, Ok(ValidateResult::Valid { .. })),
+            matches!(validated, Ok(ValidateResult::Valid)),
             "expected valid point, got {validated:?}"
         );
     }

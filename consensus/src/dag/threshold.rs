@@ -79,7 +79,7 @@ impl Threshold {
     /// * `.reached()` is used for current dag round in [`Collector`](crate::intercom::Collector)
     /// * `.reached()` is used for previous dag round before point is produced
     /// * [`Self::get_reached()`] is used for previous dag round to produce point
-    ///     after `.reached()` was awaited
+    ///   after `.reached()` was awaited
     pub async fn reached(&self) {
         let mut work = self.work.lock().await;
 
