@@ -98,7 +98,9 @@ impl RpcStorage {
         // TODO: somehow make the range inclusive since
         // upper_bound is not included in the range
         readopts.set_iterate_upper_bound(upper_bound);
-        if let Some(snapshot) = &*self.snapshot.load() {
+
+        let snapshot = self.snapshot.load_full();
+        if let Some(snapshot) = &snapshot {
             readopts.set_snapshot(snapshot);
         }
 
@@ -111,7 +113,10 @@ impl RpcStorage {
             iter.next();
         }
 
-        Ok(CodeHashesIter { inner: iter })
+        Ok(CodeHashesIter {
+            inner: iter,
+            snapshot,
+        })
     }
 
     pub fn get_transactions(
@@ -130,7 +135,9 @@ impl RpcStorage {
 
         let mut readopts = self.db.transactions.new_read_config();
         readopts.set_iterate_lower_bound(lower_bound);
-        if let Some(snapshot) = &*self.snapshot.load() {
+
+        let snapshot = self.snapshot.load_full();
+        if let Some(snapshot) = &snapshot {
             readopts.set_snapshot(snapshot);
         }
 
@@ -139,7 +146,10 @@ impl RpcStorage {
         let mut iter = rocksdb.raw_iterator_cf_opt(&transactions_cf, readopts);
         iter.seek_for_prev(key);
 
-        Ok(TransactionsIterBuilder { inner: iter })
+        Ok(TransactionsIterBuilder {
+            inner: iter,
+            snapshot,
+        })
     }
 
     pub fn get_transaction(
@@ -961,11 +971,15 @@ impl RpcStorage {
 
 pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
+    snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
 impl<'a> CodeHashesIter<'a> {
     pub fn into_raw(self) -> RawCodeHashesIter<'a> {
-        RawCodeHashesIter { inner: self.inner }
+        RawCodeHashesIter {
+            inner: self.inner,
+            _snapshot: self.snapshot,
+        }
     }
 }
 
@@ -988,6 +1002,7 @@ impl Iterator for CodeHashesIter<'_> {
 
 pub struct RawCodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
+    _snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
 impl Iterator for RawCodeHashesIter<'_> {
@@ -1005,6 +1020,8 @@ impl Iterator for RawCodeHashesIter<'_> {
 
 pub struct TransactionsIterBuilder<'a> {
     inner: rocksdb::DBRawIterator<'a>,
+    // NOTE: We must store the snapshot for as long as iterator is alive.
+    snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
 impl<'a> TransactionsIterBuilder<'a> {
@@ -1015,6 +1032,7 @@ impl<'a> TransactionsIterBuilder<'a> {
         TransactionsIter {
             inner: self.inner,
             map,
+            _snapshot: self.snapshot,
         }
     }
 }
@@ -1022,6 +1040,7 @@ impl<'a> TransactionsIterBuilder<'a> {
 pub struct TransactionsIter<'a, F> {
     inner: rocksdb::DBRawIterator<'a>,
     map: F,
+    _snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
 impl<F, R> Iterator for TransactionsIter<'_, F>
