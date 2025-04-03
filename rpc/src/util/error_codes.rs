@@ -1,0 +1,10 @@
+pub const INTERNAL_ERROR_CODE: i32 = -32000;
+pub const NOT_READY_CODE: i32 = -32001;
+pub const NOT_SUPPORTED_CODE: i32 = -32002;
+pub const INVALID_BOC_CODE: i32 = -32003;
+pub const TOO_LARGE_LIMIT_CODE: i32 = -32004;
+
+pub const PARSE_ERROR_CODE: i32 = -32700;
+pub const INVALID_REQUEST_CODE: i32 = -32600;
+pub const METHOD_NOT_FOUND_CODE: i32 = -32601;
+pub const INVALID_PARAMS_CODE: i32 = -32602;

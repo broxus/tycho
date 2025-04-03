@@ -13,15 +13,11 @@ use tycho_util::metrics::HistogramGuard;
 
 pub use self::cache::ProtoEndpointCache;
 use self::protos::rpc::{self, request, response, Request};
-use super::INVALID_PARAMS_CODE;
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
-use crate::endpoint::{
-    INTERNAL_ERROR_CODE, INVALID_BOC_CODE, METHOD_NOT_FOUND_CODE, NOT_READY_CODE,
-    NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
-};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
+use crate::util::error_codes::*;
 
 mod cache;
 mod extractor;
@@ -147,7 +143,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             };
 
             let response = match &item {
-                &LoadedAccountState::NotFound { timings } => response::GetContractState {
+                &LoadedAccountState::NotFound { timings, .. } => response::GetContractState {
                     state: Some(response::get_contract_state::State::NotExists(
                         response::get_contract_state::NotExist {
                             gen_timings: Some(
@@ -275,10 +271,13 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 return invalid_params_response("invalid address");
             };
 
-            match state.get_transactions(&account, p.last_transaction_lt) {
+            match state.get_transactions(&account, p.last_transaction_lt, 0) {
                 Ok(list) => {
                     let transactions = list
-                        .map(Bytes::copy_from_slice)
+                        .map(|data| {
+                            let data = Bytes::copy_from_slice(data);
+                            Some(data)
+                        })
                         .take(p.limit as usize)
                         .collect();
                     ok_to_response(response::Result::GetTransactionsList(

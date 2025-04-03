@@ -8,7 +8,8 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use prost::Message;
 
-use crate::endpoint::{proto, APPLICATION_PROTOBUF, PARSE_ERROR_CODE};
+use crate::endpoint::{proto, APPLICATION_PROTOBUF};
+use crate::util::error_codes::PARSE_ERROR_CODE;
 
 // Counters
 const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";

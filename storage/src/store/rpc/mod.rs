@@ -122,8 +122,15 @@ impl RpcStorage {
     pub fn get_transactions(
         &self,
         account: &StdAddr,
-        last_lt: Option<u64>,
+        mut last_lt: Option<u64>,
+        mut to_lt: u64,
     ) -> Result<TransactionsIterBuilder<'_>> {
+        if matches!(last_lt, Some(last_lt) if last_lt < to_lt) {
+            // Make empty iterator if `last_lt < to_lt`.
+            last_lt = Some(u64::MAX);
+            to_lt = u64::MAX - 1;
+        }
+
         let mut key = [0u8; tables::Transactions::KEY_LEN];
         key[0] = account.workchain as u8;
         key[1..33].copy_from_slice(account.address.as_ref());
@@ -131,7 +138,7 @@ impl RpcStorage {
 
         let mut lower_bound = Vec::with_capacity(tables::Transactions::KEY_LEN);
         lower_bound.extend_from_slice(&key[..33]);
-        lower_bound.extend_from_slice(&[0; 8]);
+        lower_bound.extend_from_slice(&to_lt.to_be_bytes());
 
         let mut readopts = self.db.transactions.new_read_config();
         readopts.set_iterate_lower_bound(lower_bound);
@@ -1045,15 +1052,15 @@ pub struct TransactionsIter<'a, F> {
 
 impl<F, R> Iterator for TransactionsIter<'_, F>
 where
-    for<'a> F: FnMut(&'a [u8]) -> R,
+    for<'a> F: FnMut(&'a [u8]) -> Option<R>,
 {
     type Item = R;
 
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.inner.value()?;
-        let result = Some((self.map)(value));
+        let result = (self.map)(value)?;
         self.inner.prev();
-        result
+        Some(result)
     }
 }
 

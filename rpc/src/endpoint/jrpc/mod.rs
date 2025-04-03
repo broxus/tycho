@@ -15,15 +15,12 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 pub use self::cache::JrpcEndpointCache;
-use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
-use crate::endpoint::{
-    INTERNAL_ERROR_CODE, INVALID_BOC_CODE, NOT_READY_CODE, NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
-};
 use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
+use crate::util::error_codes::*;
+use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
 
 mod cache;
-mod extractor;
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
@@ -47,7 +44,7 @@ declare_jrpc_method! {
     }
 }
 
-pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response {
+pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Response {
     let label = [("method", req.method)];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
@@ -102,7 +99,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
 
             let account;
             ok_to_response(req.id, match &item {
-                &LoadedAccountState::NotFound { timings } => {
+                &LoadedAccountState::NotFound { timings, .. } => {
                     GetContractStateResponse::NotExists { timings }
                 }
                 LoadedAccountState::Found {
@@ -162,7 +159,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             } else if p.limit > GetTransactionsListResponse::MAX_LIMIT {
                 return too_large_limit_response(req.id);
             }
-            match state.get_transactions(&p.account, p.last_transaction_lt) {
+            match state.get_transactions(&p.account, p.last_transaction_lt, 0) {
                 Ok(list) => ok_to_response(req.id, GetTransactionsListResponse {
                     list: RefCell::new(Some(list)),
                     limit: p.limit,
@@ -428,7 +425,7 @@ impl Serialize for GetTransactionsListResponse<'_> {
             BASE64_STANDARD.encode_string(item, &mut buffer);
             let res = seq.serialize_element(&buffer);
             buffer.clear();
-            res
+            Some(res)
         })
         .take(self.limit as _)
         .collect::<Result<(), _>>()?;

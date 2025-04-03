@@ -200,12 +200,13 @@ impl RpcState {
         &self,
         account: &StdAddr,
         last_lt: Option<u64>,
+        to_lt: u64,
     ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt)
+            .get_transactions(account, last_lt, to_lt)
             .map_err(RpcStateError::Internal)
     }
 
@@ -290,7 +291,11 @@ impl StateSubscriber for RpcStateSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        futures_util::future::ready(self.inner.update_accounts_cache(&cx.block, &cx.state))
+        futures_util::future::ready(self.inner.update_accounts_cache(
+            &cx.mc_block_id,
+            &cx.block,
+            &cx.state,
+        ))
     }
 }
 
@@ -391,6 +396,7 @@ impl Inner {
                 let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
                     let state_info = state.as_ref();
                     Ok(CachedAccounts {
+                        mc_block_id: Arc::new(*mc_block_id),
                         libraries: Default::default(),
                         accounts: state_info.load_accounts()?.dict().clone(),
                         mc_ref_hanlde: state.ref_mc_state_handle().clone(),
@@ -458,6 +464,11 @@ impl Inner {
             // Handle case when account is not found in any shard
             if !found && gen_utime > 0 {
                 state = Ok(LoadedAccountState::NotFound {
+                    mc_block_id: Arc::new(BlockId {
+                        shard: ShardIdent::MASTERCHAIN,
+                        seqno: 0,
+                        ..Default::default()
+                    }),
                     timings: GenTimings {
                         gen_lt: 0,
                         gen_utime,
@@ -530,7 +541,12 @@ impl Inner {
         self.proto_cache.handle_config(global_id, seqno, config);
     }
 
-    fn update_accounts_cache(&self, block: &BlockStuff, state: &ShardStateStuff) -> Result<()> {
+    fn update_accounts_cache(
+        &self,
+        mc_block_id: &BlockId,
+        block: &BlockStuff,
+        state: &ShardStateStuff,
+    ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_accounts_cache_time");
 
         let shard = block.id().shard;
@@ -542,6 +558,7 @@ impl Inner {
         let libraries = state.state().libraries.clone();
 
         let cached = CachedAccounts {
+            mc_block_id: Arc::new(*mc_block_id),
             libraries,
             accounts,
             mc_ref_hanlde: state.ref_mc_state_handle().clone(),
@@ -610,9 +627,11 @@ impl Drop for Inner {
 
 pub enum LoadedAccountState {
     NotFound {
+        mc_block_id: Arc<BlockId>,
         timings: GenTimings,
     },
     Found {
+        mc_block_id: Arc<BlockId>,
         state: ShardAccount,
         mc_ref_handle: RefMcStateHandle,
         gen_utime: u32,
@@ -620,6 +639,7 @@ pub enum LoadedAccountState {
 }
 
 struct CachedAccounts {
+    mc_block_id: Arc<BlockId>,
     libraries: Dict<HashBytes, LibDescr>,
     accounts: ShardAccountsDict,
     mc_ref_hanlde: RefMcStateHandle,
@@ -628,13 +648,16 @@ struct CachedAccounts {
 
 impl CachedAccounts {
     fn get(&self, account: &HashBytes) -> Result<LoadedAccountState, RpcStateError> {
+        let mc_block_id = self.mc_block_id.clone();
         match self.accounts.get(account) {
             Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
+                mc_block_id,
                 state,
                 mc_ref_handle: self.mc_ref_hanlde.clone(),
                 gen_utime: self.gen_utime,
             }),
             Ok(None) => Ok(LoadedAccountState::NotFound {
+                mc_block_id,
                 timings: GenTimings {
                     gen_lt: 0,
                     gen_utime: self.gen_utime,
