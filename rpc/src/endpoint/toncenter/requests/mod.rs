@@ -40,3 +40,12 @@ pub(crate) struct ExecMethodArgs {
     #[allow(dead_code)]
     pub seqno: i64,
 }
+
+#[derive(Deserialize)]
+#[allow(unused)]
+pub(crate) struct JsonRpcMethodArgs {
+    pub id: Option<String>,
+    pub method: String,
+    pub jsonrpc: Option<String>,
+    pub params: serde_json::Value,
+}

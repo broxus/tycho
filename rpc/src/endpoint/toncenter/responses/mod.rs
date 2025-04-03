@@ -7,11 +7,62 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tycho_vm::{SafeRc, Stack, StackValue, StackValueType};
 
+use crate::endpoint::error::Error;
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TonCenterResponse<T> {
     pub ok: bool,
     pub result: Option<T>,
     pub error: Option<String>,
+    pub code: Option<u32>,
+}
+
+impl<T> TonCenterResponse<T> {
+    pub fn error(error: Error) -> Self {
+        Self {
+            ok: true,
+            result: None,
+            error: Some(error.to_string()),
+            code: Some(0),
+        }
+    }
+}
+
+impl<T: Serialize> From<TonCenterResponse<T>> for JsonRpcResponse {
+    fn from(value: TonCenterResponse<T>) -> Self {
+        Self {
+            ok: value.ok,
+            result: value
+                .result
+                .map(serde_json::to_value)
+                .transpose()
+                .ok()
+                .flatten(),
+            error: value.error,
+            json_rpc: "2.0".to_string(),
+            code: value.code,
+        }
+    }
+}
+
+impl From<Error> for JsonRpcResponse {
+    fn from(error: Error) -> Self {
+        JsonRpcResponse {
+            json_rpc: "2.0".to_string(),
+            result: None,
+            ok: false,
+            error: Some(error.to_string()),
+            code: Some(0),
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonRpcResponse {
+    pub ok: bool,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+    pub json_rpc: String,
     pub code: Option<u32>,
 }
 

@@ -1,20 +1,24 @@
 use std::str::FromStr;
 use std::vec;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::Json;
 use everscale_types::boc::Boc;
 use everscale_types::cell::CellBuilder;
 use everscale_types::crc::crc_16;
 use everscale_types::models::{
-    AccountState, IntAddr, MsgInfo, OwnedMessage, StateInit, StdAddr, Transaction,
+    AccountState, IntAddr, MsgInfo, OwnedMessage, StateInit, Transaction,
 };
 use num_bigint::BigInt;
-use requests::{AddressInformationQuery, ExecMethodArgs, GetTransactionsQuery, SendMessageRequest};
+use requests::{
+    AddressInformationQuery, ExecMethodArgs, GetTransactionsQuery, JsonRpcMethodArgs,
+    SendMessageRequest,
+};
 use responses::{
     parse_tvm_stack, status_to_string, AddressInformation, AddressResponse, BlockId,
-    TonCenterResponse, TransactionId, TransactionResponse, TransactionsResponse, TvmStackRecord,
+    JsonRpcResponse, TonCenterResponse, TransactionId, TransactionResponse, TransactionsResponse,
+    TvmStackRecord,
 };
 use tycho_vm::{GasParams, NaN, OwnedCellSlice, RcStackValue, SmcInfoBase, VmState};
 
@@ -27,35 +31,49 @@ mod responses;
 
 pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
-        .route("/getAddressInformation", get(get_address_information))
-        .route("/getTransactions", get(get_blockchain_account_transactions))
-        .route("/runGetMethod", get(exec_get_method_for_blockchain_account))
-        .route("/sendBoc", post(send_blockchain_message))
+        .route("/getAddressInformation", get(get_address_information_route))
+        .route(
+            "/getTransactions",
+            get(get_blockchain_account_transactions_route),
+        )
+        .route(
+            "/runGetMethod",
+            get(exec_get_method_for_blockchain_account_route),
+        )
+        .route("/sendBoc", post(send_blockchain_message_route))
+        .route("/jsonRpc", post(json_rpc))
 }
 
-async fn get_address_information(
+async fn get_address_information_route(
     Query(address): Query<AddressInformationQuery>,
     State(rpc_state): State<RpcState>,
 ) -> Result<Json<TonCenterResponse<AddressInformation>>> {
+    get_address_information(address, rpc_state).await.map(Json)
+}
+
+async fn get_address_information(
+    address: AddressInformationQuery,
+    rpc_state: RpcState,
+) -> Result<TonCenterResponse<AddressInformation>> {
     let Ok(item) = rpc_state.get_account_state(&address.address) else {
-        return Ok(Json(TonCenterResponse {
+        return Ok(TonCenterResponse {
             ok: false,
             result: None,
             error: Some("account not found".to_string()),
             code: None,
-        }));
+        });
     };
 
     match &item {
         &LoadedAccountState::NotFound { .. } => Err(Error::NotFound("account not found")),
         LoadedAccountState::Found { state, .. } => {
             let Ok(account) = state.load_account() else {
-                return Ok(Json(TonCenterResponse {
+                return Ok(TonCenterResponse {
                     ok: false,
                     result: None,
                     error: Some("account not found".to_string()),
                     code: None,
-                }));
+                });
             };
             match account {
                 Some(loaded) => {
@@ -91,7 +109,7 @@ async fn get_address_information(
                         None
                     };
 
-                    Ok(Json(TonCenterResponse {
+                    Ok(TonCenterResponse {
                         ok: true,
                         result: Some(AddressInformation {
                             type_field: "raw.fullAccountState".to_string(),
@@ -111,42 +129,53 @@ async fn get_address_information(
                         }),
                         error: None,
                         code: None,
-                    }))
+                    })
                 }
-                None => Ok(Json(TonCenterResponse {
+                None => Ok(TonCenterResponse {
                     ok: false,
                     result: None,
                     error: Some("account not found".to_string()),
                     code: None,
-                })),
+                }),
             }
         }
     }
 }
 
-async fn get_blockchain_account_transactions(
-    Path(address): Path<StdAddr>,
+async fn get_blockchain_account_transactions_route(
     Query(pagination): Query<GetTransactionsQuery>,
     State(state): State<RpcState>,
 ) -> Result<Json<TonCenterResponse<Vec<TransactionResponse>>>> {
+    Ok(get_blockchain_account_transactions(pagination, state)
+        .await
+        .map_or_else(
+            |e| Json(TonCenterResponse::<Vec<TransactionResponse>>::error(e)),
+            Json,
+        ))
+}
+
+async fn get_blockchain_account_transactions(
+    pagination: GetTransactionsQuery,
+    state: RpcState,
+) -> Result<TonCenterResponse<Vec<TransactionResponse>>> {
     let limit = pagination
         .limit
         .unwrap_or(TransactionsResponse::DEFAULT_LIMIT);
 
     if limit == 0 {
-        return Ok(Json(TonCenterResponse {
+        return Ok(TonCenterResponse {
             ok: true,
             result: Some(vec![]),
             error: None,
             code: None,
-        }));
+        });
     }
 
     if limit > TransactionsResponse::MAX_LIMIT {
         return Err(Error::BadRequest("limit is too large"));
     }
 
-    let list = state.get_transactions(&address, pagination.lt)?;
+    let list = state.get_transactions(&pagination.address, pagination.lt)?;
     let transactions = list
         .map(|item| {
             let root = Boc::decode(item).map_err(|e| anyhow::format_err!(e.to_string()))?;
@@ -193,27 +222,39 @@ async fn get_blockchain_account_transactions(
         .take(limit as _)
         .collect::<Result<Vec<TransactionResponse>, _>>()?;
 
-    Ok(Json(TonCenterResponse {
+    Ok(TonCenterResponse {
         ok: true,
         result: Some(transactions),
         error: None,
         code: None,
-    }))
+    })
 }
 
-async fn exec_get_method_for_blockchain_account(
+async fn exec_get_method_for_blockchain_account_route(
     Query(args): Query<ExecMethodArgs>,
     State(state): State<RpcState>,
 ) -> Result<Json<TonCenterResponse<Vec<TvmStackRecord>>>> {
+    Ok(exec_get_method_for_blockchain_account(args, state)
+        .await
+        .map_or_else(
+            |e| Json(TonCenterResponse::<Vec<TvmStackRecord>>::error(e)),
+            Json,
+        ))
+}
+
+async fn exec_get_method_for_blockchain_account(
+    args: ExecMethodArgs,
+    state: RpcState,
+) -> Result<TonCenterResponse<Vec<TvmStackRecord>>> {
     let item = state.get_account_state(&args.address)?;
 
     match &item {
-        &LoadedAccountState::NotFound { .. } => Ok(Json(TonCenterResponse {
+        &LoadedAccountState::NotFound { .. } => Ok(TonCenterResponse {
             ok: false,
             result: None,
             error: Some("account not found".to_string()),
             code: None,
-        })),
+        }),
         LoadedAccountState::Found { state, .. } => {
             let account = state.load_account()?;
             match account {
@@ -301,12 +342,12 @@ async fn exec_get_method_for_blockchain_account(
 
                             let result = parse_tvm_stack(stack).ok();
 
-                            Ok(Json(TonCenterResponse {
+                            Ok(TonCenterResponse {
                                 ok: success,
                                 result,
                                 error: None,
                                 code: None,
-                            }))
+                            })
                         }
                         _ => Err(Error::BadRequest("account has wrong state")),
                     }
@@ -317,12 +358,61 @@ async fn exec_get_method_for_blockchain_account(
     }
 }
 
-async fn send_blockchain_message(
+async fn send_blockchain_message_route(
     State(state): State<RpcState>,
     Json(input): Json<SendMessageRequest>,
-) -> Result<Json<()>> {
+) -> Result<Json<TonCenterResponse<()>>> {
+    Ok(send_blockchain_message(state, input)
+        .await
+        .map_or_else(|e| Json(TonCenterResponse::<()>::error(e)), Json))
+}
+
+async fn send_blockchain_message(
+    state: RpcState,
+    input: SendMessageRequest,
+) -> Result<TonCenterResponse<()>> {
     let data =
         hex::decode(input.boc).map_err(|_e| Error::BadRequest("can not parse boc from hex"))?;
     state.broadcast_external_message(&data).await;
-    Ok(Json(()))
+    Ok(TonCenterResponse {
+        ok: true,
+        result: None,
+        error: None,
+        code: None,
+    })
+}
+
+async fn json_rpc(
+    State(state): State<RpcState>,
+    Json(input): Json<JsonRpcMethodArgs>,
+) -> Result<Json<JsonRpcResponse>> {
+    match input.method.as_str() {
+        "getAddressInformation" => Ok(Json(
+            get_address_information(serde_json::from_value(input.params)?, state)
+                .await
+                .map_or_else(From::from, From::from),
+        )),
+        "getTransactions" => Ok(Json(
+            get_blockchain_account_transactions(serde_json::from_value(input.params)?, state)
+                .await
+                .map_or_else(From::from, From::from),
+        )),
+        "runGetMethod" => Ok(Json(
+            exec_get_method_for_blockchain_account(serde_json::from_value(input.params)?, state)
+                .await
+                .map_or_else(From::from, From::from),
+        )),
+        "sendBoc" => Ok(Json(
+            send_blockchain_message(state, serde_json::from_value(input.params)?)
+                .await
+                .map_or_else(From::from, From::from),
+        )),
+        _ => Ok(Json(JsonRpcResponse {
+            json_rpc: "2.0".to_string(),
+            result: None,
+            ok: false,
+            error: Some("no method implemented".to_string()),
+            code: None,
+        })),
+    }
 }
