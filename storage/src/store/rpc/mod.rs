@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -11,7 +11,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
@@ -407,21 +407,24 @@ impl RpcStorage {
                 });
                 self.total_tx += 1;
 
-                // Delete secondary index entries
-                if let Ok(tx_cell) = Boc::decode(value) {
-                    // Delete transaction by hash index entry
-                    self.batch
-                        .delete_cf(&self.tx_by_hash, tx_cell.repr_hash().as_slice());
-                    self.total_tx_by_hash += 1;
+                // Must contain at least mask and tx hash
+                if value.len() < 33 {
+                    return;
+                }
 
-                    // Delete transaction by incoming message hash index entry
-                    if let Ok(tx) = tx_cell.parse::<Transaction>() {
-                        if let Some(in_msg) = &tx.in_msg {
-                            self.batch
-                                .delete_cf(&self.tx_by_in_msg, in_msg.repr_hash().as_slice());
-                            self.total_tx_by_in_msg += 1;
-                        }
-                    }
+                // Read transaction mask
+                let mask = TransactionMask(value[0]);
+
+                // Delete transaction by hash index entry
+                let tx_hash = &value[1..33];
+                self.batch.delete_cf(&self.tx_by_hash, tx_hash);
+                self.total_tx_by_hash += 1;
+
+                // Delete transaction by incoming message hash index entry
+                if mask.with_msg_hash() && value.len() >= 65 {
+                    let in_msg_hash = &value[33..65];
+                    self.batch.delete_cf(&self.tx_by_in_msg, in_msg_hash);
+                    self.total_tx_by_in_msg += 1;
                 }
             }
 
@@ -589,7 +592,11 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
-    pub async fn update(&self, block: BlockStuff) -> Result<()> {
+    pub async fn update(
+        &self,
+        block: BlockStuff,
+        rpc_blacklist: Option<Arc<ArcSwap<FastHashSet<AccountDb>>>>,
+    ) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -598,6 +605,8 @@ impl RpcStorage {
 
         let span = tracing::Span::current();
         let db = self.db.clone();
+
+        let rpc_blacklist = rpc_blacklist.map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
@@ -699,28 +708,56 @@ impl RpcStorage {
                         }
                     }
 
-                    // Write tx data and indices
-                    let tx_hash = tx_cell.inner().repr_hash();
+                    // Don't write tx for account from blacklist
+                    if let Some(blacklist) = &rpc_blacklist {
+                        if blacklist.contains(&tx_info[..33]) {
+                            continue;
+                        }
+                    }
+
+                    let (tx_mask, msg_hash) = match &tx.in_msg {
+                        Some(in_msg) => {
+                            let hash = Some(*in_msg.repr_hash());
+                            let mask = TransactionMask::builder().with_msg_hash().build();
+
+                            (mask, hash)
+                        }
+                        None => (TransactionMask::builder().build(), None),
+                    };
 
                     tx_buffer.clear();
+
+                    // Collect transaction data to `tx_buffer`
+                    tx_buffer.push(tx_mask.0);
+
+                    let tx_hash = tx_cell.inner().repr_hash();
+                    tx_buffer.extend_from_slice(tx_hash.as_slice());
+
+                    if let Some(msg_hash) = &msg_hash {
+                        tx_buffer.extend_from_slice(msg_hash.as_slice());
+                    }
+
                     everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut tx_buffer);
+
+                    // Write tx data and indices
+                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+
+                    if let Some(msg_hash) = &msg_hash {
+                        write_batch.put_cf(
+                            tx_by_in_msg_cf,
+                            msg_hash,
+                            &tx_info[..tables::Transactions::KEY_LEN],
+                        );
+                    }
 
                     write_batch.put_cf(
                         tx_cf,
                         &tx_info[..tables::Transactions::KEY_LEN],
                         &tx_buffer,
                     );
-                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
-                    if let Some(in_msg) = &tx.in_msg {
-                        write_batch.put_cf(
-                            tx_by_in_msg_cf,
-                            in_msg.repr_hash(),
-                            &tx_info[..tables::Transactions::KEY_LEN],
-                        );
-                    }
                 }
 
                 // Update code hash
@@ -1051,7 +1088,20 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.inner.value()?;
-        let result = Some((self.map)(value));
+
+        // Must contain at least mask and tx hash
+        if value.len() < 33 {
+            return None;
+        }
+
+        let mask = TransactionMask(value[0]);
+        let prefix_len = if mask.with_msg_hash() {
+            1 + 32 + 32
+        } else {
+            1 + 32
+        };
+
+        let result = Some((self.map)(&value[prefix_len..]));
         self.inner.prev();
         result
     }
@@ -1153,6 +1203,40 @@ const fn extract_tag(shard: &ShardIdent) -> u64 {
     let prefix = shard.prefix();
     prefix & (!prefix).wrapping_add(1)
 }
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct TransactionMask(pub u8);
+
+impl TransactionMask {
+    fn builder() -> TransactionMaskBuilder {
+        TransactionMaskBuilder::new()
+    }
+
+    pub fn with_msg_hash(&self) -> bool {
+        self.0 & 1 == 1
+    }
+}
+
+struct TransactionMaskBuilder {
+    mask: u8,
+}
+
+impl TransactionMaskBuilder {
+    fn new() -> Self {
+        Self { mask: 0 }
+    }
+
+    fn with_msg_hash(mut self) -> Self {
+        self.mask |= 1 << 0;
+        self
+    }
+
+    fn build(self) -> TransactionMask {
+        TransactionMask(self.mask)
+    }
+}
+
+pub type AccountDb = [u8; 33];
 
 const TX_MIN_LT: &[u8] = b"tx_min_lt";
 const TX_GC_RUNNING: &[u8] = b"tx_gc_running";

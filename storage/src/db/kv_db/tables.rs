@@ -599,7 +599,7 @@ fn optimize_for_level_compaction(opts: &mut Options, budget: ByteSize) {
 
 /// Stores raw transactions
 /// - Key: `workchain: i8, account: [u8; 32], lt: u64`
-/// - Value: `transaction BOC`
+/// - Value: `transaction mask: u8, transaction hash: [u8; 32], message hash: [u8; 32], transaction BOC`
 pub struct Transactions;
 
 impl Transactions {

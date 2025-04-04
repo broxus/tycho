@@ -10,7 +10,7 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tycho_block_util::message::{validate_external_message, ExtMsgRepr};
-use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
+use tycho_storage::{CodeHashesIter, TransactionMask, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
@@ -171,11 +171,11 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             }
         }
         MethodParams::GetTransaction(p) => match state.get_transaction(&p.id) {
-            Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
+            Ok(value) => ok_to_response(req.id, value.and_then(encode_transaction)),
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetDstTransaction(p) => match state.get_dst_transaction(&p.message_hash) {
-            Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
+            Ok(value) => ok_to_response(req.id, value.and_then(encode_transaction)),
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetTransactionBlockId(p) => match state.get_transaction_block_id(&p.id) {
@@ -456,6 +456,24 @@ struct BlockDataResponse {
 
 fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {
     BASE64_STANDARD.encode(value)
+}
+
+fn encode_transaction<T: AsRef<[u8]>>(value: T) -> Option<String> {
+    let value = value.as_ref();
+
+    // Must contain at least mask and tx hash
+    if value.len() < 33 {
+        return None;
+    }
+
+    let mask = TransactionMask(value[0]);
+    let prefix_len = if mask.with_msg_hash() {
+        1 + 32 + 32
+    } else {
+        1 + 32
+    };
+
+    Some(encode_base64(value[prefix_len..].as_ref()))
 }
 
 fn ok_to_response<T: Serialize>(id: i64, result: T) -> Response {
