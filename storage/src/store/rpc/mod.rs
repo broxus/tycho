@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -11,7 +11,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
@@ -23,17 +23,15 @@ pub struct RpcStorage {
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
     snapshot: ArcSwapOption<OwnedSnapshot>,
-    account_blacklist: Weak<AccountBlackList>,
 }
 
 impl RpcStorage {
-    pub fn new(db: RpcDb, account_blacklist: &Arc<AccountBlackList>) -> Self {
+    pub fn new(db: RpcDb) -> Self {
         let this = Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
             min_tx_lt_guard: Default::default(),
             snapshot: Default::default(),
-            account_blacklist: Arc::downgrade(account_blacklist),
         };
 
         let state = &this.db.state;
@@ -591,7 +589,11 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
-    pub async fn update(&self, block: BlockStuff) -> Result<()> {
+    pub async fn update(
+        &self,
+        block: BlockStuff,
+        rpc_blacklist: Option<Arc<ArcSwap<FastHashSet<[u8; 33]>>>>,
+    ) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -601,7 +603,7 @@ impl RpcStorage {
         let span = tracing::Span::current();
         let db = self.db.clone();
 
-        let account_blacklist = self.account_blacklist.upgrade().map(|x| x.load());
+        let rpc_blacklist = rpc_blacklist.map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
@@ -704,7 +706,7 @@ impl RpcStorage {
                     }
 
                     // Don't write tx for account from blacklist
-                    if let Some(blacklist) = &account_blacklist {
+                    if let Some(blacklist) = &rpc_blacklist {
                         if blacklist.contains(&tx_info[..33]) {
                             continue;
                         }

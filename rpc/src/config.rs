@@ -1,7 +1,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use everscale_types::models::StdAddr;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
 
@@ -120,5 +121,16 @@ impl Default for TransactionsGcConfig {
         Self {
             tx_ttl: Duration::from_secs(60 * 60 * 24 * 7),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BlackListConfig {
+    pub accounts: Vec<StdAddr>,
+}
+
+impl BlackListConfig {
+    pub fn load_from<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        serde_helpers::load_json_from_file(path)
     }
 }
