@@ -369,23 +369,12 @@ impl QueueStatistics {
         }
     }
 
-    pub fn append(&mut self, other: &Self) {
-        for (account_addr, &msgs_count) in &other.statistics {
+    pub fn append(&mut self, other: &AccountStatistics) {
+        for (account_addr, &msgs_count) in other {
             self.statistics
                 .entry(account_addr.clone())
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
-        }
-    }
-
-    pub fn append_diff_statistics(&mut self, diff_statistics: &DiffStatistics) {
-        for (_, par_stats) in diff_statistics.inner.statistics.clone() {
-            for (account_addr, msgs_count) in par_stats {
-                self.statistics
-                    .entry(account_addr)
-                    .and_modify(|count| *count += msgs_count)
-                    .or_insert(msgs_count);
-            }
         }
     }
 
@@ -448,6 +437,10 @@ impl DiffStatistics {
 
     pub fn max_message(&self) -> &QueueKey {
         &self.inner.max_message
+    }
+
+    pub fn statistics(&self) -> &StatisticsByPartitions {
+        &self.inner.statistics
     }
 
     pub fn partition(&self, partition: QueuePartitionIdx) -> Option<&AccountStatistics> {
