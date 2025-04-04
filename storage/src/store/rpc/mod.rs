@@ -592,7 +592,7 @@ impl RpcStorage {
     pub async fn update(
         &self,
         block: BlockStuff,
-        rpc_blacklist: Option<Arc<ArcSwap<FastHashSet<[u8; 33]>>>>,
+        rpc_blacklist: Option<Arc<ArcSwap<FastHashSet<AccountDb>>>>,
     ) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
@@ -1166,6 +1166,8 @@ const fn extract_tag(shard: &ShardIdent) -> u64 {
     let prefix = shard.prefix();
     prefix & (!prefix).wrapping_add(1)
 }
+
+pub type AccountDb = [u8; 33];
 
 const TX_MIN_LT: &[u8] = b"tx_min_lt";
 const TX_GC_RUNNING: &[u8] = b"tx_gc_running";

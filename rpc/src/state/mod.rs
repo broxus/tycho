@@ -17,7 +17,9 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
+use tycho_storage::{
+    AccountDb, CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
+};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::{FastHashMap, FastHashSet};
@@ -784,7 +786,7 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     Ok(info.start_lt)
 }
 
-pub type AccountBlackList = ArcSwap<FastHashSet<[u8; 33]>>;
+pub type AccountBlackList = ArcSwap<FastHashSet<AccountDb>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcStateError {
