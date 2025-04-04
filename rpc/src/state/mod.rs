@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -15,12 +17,14 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
+use tycho_storage::{
+    AccountDb, CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
+};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::config::{RpcConfig, RpcStorage, TransactionsGcConfig};
+use crate::config::{BlackListConfig, RpcConfig, RpcStorage, TransactionsGcConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
 
@@ -33,16 +37,29 @@ impl RpcStateBuilder {
     pub fn build(self) -> RpcState {
         let (storage, blockchain_rpc_client) = self.mandatory_fields;
 
+        let rpc_blacklist = Arc::new(Default::default());
+        let rpc_blacklist_weak = Arc::downgrade(&rpc_blacklist);
+
         let gc_notify = Arc::new(Notify::new());
-        let gc_handle = match &self.config.storage {
-            RpcStorage::Full { gc, .. } => gc.as_ref().map(|config| {
-                tokio::spawn(transactions_gc(
-                    config.clone(),
-                    storage.clone(),
-                    gc_notify.clone(),
-                ))
-            }),
-            RpcStorage::StateOnly => None,
+        let (gc_handle, rpc_blacklist_handle) = match &self.config.storage {
+            RpcStorage::Full {
+                gc, blacklist_path, ..
+            } => {
+                let gc_handle = gc.as_ref().map(|config| {
+                    tokio::spawn(transactions_gc(
+                        config.clone(),
+                        storage.clone(),
+                        gc_notify.clone(),
+                    ))
+                });
+
+                let blacklist_handle = blacklist_path
+                    .as_ref()
+                    .map(|path| tokio::spawn(blacklist_watcher(path.clone(), rpc_blacklist)));
+
+                (gc_handle, blacklist_handle)
+            }
+            RpcStorage::StateOnly => (None, None),
         };
 
         let download_block_semaphore =
@@ -62,6 +79,8 @@ impl RpcStateBuilder {
                 proto_cache: Default::default(),
                 gc_notify,
                 gc_handle,
+                rpc_blacklist: rpc_blacklist_weak,
+                rpc_blacklist_handle,
             }),
         }
     }
@@ -347,6 +366,9 @@ struct Inner {
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
+    // RPC blacklist
+    rpc_blacklist: Weak<AccountBlackList>,
+    rpc_blacklist_handle: Option<JoinHandle<()>>,
 }
 
 impl Inner {
@@ -479,7 +501,8 @@ impl Inner {
         }
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
-            rpc_storage.update(block.clone()).await?;
+            let blacklist = self.rpc_blacklist.upgrade();
+            rpc_storage.update(block.clone(), blacklist).await?;
         }
         Ok(())
     }
@@ -605,6 +628,10 @@ impl Drop for Inner {
         if let Some(handle) = self.gc_handle.take() {
             handle.abort();
         }
+
+        if let Some(handle) = self.rpc_blacklist_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -679,6 +706,58 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
     }
 }
 
+pub async fn blacklist_watcher(config: PathBuf, blacklist: Arc<AccountBlackList>) {
+    tracing::info!(
+        logger_config = %config.display(),
+        "started watching for changes in rpc blacklist config"
+    );
+
+    let get_metadata = || {
+        std::fs::metadata(&config)
+            .ok()
+            .and_then(|m| m.modified().ok())
+    };
+
+    let handle = |config: BlackListConfig, blacklist: &AccountBlackList| {
+        let new_list = Arc::new(
+            config
+                .accounts
+                .into_iter()
+                .map(|addr| {
+                    let mut addr_bytes = [0u8; 33];
+                    addr_bytes[0] = addr.workchain as u8;
+                    addr_bytes[1..33].copy_from_slice(addr.address.as_slice());
+                    addr_bytes
+                })
+                .collect::<FastHashSet<_>>(),
+        );
+
+        // Atomic swap blacklist values
+        blacklist.swap(new_list);
+    };
+
+    let mut last_modified = None;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+
+        let modified = get_metadata();
+        if last_modified == modified {
+            continue;
+        }
+        last_modified = modified;
+
+        // Handle
+        match BlackListConfig::load_from(&config) {
+            Ok(config) => handle(config, &blacklist),
+            Err(e) => {
+                tracing::error!("failed to load blacklist config: {e}");
+            }
+        }
+    }
+}
+
 async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64> {
     let block_handle_storage = storage.block_handle_storage();
 
@@ -706,6 +785,8 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     let info = virt_block.info.load()?;
     Ok(info.start_lt)
 }
+
+pub type AccountBlackList = ArcSwap<FastHashSet<AccountDb>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcStateError {
