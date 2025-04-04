@@ -407,13 +407,21 @@ impl RpcStorage {
                 });
                 self.total_tx += 1;
 
+                // Must contain at least mask and tx hash
+                if value.len() < 33 {
+                    return;
+                }
+
+                // Read transaction mask
+                let mask = TransactionMask(value[0]);
+
                 // Delete transaction by hash index entry
-                let tx_hash = &value[..32];
+                let tx_hash = &value[1..33];
                 self.batch.delete_cf(&self.tx_by_hash, tx_hash);
                 self.total_tx_by_hash += 1;
 
                 // Delete transaction by incoming message hash index entry
-                if value.len() >= 65 && value[32] != 0 {
+                if mask.with_msg_hash() && value.len() >= 65 {
                     let in_msg_hash = &value[33..65];
                     self.batch.delete_cf(&self.tx_by_in_msg, in_msg_hash);
                     self.total_tx_by_in_msg += 1;
@@ -707,39 +715,43 @@ impl RpcStorage {
                         }
                     }
 
+                    let (tx_mask, msg_hash) = match &tx.in_msg {
+                        Some(in_msg) => {
+                            let hash = Some(*in_msg.repr_hash());
+                            let mask = TransactionMask::builder().with_msg_hash().build();
+
+                            (mask, hash)
+                        }
+                        None => (TransactionMask::builder().build(), None),
+                    };
+
                     tx_buffer.clear();
 
-                    // Write tx data and indices
+                    // Collect transaction data to `tx_buffer`
+                    tx_buffer.push(tx_mask.0);
+
                     let tx_hash = tx_cell.inner().repr_hash();
                     tx_buffer.extend_from_slice(tx_hash.as_slice());
 
-                    // Msg hash
-                    match &tx.in_msg {
-                        Some(in_msg) => {
-                            // With message hash
-                            tx_buffer.push(true as u8);
-
-                            let hash = in_msg.repr_hash();
-                            write_batch.put_cf(
-                                tx_by_in_msg_cf,
-                                hash,
-                                &tx_info[..tables::Transactions::KEY_LEN],
-                            );
-                        }
-                        None => {
-                            // Without message hash
-                            tx_buffer.push(false as u8);
-                        }
+                    if let Some(msg_hash) = &msg_hash {
+                        tx_buffer.extend_from_slice(msg_hash.as_slice());
                     }
 
-                    // Tx hash
-                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
-
-                    // Tx data
                     everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut tx_buffer);
+
+                    // Write tx data and indices
+                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+
+                    if let Some(msg_hash) = &msg_hash {
+                        write_batch.put_cf(
+                            tx_by_in_msg_cf,
+                            msg_hash,
+                            &tx_info[..tables::Transactions::KEY_LEN],
+                        );
+                    }
 
                     write_batch.put_cf(
                         tx_cf,
@@ -1077,14 +1089,16 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.inner.value()?;
 
+        // Must contain at least mask and tx hash
         if value.len() < 33 {
             return None;
         }
 
-        let with_msg_hash = value[32] != 0;
-        let prefix_len = match with_msg_hash {
-            true => 32 + 1 + 32, // (tx hash, msg_hash flag, msg_hash)
-            false => 32 + 1,     // (tx hash, msg_hash flag)
+        let mask = TransactionMask(value[0]);
+        let prefix_len = if mask.with_msg_hash() {
+            1 + 32 + 32
+        } else {
+            1 + 32
         };
 
         let result = Some((self.map)(&value[prefix_len..]));
@@ -1188,6 +1202,38 @@ fn extend_account_prefix(shard: &ShardIdent, max: bool, target: &mut [u8; 32]) {
 const fn extract_tag(shard: &ShardIdent) -> u64 {
     let prefix = shard.prefix();
     prefix & (!prefix).wrapping_add(1)
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct TransactionMask(pub u8);
+
+impl TransactionMask {
+    fn builder() -> TransactionMaskBuilder {
+        TransactionMaskBuilder::new()
+    }
+
+    pub fn with_msg_hash(&self) -> bool {
+        self.0 & 1 == 1
+    }
+}
+
+struct TransactionMaskBuilder {
+    mask: u8,
+}
+
+impl TransactionMaskBuilder {
+    fn new() -> Self {
+        Self { mask: 0 }
+    }
+
+    fn with_msg_hash(mut self) -> Self {
+        self.mask |= 1 << 0;
+        self
+    }
+
+    fn build(self) -> TransactionMask {
+        TransactionMask(self.mask)
+    }
 }
 
 pub type AccountDb = [u8; 33];

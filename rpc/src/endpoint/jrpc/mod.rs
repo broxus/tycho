@@ -10,7 +10,7 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tycho_block_util::message::{validate_external_message, ExtMsgRepr};
-use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
+use tycho_storage::{CodeHashesIter, TransactionMask, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
@@ -461,17 +461,19 @@ fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {
 fn encode_transaction<T: AsRef<[u8]>>(value: T) -> Option<String> {
     let value = value.as_ref();
 
+    // Must contain at least mask and tx hash
     if value.len() < 33 {
         return None;
     }
 
-    let with_msg_hash = value[32] != 0;
-    let prefix_len = match with_msg_hash {
-        true => 32 + 1 + 32, // (tx hash, msg_hash flag, msg_hash)
-        false => 32 + 1,     // (tx hash, msg_hash flag)
+    let mask = TransactionMask(value[0]);
+    let prefix_len = if mask.with_msg_hash() {
+        1 + 32 + 32
+    } else {
+        1 + 32
     };
 
-    Some(encode_base64(&value[prefix_len..]))
+    Some(encode_base64(value[prefix_len..].as_ref()))
 }
 
 fn ok_to_response<T: Serialize>(id: i64, result: T) -> Response {

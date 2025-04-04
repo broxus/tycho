@@ -9,6 +9,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_block_util::message::validate_external_message;
+use tycho_storage::TransactionMask;
 use tycho_util::metrics::HistogramGuard;
 
 pub use self::cache::ProtoEndpointCache;
@@ -296,7 +297,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             match state.get_transaction(&hash) {
                 Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
                     response::GetRawTransaction {
-                        transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
+                        transaction: tx.and_then(read_transaction),
                     },
                 )),
                 Err(e) => error_to_response(e),
@@ -310,7 +311,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             match state.get_dst_transaction(&hash) {
                 Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
                     response::GetRawTransaction {
-                        transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
+                        transaction: tx.and_then(read_transaction),
                     },
                 )),
                 Err(e) => error_to_response(e),
@@ -492,6 +493,24 @@ fn make_response_block_id(id: BlockId) -> response::BlockId {
 fn serialize_account(account: &Account) -> Result<Bytes, everscale_types::error::Error> {
     let cell = crate::models::serialize_account(account)?;
     Ok(Boc::encode(cell).into())
+}
+
+fn read_transaction<T: AsRef<[u8]>>(value: T) -> Option<Bytes> {
+    let value = value.as_ref();
+
+    // Must contain at least mask and tx hash
+    if value.len() < 33 {
+        return None;
+    }
+
+    let mask = TransactionMask(value[0]);
+    let prefix_len = if mask.with_msg_hash() {
+        1 + 32 + 32
+    } else {
+        1 + 32
+    };
+
+    Some(Bytes::copy_from_slice(value[prefix_len..].as_ref()))
 }
 
 const MAX_LIMIT: u32 = 100;
