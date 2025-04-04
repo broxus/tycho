@@ -407,21 +407,16 @@ impl RpcStorage {
                 });
                 self.total_tx += 1;
 
-                // Delete secondary index entries
-                if let Ok(tx_cell) = Boc::decode(value) {
-                    // Delete transaction by hash index entry
-                    self.batch
-                        .delete_cf(&self.tx_by_hash, tx_cell.repr_hash().as_slice());
-                    self.total_tx_by_hash += 1;
+                // Delete transaction by hash index entry
+                let tx_hash = &value[..32];
+                self.batch.delete_cf(&self.tx_by_hash, tx_hash);
+                self.total_tx_by_hash += 1;
 
-                    // Delete transaction by incoming message hash index entry
-                    if let Ok(tx) = tx_cell.parse::<Transaction>() {
-                        if let Some(in_msg) = &tx.in_msg {
-                            self.batch
-                                .delete_cf(&self.tx_by_in_msg, in_msg.repr_hash().as_slice());
-                            self.total_tx_by_in_msg += 1;
-                        }
-                    }
+                // Delete transaction by incoming message hash index entry
+                if value.len() >= 65 && value[32] != 0 {
+                    let in_msg_hash = &value[33..65];
+                    self.batch.delete_cf(&self.tx_by_in_msg, in_msg_hash);
+                    self.total_tx_by_in_msg += 1;
                 }
             }
 
@@ -712,10 +707,35 @@ impl RpcStorage {
                         }
                     }
 
+                    tx_buffer.clear();
+
                     // Write tx data and indices
                     let tx_hash = tx_cell.inner().repr_hash();
+                    tx_buffer.extend_from_slice(tx_hash.as_slice());
 
-                    tx_buffer.clear();
+                    // Msg hash
+                    match &tx.in_msg {
+                        Some(in_msg) => {
+                            // With message hash
+                            tx_buffer.push(true as u8);
+
+                            let hash = in_msg.repr_hash();
+                            write_batch.put_cf(
+                                tx_by_in_msg_cf,
+                                hash,
+                                &tx_info[..tables::Transactions::KEY_LEN],
+                            );
+                        }
+                        None => {
+                            // Without message hash
+                            tx_buffer.push(false as u8);
+                        }
+                    }
+
+                    // Tx hash
+                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+
+                    // Tx data
                     everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
@@ -726,14 +746,6 @@ impl RpcStorage {
                         &tx_info[..tables::Transactions::KEY_LEN],
                         &tx_buffer,
                     );
-                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
-                    if let Some(in_msg) = &tx.in_msg {
-                        write_batch.put_cf(
-                            tx_by_in_msg_cf,
-                            in_msg.repr_hash(),
-                            &tx_info[..tables::Transactions::KEY_LEN],
-                        );
-                    }
                 }
 
                 // Update code hash
@@ -1064,7 +1076,18 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.inner.value()?;
-        let result = Some((self.map)(value));
+
+        if value.len() < 33 {
+            return None;
+        }
+
+        let with_msg_hash = value[32] != 0;
+        let prefix_len = match with_msg_hash {
+            true => 32 + 1 + 32, // (tx hash, msg_hash flag, msg_hash)
+            false => 32 + 1,     // (tx hash, msg_hash flag)
+        };
+
+        let result = Some((self.map)(&value[prefix_len..]));
         self.inner.prev();
         result
     }
