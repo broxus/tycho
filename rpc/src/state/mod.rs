@@ -48,6 +48,13 @@ impl RpcStateBuilder {
         let download_block_semaphore =
             tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
 
+        let run_get_method_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            self.config.run_get_method.max_vms,
+        ));
+
+        // NOTE: Only a stub here.
+        let parsed_config = Arc::new(LatestBlockchainConfig::default());
+
         RpcState {
             inner: Arc::new(Inner {
                 config: self.config,
@@ -66,9 +73,11 @@ impl RpcStateBuilder {
                 }),
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
+                run_get_method_semaphore,
                 download_block_semaphore,
                 is_ready: AtomicBool::new(false),
                 timings: ArcSwap::new(Default::default()),
+                blockchain_config: ArcSwap::new(parsed_config),
                 jrpc_cache: Default::default(),
                 proto_cache: Default::default(),
                 gc_notify,
@@ -142,6 +151,20 @@ impl RpcState {
         self.inner.download_block_semaphore.acquire().await.unwrap()
     }
 
+    pub async fn acquire_run_get_method_permit(&self) -> RunGetMethodPermit {
+        let config = &self.config().run_get_method;
+        if config.max_vms == 0 {
+            return RunGetMethodPermit::Disabled;
+        }
+
+        let fut = self.inner.run_get_method_semaphore.clone().acquire_owned();
+        match tokio::time::timeout(config.max_wait_for_vm, fut).await {
+            Ok(Ok(permit)) => RunGetMethodPermit::Acquired(permit),
+            Ok(Err(_)) => RunGetMethodPermit::Disabled,
+            Err(_) => RunGetMethodPermit::Timeout,
+        }
+    }
+
     pub async fn bind_endpoint(&self) -> Result<RpcEndpoint> {
         RpcEndpoint::bind(self.clone()).await
     }
@@ -177,6 +200,17 @@ impl RpcState {
             .blockchain_rpc_client
             .broadcast_external_message(message)
             .await;
+    }
+
+    pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
+        self.inner.blockchain_config.load_full()
+    }
+
+    pub fn get_libraries(&self) -> Dict<HashBytes, LibDescr> {
+        match self.inner.mc_accounts.read().as_ref() {
+            Some(cache) => cache.libraries.clone(),
+            None => Dict::new(),
+        }
     }
 
     pub fn get_raw_library(&self, hash: &HashBytes) -> Result<Option<Cell>> {
@@ -347,6 +381,12 @@ impl BlockSubscriber for RpcBlockSubscriber {
     }
 }
 
+pub enum RunGetMethodPermit {
+    Acquired(tokio::sync::OwnedSemaphorePermit),
+    Timeout,
+    Disabled,
+}
+
 struct Inner {
     config: RpcConfig,
     storage: Storage,
@@ -355,8 +395,10 @@ struct Inner {
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
     download_block_semaphore: Semaphore,
+    run_get_method_semaphore: Arc<Semaphore>,
     is_ready: AtomicBool,
     timings: ArcSwap<StateTimings>,
+    blockchain_config: ArcSwap<LatestBlockchainConfig>,
     jrpc_cache: JrpcEndpointCache,
     proto_cache: ProtoEndpointCache,
     // GC
@@ -368,6 +410,30 @@ struct Inner {
 struct LatestMcInfo {
     block_id: Arc<BlockId>,
     timings: GenTimings,
+}
+
+pub struct LatestBlockchainConfig {
+    pub raw: BlockchainConfigParams,
+    pub unpacked: tycho_vm::UnpackedConfig,
+    pub modifiers: tycho_vm::BehaviourModifiers,
+}
+
+impl Default for LatestBlockchainConfig {
+    fn default() -> Self {
+        Self {
+            raw: BlockchainConfigParams::from_raw(Cell::empty_cell()),
+            unpacked: tycho_vm::UnpackedConfig {
+                latest_storage_prices: None,
+                global_id: None,
+                mc_gas_prices: None,
+                gas_prices: None,
+                mc_fwd_prices: None,
+                fwd_prices: None,
+                size_limits_config: None,
+            },
+            modifiers: Default::default(),
+        }
+    }
 }
 
 impl Inner {
@@ -447,6 +513,11 @@ impl Inner {
 
                 // Reload mc state.
                 mc_state = shard_states.load_state(mc_block_id).await?;
+            }
+
+            // Fill config.
+            if let Some(config) = load_blockchain_config(&mc_state) {
+                self.blockchain_config.store(config);
             }
 
             // Fill masterchain cache
@@ -607,6 +678,12 @@ impl Inner {
         };
 
         if shard.is_masterchain() {
+            // Fill config.
+            if let Some(config) = load_blockchain_config(state) {
+                self.blockchain_config.store(config);
+            }
+
+            // Update accounts cache.
             *self.mc_accounts.write() = Some(cached);
         } else {
             let mut cache = self.sc_accounts.write();
@@ -662,6 +739,39 @@ impl Drop for Inner {
     fn drop(&mut self) {
         if let Some(handle) = self.gc_handle.take() {
             handle.abort();
+        }
+    }
+}
+
+fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockchainConfig>> {
+    let extra = mc_state.state_extra().ok()?;
+
+    // Fill config.
+    let now = mc_state.as_ref().gen_utime;
+    match tycho_vm::SmcInfoTonV6::unpack_config_partial(&extra.config.params, now) {
+        Ok(unpacked) => {
+            let mut modifiers = tycho_vm::BehaviourModifiers::default();
+            if let Ok(global_id) = extra.config.params.get_global_id() {
+                if let Ok(global) = extra.config.params.get_global_version() {
+                    modifiers.signature_with_id = global
+                        .capabilities
+                        .contains(GlobalCapability::CapSignatureWithId)
+                        .then_some(global_id);
+                }
+            }
+
+            Some(Arc::new(LatestBlockchainConfig {
+                raw: extra.config.params.clone(),
+                unpacked,
+                modifiers,
+            }))
+        }
+        Err(e) => {
+            tracing::error!(
+                block_id = %mc_state.block_id(),
+                "failed to unpack blockchain config: {e:?}",
+            );
+            None
         }
     }
 }

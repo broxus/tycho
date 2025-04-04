@@ -57,11 +57,11 @@ hex = "0.4"
 humantime = "2"
 indexmap = "2.2"
 itertools = "0.12"
-tabled = { version = "0.17.0", default-features = false }
 libc = "0.2"
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 moka = { version = "0.12", features = ["sync"] }
+num-bigint = "0.4.6"
 parking_lot = { version = "0.12.1" }
 parking_lot_core = "0.9.9"
 pin-project-lite = "0.2"
@@ -88,6 +88,7 @@ sha2 = "0.10.8"
 smallvec = "1.13.1"
 socket2 = "0.5"
 sysinfo = "0.30.5"
+tabled = { version = "0.17.0", default-features = false }
 tarpc = { version = "0.34", features = [
     "tokio1",
     "serde1",

@@ -3761,9 +3761,11 @@ dependencies = [
  "futures-util",
  "metrics",
  "moka",
+ "num-bigint",
  "parking_lot",
  "prost",
  "rand",
+ "scopeguard",
  "serde",
  "serde_json",
  "tempfile",
@@ -3777,6 +3779,7 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+ "tycho-vm",
 ]
 
 [[package]]

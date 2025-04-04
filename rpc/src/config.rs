@@ -33,12 +33,52 @@ pub struct RpcConfig {
     /// Default: `10`.
     pub max_parallel_block_downloads: usize,
 
+    /// Configuration of getter requests.
+    pub run_get_method: RunGetMethodConfig,
+
     /// Enable `/toncenter/v2/*` endpoints.
     ///
     /// Default: `false`.
     pub enable_toncenter_api: bool,
 
     pub storage: RpcStorage,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunGetMethodConfig {
+    /// The maximum number of methods running in parallel.
+    /// Zero means disabled.
+    ///
+    /// Default: `20`.
+    pub max_vms: usize,
+
+    /// Max time to wait for a VM slot.
+    ///
+    /// Default: `50ms`.
+    #[serde(with = "serde_helpers::humantime")]
+    pub max_wait_for_vm: Duration,
+
+    /// Max stack items in response.
+    ///
+    /// Default: 32.
+    pub max_response_stack_items: usize,
+
+    /// Default VM gas.
+    ///
+    /// Default: `1000000`.
+    pub vm_getter_gas: u64,
+}
+
+impl Default for RunGetMethodConfig {
+    fn default() -> Self {
+        Self {
+            max_vms: 20,
+            max_wait_for_vm: Duration::from_millis(50),
+            max_response_stack_items: 32,
+            vm_getter_gas: 1000000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -89,6 +129,7 @@ impl Default for RpcConfig {
             shard_split_depth: 4,
             allow_huge_requests: false,
             max_parallel_block_downloads: 10,
+            run_get_method: RunGetMethodConfig::default(),
             enable_toncenter_api: false,
             storage: RpcStorage::Full {
                 gc: Some(Default::default()),

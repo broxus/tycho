@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::str::FromStr;
+use std::sync::OnceLock;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -7,15 +9,17 @@ use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
+use num_bigint::BigInt;
 use rand::Rng;
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::{validate_external_message, ExtMsgRepr};
 use tycho_storage::TransactionsIterBuilder;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
+use tycho_util::sync::rayon_run;
 
-use crate::state::{LoadedAccountState, RpcState, RpcStateError};
+use crate::state::{LoadedAccountState, RpcState, RpcStateError, RunGetMethodPermit};
 use crate::util::error_codes::*;
 use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
 
@@ -24,6 +28,7 @@ declare_jrpc_method! {
         GetAddressInformation(AccountParams),
         GetTransactions(TransactionsParams),
         SendBoc(SendBocParams),
+        RunGetMethod(RunGetMethodParams),
     }
 }
 
@@ -36,6 +41,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<String, Method>) -> 
         }
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
         MethodParams::SendBoc(p) => handle_send_boc(req.id, state, p).await,
+        MethodParams::RunGetMethod(p) => handle_run_get_method(req.id, state, p).await,
     }
 }
 
@@ -146,6 +152,180 @@ async fn handle_send_boc(id: String, state: RpcState, p: SendBocParams) -> Respo
     ok_to_response(id, EmptyOk)
 }
 
+async fn handle_run_get_method(id: String, state: RpcState, p: RunGetMethodParams) -> Response {
+    enum RunMethodError {
+        RpcError(RpcStateError),
+        InvalidParams(everscale_types::error::Error),
+        Internal(everscale_types::error::Error),
+        TooBigStack(usize),
+    }
+
+    let config = &state.config().run_get_method;
+    let permit = match state.acquire_run_get_method_permit().await {
+        RunGetMethodPermit::Acquired(permit) => permit,
+        RunGetMethodPermit::Disabled => {
+            return JrpcErrorResponse {
+                id: Some(id),
+                code: NOT_SUPPORTED_CODE,
+                message: "method disabled".into(),
+            }
+            .into_response()
+        }
+        RunGetMethodPermit::Timeout => {
+            return JrpcErrorResponse {
+                id: Some(id),
+                code: TIMEOUT_CODE,
+                message: "timeout while waiting for VM slot".into(),
+            }
+            .into_response()
+        }
+    };
+    let gas_limit = config.vm_getter_gas;
+    let max_response_stack_items = config.max_response_stack_items;
+
+    let f = move || {
+        // Prepare stack.
+        let mut items = Vec::with_capacity(p.stack.len() + 1);
+        for item in p.stack {
+            let item =
+                tycho_vm::RcStackValue::try_from(item).map_err(RunMethodError::InvalidParams)?;
+            items.push(item);
+        }
+        items.push(tycho_vm::RcStackValue::new_dyn_value(BigInt::from(
+            p.method,
+        )));
+        let stack = tycho_vm::Stack::with_items(items);
+
+        // Load account state.
+        let (block_id, shard_state, _mc_ref_handle, timings) = match state
+            .get_account_state(&p.address)
+            .map_err(RunMethodError::RpcError)?
+        {
+            LoadedAccountState::Found {
+                mc_block_id,
+                state,
+                mc_ref_handle,
+                timings,
+            } => (mc_block_id, state, mc_ref_handle, timings),
+            LoadedAccountState::NotFound { mc_block_id, .. } => {
+                return Ok(TonlibRunResult {
+                    ty: TonlibRunResult::TY,
+                    exit_code: tycho_vm::VmException::Fatal.as_exit_code(),
+                    gas_used: 0,
+                    stack: None,
+                    last_transaction_id: TonlibTransactionId::default(),
+                    block_id: TonlibBlockId::from(*mc_block_id),
+                    extra: TonlibExtra,
+                });
+            }
+        };
+
+        // Parse account state.
+        let mut balance = CurrencyCollection::ZERO;
+        let mut code = None::<Cell>;
+        let mut data = None::<Cell>;
+        let mut account_libs = Dict::new();
+        let mut state_libs = Dict::new();
+        if let Some(account) = shard_state
+            .load_account()
+            .map_err(RunMethodError::Internal)?
+        {
+            balance = account.balance;
+            if let AccountState::Active(state_init) = account.state {
+                code = state_init.code;
+                data = state_init.data;
+                account_libs = state_init.libraries;
+                state_libs = state.get_libraries();
+            }
+        }
+
+        // Prepare VM state.
+        let config = state.get_unpacked_blockchain_config();
+
+        let smc_info = tycho_vm::SmcInfoBase::new()
+            .with_now(timings.gen_utime)
+            .with_block_lt(timings.gen_lt)
+            .with_tx_lt(timings.gen_lt)
+            .with_account_balance(balance)
+            .with_account_addr(p.address.into())
+            .with_config(config.raw.clone())
+            .require_ton_v4()
+            .with_code(code.clone().unwrap_or_default())
+            .with_message_balance(CurrencyCollection::ZERO)
+            .with_storage_fees(Tokens::ZERO)
+            .require_ton_v6()
+            .with_unpacked_config(config.unpacked.as_tuple())
+            .require_ton_v9();
+
+        let libraries = (account_libs, state_libs);
+        let mut vm = tycho_vm::VmState::builder()
+            .with_smc_info(smc_info)
+            .with_code(code)
+            .with_data(data.unwrap_or_default())
+            .with_libraries(&libraries)
+            .with_init_selector(false)
+            .with_raw_stack(tycho_vm::SafeRc::new(stack))
+            .with_gas(tycho_vm::GasParams {
+                max: gas_limit,
+                limit: gas_limit,
+                ..tycho_vm::GasParams::getter()
+            })
+            .with_modifiers(config.modifiers)
+            .build();
+
+        // Run VM.
+        let exit_code = !vm.run();
+        if vm.stack.depth() > max_response_stack_items {
+            return Err(RunMethodError::TooBigStack(vm.stack.depth()));
+        }
+
+        // Prepare response.
+        let gas_used = vm.gas.consumed();
+
+        Ok::<_, RunMethodError>(TonlibRunResult {
+            ty: TonlibRunResult::TY,
+            exit_code,
+            gas_used,
+            stack: Some(vm.stack),
+            last_transaction_id: TonlibTransactionId::new(
+                shard_state.last_trans_lt,
+                shard_state.last_trans_hash,
+            ),
+            block_id: TonlibBlockId::from(*block_id),
+            extra: TonlibExtra,
+        })
+    };
+
+    rayon_run(move || {
+        let res = match f() {
+            Ok(res) => {
+                STACK_ITEMS_LIMIT.set(max_response_stack_items);
+                ok_to_response(id, res)
+            }
+            Err(RunMethodError::RpcError(e)) => error_to_response(id, e),
+            Err(RunMethodError::InvalidParams(e)) => JrpcErrorResponse {
+                id: Some(id),
+                code: INVALID_PARAMS_CODE,
+                message: format!("invalid stack item: {e}").into(),
+            }
+            .into_response(),
+            Err(RunMethodError::Internal(e)) => {
+                error_to_response(id, RpcStateError::Internal(e.into()))
+            }
+            Err(RunMethodError::TooBigStack(n)) => error_to_response(
+                id,
+                RpcStateError::Internal(anyhow::anyhow!("response stack is too big to send: {n}")),
+            ),
+        };
+
+        // NOTE: Make sure that permit lives as long as the execution.
+        drop(permit);
+
+        res
+    })
+    .await
+}
+
 // === Requests ===
 
 #[derive(Debug, Deserialize)]
@@ -179,44 +359,54 @@ pub struct SendBocParams {
     pub boc: bytes::Bytes,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RunGetMethodParams {
+    #[serde(with = "serde_tonlib_address")]
+    pub address: StdAddr,
+    #[serde(with = "serde_method_id")]
+    pub method: i64,
+    pub stack: Vec<SerdeInputStackItem>,
+}
+
 // === Responses ===
 
 #[derive(Serialize)]
-pub struct AddressInformationResponse {
+struct AddressInformationResponse {
     #[serde(rename = "@type")]
-    pub ty: &'static str,
+    ty: &'static str,
     #[serde(with = "serde_helpers::string")]
-    pub balance: Tokens,
-    pub extra_currencies: [(); 0],
+    balance: Tokens,
+    extra_currencies: [(); 0],
     #[serde(with = "serde_boc_or_empty")]
-    pub code: Option<Cell>,
+    code: Option<Cell>,
     #[serde(with = "serde_boc_or_empty")]
-    pub data: Option<Cell>,
-    pub last_transaction_id: TonlibTransactionId,
-    pub block_id: TonlibBlockId,
+    data: Option<Cell>,
+    last_transaction_id: TonlibTransactionId,
+    block_id: TonlibBlockId,
     #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
-    pub frozen_hash: Option<HashBytes>,
-    pub sync_utime: u32,
-    pub extra: TonlibExtra,
-    pub state: TonlibAccountStatus,
+    frozen_hash: Option<HashBytes>,
+    sync_utime: u32,
+    #[serde(rename = "@extra")]
+    extra: TonlibExtra,
+    state: TonlibAccountStatus,
 }
 
 impl AddressInformationResponse {
-    pub const TY: &str = "raw.fullAccountState";
+    const TY: &str = "raw.fullAccountState";
 }
 
 #[derive(Serialize)]
-pub struct TonlibTransactionId {
+struct TonlibTransactionId {
     #[serde(rename = "@type")]
-    pub ty: &'static str,
+    ty: &'static str,
     #[serde(with = "serde_helpers::string")]
-    pub lt: u64,
+    lt: u64,
     #[serde(with = "serde_tonlib_hash")]
-    pub hash: HashBytes,
+    hash: HashBytes,
 }
 
 impl TonlibTransactionId {
-    pub const TY: &str = "internal.transactionId";
+    const TY: &str = "internal.transactionId";
 
     fn new(lt: u64, hash: HashBytes) -> Self {
         Self {
@@ -234,21 +424,21 @@ impl Default for TonlibTransactionId {
 }
 
 #[derive(Serialize)]
-pub struct TonlibBlockId {
+struct TonlibBlockId {
     #[serde(rename = "@type")]
-    pub ty: &'static str,
-    pub workchain: i32,
+    ty: &'static str,
+    workchain: i32,
     #[serde(with = "serde_helpers::string")]
-    pub shard: i64,
-    pub seqno: u32,
+    shard: i64,
+    seqno: u32,
     #[serde(with = "serde_tonlib_hash")]
-    pub root_hash: HashBytes,
+    root_hash: HashBytes,
     #[serde(with = "serde_tonlib_hash")]
-    pub file_hash: HashBytes,
+    file_hash: HashBytes,
 }
 
 impl TonlibBlockId {
-    pub const TY: &str = "ton.blockIdExt";
+    const TY: &str = "ton.blockIdExt";
 }
 
 impl From<BlockId> for TonlibBlockId {
@@ -266,14 +456,14 @@ impl From<BlockId> for TonlibBlockId {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TonlibAccountStatus {
+enum TonlibAccountStatus {
     Uninitialized,
     Frozen,
     Active,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TonlibExtra;
+struct TonlibExtra;
 
 impl Serialize for TonlibExtra {
     #[inline]
@@ -550,6 +740,205 @@ impl<'a> TonlibAddress<'a> {
     }
 }
 
+#[derive(Serialize)]
+struct TonlibRunResult {
+    ty: &'static str,
+    exit_code: i32,
+    gas_used: u64,
+    #[serde(serialize_with = "TonlibRunResult::serialize_stack")]
+    stack: Option<tycho_vm::SafeRc<tycho_vm::Stack>>,
+    last_transaction_id: TonlibTransactionId,
+    block_id: TonlibBlockId,
+    #[serde(rename = "@extra")]
+    extra: TonlibExtra,
+}
+
+impl TonlibRunResult {
+    const TY: &str = "smc.runResult";
+
+    fn serialize_stack<S>(
+        value: &Option<tycho_vm::SafeRc<tycho_vm::Stack>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match value {
+            Some(stack) => {
+                let mut seq = serializer.serialize_seq(Some(stack.depth()))?;
+                for item in &stack.items {
+                    seq.serialize_element(&StackValueOutputWrapper(item.as_ref()))?;
+                }
+                seq.end()
+            }
+            None => [(); 0].serialize(serializer),
+        }
+    }
+
+    fn serialize_stack_item<S>(value: &DynStackValue, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error;
+        use tycho_vm::StackValueType;
+
+        let is_limit_ok = STACK_ITEMS_LIMIT.with(|limit| {
+            let current_limit = limit.get();
+            if current_limit > 0 {
+                limit.set(current_limit - 1);
+                true
+            } else {
+                false
+            }
+        });
+
+        if !is_limit_ok {
+            return Err(Error::custom("too many stack items in response"));
+        }
+
+        struct Num<'a>(&'a BigInt);
+
+        impl std::fmt::Display for Num<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let sign = if self.0.sign() == num_bigint::Sign::Minus {
+                    "-"
+                } else {
+                    ""
+                };
+                write!(f, "{sign}0x{:x}", self.0)
+            }
+        }
+
+        impl Serialize for Num<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_str(self)
+            }
+        }
+
+        struct List<'a>(&'a DynStackValue, &'a DynStackValue);
+
+        impl Serialize for List<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut seq = s.serialize_seq(None)?;
+                seq.serialize_element(&StackValueOutputWrapper(self.0))?;
+                let mut next = self.1;
+                while !next.is_null() {
+                    let (head, tail) = next
+                        .as_pair()
+                        .ok_or_else(|| Error::custom("invalid list"))?;
+                    seq.serialize_element(&StackValueOutputWrapper(head))?;
+                    next = tail;
+                }
+                seq.end()
+            }
+        }
+
+        struct Tuple<'a>(&'a [tycho_vm::RcStackValue]);
+
+        impl Serialize for Tuple<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut seq = s.serialize_seq(Some(self.0.len()))?;
+                for item in self.0 {
+                    seq.serialize_element(&StackValueOutputWrapper(item.as_ref()))?;
+                }
+                seq.end()
+            }
+        }
+
+        #[derive(Serialize)]
+        struct CellBytes<'a> {
+            #[serde(with = "Boc")]
+            bytes: &'a Cell,
+        }
+
+        match value.ty() {
+            StackValueType::Null => ("list", [(); 0]).serialize(serializer),
+            StackValueType::Int => match value.as_int() {
+                Some(int) => ("num", Num(int)).serialize(serializer),
+                None => ("num", "(null)").serialize(serializer),
+            },
+            StackValueType::Cell => {
+                let cell = value
+                    .as_cell()
+                    .ok_or_else(|| Error::custom("invalid cell"))?;
+                ("cell", CellBytes { bytes: cell }).serialize(serializer)
+            }
+            StackValueType::Slice => {
+                let slice = value
+                    .as_cell_slice()
+                    .ok_or_else(|| Error::custom("invalid slice"))?;
+
+                let built;
+                let cell = if slice.range().is_full(slice.cell().as_ref()) {
+                    slice.cell()
+                } else {
+                    built = CellBuilder::build_from(slice.apply()).map_err(Error::custom)?;
+                    &built
+                };
+
+                ("cell", CellBytes { bytes: cell }).serialize(serializer)
+            }
+            StackValueType::Tuple => match value.as_list() {
+                Some((head, tail)) => ("list", List(head, tail)).serialize(serializer),
+                None => {
+                    let tuple = value
+                        .as_tuple()
+                        .ok_or_else(|| Error::custom("invalid list"))?;
+                    ("tuple", Tuple(tuple)).serialize(serializer)
+                }
+            },
+            _ => Err(Error::custom("unsupported stack item")),
+        }
+    }
+}
+
+thread_local! {
+    static STACK_ITEMS_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[repr(transparent)]
+struct StackValueOutputWrapper<'a>(&'a DynStackValue);
+
+impl Serialize for StackValueOutputWrapper<'_> {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error;
+
+        const MAX_DEPTH: usize = 16;
+
+        thread_local! {
+            static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+
+        let is_depth_ok = DEPTH.with(|depth| {
+            let current_depth = depth.get();
+            if current_depth < MAX_DEPTH {
+                depth.set(current_depth + 1);
+                true
+            } else {
+                false
+            }
+        });
+
+        if !is_depth_ok {
+            return Err(Error::custom("too deep stack item"));
+        }
+
+        scopeguard::defer! {
+            DEPTH.with(|depth| {
+                depth.set(depth.get() - 1);
+            })
+        };
+
+        TonlibRunResult::serialize_stack_item(self.0, serializer)
+    }
+}
+
+type DynStackValue = dyn tycho_vm::StackValue + 'static;
+
 #[derive(Debug, Clone, Copy)]
 struct EmptyOk;
 
@@ -590,6 +979,144 @@ fn too_large_limit_response(id: String) -> Response {
         message: Cow::Borrowed("limit is too large"),
     }
     .into_response()
+}
+
+#[derive(Debug)]
+pub enum SerdeInputStackItem {
+    Num(num_bigint::BigInt),
+    Cell(Cell),
+    Slice(Cell),
+    Builder(Cell),
+}
+
+impl TryFrom<SerdeInputStackItem> for tycho_vm::RcStackValue {
+    type Error = everscale_types::error::Error;
+
+    fn try_from(value: SerdeInputStackItem) -> Result<Self, Self::Error> {
+        match value {
+            SerdeInputStackItem::Num(num) => Ok(tycho_vm::RcStackValue::new_dyn_value(num)),
+            SerdeInputStackItem::Cell(cell) => Ok(tycho_vm::RcStackValue::new_dyn_value(cell)),
+            SerdeInputStackItem::Slice(cell) => {
+                if cell.is_exotic() {
+                    return Err(everscale_types::error::Error::UnexpectedExoticCell);
+                }
+                let slice = tycho_vm::OwnedCellSlice::new_allow_exotic(cell);
+                Ok(tycho_vm::RcStackValue::new_dyn_value(slice))
+            }
+            SerdeInputStackItem::Builder(cell) => {
+                let mut b = CellBuilder::new();
+                b.store_slice(cell.as_slice_allow_exotic())?;
+                Ok(tycho_vm::RcStackValue::new_dyn_value(b))
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SerdeInputStackItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        struct IntBounds {
+            min: BigInt,
+            max: BigInt,
+        }
+
+        impl IntBounds {
+            fn get() -> &'static Self {
+                static BOUNDS: OnceLock<IntBounds> = OnceLock::new();
+                BOUNDS.get_or_init(|| Self {
+                    min: BigInt::from(-1) << 256,
+                    max: (BigInt::from(1) << 256) - 1,
+                })
+            }
+
+            fn contains(&self, int: &BigInt) -> bool {
+                *int >= self.min && *int <= self.max
+            }
+        }
+
+        struct StackItemVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StackItemVisitor {
+            type Value = SerdeInputStackItem;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a tuple of two items")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                fn map_cell<T, F: FnOnce(Cell) -> T, E: Error>(
+                    value: impl AsRef<str>,
+                    f: F,
+                ) -> Result<T, E> {
+                    Boc::decode_base64(value.as_ref())
+                        .map(f)
+                        .map_err(Error::custom)
+                }
+
+                let Some(ty) = seq.next_element()? else {
+                    return Err(Error::custom(
+                        "expected the first item to be a stack item type",
+                    ));
+                };
+
+                let Some(serde_helpers::BorrowedStr(value)) = seq.next_element()? else {
+                    return Err(Error::custom(
+                        "expected the second item to be a stack item value",
+                    ));
+                };
+
+                if seq
+                    .next_element::<&serde_json::value::RawValue>()?
+                    .is_some()
+                {
+                    return Err(Error::custom("too many tuple items"));
+                }
+
+                match ty {
+                    StackItemType::Num => {
+                        const MAX_INT_LEN: usize = 79;
+
+                        if value.len() > MAX_INT_LEN {
+                            return Err(Error::invalid_length(
+                                value.len(),
+                                &"a decimal integer in range [-2^256, 2^256)",
+                            ));
+                        }
+
+                        let int = BigInt::from_str(value.as_ref()).map_err(Error::custom)?;
+                        if !IntBounds::get().contains(&int) {
+                            return Err(Error::custom("integer out of bounds"));
+                        }
+                        Ok(SerdeInputStackItem::Num(int))
+                    }
+                    StackItemType::Cell => map_cell(value, SerdeInputStackItem::Cell),
+                    StackItemType::Slice => map_cell(value, SerdeInputStackItem::Slice),
+                    StackItemType::Builder => map_cell(value, SerdeInputStackItem::Builder),
+                }
+            }
+        }
+
+        deserializer.deserialize_seq(StackItemVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+enum StackItemType {
+    #[serde(rename = "num")]
+    Num,
+    #[serde(rename = "tvm.Cell")]
+    Cell,
+    #[serde(rename = "tvm.Slice")]
+    Slice,
+    #[serde(rename = "tvm.Builder")]
+    Builder,
 }
 
 mod serde_option_tonlib_address {
@@ -696,5 +1223,36 @@ mod serde_boc_or_empty {
             Some(value) => Boc::serialize(value, serializer),
             None => serializer.serialize_str(""),
         }
+    }
+}
+
+mod serde_method_id {
+    use super::*;
+
+    const MAX_METHOD_NAME_LEN: usize = 128;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i64, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum MethodId<'a> {
+            Int(i64),
+            String(#[serde(borrow)] Cow<'a, str>),
+        }
+
+        Ok(match <_>::deserialize(deserializer)? {
+            MethodId::Int(int) => int,
+            MethodId::String(str) => {
+                let bytes = str.as_bytes();
+                if bytes.len() > MAX_METHOD_NAME_LEN {
+                    return Err(Error::custom("method name is too long"));
+                }
+                everscale_types::crc::crc_16(bytes) as i64 | 0x10000
+            }
+        })
     }
 }

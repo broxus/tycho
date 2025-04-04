@@ -31,6 +31,7 @@ macro_rules! declare_jrpc_method {
             ),*$(,)?
         }
     ) => {
+        #[allow(clippy::enum_variant_names)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
         #[serde(rename_all = "camelCase")]
         $vis enum $method_name_enum {
