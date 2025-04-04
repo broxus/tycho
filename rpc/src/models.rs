@@ -13,6 +13,16 @@ pub struct GenTimings {
     pub gen_utime: u32,
 }
 
+impl GenTimings {
+    pub const fn max_by_lt(self, other: Self) -> Self {
+        if other.gen_lt > self.gen_lt {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LastTransactionId {
     pub lt: u64,

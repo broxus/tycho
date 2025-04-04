@@ -6,3 +6,8 @@ mod config;
 mod endpoint;
 mod models;
 mod state;
+
+mod util {
+    pub mod error_codes;
+    pub mod jrpc_extractor;
+}

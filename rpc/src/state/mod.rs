@@ -48,16 +48,36 @@ impl RpcStateBuilder {
         let download_block_semaphore =
             tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
 
+        let run_get_method_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            self.config.run_get_method.max_vms,
+        ));
+
+        // NOTE: Only a stub here.
+        let parsed_config = Arc::new(LatestBlockchainConfig::default());
+
         RpcState {
             inner: Arc::new(Inner {
                 config: self.config,
                 storage,
                 blockchain_rpc_client,
+                mc_info: RwLock::new(LatestMcInfo {
+                    block_id: Arc::new(BlockId {
+                        shard: ShardIdent::MASTERCHAIN,
+                        seqno: 0,
+                        ..Default::default()
+                    }),
+                    timings: GenTimings {
+                        gen_lt: 0,
+                        gen_utime: 0,
+                    },
+                }),
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
+                run_get_method_semaphore,
                 download_block_semaphore,
                 is_ready: AtomicBool::new(false),
                 timings: ArcSwap::new(Default::default()),
+                blockchain_config: ArcSwap::new(parsed_config),
                 jrpc_cache: Default::default(),
                 proto_cache: Default::default(),
                 gc_notify,
@@ -131,6 +151,20 @@ impl RpcState {
         self.inner.download_block_semaphore.acquire().await.unwrap()
     }
 
+    pub async fn acquire_run_get_method_permit(&self) -> RunGetMethodPermit {
+        let config = &self.config().run_get_method;
+        if config.max_vms == 0 {
+            return RunGetMethodPermit::Disabled;
+        }
+
+        let fut = self.inner.run_get_method_semaphore.clone().acquire_owned();
+        match tokio::time::timeout(config.max_wait_for_vm, fut).await {
+            Ok(Ok(permit)) => RunGetMethodPermit::Acquired(permit),
+            Ok(Err(_)) => RunGetMethodPermit::Disabled,
+            Err(_) => RunGetMethodPermit::Timeout,
+        }
+    }
+
     pub async fn bind_endpoint(&self) -> Result<RpcEndpoint> {
         RpcEndpoint::bind(self.clone()).await
     }
@@ -168,6 +202,17 @@ impl RpcState {
             .await;
     }
 
+    pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
+        self.inner.blockchain_config.load_full()
+    }
+
+    pub fn get_libraries(&self) -> Dict<HashBytes, LibDescr> {
+        match self.inner.mc_accounts.read().as_ref() {
+            Some(cache) => cache.libraries.clone(),
+            None => Dict::new(),
+        }
+    }
+
     pub fn get_raw_library(&self, hash: &HashBytes) -> Result<Option<Cell>> {
         let guard = self.inner.mc_accounts.read();
         match guard.as_ref() {
@@ -200,12 +245,13 @@ impl RpcState {
         &self,
         account: &StdAddr,
         last_lt: Option<u64>,
+        to_lt: u64,
     ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt)
+            .get_transactions(account, last_lt, to_lt)
             .map_err(RpcStateError::Internal)
     }
 
@@ -322,6 +368,8 @@ impl BlockSubscriber for RpcBlockSubscriber {
         Box::pin(async move {
             prepared.await??;
             if ctx.block.id().is_masterchain() {
+                self.inner.update_mc_info(&ctx.block)?;
+
                 // NOTE: Update snapshot only for masterchain because it is handled last.
                 // It is updated only after processing all shards and mc block.
                 if let Some(rpc_storage) = self.inner.storage.rpc_storage() {
@@ -333,20 +381,59 @@ impl BlockSubscriber for RpcBlockSubscriber {
     }
 }
 
+pub enum RunGetMethodPermit {
+    Acquired(tokio::sync::OwnedSemaphorePermit),
+    Timeout,
+    Disabled,
+}
+
 struct Inner {
     config: RpcConfig,
     storage: Storage,
     blockchain_rpc_client: BlockchainRpcClient,
+    mc_info: RwLock<LatestMcInfo>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
     download_block_semaphore: Semaphore,
+    run_get_method_semaphore: Arc<Semaphore>,
     is_ready: AtomicBool,
     timings: ArcSwap<StateTimings>,
+    blockchain_config: ArcSwap<LatestBlockchainConfig>,
     jrpc_cache: JrpcEndpointCache,
     proto_cache: ProtoEndpointCache,
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct LatestMcInfo {
+    block_id: Arc<BlockId>,
+    timings: GenTimings,
+}
+
+pub struct LatestBlockchainConfig {
+    pub raw: BlockchainConfigParams,
+    pub unpacked: tycho_vm::UnpackedConfig,
+    pub modifiers: tycho_vm::BehaviourModifiers,
+}
+
+impl Default for LatestBlockchainConfig {
+    fn default() -> Self {
+        Self {
+            raw: BlockchainConfigParams::from_raw(Cell::empty_cell()),
+            unpacked: tycho_vm::UnpackedConfig {
+                latest_storage_prices: None,
+                global_id: None,
+                mc_gas_prices: None,
+                gas_prices: None,
+                mc_fwd_prices: None,
+                fwd_prices: None,
+                size_limits_config: None,
+            },
+            modifiers: Default::default(),
+        }
+    }
 }
 
 impl Inner {
@@ -380,41 +467,42 @@ impl Inner {
             }
         }
 
-        let mc_state = shard_states.load_state(mc_block_id).await?;
+        let mut mc_state = shard_states.load_state(mc_block_id).await?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             let node_instance_id = self.storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
 
-            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
-                let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
-                    let state_info = state.as_ref();
-                    Ok(CachedAccounts {
-                        libraries: Default::default(),
-                        accounts: state_info.load_accounts()?.dict().clone(),
-                        mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+            let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
+                let state_info = state.as_ref();
+                Ok(CachedAccounts {
+                    libraries: Default::default(),
+                    accounts: state_info.load_accounts()?.dict().clone(),
+                    mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+                    timings: GenTimings {
+                        gen_lt: state_info.gen_lt,
                         gen_utime: state_info.gen_utime,
-                    })
-                };
+                    },
+                })
+            };
 
-                let shards = mc_state.shards()?.clone();
+            let shards = mc_state.shards()?.clone();
 
-                // Reset masterchain accounts and fill the cache
-                *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
+            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
+                // Reset masterchain accounts.
+                // NOTE: Consume shard state to prevent if from being fully loaded.
                 rpc_storage
                     .reset_accounts(mc_state, self.config.shard_split_depth)
                     .await?;
 
                 for item in shards.latest_blocks() {
                     let block_id = item?;
+
                     let state = shard_states.load_state(&block_id).await?;
 
-                    // Reset shard accounts and fill the cache
-                    self.sc_accounts
-                        .write()
-                        .insert(block_id.shard, make_cached_accounts(&state)?);
-
+                    // Reset shard accounts.
+                    // NOTE: Consume shard state to prevent if from being fully loaded.
                     rpc_storage
                         .reset_accounts(state, self.config.shard_split_depth)
                         .await?;
@@ -422,6 +510,27 @@ impl Inner {
 
                 // Rewrite RPC instance id
                 rpc_storage.store_instance_id(node_instance_id);
+
+                // Reload mc state.
+                mc_state = shard_states.load_state(mc_block_id).await?;
+            }
+
+            // Fill config.
+            if let Some(config) = load_blockchain_config(&mc_state) {
+                self.blockchain_config.store(config);
+            }
+
+            // Fill masterchain cache
+            *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
+
+            for item in shards.latest_blocks() {
+                let block_id = item?;
+                let state = shard_states.load_state(&block_id).await?;
+
+                // Fill accounts cache.
+                self.sc_accounts
+                    .write()
+                    .insert(block_id.shard, make_cached_accounts(&state)?);
             }
         }
 
@@ -436,32 +545,36 @@ impl Inner {
             // Search in masterchain cache
             match &*self.mc_accounts.read() {
                 None => Err(RpcStateError::NotReady),
-                Some(cache) => cache.get(&address.address),
+                Some(cache) => {
+                    let mc_info = self.mc_info.read().clone();
+                    cache.get(mc_info, &address.address)
+                }
             }
         } else {
             let cache = self.sc_accounts.read();
+            let mc_info = self.mc_info.read().clone();
+
             let mut state = Err(RpcStateError::NotReady);
 
             // Search in all shard caches
             let mut gen_utime = 0;
             let mut found = false;
             for (shard, cache) in &*cache {
-                if !shard.contains_account(&address.address) || cache.gen_utime < gen_utime {
+                if !shard.contains_account(&address.address) || cache.timings.gen_utime < gen_utime
+                {
                     continue;
                 }
 
-                gen_utime = cache.gen_utime;
-                state = cache.get(&address.address);
+                gen_utime = cache.timings.gen_utime;
+                state = cache.get(mc_info.clone(), &address.address);
                 found = true;
             }
 
             // Handle case when account is not found in any shard
             if !found && gen_utime > 0 {
                 state = Ok(LoadedAccountState::NotFound {
-                    timings: GenTimings {
-                        gen_lt: 0,
-                        gen_utime,
-                    },
+                    mc_block_id: mc_info.block_id,
+                    timings: mc_info.timings,
                 });
             }
 
@@ -515,6 +628,19 @@ impl Inner {
         Ok(())
     }
 
+    fn update_mc_info(&self, block: &BlockStuff) -> Result<()> {
+        let info = block.load_info()?;
+        let block_id = Arc::new(*block.id());
+        *self.mc_info.write() = LatestMcInfo {
+            block_id,
+            timings: GenTimings {
+                gen_lt: info.end_lt,
+                gen_utime: info.gen_utime,
+            },
+        };
+        Ok(())
+    }
+
     fn update_timings(&self, mc_gen_utime: u32, seqno: u32) {
         let time_diff = now_sec() as i64 - mc_gen_utime as i64;
         self.timings.store(Arc::new(StateTimings {
@@ -545,10 +671,19 @@ impl Inner {
             libraries,
             accounts,
             mc_ref_hanlde: state.ref_mc_state_handle().clone(),
-            gen_utime: block_info.gen_utime,
+            timings: GenTimings {
+                gen_lt: block_info.end_lt,
+                gen_utime: block_info.gen_utime,
+            },
         };
 
         if shard.is_masterchain() {
+            // Fill config.
+            if let Some(config) = load_blockchain_config(state) {
+                self.blockchain_config.store(config);
+            }
+
+            // Update accounts cache.
             *self.mc_accounts.write() = Some(cached);
         } else {
             let mut cache = self.sc_accounts.write();
@@ -608,14 +743,49 @@ impl Drop for Inner {
     }
 }
 
+fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockchainConfig>> {
+    let extra = mc_state.state_extra().ok()?;
+
+    // Fill config.
+    let now = mc_state.as_ref().gen_utime;
+    match tycho_vm::SmcInfoTonV6::unpack_config_partial(&extra.config.params, now) {
+        Ok(unpacked) => {
+            let mut modifiers = tycho_vm::BehaviourModifiers::default();
+            if let Ok(global_id) = extra.config.params.get_global_id() {
+                if let Ok(global) = extra.config.params.get_global_version() {
+                    modifiers.signature_with_id = global
+                        .capabilities
+                        .contains(GlobalCapability::CapSignatureWithId)
+                        .then_some(global_id);
+                }
+            }
+
+            Some(Arc::new(LatestBlockchainConfig {
+                raw: extra.config.params.clone(),
+                unpacked,
+                modifiers,
+            }))
+        }
+        Err(e) => {
+            tracing::error!(
+                block_id = %mc_state.block_id(),
+                "failed to unpack blockchain config: {e:?}",
+            );
+            None
+        }
+    }
+}
+
 pub enum LoadedAccountState {
     NotFound {
+        mc_block_id: Arc<BlockId>,
         timings: GenTimings,
     },
     Found {
+        mc_block_id: Arc<BlockId>,
         state: ShardAccount,
         mc_ref_handle: RefMcStateHandle,
-        gen_utime: u32,
+        timings: GenTimings,
     },
 }
 
@@ -623,22 +793,25 @@ struct CachedAccounts {
     libraries: Dict<HashBytes, LibDescr>,
     accounts: ShardAccountsDict,
     mc_ref_hanlde: RefMcStateHandle,
-    gen_utime: u32,
+    timings: GenTimings,
 }
 
 impl CachedAccounts {
-    fn get(&self, account: &HashBytes) -> Result<LoadedAccountState, RpcStateError> {
+    fn get(
+        &self,
+        mc_info: LatestMcInfo,
+        account: &HashBytes,
+    ) -> Result<LoadedAccountState, RpcStateError> {
         match self.accounts.get(account) {
             Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
+                mc_block_id: mc_info.block_id,
                 state,
                 mc_ref_handle: self.mc_ref_hanlde.clone(),
-                gen_utime: self.gen_utime,
+                timings: self.timings.max_by_lt(mc_info.timings),
             }),
             Ok(None) => Ok(LoadedAccountState::NotFound {
-                timings: GenTimings {
-                    gen_lt: 0,
-                    gen_utime: self.gen_utime,
-                },
+                mc_block_id: mc_info.block_id,
+                timings: self.timings.max_by_lt(mc_info.timings),
             }),
             Err(e) => Err(RpcStateError::Internal(e.into())),
         }

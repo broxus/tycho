@@ -8,9 +8,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use crate::endpoint::{
-    INVALID_PARAMS_CODE, INVALID_REQUEST_CODE, METHOD_NOT_FOUND_CODE, PARSE_ERROR_CODE,
-};
+use crate::util::error_codes::*;
 
 // Counters
 const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
@@ -33,6 +31,7 @@ macro_rules! declare_jrpc_method {
             ),*$(,)?
         }
     ) => {
+        #[allow(clippy::enum_variant_names)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
         #[serde(rename_all = "camelCase")]
         $vis enum $method_name_enum {
@@ -42,8 +41,7 @@ macro_rules! declare_jrpc_method {
             )*
         }
 
-
-        impl $crate::endpoint::jrpc::extractor::ParseParams for $method_name_enum {
+        impl $crate::util::jrpc_extractor::ParseParams for $method_name_enum {
             type Params = $method_enum;
 
             fn parse_params(self, params: &serde_json::value::RawValue) -> Result<Self::Params, serde_json::Error> {
@@ -72,19 +70,21 @@ macro_rules! declare_jrpc_method {
 
 pub(crate) use declare_jrpc_method;
 
-pub struct Jrpc<T: ParseParams> {
-    pub id: i64,
+pub struct Jrpc<ID, T: ParseParams> {
+    pub id: ID,
     pub params: <T as ParseParams>::Params,
     pub method: &'static str,
 }
 
 #[async_trait]
-impl<S, T> FromRequest<S> for Jrpc<T>
+impl<S, T, ID> FromRequest<S> for Jrpc<ID, T>
 where
+    JrpcErrorResponse<ID>: IntoResponse,
+    ID: Serialize + for<'de> Deserialize<'de>,
     T: ParseParams + for<'de> Deserialize<'de>,
     S: Send + Sync,
 {
-    type Rejection = JrpcErrorResponse;
+    type Rejection = JrpcErrorResponse<ID>;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         #[derive(Deserialize)]
@@ -101,9 +101,9 @@ where
         }
 
         #[derive(Deserialize)]
-        struct Request<'a, T> {
+        struct Request<'a, T, ID> {
             jsonrpc: &'a str,
-            id: i64,
+            id: ID,
             method: ParsedMethod<T>,
             #[serde(borrow)]
             params: &'a RawValue,
@@ -120,7 +120,7 @@ where
             }
         };
 
-        let (id, code, message) = match serde_json::from_slice::<Request<'_, T>>(&bytes) {
+        let (id, code, message) = match serde_json::from_slice::<Request<'_, T, ID>>(&bytes) {
             Ok(req) if req.jsonrpc == JSONRPC_VERSION => match req.method {
                 ParsedMethod::Known(known) => {
                     let method = known.method_name();
@@ -164,18 +164,19 @@ where
     }
 }
 
-pub struct JrpcOkResponse<T> {
-    pub id: i64,
+pub struct JrpcOkResponse<ID, T> {
+    pub id: ID,
     pub result: T,
 }
 
-impl<T> JrpcOkResponse<T> {
-    pub fn new(id: i64, result: T) -> Self {
+impl<ID, T> JrpcOkResponse<ID, T> {
+    pub fn new(id: ID, result: T) -> Self {
         Self { id, result }
     }
 }
 
-impl<T: serde::Serialize> Serialize for JrpcOkResponse<T> {
+// Default JRPC OK response.
+impl<T: Serialize> Serialize for JrpcOkResponse<i64, T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -190,30 +191,44 @@ impl<T: serde::Serialize> Serialize for JrpcOkResponse<T> {
     }
 }
 
-impl<T: serde::Serialize> IntoResponse for JrpcOkResponse<T> {
-    fn into_response(self) -> Response {
-        (StatusCode::OK, axum::Json(self)).into_response()
-    }
-}
-
-pub struct JrpcErrorResponse {
-    pub id: Option<i64>,
-    pub code: i32,
-    pub message: Cow<'static, str>,
-}
-
-impl Serialize for JrpcErrorResponse {
+// Strange JRPC OK response.
+impl<T: Serialize> Serialize for JrpcOkResponse<String, T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
 
-        #[derive(Serialize)]
-        struct Error<'a> {
-            code: i32,
-            message: &'a str,
-        }
+        let mut ser = serializer.serialize_struct("JrpcResponse", 4)?;
+        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+        ser.serialize_field("id", &self.id)?;
+        ser.serialize_field("result", &self.result)?;
+        ser.serialize_field("ok", &true)?;
+        ser.end()
+    }
+}
+
+impl<ID, T> IntoResponse for JrpcOkResponse<ID, T>
+where
+    Self: Serialize,
+{
+    fn into_response(self) -> Response {
+        (StatusCode::OK, axum::Json(self)).into_response()
+    }
+}
+
+pub struct JrpcErrorResponse<ID> {
+    pub id: Option<ID>,
+    pub code: i32,
+    pub message: Cow<'static, str>,
+}
+
+impl Serialize for JrpcErrorResponse<i64> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
 
         let mut ser = serializer.serialize_struct("JrpcResponse", 3)?;
         ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
@@ -226,12 +241,40 @@ impl Serialize for JrpcErrorResponse {
     }
 }
 
-impl IntoResponse for JrpcErrorResponse {
+impl Serialize for JrpcErrorResponse<String> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", 4)?;
+        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+        ser.serialize_field("id", &self.id)?;
+        ser.serialize_field("error", &Error {
+            code: self.code,
+            message: &self.message,
+        })?;
+        ser.serialize_field("ok", &false)?;
+        ser.end()
+    }
+}
+
+impl<ID> IntoResponse for JrpcErrorResponse<ID>
+where
+    Self: Serialize,
+{
     fn into_response(self) -> Response {
         metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
 
         (StatusCode::OK, axum::Json(self)).into_response()
     }
+}
+
+#[derive(Serialize)]
+struct Error<'a> {
+    code: i32,
+    message: &'a str,
 }
 
 const JSONRPC_FIELD: &str = "jsonrpc";
