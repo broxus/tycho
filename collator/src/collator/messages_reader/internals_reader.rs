@@ -14,7 +14,9 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
 };
-use crate::collator::types::{MsgsExecutionParamsExtension, ParsedMessage};
+use crate::collator::types::{
+    ConcurrentQueueStatistics, MsgsExecutionParamsExtension, ParsedMessage,
+};
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::{
     DiffZone, InternalMessageValue, QueueShardRange, QueueStatistics,
@@ -50,6 +52,8 @@ pub(super) struct InternalsPartitionReader<V: InternalMessageValue> {
     range_readers: BTreeMap<BlockSeqno, InternalsRangeReader<V>>,
 
     pub(super) all_ranges_fully_read: bool,
+
+    pub(super) remaning_msgs_stats: ConcurrentQueueStatistics,
 }
 
 pub(super) struct InternalsPartitionReaderContext {
@@ -63,6 +67,7 @@ pub(super) struct InternalsPartitionReaderContext {
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
     pub reader_state: InternalsPartitionReaderState,
+    pub remaning_msgs_stats: ConcurrentQueueStatistics,
 }
 
 impl<V: InternalMessageValue> InternalsPartitionReader<V> {
@@ -84,6 +89,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             reader_state: cx.reader_state,
             range_readers: Default::default(),
             all_ranges_fully_read: false,
+            remaning_msgs_stats: cx.remaning_msgs_stats,
         };
 
         reader.create_existing_range_readers()?;
@@ -358,7 +364,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         let msgs_stats = self
             .mq_adapter
             .get_statistics(&vec![self.partition_id].into_iter().collect(), ranges)?;
-        let remaining_msgs_stats = match fully_read {
+        let remaning_msgs_stats = match fully_read {
             true => QueueStatistics::default(),
             false => {
                 let mut remaning_msgs_stats = msgs_stats.clone();
@@ -367,7 +373,12 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     for (account_id, msgs) in range_reader_state.buffer.iter() {
                         let int_addr =
                             IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
-                        remaning_msgs_stats.decrement_for_account(int_addr, msgs.len() as u64);
+                        let count = msgs.len() as u64;
+                        // reduce in range reader stats
+                        remaning_msgs_stats.decrement_for_account(int_addr.clone(), count);
+                        // reduce in cumulative remaning stats
+                        self.remaning_msgs_stats
+                            .decrement_for_account(int_addr, count);
                     }
                 }
                 remaning_msgs_stats
@@ -375,7 +386,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         };
 
         range_reader_state.msgs_stats = Some(msgs_stats);
-        range_reader_state.remaning_msgs_stats = Some(remaining_msgs_stats);
+        range_reader_state.remaning_msgs_stats = Some(remaning_msgs_stats);
 
         Ok(())
     }
@@ -664,7 +675,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
                             metrics.read_existing_msgs_count += 1;
 
-                            // update remaining messages statistics in iterator
+                            // update remaining messages statistics in range reader
                             if let Some(remaning_msgs_stats) =
                                 range_reader.reader_state.remaning_msgs_stats.as_mut()
                             {
@@ -673,6 +684,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                                     1,
                                 );
                             }
+                            // and cumulative remaning stats by partition
+                            self.remaning_msgs_stats.decrement_for_account(
+                                int_msg.item.message.destination().clone(),
+                                1,
+                            );
                         }
                         None => {
                             range_reader.fully_read = true;
@@ -987,10 +1003,10 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
 
                 // check by previous partitions
                 for prev_par_reader in prev_par_readers.values() {
-                    for prev_reader in prev_par_reader.range_readers().values() {
-                        if prev_reader.reader_state.buffer.msgs_count() > 0 {
+                    for prev_par_range_reader in prev_par_reader.range_readers().values() {
+                        if prev_par_range_reader.reader_state.buffer.msgs_count() > 0 {
                             check_ops_count.saturating_add_assign(1);
-                            if prev_reader
+                            if prev_par_range_reader
                                 .reader_state
                                 .buffer
                                 .account_messages_count(account_id)
@@ -999,23 +1015,23 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                                 return (true, check_ops_count);
                             }
                         }
-                        if !prev_reader.fully_read {
-                            check_ops_count.saturating_add_assign(1);
-                            if prev_reader
-                                .reader_state
-                                .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
-                            {
-                                return (true, check_ops_count);
-                            }
-                        }
+                    }
+                    // check stats in previous partition
+                    check_ops_count.saturating_add_assign(1);
+                    if prev_par_reader
+                        .remaning_msgs_stats
+                        .statistics()
+                        .contains_key(&dst_addr)
+                    {
+                        return (true, check_ops_count);
                     }
                 }
 
                 // check by previous ranges in current partition
-                for prev_reader in prev_range_readers.values() {
-                    if prev_reader.reader_state.buffer.msgs_count() > 0 {
+                for prev_range_reader in prev_range_readers.values() {
+                    if prev_range_reader.reader_state.buffer.msgs_count() > 0 {
                         check_ops_count.saturating_add_assign(1);
-                        if prev_reader
+                        if prev_range_reader
                             .reader_state
                             .buffer
                             .account_messages_count(account_id)
@@ -1024,9 +1040,9 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                             return (true, check_ops_count);
                         }
                     }
-                    if !prev_reader.fully_read {
+                    if !prev_range_reader.fully_read {
                         check_ops_count.saturating_add_assign(1);
-                        if prev_reader
+                        if prev_range_reader
                             .reader_state
                             .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
                         {

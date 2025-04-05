@@ -224,7 +224,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
         if let Some(partition_stats) = cumulative_statistics.result().get(&1) {
-            new_messages.init_partition_router(1, partition_stats.statistics());
+            new_messages.init_partition_router(1, partition_stats.initial_stats.statistics());
         }
 
         // create externals reader
@@ -283,6 +283,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts.clone(),
                 reader_state: par_reader_state,
+                remaning_msgs_stats: res
+                    .internal_queue_statistics
+                    .result()
+                    .get(&0)
+                    .map(|par| par.remaning_stats.clone())
+                    .unwrap_or_default(),
             },
             mq_adapter.clone(),
         )?;
@@ -313,20 +319,17 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts,
                 reader_state: par_reader_state,
+                remaning_msgs_stats: res
+                    .internal_queue_statistics
+                    .result()
+                    .get(&1)
+                    .map(|par| par.remaning_stats.clone())
+                    .unwrap_or_default(),
             },
             mq_adapter,
         )?;
         res.internals_partition_readers.insert(1, par_reader);
         res.readers_stages.insert(1, initial_reader_stage);
-
-        // get full statistics from partition 1 and init partition router in new messages state
-        // let par_1_all_ranges_msgs_stats = res
-        //     .internals_partition_readers
-        //     .get(&1)
-        //     .unwrap()
-        //     .range_readers()
-        //     .values()
-        //     .filter_map(|r| r.reader_state.msgs_stats.as_ref());
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             readers_stages = ?res.readers_stages,

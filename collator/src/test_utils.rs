@@ -26,7 +26,7 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
                 .with_default_directive(level_filter.into())
                 .from_env_lossy(),
         )
-        .with(tracing_subscriber::fmt::layer().with_ansi(true).boxed())
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).boxed())
         .try_init()
         .ok();
 }
