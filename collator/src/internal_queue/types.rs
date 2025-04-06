@@ -359,6 +359,13 @@ impl QueueStatistics {
         &self.statistics
     }
 
+    pub fn increment_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        self.statistics
+            .entry(account_addr)
+            .and_modify(|value| *value += count)
+            .or_insert(count);
+    }
+
     pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
         if let hash_map::Entry::Occupied(mut occupied) = self.statistics.entry(account_addr) {
             let value = occupied.get_mut();
