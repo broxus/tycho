@@ -201,6 +201,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         };
 
         // get cumulative internals stats
+        let cumulative_stats_just_loaded;
         let mut cumulative_statistics = if cx.is_first_block_after_prev_master {
             // TODO use dynamic partitions
             let partitions = vec![0, 1].into_iter().collect();
@@ -214,8 +215,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 cx.mc_state_gen_lt,
                 &cx.mc_top_shards_end_lts.iter().copied().collect(),
             )?;
+            cumulative_stats_just_loaded = true;
             cumulative_statistics
         } else {
+            cumulative_stats_just_loaded = false;
             cx.reader_state
                 .internals
                 .cumulative_statistics
@@ -289,6 +292,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .get(&0)
                     .map(|par| par.remaning_stats.clone())
                     .unwrap_or_default(),
+                remaning_msgs_stats_just_loaded: cumulative_stats_just_loaded,
             },
             mq_adapter.clone(),
         )?;
@@ -325,6 +329,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .get(&1)
                     .map(|par| par.remaning_stats.clone())
                     .unwrap_or_default(),
+                remaning_msgs_stats_just_loaded: cumulative_stats_just_loaded,
             },
             mq_adapter,
         )?;

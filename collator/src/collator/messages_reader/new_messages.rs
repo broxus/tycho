@@ -165,8 +165,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                         buffer: Default::default(),
 
                         // we do not use messages satistics when reading new messages
-                        msgs_stats: Default::default(),
-                        remaning_msgs_stats: Default::default(),
+                        msgs_stats: None,
+                        remaning_msgs_stats: None,
+                        read_stats: Default::default(),
 
                         shards: new_shard_reader_states,
                         skip_offset: 0,
