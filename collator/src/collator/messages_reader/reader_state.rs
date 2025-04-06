@@ -414,6 +414,8 @@ pub struct InternalsRangeReaderState {
     /// Statistics shows remaining not read messages from currebt range.
     /// We reduce initial statistics by the number of messages that were read.
     pub remaning_msgs_stats: Option<QueueStatistics>,
+    /// Statistics shows read messages in current range
+    pub read_stats: QueueStatistics,
 
     pub shards: BTreeMap<ShardIdent, ShardReaderState>,
 
@@ -443,6 +445,7 @@ impl InternalsRangeReaderState {
             buffer: Default::default(),
             msgs_stats: None,
             remaning_msgs_stats: None,
+            read_stats: Default::default(),
             skip_offset: range_info.skip_offset,
             processed_offset: range_info.processed_offset,
             shards: Default::default(),
@@ -483,6 +486,10 @@ impl std::fmt::Debug for DebugInternalsRangeReaderState<'_> {
                     .remaning_msgs_stats
                     .as_ref()
                     .map(|s| s.statistics().len()),
+            )
+            .field(
+                "read_stats.accounts_count",
+                &self.0.read_stats.statistics().len(),
             )
             .field(
                 "shards",
