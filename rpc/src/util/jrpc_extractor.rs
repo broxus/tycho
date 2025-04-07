@@ -2,9 +2,9 @@ use std::borrow::Cow;
 
 use axum::async_trait;
 use axum::extract::{FromRequest, Request};
-use axum::http::StatusCode;
+use axum::http::{self, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -12,6 +12,11 @@ use crate::util::error_codes::*;
 
 // Counters
 const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
+
+pub const JSON_HEADERS: [(HeaderName, HeaderValue); 1] = [(
+    http::header::CONTENT_TYPE,
+    HeaderValue::from_static("application/json"),
+)];
 
 pub trait ParseParams {
     type Params;
@@ -211,9 +216,25 @@ impl<T: Serialize> Serialize for JrpcOkResponse<String, T> {
 impl<ID, T> IntoResponse for JrpcOkResponse<ID, T>
 where
     Self: Serialize,
+    JrpcErrorResponse<ID>: Serialize,
 {
     fn into_response(self) -> Response {
-        (StatusCode::OK, axum::Json(self)).into_response()
+        let mut buf = BytesMut::with_capacity(128).writer();
+        let data = match serde_json::to_writer(&mut buf, &self) {
+            Ok(()) => buf.into_inner().freeze(),
+            Err(e) => {
+                buf.get_mut().clear();
+                serde_json::to_writer(&mut buf, &JrpcErrorResponse {
+                    id: Some(self.id),
+                    code: BAD_RESPONSE_CODE,
+                    message: format!("failed to serialize response: {e}").into(),
+                })
+                .unwrap();
+
+                buf.into_inner().freeze()
+            }
+        };
+        (JSON_HEADERS, data).into_response()
     }
 }
 
