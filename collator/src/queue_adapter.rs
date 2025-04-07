@@ -189,8 +189,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     ) -> Result<()> {
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            block_id_short = %block_id_short,
-            diff_hash = %diff_hash,
+            min_message = ?diff.min_message(),
+            max_message = ?diff.max_message(),
             "apply_diff started"
         );
 

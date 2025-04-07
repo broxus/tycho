@@ -252,13 +252,29 @@ impl std::fmt::Debug for QueueKey {
 
 impl std::fmt::Display for QueueKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut short_hash = [0u8; 8];
-        hex::encode_to_slice(&self.hash.as_array()[..4], &mut short_hash).ok();
-
-        // SAFETY: output is guaranteed to contain only [0-9a-f]
-        let short_hash = unsafe { std::str::from_utf8_unchecked(&short_hash) };
+        let short_hash = get_short_hash_string(&self.hash);
 
         write!(f, "LT_HASH({}_{short_hash})", self.lt)
+    }
+}
+
+pub fn get_short_hash_string(hash: &HashBytes) -> String {
+    let mut short_hash = [0u8; 8];
+    hex::encode_to_slice(&hash.as_array()[..4], &mut short_hash).ok();
+
+    // SAFETY: output is guaranteed to contain only [0-9a-f]
+    let res = unsafe { std::str::from_utf8_unchecked(&short_hash) };
+
+    res.to_owned()
+}
+
+pub fn get_short_addr_string(addr: &IntAddr) -> String {
+    match addr {
+        IntAddr::Std(addr) => {
+            let addr_hash_short = get_short_hash_string(&addr.address);
+            format!("{}:{}", addr.workchain, addr_hash_short)
+        }
+        IntAddr::Var(_) => unreachable!(),
     }
 }
 

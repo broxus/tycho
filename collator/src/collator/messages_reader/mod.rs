@@ -850,9 +850,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         //--------------------
         // read internals
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
-            let par_reader = self
+            let mut par_reader = self
                 .internals_partition_readers
-                .get_mut(par_id)
+                .remove(par_id)
                 .context("reader for partition should exist")?;
 
             // check if we have FinishExternals stage in any partition
@@ -868,12 +868,16 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             if read_mode == GetNextMessageGroupMode::Refill
                 && par_reader.last_range_offset_reached()
             {
+                self.internals_partition_readers.insert(*par_id, par_reader);
                 continue;
             }
 
             match par_reader_stage {
                 MessagesReaderStage::ExistingAndExternals => {
-                    let read_metrics = par_reader.read_existing_messages_into_buffers(read_mode)?;
+                    let read_metrics = par_reader.read_existing_messages_into_buffers(
+                        read_mode,
+                        &self.internals_partition_readers,
+                    )?;
                     metrics_by_partitions.get_mut(*par_id).append(&read_metrics);
                 }
                 MessagesReaderStage::FinishPreviousExternals
@@ -888,6 +892,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                         .append(&read_new_messages_res.metrics);
                 }
             }
+
+            self.internals_partition_readers.insert(*par_id, par_reader);
         }
 
         //--------------------
@@ -972,6 +978,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 has_pending_new_messages_for_partition,
                 &partitions_readers,
                 &msg_groups,
+                &self.internals_partition_readers,
             )?;
             msg_groups.insert(*par_id, msg_group);
             metrics_by_partitions.get_mut(*par_id).append(&metrics);
@@ -1083,6 +1090,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_messages_for_partition(
         read_mode: GetNextMessageGroupMode,
         par_reader_stage: &mut MessagesReaderStage,
@@ -1091,6 +1099,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         has_pending_new_messages_for_partition: bool,
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
+        other_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();
 
@@ -1254,8 +1263,20 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // if all read externals collected from current block collation
         // then we can finalize existing internals read state
         // and switch to the "new messages processing" stage
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            curr_partition_id = par_reader.partition_id,
+            prev_partitions_all_read_existing_collected = ?DebugIter(prev_partitions_readers.iter().map(|(par_id, par)| (*par_id, par.all_read_existing_messages_collected()))),
+            other_partitions_all_read_existing_collected = ?DebugIter(other_partitions_readers.iter().map(|(par_id, par)| (*par_id, par.all_read_existing_messages_collected()))),
+            "check if read existing messages collected in other partitions",
+        );
         if all_read_externals_collected
             && *par_reader_stage == MessagesReaderStage::FinishCurrentExternals
+            && !prev_partitions_readers
+                .values()
+                .any(|par| !par.all_read_existing_messages_collected())
+            && !other_partitions_readers
+                .values()
+                .any(|par| !par.all_read_existing_messages_collected())
         {
             // finalize existing intenals read state
             // drop all ranges except the last one
