@@ -106,10 +106,8 @@ async fn test_refill_messages() -> Result<()> {
         externals_expire_timeout: 10,
         open_ranges_limit: 3,
         par_0_ext_msgs_count_limit: 10,
-        // 1) fails when use partitions (par_0_int_msgs_count_limit: 50)
-        //      partition router is initializing incorrectly because we use statistics only from ranges of the previous block
-        //      and those ranges include only part of diffs because of range messages limit
-        par_0_int_msgs_count_limit: 5000,
+        // isolated partition logic executed when partition 0 messages count limit is <= 50
+        par_0_int_msgs_count_limit: 50,
         group_slots_fractions,
         range_messages_limit: 20,
     });
@@ -749,6 +747,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         self.last_block_gen_lt = self.curr_lt;
         self.last_queue_diff_hash = queue_diff_hash;
 
+        tracing::trace!(last_block_gen_lt = ?self.last_block_gen_lt);
+
         // update working state
         self.primary_working_state = Some(TestWorkingState {
             anchors_cache,
@@ -766,6 +766,14 @@ impl<V: InternalMessageValue> TestCollator<V> {
         cx: MessagesReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<MessagesReader<V>> {
+        tracing::trace!(
+            for_shard_id = %cx.for_shard_id,
+            block_seqno = cx.block_seqno,
+            prev_state_gen_lt = cx.prev_state_gen_lt,
+            mc_state_gen_lt = cx.mc_state_gen_lt,
+            mc_top_shards_end_lts = ?cx.mc_top_shards_end_lts,
+            all_shards_processed_to_by_partitions = ?cx.all_shards_processed_to_by_partitions,
+        );
         MessagesReader::new(cx, mq_adapter)
     }
 
@@ -775,6 +783,14 @@ impl<V: InternalMessageValue> TestCollator<V> {
         cx: MessagesReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<MessagesReader<V>> {
+        tracing::trace!(
+            for_shard_id = %cx.for_shard_id,
+            block_seqno = cx.block_seqno,
+            prev_state_gen_lt = cx.prev_state_gen_lt,
+            mc_state_gen_lt = cx.mc_state_gen_lt,
+            mc_top_shards_end_lts = ?cx.mc_top_shards_end_lts,
+            all_shards_processed_to_by_partitions = ?cx.all_shards_processed_to_by_partitions,
+        );
         MessagesReader::new(cx, mq_adapter)
     }
 
