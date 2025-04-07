@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, ensure, Context, Result};
 use everscale_types::models::{BlockIdShort, IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::queue::{get_short_addr_string, QueueKey, QueuePartitionIdx};
 
 use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
@@ -22,6 +22,7 @@ use crate::internal_queue::types::{DiffZone, InternalMessageValue, QueueShardRan
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};
+use crate::types::DebugIter;
 
 //=========
 // INTERNALS READER
@@ -90,6 +91,15 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             all_ranges_fully_read: false,
             remaning_msgs_stats: cx.remaning_msgs_stats,
         };
+
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            partition_id = reader.partition_id,
+            remaning_msgs_stats = ?DebugIter(reader.remaning_msgs_stats.statistics().iter().map(|item| {
+                let (addr, count) = item.pair();
+                (get_short_addr_string(addr), *count)
+            })),
+            "cumulative remaning_msgs_stats",
+        );
 
         reader.create_existing_range_readers(cx.remaning_msgs_stats_just_loaded)?;
 
@@ -211,12 +221,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             .range_readers
             .pop_last()
             .context("partition reader should have at least one range reader when retain_only_last_range_reader() called")?;
-
-        if last_seqno < self.block_seqno {
-            // set that not all ranges fully read
-            // to force create and read next range reader for block
-            self.all_ranges_fully_read = false;
-        }
 
         self.range_readers.clear();
         self.range_readers.insert(last_seqno, last_range_reader);
@@ -340,10 +344,49 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
         // if remaining cumulative stats just loaded
         // then we need to reduce it by the read state
+        // only if current range is above processed_to
         if reduce_cumulative_remaning_stats {
-            for (account_addr, &count) in range_reader_state.read_stats.statistics() {
-                self.remaning_msgs_stats
-                    .decrement_for_account(account_addr.clone(), count);
+            let current_shard_processed_to_key = self
+                .reader_state
+                .processed_to
+                .get(&self.for_shard_id)
+                .copied()
+                .unwrap_or_default();
+            let current_shard_range_to_key = range_reader_state
+                .shards
+                .get(&self.for_shard_id)
+                .map(|r_s| QueueKey::max_for_lt(r_s.to))
+                .unwrap_or_default();
+            if current_shard_range_to_key > current_shard_processed_to_key {
+                // ensure all other shards range to key is not below processed_to
+                for (shard_id, &processed_to_key) in &self.reader_state.processed_to {
+                    if shard_id == &self.for_shard_id {
+                        continue;
+                    }
+
+                    let shard_range_to_key = range_reader_state
+                        .shards
+                        .get(shard_id)
+                        .map(|r_s| QueueKey::max_for_lt(r_s.to))
+                        .unwrap();
+                    ensure!(shard_range_to_key >= processed_to_key);
+                }
+
+                // reduce remaining stats
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    partition_id = self.partition_id,
+                    seqno,
+                    read_stats = ?DebugIter(range_reader_state.read_stats.statistics().iter().map(|(addr, count)| (addr.to_string(), *count))),
+                    remaning_msgs_stats = ?DebugIter(self.remaning_msgs_stats.statistics().iter().map(|item| {
+                        let (addr, count) = item.pair();
+                        (get_short_addr_string(addr), *count)
+                    })),
+                    "reduce cumulative remaning_msgs_stats",
+                );
+                for (account_addr, &count) in range_reader_state.read_stats.statistics() {
+                    self.remaning_msgs_stats
+                        .decrement_for_account(account_addr.clone(), count);
+                }
             }
         }
 
@@ -563,13 +606,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     pub fn read_existing_messages_into_buffers(
         &mut self,
         read_mode: GetNextMessageGroupMode,
+        other_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
     ) -> Result<MessagesReaderMetrics, CollatorError> {
         let mut metrics = MessagesReaderMetrics::default();
-
-        // skip if all open ranges fully read
-        if self.all_ranges_fully_read {
-            return Ok(metrics);
-        }
 
         metrics.read_existing_messages_timer.start();
 
@@ -734,14 +773,36 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 if last_seqno < self.block_seqno {
                     // if open ranges limit not reached
                     if !self.open_ranges_limit_reached() {
-                        if read_mode == GetNextMessageGroupMode::Continue {
-                            let range_seqno = self.create_append_next_range_reader()?;
-                            ranges_seqno.push_back(range_seqno);
+                        // check if open ranges limit reached in other partitions
+                        let open_ranges_limit_reached_by_others: BTreeMap<_, _> = other_par_readers
+                            .iter()
+                            .map(|(par_id, par)| (*par_id, par.open_ranges_limit_reached()))
+                            .collect();
+                        let open_ranges_limit_reached_in_others =
+                            open_ranges_limit_reached_by_others.values().any(|val| *val);
+                        if !open_ranges_limit_reached_in_others {
+                            if read_mode == GetNextMessageGroupMode::Continue {
+                                let range_seqno = self.create_append_next_range_reader()?;
+                                ranges_seqno.push_back(range_seqno);
+                            } else {
+                                // do not create next range reader on refill
+                                tracing::debug!(target: tracing_targets::COLLATOR,
+                                    last_seqno,
+                                    "internals reader: do not create next range reader on Refill",
+                                );
+                                self.all_ranges_fully_read = true;
+                                break;
+                            }
                         } else {
-                            // do not create next range reader on refill
+                            // otherwise set all open ranges read
+                            // to collect messages from all open ranges
+                            // and then create next range
                             tracing::debug!(target: tracing_targets::COLLATOR,
+                                partition_id = self.partition_id,
                                 last_seqno,
-                                "internals reader: do not create next range reader on Refill",
+                                open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                                open_ranges_limit_reached_by_others = ?DebugIter(open_ranges_limit_reached_by_others.iter()),
+                                "internals reader: open ranges limit reached in other partitions",
                             );
                             self.all_ranges_fully_read = true;
                             break;
