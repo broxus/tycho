@@ -1,9 +1,7 @@
 use std::sync::OnceLock;
 
 use everscale_crypto::ed25519;
-use everscale_types::abi::{
-    AbiHeaderType, AbiType, AbiValue, AbiVersion, Function, IntoAbi, WithAbiType,
-};
+use everscale_types::abi::{AbiHeaderType, AbiVersion, Function, IntoAbi, WithAbiType};
 use everscale_types::models::{StateInit, StdAddr};
 use everscale_types::prelude::*;
 
@@ -51,45 +49,12 @@ pub mod methods {
         })
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, WithAbiType, IntoAbi)]
     pub struct SendTransactionInputs {
         pub dest: StdAddr,
         pub value: u128,
         pub bounce: bool,
         pub flags: u8,
         pub payload: Cell,
-    }
-
-    // TODO: Replace with macros
-    impl WithAbiType for SendTransactionInputs {
-        fn abi_type() -> AbiType {
-            AbiType::tuple([
-                StdAddr::abi_type().named("dest"),
-                u128::abi_type().named("value"),
-                bool::abi_type().named("bounce"),
-                u8::abi_type().named("flags"),
-                Cell::abi_type().named("payload"),
-            ])
-        }
-    }
-
-    // TODO: Replace with macros
-    impl IntoAbi for SendTransactionInputs {
-        fn as_abi(&self) -> AbiValue {
-            AbiValue::tuple([
-                self.dest.as_abi().named("dest"),
-                self.value.into_abi().named("value"),
-                self.bounce.into_abi().named("bounce"),
-                self.flags.into_abi().named("flags"),
-                self.payload.as_abi().named("payload"),
-            ])
-        }
-
-        fn into_abi(self) -> AbiValue
-        where
-            Self: Sized,
-        {
-            self.as_abi()
-        }
     }
 }

@@ -956,7 +956,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=90cd8f576e8cd3898e2524b70de8ad73aef8e3fd#90cd8f576e8cd3898e2524b70de8ad73aef8e3fd"
+source = "git+https://github.com/broxus/everscale-types.git?rev=acc7b79eee0712c48e7678ceafaf143cad2e4ca9#acc7b79eee0712c48e7678ceafaf143cad2e4ca9"
 dependencies = [
  "ahash",
  "anyhow",
@@ -967,6 +967,7 @@ dependencies = [
  "crc32c",
  "ed25519-dalek",
  "everscale-crypto",
+ "everscale-types-abi-proc",
  "everscale-types-proc",
  "hex",
  "num-bigint",
@@ -983,9 +984,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "everscale-types-abi-proc"
+version = "0.1.0"
+source = "git+https://github.com/broxus/everscale-types.git?rev=acc7b79eee0712c48e7678ceafaf143cad2e4ca9#acc7b79eee0712c48e7678ceafaf143cad2e4ca9"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
+]
+
+[[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=90cd8f576e8cd3898e2524b70de8ad73aef8e3fd#90cd8f576e8cd3898e2524b70de8ad73aef8e3fd"
+source = "git+https://github.com/broxus/everscale-types.git?rev=acc7b79eee0712c48e7678ceafaf143cad2e4ca9#acc7b79eee0712c48e7678ceafaf143cad2e4ca9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3141,9 +3153,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4e0d6f1ad91e0776280a494c5c5ed10922988b6c4475a11dd92c73c6838b381"
+checksum = "fa0cfc23477a4135cb40334544c149647f26239c83034ab01049f384528af4c5"
 dependencies = [
  "bytes",
  "digest",
@@ -3155,9 +3167,9 @@ dependencies = [
 
 [[package]]
 name = "tl-proto-proc"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c1a51b272c6c86781e53fb392cc1e09aa857158ff8ef074ae13e926e1f5dd80"
+checksum = "031cadd2049e03a287e8ac7663b5968cda07d7d10dd5b1cd734ebe234d135bb8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3498,6 +3510,7 @@ dependencies = [
  "hex",
  "humantime",
  "metrics",
+ "num-bigint",
  "parking_lot",
  "rand",
  "rayon",
