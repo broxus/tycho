@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -15,12 +17,14 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
+use tycho_storage::{
+    BlacklistedAccounts, CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
+};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
-use crate::config::{RpcConfig, RpcStorage, TransactionsGcConfig};
+use crate::config::{BlackListConfig, RpcConfig, RpcStorage, TransactionsGcConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
 
@@ -34,16 +38,32 @@ impl RpcStateBuilder {
         let (storage, blockchain_rpc_client) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
-        let gc_handle = match &self.config.storage {
-            RpcStorage::Full { gc, .. } => gc.as_ref().map(|config| {
-                tokio::spawn(transactions_gc(
+
+        let mut gc_handle = None;
+        let mut blacklisted_accounts = None::<BlacklistedAccounts>;
+        let mut blacklist_watcher_handle = None;
+
+        if let RpcStorage::Full {
+            gc, blacklist_path, ..
+        } = &self.config.storage
+        {
+            if let Some(config) = gc {
+                gc_handle = Some(tokio::spawn(transactions_gc(
                     config.clone(),
                     storage.clone(),
                     gc_notify.clone(),
-                ))
-            }),
-            RpcStorage::StateOnly => None,
-        };
+                )));
+            }
+
+            if let Some(path) = blacklist_path {
+                let accounts = BlacklistedAccounts::default();
+                blacklisted_accounts = Some(accounts.clone());
+                blacklist_watcher_handle = Some(tokio::spawn(watch_blacklisted_accounts(
+                    path.clone(),
+                    accounts,
+                )));
+            }
+        }
 
         let download_block_semaphore =
             tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
@@ -82,6 +102,8 @@ impl RpcStateBuilder {
                 proto_cache: Default::default(),
                 gc_notify,
                 gc_handle,
+                blacklisted_accounts,
+                blacklist_watcher_handle,
             }),
         }
     }
@@ -404,6 +426,9 @@ struct Inner {
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
+    // RPC blacklist
+    blacklisted_accounts: Option<BlacklistedAccounts>,
+    blacklist_watcher_handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -592,7 +617,9 @@ impl Inner {
         }
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
-            rpc_storage.update(block.clone()).await?;
+            rpc_storage
+                .update(block.clone(), self.blacklisted_accounts.as_ref())
+                .await?;
         }
         Ok(())
     }
@@ -740,6 +767,10 @@ impl Drop for Inner {
         if let Some(handle) = self.gc_handle.take() {
             handle.abort();
         }
+
+        if let Some(handle) = self.blacklist_watcher_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -848,6 +879,40 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
                 min_lt,
                 "failed to remove old transactions: {e:?}"
             );
+        }
+    }
+}
+
+pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: BlacklistedAccounts) {
+    tracing::info!(
+        config_path = %config_path.display(),
+        "started watching for changes in rpc blacklist config"
+    );
+
+    let get_metadata = || {
+        std::fs::metadata(&config_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+    };
+
+    let mut last_modified = None;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+
+        let modified = get_metadata();
+        if last_modified == modified {
+            continue;
+        }
+        last_modified = modified;
+
+        // Handle
+        match BlackListConfig::load_from(&config_path) {
+            Ok(config) => accounts.update(config.accounts),
+            Err(e) => {
+                tracing::error!("failed to load blacklist config: {e}");
+            }
         }
     }
 }
