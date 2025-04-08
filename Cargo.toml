@@ -54,6 +54,7 @@ exponential-backoff = "1.2.1"
 fdlimit = "0.3.0"
 futures-util = "0.3"
 getip = "0.2.0"
+governor = { version = "0.10.0", default-features = false }
 hex = "0.4"
 humantime = "2"
 indexmap = "2.2"

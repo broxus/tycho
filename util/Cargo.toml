@@ -40,13 +40,14 @@ tracing-stackdriver = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
-
 tycho-util-proc = { workspace = true }
+governor = { workspace = true, optional = true, features = ["std", "jitter"], default-features = false }
+pin-project-lite = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros", "io-util"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 
@@ -62,6 +63,11 @@ cli = [
     "tokio/signal",
     "metrics-exporter-prometheus",
     "tikv-jemalloc-ctl",
+]
+governor = [
+    "dep:governor",
+    "dep:pin-project-lite",
+    "dep:bytesize",
 ]
 
 [[bench]]
