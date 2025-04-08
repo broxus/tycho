@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -11,12 +11,42 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
 use crate::tables::Transactions;
 use crate::util::*;
+
+#[derive(Default, Clone)]
+pub struct BlacklistedAccounts {
+    inner: Arc<BlacklistedAccountsInner>,
+}
+
+impl BlacklistedAccounts {
+    pub fn update<I: IntoIterator<Item = StdAddr>>(&self, items: I) {
+        let items = items
+            .into_iter()
+            .map(|item| {
+                let mut key = [0; 33];
+                key[0] = item.workchain as u8;
+                key[1..33].copy_from_slice(item.address.as_array());
+                key
+            })
+            .collect::<FastHashSet<_>>();
+
+        self.inner.accounts.store(Arc::new(items));
+    }
+
+    fn load(&self) -> Arc<FastHashSet<AddressKey>> {
+        self.inner.accounts.load_full()
+    }
+}
+
+#[derive(Default)]
+struct BlacklistedAccountsInner {
+    accounts: ArcSwap<FastHashSet<AddressKey>>,
+}
 
 pub struct RpcStorage {
     db: RpcDb,
@@ -596,7 +626,11 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
-    pub async fn update(&self, block: BlockStuff) -> Result<()> {
+    pub async fn update(
+        &self,
+        block: BlockStuff,
+        rpc_blacklist: Option<&BlacklistedAccounts>,
+    ) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -605,6 +639,8 @@ impl RpcStorage {
 
         let span = tracing::Span::current();
         let db = self.db.clone();
+
+        let rpc_blacklist = rpc_blacklist.map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
@@ -657,6 +693,8 @@ impl RpcStorage {
 
             let mut tx_buffer = Vec::with_capacity(1024);
 
+            let rpc_blacklist = rpc_blacklist.as_deref();
+
             // Iterate through all changed accounts in the block
             let mut non_empty_batch = false;
             for item in account_blocks.iter() {
@@ -703,6 +741,13 @@ impl RpcStorage {
                         };
                         if let Some(action_phase) = action_phase {
                             has_special_actions |= action_phase.special_actions > 0;
+                        }
+                    }
+
+                    // Don't write tx for account from blacklist
+                    if let Some(blacklist) = &rpc_blacklist {
+                        if blacklist.contains(&tx_info[..33]) {
+                            continue;
                         }
                     }
 
@@ -1160,6 +1205,8 @@ const fn extract_tag(shard: &ShardIdent) -> u64 {
     let prefix = shard.prefix();
     prefix & (!prefix).wrapping_add(1)
 }
+
+type AddressKey = [u8; 33];
 
 const TX_MIN_LT: &[u8] = b"tx_min_lt";
 const TX_GC_RUNNING: &[u8] = b"tx_gc_running";
