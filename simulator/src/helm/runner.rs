@@ -1,42 +1,37 @@
-use std::ffi::OsString;
 use std::io;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 use clap::ValueEnum;
 
-use crate::config::ServiceConfig;
+use crate::config::SimulatorConfig;
 
-pub struct HelmRunner {
-    service_config: ServiceConfig,
-    pub cluster_type: ClusterType,
-}
+const HELM_CHART: &str = "tycho"; // name in `Chart.yaml`
 
-#[derive(ValueEnum, Clone, Debug, Copy)]
+pub struct HelmRunner;
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum ClusterType {
+    #[default]
     K3S,
-    GKE,
+    Gke,
 }
 
 impl HelmRunner {
-    pub fn new(service_config: ServiceConfig, cluster_type: ClusterType) -> Self {
-        Self {
-            service_config,
-            cluster_type,
-        }
-    }
-
-    pub fn upload_image(&self, image: &str) -> Result<(), io::Error> {
-        match self.cluster_type {
+    pub fn upload_image(
+        config: &SimulatorConfig,
+        cluster_type: ClusterType,
+    ) -> Result<(), io::Error> {
+        match cluster_type {
             ClusterType::K3S => {
-                println!("Uploading image {} to K3S cluster", image);
-                //  docker save tycho-network | sudo k3s ctr images import -
+                println!("Uploading image {} to K3S cluster", config.pod.image_name);
+                //  docker save tycho-simulated | sudo k3s ctr images import -
                 let pipe = Command::new("docker")
                     .arg("save")
-                    .arg(image)
+                    .arg(&config.pod.image_name)
                     .stdout(Stdio::piped())
                     .spawn()?;
-                let mut output = Command::new("sudo")
+                Command::new("sudo")
                     .arg("k3s")
                     .arg("ctr")
                     .arg("images")
@@ -44,86 +39,91 @@ impl HelmRunner {
                     .arg("-")
                     .stdin(pipe.stdout.expect("Failed to capture stdout"))
                     .stdout(Stdio::piped())
-                    .spawn()?;
-                output.wait()?;
+                    .spawn()?
+                    .wait()?;
                 Ok(())
             }
-            ClusterType::GKE => {
-                println!("Uploading image {} to GKE cluster", image);
-                todo!()
+            ClusterType::Gke => {
+                println!("Uploading image {} to GKE cluster", config.pod.image_name);
+                panic!("unimplemented: upload image to GKE");
             }
         }
     }
 
-    pub fn exec_command(&self, pod_name: &str, command: &[String]) -> Result<String, io::Error> {
-        let output = Command::new("kubectl")
+    pub fn exec_command(
+        pod_name: &str,
+        stdin: bool,
+        tty: bool,
+        cmd: &str,
+        args: &[String],
+    ) -> Result<(), io::Error> {
+        Command::new("kubectl")
             .arg("exec")
             .arg(pod_name)
+            .args(stdin.then_some("-i"))
+            .args(tty.then_some("-t"))
             .arg("--")
-            .args(command)
-            .output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ))
-        }
-    }
-
-    pub fn ps(&self) -> Result<(), io::Error> {
-        Command::new("kubectl")
-            .arg("get")
-            .arg("pods")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
-
+            .arg(cmd)
+            .args(args)
+            .spawn()?
+            .wait()?;
         Ok(())
     }
 
-    pub fn stop_node(&self, release_name: &str) -> Result<(), io::Error> {
-        let res = self.helm(vec!["uninstall", release_name].into_iter())?;
-
-        if res.status.success() {
-            io::stdout().write_all(&res.stdout)?;
-
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                String::from_utf8_lossy(&res.stderr).to_string(),
-            ))
-        }
+    pub fn ps() -> Result<(), io::Error> {
+        Self::match_output(Command::new("kubectl").arg("get").arg("pods").output()?)
     }
 
-    pub fn start_node(
-        &self,
-        release_name: &str,
-        chart: &str,
+    pub fn lint(config: &SimulatorConfig) -> Result<(), io::Error> {
+        Self::helm(config, vec![
+            &"lint".into(),
+            &config.project_root.scratch.helm.tycho.dir,
+            &"--strict".into(),
+            &"--with-subcharts".into(),
+            &"--debug".into(),
+        ])
+    }
+
+    pub fn uninstall(config: &SimulatorConfig) -> Result<(), io::Error> {
+        Self::helm(config, vec![
+            "uninstall",
+            &config.helm_release,
+            "--cascade",
+            "foreground",
+            "--ignore-not-found",
+            "--wait",
+            "--debug",
+        ])
+    }
+
+    pub fn upgrade_install(
+        config: &SimulatorConfig,
+        debug: bool,
         values: Option<&str>,
-    ) -> Result<Output, io::Error> {
-        let mut args = vec!["upgrade", "--install", release_name, chart];
+    ) -> Result<(), io::Error> {
+        let mut args = vec![
+            "upgrade",
+            "--install",
+            &config.helm_release,
+            HELM_CHART,
+            "--force",
+            "--atomic",
+            "--cleanup-on-fail",
+            "--reset-values",
+            "--wait",
+            "--wait-for-jobs",
+        ];
+        if debug {
+            args.push("--debug");
+        }
         if let Some(values_file) = values {
             args.push("-f");
             args.push(values_file);
         }
-        let res = self.helm(args.into_iter())?;
-
-        if res.status.success() {
-            io::stdout().write_all(&res.stdout)?;
-            Ok(res)
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                String::from_utf8_lossy(&res.stderr).to_string(),
-            ))
-        }
+        Self::helm(config, args)
     }
 
-    pub fn logs(&self, pod_name: &str, follow: bool) -> Result<(), io::Error> {
+    pub fn logs(pod_name: &str, follow: bool) -> Result<(), io::Error> {
         let mut command = Command::new("kubectl");
         command.arg("logs").arg(pod_name);
         if follow {
@@ -136,49 +136,46 @@ impl HelmRunner {
             let mut stdout = child.stdout.take().expect("Failed to capture stdout");
             io::copy(&mut stdout, &mut io::stdout())?;
             child.wait()?;
+            Ok(())
         } else {
-            let output = child.wait_with_output()?;
-            if output.status.success() {
-                io::stdout().write_all(&output.stdout)?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    String::from_utf8_lossy(&output.stderr).to_string(),
-                ));
-            }
+            Self::match_output(child.wait_with_output()?)
         }
+    }
 
+    // TODO use or remove
+    pub fn _kubectl<I, S>(args: I) -> Result<Output, io::Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        // Execute the command and return the output
+        Command::new("kubectl").args(args).output()
+    }
+
+    pub fn helm<I, S>(config: &SimulatorConfig, args: I) -> Result<(), io::Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        Command::new("helm")
+            .args(args)
+            .current_dir(&config.project_root.scratch.helm.dir)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdin(Stdio::null())
+            .spawn()?
+            .wait()?;
         Ok(())
     }
-    pub fn kubectl<A, T>(&self, args: A) -> Result<Output, io::Error>
-    where
-        A: Iterator<Item = T>,
-        T: Into<OsString>,
-    {
-        let mut command = Command::new("kubectl");
 
-        for arg in args {
-            command.arg(arg.into());
+    fn match_output(output: Output) -> Result<(), io::Error> {
+        if output.status.success() {
+            io::stdout().write_all(&output.stdout)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
         }
-
-        // Execute the command and return the output
-        command.output()
-    }
-
-    pub fn helm<A, T>(&self, args: A) -> Result<Output, io::Error>
-    where
-        A: Iterator<Item = T>,
-        T: Into<OsString>,
-    {
-        let mut command = Command::new("helm");
-        let helm_dir = self.service_config.helm_template_output();
-
-        for arg in args {
-            command.arg(arg.into());
-        }
-
-        command.current_dir(helm_dir);
-
-        command.output()
     }
 }

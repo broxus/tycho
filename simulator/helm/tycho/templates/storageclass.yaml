@@ -1,0 +1,10 @@
+{{- if and .Values.persistence .Values.persistence.isLocal }}
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: {{ .Values.persistence.storageClass }}
+  labels:
+    {{- include "tycho.labels" . | nindent 4 }}
+provisioner: kubernetes.io/no-provisioner # indicates that this StorageClass does not support automatic provisioning
+volumeBindingMode: WaitForFirstConsumer # default: Immediate
+{{- end }}

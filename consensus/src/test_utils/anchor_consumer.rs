@@ -13,6 +13,7 @@ use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolMergedConfig;
 use crate::models::{MempoolOutput, PointId, Round};
+use crate::test_utils::last_anchor_file::LastAnchorFile;
 
 #[derive(Default)]
 pub struct AnchorConsumer {
@@ -37,7 +38,7 @@ impl AnchorConsumer {
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
 
-    pub async fn drain(mut self) {
+    pub async fn drain(mut self, mut file: LastAnchorFile) {
         loop {
             let (_, commit_result) = self
                 .streams
@@ -58,6 +59,7 @@ impl AnchorConsumer {
             };
             self.top_known_anchor.set_max(round);
             self.commit_round.set_max(round);
+            file.update(round.0).expect("update last anchor file");
         }
     }
 

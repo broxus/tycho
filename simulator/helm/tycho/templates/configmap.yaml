@@ -1,9 +1,16 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: global-config
+  name: {{ include "tycho.fullname" . }}-shared-configs
   labels:
     {{- include "tycho.labels" . | nindent 4 }}
 data:
   global-config.json: |
-    {{- .Values.config.globalConfig | nindent 4 }}
+    {{- .Values.sharedConfigs.globalConfig | nindent 4 }}
+  config.json: |
+    {{- .Values.sharedConfigs.config | nindent 4 }}
+  logger.json: |
+    {{- .Values.sharedConfigs.logger | nindent 4 }}
+binaryData:
+  zerostate.boc: |
+    {{- .Values.sharedConfigs.zerostate | nindent 4 }}

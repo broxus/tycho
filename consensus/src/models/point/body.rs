@@ -10,7 +10,7 @@ use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Sign
 use crate::models::proto_utils::evidence_btree_map;
 use crate::models::{PeerCount, UnixTime};
 
-#[derive(TlWrite, TlRead, Debug)]
+#[derive(TlWrite, TlRead)]
 #[cfg_attr(test, derive(Clone))]
 #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBody {
@@ -22,6 +22,17 @@ pub struct PointBody {
     /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     pub evidence: BTreeMap<PeerId, Signature>,
+}
+
+impl std::fmt::Debug for PointBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PointBody")
+            .field("round", &self.round.0)
+            .field("payload_bytes", &self.payload_bytes())
+            .field("data", &self.data)
+            .field("evidence", &self.evidence)
+            .finish()
+    }
 }
 
 impl PointBody {

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,102 +5,144 @@ use serde_json::Value;
 mod runner;
 pub use runner::*;
 
-use crate::config::ServiceConfig;
+use crate::config::{PodConfig, ProjectRoot};
 
 pub struct HelmConfig {
     values: Values,
-    helm_path: PathBuf,
-    template_path: PathBuf,
 }
 
 impl HelmConfig {
-    pub fn new(service_config: &ServiceConfig) -> Self {
-        let helm_path = service_config.helm_template_output();
-        let template_path = service_config.helm_template_path();
+    pub fn new(
+        pod_config: &PodConfig,
+        shared_conf: SharedConfigs,
+        node_secrets: Vec<String>,
+    ) -> Self {
+        let fullname_override = "tycho".to_string();
 
-        std::fs::create_dir_all(&helm_path).unwrap();
+        let keys = "keys".to_string();
+        let shared_configs = "shared-configs".to_string();
+        let data_volume = "data-volume".to_string();
+
+        // 1250 is a max dag length by default mempool config; 6/5 is +20% provisioning
+        let mempool_data_gb = node_secrets.len() * 1250 * 6 / 5000;
+
         Self {
             values: Values {
                 image: Image {
-                    repository: "localhost/tycho-network".to_string(),
+                    repository: format!("localhost/{}", pod_config.image_name),
                     pull_policy: "IfNotPresent".to_string(),
                     tag: "latest".to_string(),
                 },
-                fullname_override: "tycho".to_string(),
-                config: Config {
-                    rust_log: "info,tycho_network=trace".to_string(),
-                    global_config: String::new(),
-                },
+                fullname_override: fullname_override.clone(),
+                replica_count: node_secrets.len() as u64,
+                keys: node_secrets,
+                shared_configs: shared_conf,
                 service: Service {
                     type_field: "ClusterIP".to_string(),
-                    port: 30310,
+                    port: pod_config.node_port,
                     cluster_ip: "None".to_string(),
                 },
+                persistence: Some(Persistence {
+                    storage_class: "local-storage".to_string(),
+                    is_local: true,
+                    local_path: "/var/tmp".to_string(),
+                    access_mode: PersistenceAccessMode::ReadWriteOnce,
+                    size_per_pod: mempool_data_gb,
+                    size_type: PersistenceSizeType::Gi,
+                }),
                 volumes: vec![
                     Volume {
-                        name: "keys".to_string(),
-                        config_map: None,
-                        secret: Some(Secret {
-                            secret_name: "tycho-keys".to_string(),
+                        name: keys.clone(),
+                        volume_type: VolumeType::Secret(Secret {
+                            secret_name: format!("{fullname_override}-keys"),
                         }),
                     },
                     Volume {
-                        name: "global-config".to_string(),
-                        config_map: Some(ConfigMap {
-                            name: "global-config".to_string(),
+                        name: shared_configs.clone(),
+                        volume_type: VolumeType::ConfigMap(ConfigMap {
+                            name: format!("{fullname_override}-shared-configs"),
                         }),
-                        secret: None,
+                    },
+                    Volume {
+                        name: data_volume.clone(),
+                        volume_type: VolumeType::PersistentVolumeClaim(PersistentVolumeClaim {
+                            claim_name: format!("{fullname_override}-data-local-claim"),
+                        }),
+                        // volume_type: VolumeType::EmptyDir(EmptyDir {
+                        //     size_limit: format!("{mempool_data_gb}{:?}", PersistenceSizeType::Gi),
+                        //     medium: None,
+                        // }),
                     },
                 ],
                 volume_mounts: vec![
                     VolumeMount {
-                        name: "keys".to_string(),
+                        name: keys.clone(),
                         mount_path: "/keys".to_string(),
-                        sub_path: None,
+                        sub_path_type: None,
                         read_only: true,
                     },
                     VolumeMount {
-                        name: "global-config".to_string(),
+                        name: shared_configs.clone(),
                         mount_path: "/app/global-config.json".to_string(),
-                        sub_path: Some("global-config.json".to_string()),
+                        sub_path_type: Some(SubPathType::SubPath("global-config.json".to_string())),
                         read_only: true,
+                    },
+                    VolumeMount {
+                        name: shared_configs.clone(),
+                        mount_path: "/app/config.json".to_string(),
+                        sub_path_type: Some(SubPathType::SubPath("config.json".to_string())),
+                        read_only: true,
+                    },
+                    VolumeMount {
+                        name: shared_configs.clone(),
+                        mount_path: "/app/zerostate.boc".to_string(),
+                        sub_path_type: Some(SubPathType::SubPath("zerostate.boc".to_string())),
+                        read_only: true,
+                    },
+                    VolumeMount {
+                        name: shared_configs.clone(),
+                        mount_path: "/app/logger.json".to_string(),
+                        sub_path_type: Some(SubPathType::SubPath("logger.json".to_string())),
+                        read_only: true,
+                    },
+                    VolumeMount {
+                        name: data_volume.clone(),
+                        mount_path: pod_config.db_path.clone(),
+                        sub_path_type: Some(SubPathType::SubPathExpr(
+                            "$(POD_HOST_NAME)".to_string(),
+                        )),
+                        read_only: false,
                     },
                 ],
                 service_monitor: ServiceMonitor {
                     enabled: true,
-                    port: 9090,
+                    port: pod_config.metrics_port,
+                    namespace: "monitoring".to_string(), // must be where prometheus is installed
+                    path: "/".to_string(),               // empty defaults to /metrics, will also do
                 },
                 ..Default::default()
             },
-            helm_path,
-            template_path,
         }
     }
 
-    pub fn add_node(&mut self, secret_key: &str) {
-        self.values.replica_count += 1;
-        self.values.keys.push(secret_key.to_owned());
-    }
+    pub fn write(self, project_root: &ProjectRoot) -> Result<()> {
+        let dst = &project_root.scratch.helm.tycho.dir;
 
-    pub fn finalize(&mut self, global_config: String) -> Result<()> {
-        self.values.config.global_config = global_config;
+        std::fs::create_dir_all(dst)?;
 
         // copy the helm chart to the scratch directory
-        let dst = self.helm_path.join("tycho");
-        std::fs::create_dir_all(&dst).unwrap();
         fs_extra::dir::copy(
-            &self.template_path,
-            &dst,
+            &project_root.simulator.helm.tycho.dir,
+            dst,
             &fs_extra::dir::CopyOptions::new()
                 .overwrite(true)
                 .content_only(true),
         )?;
 
         // write the values file
-        let values_path = dst.join("values.yaml");
         // yaml is a superset of json, so we can use serde_json to write yaml
         let values_data = serde_json::to_string_pretty(&self.values)?;
-        std::fs::write(values_path, values_data)?;
+        std::fs::write(&project_root.scratch.helm.tycho.values, values_data)?;
 
         Ok(())
     }
@@ -110,128 +150,197 @@ impl HelmConfig {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Values {
-    pub replica_count: u64,
-    pub image: Image,
-    pub image_pull_secrets: Vec<Value>,
-    pub name_override: String,
-    pub fullname_override: String,
-    pub config: Config,
-    pub keys: Vec<String>,
-    pub service_account: ServiceAccount,
-    pub pod_annotations: PodAnnotations,
-    pub pod_labels: PodLabels,
-    pub pod_security_context: PodSecurityContext,
-    pub security_context: SecurityContext,
-    pub service: Service,
-    pub resources: Resources,
-    pub volumes: Vec<Volume>,
-    pub volume_mounts: Vec<VolumeMount>,
-    pub node_selector: NodeSelector,
-    pub tolerations: Vec<Value>,
-    pub affinity: Affinity,
-    pub service_monitor: ServiceMonitor,
+struct Values {
+    image: Image,
+    image_pull_secrets: Vec<Value>,
+    name_override: String,
+    fullname_override: String,
+    replica_count: u64,
+    keys: Vec<String>,
+    shared_configs: SharedConfigs,
+    service_account: ServiceAccount,
+    pod_annotations: PodAnnotations,
+    pod_labels: PodLabels,
+    pod_security_context: PodSecurityContext,
+    security_context: SecurityContext,
+    service: Service,
+    resources: Resources,
+    persistence: Option<Persistence>,
+    volumes: Vec<Volume>,
+    volume_mounts: Vec<VolumeMount>,
+    node_selector: NodeSelector,
+    tolerations: Vec<Value>,
+    affinity: Affinity,
+    service_monitor: ServiceMonitor,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Image {
-    pub repository: String,
-    pub pull_policy: String,
-    pub tag: String,
+struct Image {
+    repository: String,
+    pull_policy: String,
+    tag: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Config {
+pub struct SharedConfigs {
+    /// Used only by network example
     #[serde(rename = "rustLog")]
     pub rust_log: String,
     pub global_config: String,
+    /// tycho node config is conventionally named just `config`
+    pub config: String,
+    pub zerostate: String,
+    pub logger: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ServiceAccount {
-    pub create: bool,
-    pub automount: bool,
-    pub annotations: Annotations,
-    pub name: String,
+struct ServiceAccount {
+    create: bool,
+    automount: bool,
+    annotations: Annotations,
+    name: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Annotations {}
+struct Annotations {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PodAnnotations {}
+struct PodAnnotations {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PodLabels {}
+struct PodLabels {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PodSecurityContext {}
+struct PodSecurityContext {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SecurityContext {}
+struct SecurityContext {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Service {
+struct Service {
     #[serde(rename = "type")]
-    pub type_field: String,
-    pub port: i64,
+    type_field: String,
+    port: u16,
     #[serde(rename = "clusterIP")]
-    pub cluster_ip: String,
+    cluster_ip: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Resources {}
+struct Resources {}
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Volume {
-    pub name: String,
-    pub config_map: Option<ConfigMap>,
-    pub secret: Option<Secret>,
+struct Volume {
+    name: String,
+    #[serde(flatten)]
+    volume_type: VolumeType,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum VolumeType {
+    PersistentVolumeClaim(PersistentVolumeClaim),
+    ConfigMap(ConfigMap),
+    Secret(Secret),
+    EmptyDir(EmptyDir),
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigMap {
-    pub name: String,
+struct ConfigMap {
+    name: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Secret {
-    pub secret_name: String,
+struct Secret {
+    secret_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmptyDir {
+    size_limit: String,
+    /// leave empty to use file fs, not tmpfs
+    medium: Option<EmptyDirMedium>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+enum EmptyDirMedium {
+    Memory,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistentVolumeClaim {
+    claim_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VolumeMount {
+    name: String,
+    mount_path: String,
+    #[serde(flatten)]
+    sub_path_type: Option<SubPathType>,
+    read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SubPathType {
+    SubPath(String),
+    SubPathExpr(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Persistence {
+    storage_class: String,
+    is_local: bool,
+    local_path: String,
+    access_mode: PersistenceAccessMode,
+    size_per_pod: usize,
+    size_type: PersistenceSizeType,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+enum PersistenceAccessMode {
+    ReadWriteOnce,
+    ReadWriteMany,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+enum PersistenceSizeType {
+    Mi,
+    Gi,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VolumeMount {
-    pub name: String,
-    pub mount_path: String,
-    pub sub_path: Option<String>,
-    pub read_only: bool,
-}
+struct NodeSelector {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NodeSelector {}
+struct Affinity {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Affinity {}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceMonitor {
+struct ServiceMonitor {
     enabled: bool,
     port: u16,
+    namespace: String,
+    path: String,
 }
