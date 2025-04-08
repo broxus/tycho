@@ -65,6 +65,7 @@ tycho-consensus = { workspace = true }
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
+num-bigint = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

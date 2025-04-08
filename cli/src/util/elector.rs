@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use bytes::Bytes;
 use everscale_types::abi::{
     AbiType, AbiValue, AbiVersion, FromAbi, Function, IntoAbi, WithAbiType,
 };
@@ -34,7 +33,7 @@ pub mod methods {
         })
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, IntoAbi, WithAbiType)]
     pub struct ParticiateInElectionsInput {
         pub query_id: u64,
         pub validator_key: HashBytes,
@@ -43,48 +42,12 @@ pub mod methods {
         pub adnl_addr: HashBytes,
         pub signature: Vec<u8>,
     }
-
-    // TODO: Replace with macros
-    impl WithAbiType for ParticiateInElectionsInput {
-        fn abi_type() -> AbiType {
-            AbiType::tuple([
-                u64::abi_type().named("query_id"),
-                HashBytes::abi_type().named("validator_key"),
-                u32::abi_type().named("stake_at"),
-                u32::abi_type().named("stake_factor"),
-                HashBytes::abi_type().named("adnl_addr"),
-                Bytes::abi_type().named("signature"),
-            ])
-        }
-    }
-
-    // TODO: Replace with macros
-    impl IntoAbi for ParticiateInElectionsInput {
-        fn as_abi(&self) -> AbiValue {
-            AbiValue::tuple([
-                self.query_id.into_abi().named("query_id"),
-                self.validator_key.into_abi().named("validator_key"),
-                self.stake_at.into_abi().named("stake_at"),
-                self.stake_factor.into_abi().named("stake_factor"),
-                self.adnl_addr.into_abi().named("adnl_addr"),
-                // TODO: Just use `self.signature.as_abi()` when the fix is merged.
-                AbiValue::bytes(self.signature.clone()).named("signature"),
-            ])
-        }
-
-        fn into_abi(self) -> everscale_types::abi::AbiValue
-        where
-            Self: Sized,
-        {
-            self.as_abi()
-        }
-    }
 }
 
 pub mod data {
     use super::*;
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
     pub struct PartialElectorData {
         pub current_election: Option<Ref<CurrentElectionData>>,
         pub credits: BTreeMap<HashBytes, FpTokens>,
@@ -100,30 +63,7 @@ pub mod data {
         }
     }
 
-    // TODO: Replace with macros
-    impl WithAbiType for PartialElectorData {
-        fn abi_type() -> AbiType {
-            AbiType::tuple([
-                Option::<Ref<CurrentElectionData>>::abi_type().named("current_election"),
-                BTreeMap::<HashBytes, FpTokens>::abi_type().named("credits"),
-                BTreeMap::<u32, PastElectionData>::abi_type().named("past_elections"),
-            ])
-        }
-    }
-
-    // TODO: Replace with macros
-    impl FromAbi for PartialElectorData {
-        fn from_abi(value: AbiValue) -> Result<Self> {
-            let (current_election, credits, past_elections) = <_>::from_abi(value)?;
-            Ok(Self {
-                current_election,
-                credits,
-                past_elections,
-            })
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
     pub struct CurrentElectionData {
         pub elect_at: u32,
         pub elect_close: u32,
@@ -134,40 +74,7 @@ pub mod data {
         pub finished: bool,
     }
 
-    // TODO: Replace with macros
-    impl WithAbiType for CurrentElectionData {
-        fn abi_type() -> AbiType {
-            AbiType::tuple([
-                u32::abi_type().named("elect_at"),
-                u32::abi_type().named("elect_close"),
-                FpTokens::abi_type().named("min_stake"),
-                FpTokens::abi_type().named("total_stake"),
-                BTreeMap::<HashBytes, ElectionMember>::abi_type().named("members"),
-                bool::abi_type().named("failed"),
-                bool::abi_type().named("finished"),
-            ])
-        }
-    }
-
-    // TODO: Replace with macros
-    impl FromAbi for CurrentElectionData {
-        fn from_abi(value: AbiValue) -> Result<Self> {
-            let (elect_at, elect_close, min_stake, total_stake, members, failed, finished) =
-                <_>::from_abi(value)?;
-
-            Ok(Self {
-                elect_at,
-                elect_close,
-                min_stake,
-                total_stake,
-                members,
-                failed,
-                finished,
-            })
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
     pub struct ElectionMember {
         pub msg_value: FpTokens,
         pub created_at: u32,
@@ -176,52 +83,9 @@ pub mod data {
         pub adnl_addr: HashBytes,
     }
 
-    // TODO: Replace with macros
-    impl WithAbiType for ElectionMember {
-        fn abi_type() -> AbiType {
-            AbiType::tuple([
-                FpTokens::abi_type().named("msg_value"),
-                u32::abi_type().named("created_at"),
-                u32::abi_type().named("stake_factor"),
-                HashBytes::abi_type().named("src_addr"),
-                HashBytes::abi_type().named("adnl_addr"),
-            ])
-        }
-    }
-
-    // TODO: Replace with macros
-    impl FromAbi for ElectionMember {
-        fn from_abi(value: AbiValue) -> Result<Self> {
-            let (msg_value, created_at, stake_factor, src_addr, adnl_addr) = <_>::from_abi(value)?;
-
-            Ok(Self {
-                msg_value,
-                created_at,
-                stake_factor,
-                src_addr,
-                adnl_addr,
-            })
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
     pub struct PastElectionData {
         pub unfreeze_at: u32,
-    }
-
-    // TODO: Replace with macros
-    impl WithAbiType for PastElectionData {
-        fn abi_type() -> AbiType {
-            AbiType::tuple([u32::abi_type().named("unfreeze_at")])
-        }
-    }
-
-    // TODO: Replace with macros
-    impl FromAbi for PastElectionData {
-        fn from_abi(value: AbiValue) -> Result<Self> {
-            let (unfreeze_at,) = <(u32,)>::from_abi(value)?;
-            Ok(Self { unfreeze_at })
-        }
     }
 
     // TODO: Move into `everscale-types`?
@@ -274,5 +138,194 @@ pub mod data {
         fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             T::deserialize(deserializer).map(Self)
         }
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use everscale_types::abi::{
+        AbiType, AbiValue, FromAbi, IntoAbi, PlainAbiType, PlainAbiValue, WithAbiType,
+    };
+    use everscale_types::cell::HashBytes;
+    use everscale_types::num::Tokens;
+    use num_bigint::BigUint;
+    use serde::{Deserialize, Serialize};
+
+    use crate::util::elector::data::{CurrentElectionData, ElectionMember, Ref};
+    use crate::util::elector::methods::ParticiateInElectionsInput;
+    use crate::util::FpTokens;
+
+    #[test]
+    fn test_participate_in_elections_input() {
+        let input = ParticiateInElectionsInput {
+            query_id: 322,
+            validator_key: HashBytes::default(),
+            stake_at: 1,
+            stake_factor: 2,
+            adnl_addr: HashBytes::from_str(
+                "2b4c1a29d2fc2320637f37904e148475efbc1716036274d994efaccce9868234",
+            )
+            .unwrap(),
+            signature: vec![1, 2, 3, 4, 5],
+        };
+
+        let abi_value_manual = AbiValue::tuple([
+            input.query_id.into_abi().named("query_id"),
+            input.validator_key.into_abi().named("validator_key"),
+            input.stake_at.into_abi().named("stake_at"),
+            input.stake_factor.into_abi().named("stake_factor"),
+            input.adnl_addr.into_abi().named("adnl_addr"),
+            input.signature.as_abi().named("signature"),
+        ]);
+
+        let abi_type_manual = AbiType::tuple([
+            u64::abi_type().named("query_id"),
+            HashBytes::abi_type().named("validator_key"),
+            u32::abi_type().named("stake_at"),
+            u32::abi_type().named("stake_factor"),
+            HashBytes::abi_type().named("adnl_addr"),
+            Bytes::abi_type().named("signature"),
+        ]);
+
+        let abi_type = ParticiateInElectionsInput::abi_type();
+
+        assert_eq!(abi_type_manual, abi_type);
+
+        let as_abi_value = input.as_abi();
+        let into_abi_value = input.into_abi();
+
+        assert_eq!(abi_value_manual, as_abi_value);
+        assert_eq!(into_abi_value, as_abi_value);
+    }
+
+    #[test]
+    fn test_partial_elector_data() {
+        #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
+        pub struct PartialElectorDataShort {
+            pub current_election: Option<Ref<CurrentElectionData>>,
+        }
+
+        let mut members = BTreeMap::new();
+        members.insert(
+            HashBytes::from_str("2b4c1a29d2fc2320637f37904e148475efbc1716036274d994efaccce9868234")
+                .unwrap(),
+            ElectionMember {
+                msg_value: FpTokens(100_000),
+                created_at: 1,
+                stake_factor: 2,
+                src_addr: Default::default(),
+                adnl_addr: Default::default(),
+            },
+        );
+
+        let initial_current = Ref(CurrentElectionData {
+            elect_at: 1,
+            elect_close: 2,
+            min_stake: FpTokens(123),
+            total_stake: FpTokens(456),
+            members,
+            failed: false,
+            finished: true,
+        });
+
+        let abi_type = PartialElectorDataShort::abi_type();
+        let manual_abi_type = AbiType::tuple([
+            Option::<Ref<CurrentElectionData>>::abi_type().named("current_election")
+        ]);
+
+        let map_inner = [
+            AbiType::Token.named("msg_value"),
+            AbiType::Uint(32).named("created_at"),
+            AbiType::Uint(32).named("stake_factor"),
+            AbiType::Bytes.named("src_addr"),
+            AbiType::Bytes.named("adnl_addr"),
+        ];
+
+        let first_value_inner_type = [
+            AbiType::Uint(32).named("elect_at"),
+            AbiType::Uint(32).named("elect_close"),
+            AbiType::Token.named("min_stake"),
+            AbiType::Token.named("total_stake"),
+            AbiType::Map(
+                PlainAbiType::Uint(256),
+                Arc::new(AbiType::Tuple(Arc::from(map_inner))),
+            )
+            .named("members"),
+        ];
+
+        let first_type = AbiType::Ref(Arc::new(AbiType::Tuple(Arc::from(first_value_inner_type))));
+
+        let map_inner_type = [
+            AbiType::Token.named("msg_value"),
+            AbiType::Uint(32).named("created_at"),
+            AbiType::Uint(32).named("stake_factor"),
+            AbiType::Uint(256).named("src_addr"),
+            AbiType::Uint(256).named("adnl_addr"),
+        ];
+
+        let mut map_inner_value = BTreeMap::new();
+        map_inner_value.insert(
+            PlainAbiValue::Uint(
+                256,
+                BigUint::from_bytes_be(
+                    b"1b4c1a29d2fc2320637f37904e148475efbc1716036274d994efaccce9868234",
+                ),
+            ),
+            AbiValue::tuple([
+                AbiValue::Token(Tokens::new(100_000)).named("msg_value"),
+                AbiValue::uint(32, 1u32).named("created_at"),
+                AbiValue::uint(32, 2u32).named("stake_factor"),
+                AbiValue::Uint(256, BigUint::from(0u32)).named("src_addr"),
+                AbiValue::Uint(256, BigUint::from(0u32)).named("adnl_addr"),
+            ]),
+        );
+
+        let first_value_inner = vec![
+            AbiValue::uint(32u16, 1u32).named("elect_at"),
+            AbiValue::uint(32u16, 2u32).named("elect_at"),
+            AbiValue::Token(Tokens::new(123)).named("min_stake"),
+            AbiValue::Token(Tokens::new(456)).named("total_stake"),
+            AbiValue::Map(
+                PlainAbiType::Uint(256),
+                Arc::new(AbiType::Tuple(Arc::from(map_inner_type))),
+                map_inner_value,
+            )
+            .named("members"),
+            AbiValue::Bool(false).named("failed"),
+            AbiValue::Bool(true).named("finished"),
+        ];
+
+        let first_value = AbiValue::Ref(Box::new(AbiValue::Tuple(first_value_inner)));
+
+        let abi_value_manual = AbiValue::Tuple(vec![AbiValue::Optional(
+            Arc::new(first_type),
+            Some(Box::new(first_value)),
+        )
+        .named("current_election")]);
+
+        let new = PartialElectorDataShort::from_abi(abi_value_manual).unwrap();
+        assert!(new.current_election.is_some());
+
+        let current_election = new.current_election.unwrap();
+
+        assert_eq!(current_election.0.elect_at, initial_current.0.elect_at);
+        assert_eq!(
+            current_election.0.elect_close,
+            initial_current.0.elect_close
+        );
+        assert_eq!(current_election.0.failed, initial_current.0.failed);
+        assert_eq!(current_election.0.finished, initial_current.0.finished);
+        assert_eq!(
+            current_election.0.total_stake,
+            initial_current.0.total_stake
+        );
+        assert_eq!(current_election.0.min_stake, initial_current.0.min_stake);
+
+        assert_eq!(manual_abi_type, abi_type);
     }
 }
