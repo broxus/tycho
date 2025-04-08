@@ -41,14 +41,25 @@ spec:
             - >
               export INDEX=$((${HOSTNAME##*-}));
               export KEY="$(</keys/$INDEX)";
-              /app/network-node run 0.0.0.0:30310 $TYCHO_POD_IP:30310 --key $KEY --global-config /app/global-config.json
+              /app/tycho debug mempool
+              --key $KEY
+              --config "/app/config.json"
+              --global-config "/app/global-config.json"
+              --import-zerostate "/app/zerostate.boc"
+              --logger-config "/app/logger.json"
+              --payload-step 50
+              --steps-until-full 8
           env:
             - name: RUST_LOG
-              value: {{ .Values.config.rustLog | quote }}
+              value: {{ .Values.sharedConfigs.rustLog | quote }}
             - name: TYCHO_POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: POD_HOST_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: udp
@@ -56,7 +67,7 @@ spec:
               protocol: UDP
           {{- if .Values.serviceMonitor.enabled }}
             - name: metrics
-              containerPort: 9090
+              containerPort: {{ .Values.serviceMonitor.port }}
               protocol: TCP
           {{- end }}
           resources:
@@ -81,3 +92,23 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- if .Values.persistence }}
+  {{- if not .Values.persistence.isLocal }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "tycho.labels" . | nindent 10 }}
+      {{- with .Values.persistence.annotations }}
+        annotations:
+          {{ toYaml . | nindent 10 | trim }}
+      {{- end }}
+      spec:
+        storageClassName: {{ .Values.persistence.storageClass }}
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}{{ .Values.persistence.sizeType }}
+  {{- end }}
+{{- end }}

@@ -141,9 +141,7 @@ pub mod __internal {
     }
 }
 
-pub fn project_root() -> Result<PathBuf, anyhow::Error> {
-    use anyhow::Context;
-
+pub fn project_root() -> Result<PathBuf, std::io::Error> {
     let project_root = Command::new("git")
         .arg("rev-parse")
         .arg("--show-toplevel")
@@ -152,7 +150,7 @@ pub fn project_root() -> Result<PathBuf, anyhow::Error> {
     // won't work on windows but we don't care
     let project_root = PathBuf::from(
         String::from_utf8(project_root)
-            .context("invalid project root")?
+            .map_err(|e| std::io::Error::other(format!("invalid project root: {e}")))?
             .trim(),
     );
     Ok(project_root)

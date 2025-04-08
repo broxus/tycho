@@ -1,0 +1,21 @@
+{{- if and .Values.persistence .Values.persistence.isLocal }}
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: {{ include "tycho.fullname" . }}-data-local-claim
+  labels:
+    {{- include "tycho.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ .Values.persistence.storageClass }}
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.sizePerPod }}{{ .Values.persistence.sizeType }}
+    limits:
+      storage: {{ .Values.persistence.sizePerPod }}{{ .Values.persistence.sizeType }}
+  volumeName: {{ include "tycho.fullname" . }}-data-local
+  selector:
+    matchLabels:
+      {{- include "tycho.selectorLabels" . | nindent 6 }}
+{{- end }}

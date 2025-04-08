@@ -6,20 +6,21 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use everscale_crypto::ed25519;
-use futures_util::future::Either;
+use everscale_types::cell::HashBytes;
 use tokio::signal::unix;
 use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineCreated, EngineNetworkArgs, InitPeers, InputBuffer, MempoolAdapterStore,
-    MempoolConfigBuilder, MempoolMergedConfig, RoundWatch, TopKnownAnchor,
+    MempoolConfigBuilder, MempoolMergedConfig,
 };
-use tycho_consensus::test_utils::{test_logger, AnchorConsumer};
+use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_network::PeerId;
-use tycho_storage::{NewBlockMeta, Storage};
+use tycho_storage::{FileDb, NewBlockMeta, Storage};
 use tycho_util::cli::logger::init_logger;
+use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
 use tycho_util::futures::JoinTask;
 
@@ -36,9 +37,8 @@ pub struct CmdRun {
     #[clap(long)]
     global_config: PathBuf,
 
-    /// path to the node keys
-    #[clap(long)]
-    keys: PathBuf,
+    #[clap(flatten)]
+    key_variant: KeyVariant,
 
     /// path to the logger config
     #[clap(long)]
@@ -68,6 +68,41 @@ pub struct CmdRun {
     steps_until_full: NonZeroUsize,
 }
 
+#[derive(Debug, clap::Args)]
+#[group(required = true, multiple = false)]
+pub struct KeyVariant {
+    /// ed25519 secret key
+    #[clap(long)]
+    key: Option<String>,
+
+    /// path to the node ed25519 keypair
+    #[clap(long)]
+    keys: Option<PathBuf>,
+}
+
+impl TryFrom<&KeyVariant> for NodeKeys {
+    type Error = anyhow::Error;
+
+    fn try_from(variant: &KeyVariant) -> std::result::Result<Self, Self::Error> {
+        anyhow::ensure!(
+            variant.key.is_some() ^ variant.keys.is_some(),
+            "strictly one of the two arg options must be provided; got: key={}, keys={}",
+            variant.key.is_some(),
+            variant.keys.is_some()
+        );
+        if let Some(secret) = &variant.key {
+            Ok(NodeKeys {
+                secret: <HashBytes as std::str::FromStr>::from_str(secret)
+                    .context("failed to parse node secret key")?,
+            })
+        } else if let Some(path) = &variant.keys {
+            NodeKeys::from_file(path).context("failed to load node keys")
+        } else {
+            unreachable!()
+        }
+    }
+}
+
 impl CmdRun {
     pub fn run(self) -> Result<()> {
         let node_config =
@@ -90,29 +125,27 @@ impl CmdRun {
         init_logger(&node_config.logger, self.logger_config.clone())?;
         test_logger::set_print_panic_hook(true);
 
-        let mut stop_fut = any_signal_repeatable(signal::TERMINATION_SIGNALS);
+        if let Some(metrics_config) = &node_config.metrics {
+            init_metrics(metrics_config)?;
+        }
 
-        let mut top_known_anchor: Either<u32, RoundWatch<TopKnownAnchor>> =
-            Either::Left(self.top_known_anchor.flatten().unwrap_or_default());
+        let mut stop_fut = any_signal_repeatable(signal::TERMINATION_SIGNALS);
 
         let mut restarts_remain: u8 = self.restarts.unwrap_or_default().unwrap_or_default();
 
         let mempool = Mempool::new(self, node_config).await?;
+        let file_storage = Mempool::file_storage(&mempool.storage)?;
 
         loop {
             let (engine, anchor_consumer) = mempool.boot().await.context("init mempool")?;
 
-            (anchor_consumer.top_known_anchor).set_max_raw(match top_known_anchor {
-                Either::Left(from_cli_arg) => from_cli_arg,
-                Either::Right(from_prev_run) => from_prev_run.get().0,
-            });
+            let mut last_anchor_file = LastAnchorFile::reopen_in(&file_storage)?;
+            (anchor_consumer.top_known_anchor).set_max_raw(last_anchor_file.read()?);
 
             let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
             let engine = engine.run(engine_stop_tx);
 
-            top_known_anchor = Either::Right(anchor_consumer.top_known_anchor.clone());
-
-            let drain_anchors = JoinTask::new(anchor_consumer.drain());
+            let drain_anchors = JoinTask::new(anchor_consumer.drain(last_anchor_file));
 
             tracing::info!("started mempool");
 
@@ -153,7 +186,7 @@ impl Mempool {
             InitPeers::new((global_config.bootstrap_peers.iter().map(|info| info.id)).collect());
 
         let net_args = {
-            let keys = NodeKeys::from_file(&cmd.keys).context("failed to load node keys")?;
+            let keys = NodeKeys::try_from(&cmd.key_variant)?;
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let public_addr = SocketAddr::new(public_ip, node_config.port);
@@ -203,6 +236,15 @@ impl Mempool {
             .await
             .context("failed to create storage")?;
 
+        let mut last_anchor_file = LastAnchorFile::reopen_in(&Self::file_storage(&storage)?)?;
+        let last_anchor_opt = last_anchor_file.read_opt()?;
+        last_anchor_file.update(
+            cmd.top_known_anchor
+                .flatten()
+                .or(last_anchor_opt)
+                .unwrap_or_default(),
+        )?;
+
         tracing::info!(
             root_dir = %storage.root().path().display(),
             "initialized storage"
@@ -245,6 +287,10 @@ impl Mempool {
             input_buffer,
             merged_conf: config_builder.build()?,
         })
+    }
+
+    pub fn file_storage(storage: &Storage) -> Result<FileDb> {
+        storage.root().create_subdir("mempool_files")
     }
 
     pub async fn boot(&self) -> Result<(EngineCreated, AnchorConsumer)> {

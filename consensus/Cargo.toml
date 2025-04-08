@@ -52,6 +52,7 @@ tycho-storage = { workspace = true }
 [dev-dependencies]
 humantime = { workspace = true }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
+tempfile = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
