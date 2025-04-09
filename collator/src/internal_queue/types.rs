@@ -373,6 +373,8 @@ impl QueueStatistics {
             if *value == 0 {
                 occupied.remove();
             }
+        } else {
+            panic!("attempted to decrement non-existent account");
         }
     }
 
