@@ -367,12 +367,11 @@ impl RoundCtx {
         let no_proof = own_point.is_ok_and(|point| point.evidence().is_empty());
         metrics::counter!("tycho_mempool_points_no_proof_produced").increment(no_proof as _);
 
-        metrics::counter!("tycho_mempool_point_payload_count")
-            .increment(own_point.map_or(0, |point| point.payload().len() as _));
-        let payload_bytes = own_point
-            .map(|point| (point.payload().iter()).fold(0, |acc, bytes| acc + bytes.len()) as _);
-        metrics::counter!("tycho_mempool_point_payload_bytes")
-            .increment(payload_bytes.unwrap_or_default());
+        let externals = own_point.map_or(0, |point| point.payload().len());
+        metrics::counter!("tycho_mempool_point_payload_count").increment(externals as _);
+
+        let payload_bytes = own_point.map_or(0, |point| point.payload_bytes());
+        metrics::counter!("tycho_mempool_point_payload_bytes").increment(payload_bytes as _);
 
         if own_point.is_err() {
             // if point is produced, then method is called immediately when its time is known
@@ -384,11 +383,10 @@ impl RoundCtx {
                 tracing::info!(
                     parent: self.span(),
                     digest = display(own_point.digest().alt()),
-                    payload_bytes = own_point
-                        .payload().iter().map(|bytes| bytes.len()).sum::<usize>(),
-                    externals = own_point.payload().len(),
-                    is_proof = Some(own_point.data().anchor_proof == Link::ToSelf).filter(|x| *x),
-                    is_trigger = Some(own_point.data().anchor_trigger == Link::ToSelf).filter(|x| *x),
+                    externals,
+                    payload_bytes,
+                    is_proof = (own_point.data().anchor_proof == Link::ToSelf).then_some(true),
+                    is_trigger = (own_point.data().anchor_trigger == Link::ToSelf).then_some(true),
                     "produced point"
                 );
                 tracing::debug!(

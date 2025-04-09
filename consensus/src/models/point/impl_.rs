@@ -58,13 +58,6 @@ impl Debug for Point {
     }
 }
 
-impl PointInner {
-    fn is_integrity_ok(&self) -> bool {
-        self.signature
-            .verifies(&self.body.data.author, &self.digest)
-    }
-}
-
 impl Point {
     pub const TL_ID: u32 = tl_proto::id!("consensus.pointInner", scheme = "proto.tl");
 
@@ -136,6 +129,10 @@ impl Point {
         &self.0.body.payload
     }
 
+    pub fn payload_bytes(&self) -> u32 {
+        self.0.body.payload_bytes()
+    }
+
     pub fn id(&self) -> PointId {
         PointId {
             author: self.0.body.data.author,
@@ -163,7 +160,7 @@ impl Point {
     /// blame every dependent point author and the sender of this point,
     /// do not use the author from point's body
     pub fn is_integrity_ok(&self) -> bool {
-        self.0.is_integrity_ok()
+        (self.0.signature).verifies(&self.0.body.data.author, &self.0.digest)
     }
 
     /// blame author and every dependent point's author

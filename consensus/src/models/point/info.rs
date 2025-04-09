@@ -16,6 +16,7 @@ pub struct PointInfo(Arc<PointInfoInner>);
 struct PointInfoInner {
     round: Round,
     digest: Digest,
+    payload_bytes: u32,
     data: PointData,
 }
 
@@ -24,6 +25,7 @@ struct PointInfoInner {
 pub struct PointInfoRef<'a> {
     round: Round,
     digest: &'a Digest,
+    payload_bytes: u32,
     data: PointDataRef<'a>,
 }
 
@@ -32,6 +34,7 @@ impl Debug for PointInfo {
         f.debug_struct("PointInfo")
             .field("round", &self.round().0)
             .field("digest", self.digest())
+            .field("payload_bytes", &self.payload_bytes())
             .field("data", self.data())
             .finish()
     }
@@ -42,6 +45,7 @@ impl From<&Point> for PointInfo {
         PointInfo(Arc::new(PointInfoInner {
             round: point.round(),
             digest: *point.digest(),
+            payload_bytes: point.payload_bytes(),
             data: point.data().clone(),
         }))
     }
@@ -54,6 +58,10 @@ impl PointInfo {
 
     pub fn digest(&self) -> &Digest {
         &self.0.digest
+    }
+
+    pub fn payload_bytes(&self) -> u32 {
+        self.0.payload_bytes
     }
 
     pub fn data(&self) -> &PointData {
@@ -80,6 +88,7 @@ impl PointInfo {
         PointInfoRef {
             round: point.round(),
             digest: point.digest(),
+            payload_bytes: point.payload_bytes(),
             data: PointDataRef::from(point.data()),
         }
     }
