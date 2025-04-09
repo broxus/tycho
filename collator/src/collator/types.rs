@@ -1435,6 +1435,8 @@ impl ConcurrentQueueStatistics {
             if *value == 0 {
                 occupied.remove();
             }
+        } else {
+            panic!("attempt to decrement non-existing account");
         }
     }
 
