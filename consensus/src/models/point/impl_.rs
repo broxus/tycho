@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use bumpalo::Bump;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::ConsensusConfig;
@@ -9,7 +10,7 @@ use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
-use crate::models::point::body::{PointBody, ShortPointBody};
+use crate::models::point::body::PointBody;
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
 #[derive(Clone, TlWrite, TlRead)]
@@ -25,29 +26,6 @@ struct PointInner {
     body: PointBody,
 }
 
-#[derive(Debug)]
-pub(crate) struct ShortPoint {
-    body: ShortPointBody,
-}
-
-impl ShortPoint {
-    fn read_from_bytes(mut data: &[u8]) -> Result<Self, TlError> {
-        let tag = u32::read_from(&mut data)?;
-        if tag != Point::TL_ID {
-            return Err(TlError::UnknownConstructor);
-        }
-        // skip 32 + 64 bytes of digest and signature
-        <[u8; 32 + 64]>::read_from(&mut data)?;
-        Ok(ShortPoint {
-            body: ShortPointBody::read_from(&mut data)?,
-        })
-    }
-
-    pub fn payload(&self) -> &Vec<Bytes> {
-        &self.body.payload
-    }
-}
-
 impl Debug for Point {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Point")
@@ -60,10 +38,6 @@ impl Debug for Point {
 
 impl Point {
     pub const TL_ID: u32 = tl_proto::id!("consensus.pointInner", scheme = "proto.tl");
-
-    pub(crate) fn short_point_from_bytes<T: AsRef<[u8]>>(data: T) -> Result<ShortPoint, TlError> {
-        ShortPoint::read_from_bytes(data.as_ref())
-    }
 
     pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
         // 4 bytes of Point tag
@@ -193,6 +167,34 @@ impl Point {
             .data
             .anchor_link_id(link_field, self.0.body.round)
             .unwrap_or(self.id())
+    }
+
+    // Note: resulting slice has lifetime of bump that is elided
+    pub fn read_payload_from_tl_bytes<T>(data: T, bump: &Bump) -> Result<Vec<&[u8]>, TlError>
+    where
+        T: AsRef<[u8]>,
+    {
+        #[derive(TlRead)]
+        #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
+        struct PointBodyPrefix<'tl> {
+            _round: Round,
+            payload: Vec<&'tl [u8]>,
+        }
+
+        let data = &mut data.as_ref();
+
+        let tag = u32::read_from(data)?;
+        if tag != Point::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+        // skip 32 + 64 bytes of digest and signature
+        <[u8; 32 + 64]>::read_from(data)?;
+        let PointBodyPrefix { payload, .. } = <_>::read_from(data)?;
+
+        Ok(payload
+            .into_iter()
+            .map(|item| &*bump.alloc_slice_copy(item))
+            .collect())
     }
 
     pub fn verify_hash(&self) -> Result<(), &'static str> {
@@ -484,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    pub fn point_to_short_point() {
+    pub fn read_payload_from_tl() {
         let merged_conf = default_test_config();
 
         let point_key_pair = new_key_pair();
@@ -498,10 +500,10 @@ mod tests {
 
         let bytes = tl_proto::serialize(&point);
 
-        let short = ShortPoint::read_from_bytes(&bytes)
+        let bump = Bump::new();
+        let payload = Point::read_payload_from_tl_bytes(&bytes, &bump)
             .expect("Failed to deserialize ShortPoint from Point bytes");
-        assert_eq!(short.body.round, point.0.body.round);
-        assert_eq!(short.body.payload, point.0.body.payload);
+        assert_eq!(payload, point.0.body.payload);
     }
 
     #[test]

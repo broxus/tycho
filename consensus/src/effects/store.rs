@@ -2,8 +2,9 @@ use std::cmp;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-use ahash::HashMapExt;
+use ahash::{HashMapExt, HashSetExt};
 use anyhow::{Context, Result};
+use bumpalo::Bump;
 use bytes::Bytes;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
@@ -57,7 +58,13 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>>;
 
-    fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>>;
+    fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize;
+
+    fn expand_anchor_history<'b>(
+        &self,
+        history: &[PointInfo],
+        bump: &'b Bump,
+    ) -> Result<Vec<&'b [u8]>>;
 
     fn last_round(&self) -> Result<Round>;
 
@@ -82,7 +89,16 @@ impl MempoolAdapterStore {
         self.commit_finished.set_max_raw(next_expected_anchor);
     }
 
-    pub fn expand_anchor_history(&self, anchor: &PointInfo, history: &[PointInfo]) -> Vec<Bytes> {
+    pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
+        self.storage.expand_anchor_history_arena_size(history)
+    }
+
+    pub fn expand_anchor_history<'b>(
+        &self,
+        anchor: &PointInfo,
+        history: &[PointInfo],
+        bump: &'b Bump,
+    ) -> Vec<&'b [u8]> {
         fn context(anchor: &PointInfo, history: &[PointInfo]) -> String {
             format!(
                 "anchor {:?} history {} points rounds [{}..{}]",
@@ -103,7 +119,7 @@ impl MempoolAdapterStore {
             Vec::new()
         } else {
             self.storage
-                .expand_anchor_history(history)
+                .expand_anchor_history(history, bump)
                 .with_context(|| context(anchor, history))
                 .expect("DB expand anchor history")
         };
@@ -482,24 +498,31 @@ impl MempoolStoreImpl for MempoolStorage {
             .transpose()
     }
 
-    fn expand_anchor_history(&self, history: &[PointInfo]) -> Result<Vec<Bytes>> {
+    fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
+        let payload_bytes =
+            (history.iter()).fold(0, |acc, info| acc + info.payload_bytes() as usize);
+        let keys_bytes = history.len() * MempoolStorage::KEY_LEN;
+        payload_bytes + keys_bytes
+    }
+
+    fn expand_anchor_history<'b>(
+        &self,
+        history: &[PointInfo],
+        bump: &'b Bump,
+    ) -> Result<Vec<&'b [u8]>> {
         let _call_duration =
             HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
         let mut buf = [0_u8; MempoolStorage::KEY_LEN];
-        let mut keys = history
-            .iter()
-            .map(|info| {
-                MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-                buf.to_vec().into_boxed_slice()
-            })
-            .collect::<FastHashSet<_>>();
+        let mut keys = FastHashSet::<&'b [u8]>::with_capacity(history.len());
+        for info in history {
+            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
+            keys.insert(bump.alloc_slice_copy(&buf));
+        }
         buf.fill(0);
 
         let mut opt = ReadOptions::default();
 
-        let first = history
-            .first()
-            .context("anchor history must not be empty")?;
+        let first = (history.first()).context("anchor history must not be empty")?;
         MempoolStorage::fill_prefix(first.round().0, &mut buf);
         opt.set_iterate_lower_bound(buf);
 
@@ -517,15 +540,13 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut total_payload_items = 0;
         while iter.valid() {
             let key = iter.key().context("history iter invalidated on key")?;
-            if keys.remove(key) {
+            if let Some(key) = keys.take(key) {
                 let bytes = iter.value().context("history iter invalidated on value")?;
-                let point = Point::short_point_from_bytes(bytes).context("deserialize point")?;
+                let payload =
+                    Point::read_payload_from_tl_bytes(bytes, bump).context("deserialize point")?;
 
-                total_payload_items += point.payload().len();
-                if found
-                    .insert(key.to_vec().into_boxed_slice(), point)
-                    .is_some()
-                {
+                total_payload_items += payload.len();
+                if found.insert(key, payload).is_some() {
                     // we panic thus we don't care about performance
                     let full_point =
                         tl_proto::deserialize::<Point>(bytes).context("deserialize point")?;
@@ -553,11 +574,13 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut result = Vec::with_capacity(total_payload_items);
         for info in history {
             MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-            let point = found
+            let payload = found
                 .remove(buf.as_slice())
                 .with_context(|| MempoolStorage::format_key(&buf))
                 .context("key was searched in db but was not found")?;
-            result.extend_from_slice(point.payload());
+            for msg in payload {
+                result.push(msg);
+            }
         }
 
         Ok(result)
@@ -757,7 +780,11 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn expand_anchor_history(&self, _: &[PointInfo]) -> Result<Vec<Bytes>> {
+    fn expand_anchor_history_arena_size(&self, _: &[PointInfo]) -> usize {
+        0
+    }
+
+    fn expand_anchor_history<'b>(&self, _: &[PointInfo], _: &'b Bump) -> Result<Vec<&'b [u8]>> {
         anyhow::bail!("should not be used in tests")
     }
 
