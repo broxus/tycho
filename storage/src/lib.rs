@@ -246,6 +246,14 @@ impl Storage {
         &self.inner.base_db
     }
 
+    pub fn mempool_db(&self) -> &MempoolDb {
+        &self.inner.mempool_storage.db
+    }
+
+    pub fn rpc_db(&self) -> Option<&RpcDb> {
+        self.inner.rpc_state.as_ref().map(|x| x.db())
+    }
+
     pub fn config(&self) -> &StorageConfig {
         &self.inner.config
     }

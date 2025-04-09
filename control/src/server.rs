@@ -21,7 +21,8 @@ use tarpc::server::Channel;
 use tycho_block_util::config::build_elections_data_to_sign;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::block_strider::{
-    GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
+    GcSubscriber, ManualCompaction, ManualCompactionTrigger, ManualGcTrigger, StateSubscriber,
+    StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_network::Network;
@@ -149,7 +150,13 @@ impl Drop for ControlEndpoint {
 }
 
 pub struct ControlServerBuilder<
-    MandatoryFields = (Network, Storage, GcSubscriber, BlockchainRpcClient),
+    MandatoryFields = (
+        Network,
+        Storage,
+        GcSubscriber,
+        BlockchainRpcClient,
+        ManualCompaction,
+    ),
 > {
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
@@ -159,7 +166,8 @@ pub struct ControlServerBuilder<
 
 impl ControlServerBuilder {
     pub async fn build(self, version: ControlServerVersion) -> Result<ControlServer> {
-        let (network, storage, gc_subscriber, blockchain_rpc_client) = self.mandatory_fields;
+        let (network, storage, gc_subscriber, blockchain_rpc_client, manual_compaction) =
+            self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
             .unwrap_or_else(|| Arc::new(StubMemoryProfiler));
@@ -206,6 +214,7 @@ impl ControlServerBuilder {
                 gc_subscriber,
                 storage,
                 blockchain_rpc_client,
+                manual_compaction,
                 memory_profiler,
                 validator_keypair: self.validator_keypair,
                 mc_accounts: Default::default(),
@@ -215,11 +224,14 @@ impl ControlServerBuilder {
     }
 }
 
-impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
-    pub fn with_network(self, network: &Network) -> ControlServerBuilder<(Network, T2, T3, T4)> {
-        let (_, t2, t3, t4) = self.mandatory_fields;
+impl<T2, T3, T4, T5> ControlServerBuilder<((), T2, T3, T4, T5)> {
+    pub fn with_network(
+        self,
+        network: &Network,
+    ) -> ControlServerBuilder<(Network, T2, T3, T4, T5)> {
+        let (_, t2, t3, t4, t5) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (network.clone(), t2, t3, t4),
+            mandatory_fields: (network.clone(), t2, t3, t4, t5),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -227,11 +239,11 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
     }
 }
 
-impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
-    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3, T4)> {
-        let (t1, _, t3, t4) = self.mandatory_fields;
+impl<T1, T3, T4, T5> ControlServerBuilder<(T1, (), T3, T4, T5)> {
+    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3, T4, T5)> {
+        let (t1, _, t3, t4, t5) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, storage, t3, t4),
+            mandatory_fields: (t1, storage, t3, t4, t5),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -239,14 +251,14 @@ impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
     }
 }
 
-impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
+impl<T1, T2, T4, T5> ControlServerBuilder<(T1, T2, (), T4, T5)> {
     pub fn with_gc_subscriber(
         self,
         gc_subscriber: GcSubscriber,
-    ) -> ControlServerBuilder<(T1, T2, GcSubscriber, T4)> {
-        let (t1, t2, _, t4) = self.mandatory_fields;
+    ) -> ControlServerBuilder<(T1, T2, GcSubscriber, T4, T5)> {
+        let (t1, t2, _, t4, t5) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, t2, gc_subscriber, t4),
+            mandatory_fields: (t1, t2, gc_subscriber, t4, t5),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -254,14 +266,29 @@ impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
     }
 }
 
-impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
+impl<T1, T2, T3, T5> ControlServerBuilder<(T1, T2, T3, (), T5)> {
     pub fn with_blockchain_rpc_client(
         self,
         client: BlockchainRpcClient,
-    ) -> ControlServerBuilder<(T1, T2, T3, BlockchainRpcClient)> {
-        let (t1, t2, t3, _) = self.mandatory_fields;
+    ) -> ControlServerBuilder<(T1, T2, T3, BlockchainRpcClient, T5)> {
+        let (t1, t2, t3, _, t5) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, t2, t3, client),
+            mandatory_fields: (t1, t2, t3, client, t5),
+            memory_profiler: self.memory_profiler,
+            validator_keypair: self.validator_keypair,
+            collator: self.collator,
+        }
+    }
+}
+
+impl<T1, T2, T3, T4> ControlServerBuilder<(T1, T2, T3, T4, ())> {
+    pub fn with_manual_compaction(
+        self,
+        manual_compaction: ManualCompaction,
+    ) -> ControlServerBuilder<(T1, T2, T3, T4, ManualCompaction)> {
+        let (t1, t2, t3, t4, _) = self.mandatory_fields;
+        ControlServerBuilder {
+            mandatory_fields: (t1, t2, t3, t4, manual_compaction),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -293,9 +320,9 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn builder() -> ControlServerBuilder<((), (), (), ())> {
+    pub fn builder() -> ControlServerBuilder<((), (), (), (), ())> {
         ControlServerBuilder {
-            mandatory_fields: ((), (), (), ()),
+            mandatory_fields: ((), (), (), (), ()),
             memory_profiler: None,
             validator_keypair: None,
             collator: None,
@@ -438,6 +465,10 @@ impl proto::ControlServer for ControlServer {
 
     async fn trigger_states_gc(self, _: Context, req: proto::TriggerGcRequest) {
         self.inner.gc_subscriber.trigger_states_gc(req.into());
+    }
+
+    async fn trigger_compaction(self, _: Context, req: proto::TriggerCompactionRequest) {
+        self.inner.manual_compaction.trigger_compaction(req.into());
     }
 
     async fn set_memory_profiler_enabled(self, _: Context, enabled: bool) -> bool {
@@ -749,6 +780,7 @@ struct Inner {
     gc_subscriber: GcSubscriber,
     storage: Storage,
     blockchain_rpc_client: BlockchainRpcClient,
+    manual_compaction: ManualCompaction,
     memory_profiler: Arc<dyn MemoryProfiler>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
@@ -818,6 +850,16 @@ impl From<proto::TriggerGcRequest> for ManualGcTrigger {
         match value {
             proto::TriggerGcRequest::Exact(mc_seqno) => Self::Exact(mc_seqno),
             proto::TriggerGcRequest::Distance(distance) => Self::Distance(distance),
+        }
+    }
+}
+
+impl From<proto::TriggerCompactionRequest> for ManualCompactionTrigger {
+    fn from(value: proto::TriggerCompactionRequest) -> Self {
+        match value {
+            proto::TriggerCompactionRequest::Base => Self::Base,
+            proto::TriggerCompactionRequest::Mempool => Self::Mempool,
+            proto::TriggerCompactionRequest::Rpc => Self::Rpc,
         }
     }
 }

@@ -25,9 +25,9 @@ use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, Control
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    ColdBootType, FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StarterConfig,
-    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
+    ColdBootType, FileZerostateProvider, GcSubscriber, ManualCompaction, MetricsSubscriber,
+    OptionalBlockStuff, PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter,
+    StarterConfig, StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -368,6 +368,7 @@ impl Node {
 
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
         let ps_subscriber = PsSubscriber::new(self.storage.clone());
+        let manual_compaction = ManualCompaction::new(self.storage.clone());
 
         // Create control server
         let control_server = {
@@ -376,6 +377,7 @@ impl Node {
                 .with_gc_subscriber(gc_subscriber.clone())
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
+                .with_manual_compaction(manual_compaction)
                 .with_validator_keypair(self.keypair.clone())
                 .with_collator(Arc::new(CollatorControl {
                     config: self.collator_config.clone(),
