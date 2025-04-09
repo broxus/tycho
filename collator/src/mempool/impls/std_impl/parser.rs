@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use everscale_types::boc::Boc;
 use everscale_types::models::MsgInfo;
 use everscale_types::prelude::Load;
@@ -37,7 +36,7 @@ impl Parser {
     pub fn parse_unique(
         &mut self,
         anchor_id: MempoolAnchorId,
-        payloads: Vec<Bytes>,
+        payloads: Vec<&[u8]>,
     ) -> ParserOutput {
         let _guard = HistogramGuard::begin("tycho_mempool_adapter_parse_anchor_history_time");
 
@@ -45,7 +44,7 @@ impl Parser {
             .into_par_iter()
             .filter_map(|bytes| {
                 (bytes.len() <= ExtMsgRepr::MAX_BOC_SIZE)
-                    .then(|| (<[u8; 32]>::from(blake3::hash(&bytes)), bytes))
+                    .then(|| (<[u8; 32]>::from(blake3::hash(bytes)), bytes))
             })
             .collect::<Vec<_>>();
 
@@ -57,7 +56,7 @@ impl Parser {
 
         let uniq_messages_blake = uniq_bytes_blake
             .into_par_iter()
-            .filter_map(|bytes| Self::parse_message_bytes(&bytes).map(|cell| (cell, bytes.len())))
+            .filter_map(|bytes| Self::parse_message_bytes(bytes).map(|cell| (cell, bytes.len())))
             .collect::<Vec<_>>();
 
         let mut unique_payload_bytes = 0;
@@ -78,7 +77,7 @@ impl Parser {
         }
     }
 
-    fn parse_message_bytes(message: &Bytes) -> Option<Arc<ExternalMessage>> {
+    fn parse_message_bytes(message: &[u8]) -> Option<Arc<ExternalMessage>> {
         let cell = Boc::decode(message).ok()?;
         if cell.is_exotic() || cell.level() != 0 || cell.repr_depth() > ExtMsgRepr::MAX_REPR_DEPTH {
             return None;

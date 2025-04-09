@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bumpalo::Bump;
 use everscale_types::models::ConsensusConfig;
 use tokio::sync::mpsc;
 use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolOutput};
@@ -93,8 +94,12 @@ impl Shuttle {
             (self.first_after_gap.as_ref()).is_none_or(|first_id| anchor_id >= *first_id);
 
         let task = tokio::task::spawn_blocking(move || {
+            let bump = Bump::with_capacity(
+                (self.store).expand_anchor_history_arena_size(&committed.history),
+            );
+
             let payloads =
-                (self.store).expand_anchor_history(&committed.anchor, &committed.history);
+                (self.store).expand_anchor_history(&committed.anchor, &committed.history, &bump);
 
             let total_messages = payloads.len();
             let total_bytes: usize = payloads.iter().fold(0, |acc, bytes| acc + bytes.len());
@@ -103,6 +108,8 @@ impl Shuttle {
                 unique_messages,
                 unique_payload_bytes,
             } = self.parser.parse_unique(anchor_id, payloads);
+
+            drop(bump);
 
             let unique_messages_len = unique_messages.len();
 

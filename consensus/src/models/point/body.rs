@@ -24,14 +24,6 @@ pub struct PointBody {
     pub evidence: BTreeMap<PeerId, Signature>,
 }
 
-#[derive(TlWrite, TlRead, Debug)]
-#[cfg_attr(test, derive(Clone))]
-#[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
-pub struct ShortPointBody {
-    pub round: Round,
-    pub payload: Vec<Bytes>,
-}
-
 impl PointBody {
     pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
         // 4 bytes of PointBody tag
