@@ -63,7 +63,7 @@ pub enum IllFormedReason {
     #[error("unknown after load from DB")]
     AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
     #[error("too large payload: {0} bytes")]
-    TooLargePayload(usize),
+    TooLargePayload(u32),
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
     #[error("links both anchor roles to same round")]
@@ -535,8 +535,8 @@ impl Verifier {
         }
 
         // check size only now, as config seems up to date
-        let payload_bytes: usize = point.payload().iter().fold(0, |acc, msg| acc + msg.len());
-        if payload_bytes > conf.consensus.payload_batch_bytes as usize {
+        let payload_bytes = point.payload_bytes();
+        if payload_bytes > conf.consensus.payload_batch_bytes {
             let reason = IllFormedReason::TooLargePayload(payload_bytes);
             return Some(VerifyError::IllFormed(reason));
         }

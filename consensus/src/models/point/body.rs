@@ -75,6 +75,10 @@ impl PointBody {
         Digest::new(data.as_ref())
     }
 
+    pub fn payload_bytes(&self) -> u32 {
+        (self.payload.iter()).fold(0, |acc, msg| acc.saturating_add(msg.len() as u32))
+    }
+
     pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
         // check for being earlier than genesis takes place with other peer checks
         #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
