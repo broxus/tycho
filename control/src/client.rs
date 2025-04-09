@@ -63,6 +63,13 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
+    pub async fn trigger_compaction(&self, req: TriggerCompactionRequest) -> ClientResult<()> {
+        self.inner
+            .trigger_compaction(current_context(), req)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn set_memory_profiler_enabled(&self, enabled: bool) -> ClientResult<bool> {
         self.inner
             .set_memory_profiler_enabled(current_context(), enabled)

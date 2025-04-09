@@ -25,6 +25,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node gc-archives`↴](#tycho-node-gc-archives)
 * [`tycho node gc-blocks`↴](#tycho-node-gc-blocks)
 * [`tycho node gc-states`↴](#tycho-node-gc-states)
+* [`tycho node compact`↴](#tycho-node-compact)
 * [`tycho node mem-profiler`↴](#tycho-node-mem-profiler)
 * [`tycho node mem-profiler start`↴](#tycho-node-mem-profiler-start)
 * [`tycho node mem-profiler stop`↴](#tycho-node-mem-profiler-stop)
@@ -164,6 +165,7 @@ Manage the node
 * `gc-archives` — Trigger a garbage collection of archives
 * `gc-blocks` — Trigger a garbage collection of blocks
 * `gc-states` — Trigger a garbage collection of states
+* `compact` — Trigger a compaction in database
 * `mem-profiler` — Manage memory profiler
 
 
@@ -395,6 +397,28 @@ Trigger a garbage collection of states
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `--seqno <SEQNO>` — Triggers GC for the specified MC block seqno
 * `--distance <DISTANCE>` — Triggers GC for the MC block seqno relative to the latest MC block
+
+
+
+## `tycho node compact`
+
+Trigger a compaction in database
+
+**Usage:** `tycho node compact [OPTIONS] --database <DATABASE>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-d`, `--database <DATABASE>`
+
+  Possible values:
+  - `base`:
+    Trigger compaction for `BaseDb`
+  - `mempool`:
+    Trigger compaction for `MempoolDb`
+  - `rpc`:
+    Trigger compaction for `RpcDb`
+
 
 
 

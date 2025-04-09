@@ -3631,6 +3631,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bytes",
+ "clap",
  "everscale-crypto",
  "everscale-types",
  "futures-util",

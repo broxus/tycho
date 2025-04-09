@@ -32,6 +32,7 @@ pub enum CmdControl {
     GcArchives(CmdGcArchives),
     GcBlocks(CmdGcBlocks),
     GcStates(CmdGcStates),
+    Compact(CmdCompact),
     #[clap(subcommand)]
     MemProfiler(CmdMemProfiler),
 }
@@ -53,6 +54,7 @@ impl CmdControl {
             Self::GcArchives(cmd) => cmd.run(args),
             Self::GcBlocks(cmd) => cmd.run(args),
             Self::GcStates(cmd) => cmd.run(args),
+            Self::Compact(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
         }
     }
@@ -275,6 +277,25 @@ impl CmdGcStates {
     pub fn run(self, args: BaseArgs) -> Result<()> {
         self.args.rt(args, |client| async move {
             client.trigger_states_gc(self.by.into()).await?;
+            print_json(Empty {})
+        })
+    }
+}
+
+/// Trigger a compaction in database.
+#[derive(Parser)]
+pub struct CmdCompact {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    #[clap(short, long)]
+    database: tycho_control::proto::TriggerCompactionRequest,
+}
+
+impl CmdCompact {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, |client| async move {
+            client.trigger_compaction(self.database).await?;
             print_json(Empty {})
         })
     }

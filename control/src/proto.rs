@@ -28,6 +28,9 @@ pub trait ControlServer {
     /// Trigger manual GC for states.
     async fn trigger_states_gc(req: TriggerGcRequest);
 
+    /// Trigger manual compaction.
+    async fn trigger_compaction(req: TriggerCompactionRequest);
+
     /// Sets memory profiler state. Returns whether the state was changed.
     async fn set_memory_profiler_enabled(enabled: bool) -> bool;
 
@@ -118,6 +121,16 @@ pub struct CollatorInfo {
 pub enum TriggerGcRequest {
     Exact(u32),
     Distance(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
+pub enum TriggerCompactionRequest {
+    /// Trigger compaction for `BaseDb`.
+    Base,
+    /// Trigger compaction for `MempoolDb`.
+    Mempool,
+    /// Trigger compaction for `RpcDb`.
+    Rpc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
