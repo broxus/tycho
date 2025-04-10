@@ -122,7 +122,7 @@ pub enum TriggerGcRequest {
     Distance(u32),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TriggerCompactionRequest {
     /// Trigger compaction for `BaseDb`.
     Base,
@@ -130,6 +130,21 @@ pub enum TriggerCompactionRequest {
     Mempool,
     /// Trigger compaction for `RpcDb`.
     Rpc,
+}
+
+impl TryFrom<&str> for TriggerCompactionRequest {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let res = match s {
+            "base" => Self::Base,
+            "mempool" => Self::Mempool,
+            "rpc" => Self::Rpc,
+            _ => anyhow::bail!("invalid database type"),
+        };
+
+        Ok(res)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

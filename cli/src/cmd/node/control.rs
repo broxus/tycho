@@ -288,14 +288,16 @@ pub struct CmdCompact {
     #[clap(flatten)]
     args: ControlArgs,
 
-    #[clap(short, long)]
-    database: tycho_control::proto::TriggerCompactionRequest,
+    #[clap(short, long, value_parser = ["base", "mempool", "rpc"])]
+    database: String,
 }
 
 impl CmdCompact {
     pub fn run(self, args: BaseArgs) -> Result<()> {
         self.args.rt(args, |client| async move {
-            client.trigger_compaction(self.database).await?;
+            client
+                .trigger_compaction(self.database.as_str().try_into()?)
+                .await?;
             print_json(Empty {})
         })
     }

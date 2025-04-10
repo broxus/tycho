@@ -411,13 +411,7 @@ Trigger a compaction in database
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `-d`, `--database <DATABASE>`
 
-  Possible values:
-  - `base`:
-    Trigger compaction for `BaseDb`
-  - `mempool`:
-    Trigger compaction for `MempoolDb`
-  - `rpc`:
-    Trigger compaction for `RpcDb`
+  Possible values: `base`, `mempool`, `rpc`
 
 
 
