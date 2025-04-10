@@ -1396,7 +1396,13 @@ impl CumulativeStatistics {
                             .or_insert(count);
                     }
                 }
-                self.result.insert(partition, QueueStatisticsWithRemaning {
+                self.result
+                    .entry(partition)
+                    .and_modify(|stats| {
+                        stats.initial_stats.append(&partition_stats);
+                        stats.remaning_stats.append(&partition_stats);
+                    })
+                    .or_insert(QueueStatisticsWithRemaning {
                     initial_stats: QueueStatistics::with_statistics(partition_stats.clone()),
                     remaning_stats: ConcurrentQueueStatistics::with_statistics(partition_stats),
                 });
