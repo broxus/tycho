@@ -164,11 +164,11 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
             }
         }
         MethodParams::GetTransaction(p) => match state.get_transaction(&p.id) {
-            Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
+            Ok(value) => ok_to_response(req.id, value.as_ref().map(encode_base64)),
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetDstTransaction(p) => match state.get_dst_transaction(&p.message_hash) {
-            Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
+            Ok(value) => ok_to_response(req.id, value.as_ref().map(encode_base64)),
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetTransactionBlockId(p) => match state.get_transaction_block_id(&p.id) {

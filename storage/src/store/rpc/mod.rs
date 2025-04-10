@@ -189,15 +189,14 @@ impl RpcStorage {
         })
     }
 
-    pub fn get_transaction(
-        &self,
-        hash: &HashBytes,
-    ) -> Result<Option<rocksdb::DBPinnableSlice<'_>>> {
+    pub fn get_transaction(&self, hash: &HashBytes) -> Result<Option<TransactionData<'_>>> {
         let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
             return Ok(None);
         };
         let tx_info = &tx_info.as_ref()[..Transactions::KEY_LEN];
-        self.db.transactions.get(tx_info).map_err(Into::into)
+
+        let tx = self.db.transactions.get(tx_info)?;
+        Ok(tx.map(TransactionData::new))
     }
 
     pub fn get_transaction_block_id(&self, hash: &HashBytes) -> Result<Option<BlockId>> {
@@ -235,11 +234,13 @@ impl RpcStorage {
     pub fn get_dst_transaction(
         &self,
         in_msg_hash: &HashBytes,
-    ) -> Result<Option<rocksdb::DBPinnableSlice<'_>>> {
+    ) -> Result<Option<TransactionData<'_>>> {
         let Some(key) = self.db.transactions_by_in_msg.get(in_msg_hash)? else {
             return Ok(None);
         };
-        self.db.transactions.get(key).map_err(Into::into)
+
+        let tx = self.db.transactions.get(key)?;
+        Ok(tx.map(TransactionData::new))
     }
 
     #[tracing::instrument(
@@ -444,21 +445,23 @@ impl RpcStorage {
                 });
                 self.total_tx += 1;
 
-                // Delete secondary index entries
-                if let Ok(tx_cell) = Boc::decode(value) {
-                    // Delete transaction by hash index entry
-                    self.batch
-                        .delete_cf(&self.tx_by_hash, tx_cell.repr_hash().as_slice());
-                    self.total_tx_by_hash += 1;
+                // Must contain at least mask and tx hash
+                assert!(value.len() >= 33);
 
-                    // Delete transaction by incoming message hash index entry
-                    if let Ok(tx) = tx_cell.parse::<Transaction>() {
-                        if let Some(in_msg) = &tx.in_msg {
-                            self.batch
-                                .delete_cf(&self.tx_by_in_msg, in_msg.repr_hash().as_slice());
-                            self.total_tx_by_in_msg += 1;
-                        }
-                    }
+                let mask = TransactionMask::from_bits_retain(value[0]);
+
+                // Delete transaction by hash index entry
+                let tx_hash = &value[1..33];
+                self.batch.delete_cf(&self.tx_by_hash, tx_hash);
+                self.total_tx_by_hash += 1;
+
+                // Delete transaction by incoming message hash index entry
+                if mask.has_msg_hash() {
+                    assert!(value.len() >= 65);
+
+                    let in_msg_hash = &value[33..65];
+                    self.batch.delete_cf(&self.tx_by_in_msg, in_msg_hash);
+                    self.total_tx_by_in_msg += 1;
                 }
             }
 
@@ -469,11 +472,17 @@ impl RpcStorage {
                         PendingDelete::Single => self
                             .batch
                             .delete_cf(&self.tx_cf, self.key_range_begin.as_slice()),
-                        PendingDelete::Range => self.batch.delete_range_cf(
-                            &self.tx_cf,
-                            self.key_range_begin.as_slice(),
-                            self.key_range_end.as_slice(),
-                        ),
+                        PendingDelete::Range => {
+                            // Remove `[begin; end)`
+                            self.batch.delete_range_cf(
+                                &self.tx_cf,
+                                self.key_range_begin.as_slice(),
+                                self.key_range_end.as_slice(),
+                            );
+                            // Remove `end`
+                            self.batch
+                                .delete_cf(&self.tx_cf, self.key_range_end.as_slice());
+                        }
                     }
                 }
             }
@@ -751,28 +760,44 @@ impl RpcStorage {
                         }
                     }
 
-                    // Write tx data and indices
                     let tx_hash = tx_cell.inner().repr_hash();
+                    let (tx_mask, msg_hash) = match &tx.in_msg {
+                        Some(in_msg) => {
+                            let hash = Some(in_msg.repr_hash());
+                            let mask = TransactionMask::HAS_MSG_HASH;
+                            (mask, hash)
+                        }
+                        None => (TransactionMask::empty(), None),
+                    };
 
+                    // Collect transaction data to `tx_buffer`
                     tx_buffer.clear();
+                    tx_buffer.push(tx_mask.bits());
+                    tx_buffer.extend_from_slice(tx_hash.as_slice());
+                    if let Some(msg_hash) = msg_hash {
+                        tx_buffer.extend_from_slice(msg_hash.as_slice());
+                    }
                     everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut tx_buffer);
+
+                    // Write tx data and indices
+                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+
+                    if let Some(msg_hash) = msg_hash {
+                        write_batch.put_cf(
+                            tx_by_in_msg_cf,
+                            msg_hash,
+                            &tx_info[..tables::Transactions::KEY_LEN],
+                        );
+                    }
 
                     write_batch.put_cf(
                         tx_cf,
                         &tx_info[..tables::Transactions::KEY_LEN],
                         &tx_buffer,
                     );
-                    write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
-                    if let Some(in_msg) = &tx.in_msg {
-                        write_batch.put_cf(
-                            tx_by_in_msg_cf,
-                            in_msg.repr_hash(),
-                            &tx_info[..tables::Transactions::KEY_LEN],
-                        );
-                    }
                 }
 
                 // Update code hash
@@ -1103,9 +1128,37 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.inner.value()?;
-        let result = (self.map)(value)?;
+        let result = (self.map)(TransactionData::read_transaction(value))?;
         self.inner.prev();
         Some(result)
+    }
+}
+
+pub struct TransactionData<'a> {
+    data: rocksdb::DBPinnableSlice<'a>,
+}
+
+impl<'a> TransactionData<'a> {
+    pub fn new(data: rocksdb::DBPinnableSlice<'a>) -> Self {
+        Self { data }
+    }
+
+    fn read_transaction<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {
+        let value = value.as_ref();
+        assert!(!value.is_empty());
+
+        let mask = TransactionMask::from_bits_retain(value[0]);
+        let boc_start = if mask.has_msg_hash() { 65 } else { 33 }; // 1 + 32 + (32)
+
+        assert!(boc_start < value.len());
+
+        value[boc_start..].as_ref()
+    }
+}
+
+impl AsRef<[u8]> for TransactionData<'_> {
+    fn as_ref(&self) -> &[u8] {
+        Self::read_transaction(self.data.as_ref())
     }
 }
 
@@ -1204,6 +1257,19 @@ fn extend_account_prefix(shard: &ShardIdent, max: bool, target: &mut [u8; 32]) {
 const fn extract_tag(shard: &ShardIdent) -> u64 {
     let prefix = shard.prefix();
     prefix & (!prefix).wrapping_add(1)
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct TransactionMask: u8 {
+        const HAS_MSG_HASH = 1 << 0;
+    }
+}
+
+impl TransactionMask {
+    pub fn has_msg_hash(&self) -> bool {
+        self.contains(TransactionMask::HAS_MSG_HASH)
+    }
 }
 
 type AddressKey = [u8; 33];
