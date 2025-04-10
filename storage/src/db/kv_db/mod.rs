@@ -224,13 +224,16 @@ pub type RpcDb = WeeDb<RpcTables>;
 
 impl WithMigrations for RpcDb {
     const NAME: &'static str = "rpc";
-    const VERSION: Semver = [0, 0, 1];
+    const VERSION: Semver = [0, 0, 2];
 
     fn register_migrations(
-        _migrations: &mut Migrations<Self>,
-        _cancelled: CancellationFlag,
+        migrations: &mut Migrations<Self>,
+        cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
-        // TODO: register migrations here
+        migrations.register([0, 0, 1], [0, 0, 2], move |db| {
+            rpc_migrations::v0_0_1_to_0_0_2(db, cancelled.clone())
+        })?;
+
         Ok(())
     }
 }
@@ -243,6 +246,102 @@ weedb::tables! {
         pub transactions_by_in_msg: tables::TransactionsByInMsg,
         pub code_hashes: tables::CodeHashes,
         pub code_hashes_by_address: tables::CodeHashesByAddress,
+    }
+}
+
+mod rpc_migrations {
+    use std::time::Instant;
+
+    use everscale_types::boc::{Boc, BocTag};
+    use everscale_types::models::Transaction;
+    use tycho_util::sync::CancellationFlag;
+    use weedb::MigrationError;
+
+    use crate::{RpcDb, TransactionMask};
+
+    pub fn v0_0_1_to_0_0_2(db: &RpcDb, cancelled: CancellationFlag) -> Result<(), MigrationError> {
+        const BATCH_SIZE: usize = 100_000;
+
+        let mut transactions_iter = db.transactions.raw_iterator();
+        transactions_iter.seek_to_first();
+
+        tracing::info!("stated migrating transactions");
+
+        let started_at = Instant::now();
+        let mut total_processed = 0usize;
+
+        let transactions_cf = &db.transactions.cf();
+        let mut batch = weedb::rocksdb::WriteBatch::default();
+        let mut cancelled = cancelled.debounce(10);
+        let mut buffer = Vec::new();
+        loop {
+            let (key, value) = match transactions_iter.item() {
+                Some(item) if !cancelled.check() => item,
+                Some(_) => return Err(MigrationError::Custom(anyhow::anyhow!("cancelled").into())),
+                None => {
+                    transactions_iter.status()?;
+                    break;
+                }
+            };
+
+            if BocTag::from_bytes(value[0..4].try_into().unwrap()).is_none() {
+                // Skip already updated values.
+                transactions_iter.next();
+                continue;
+            }
+
+            let tx_cell = Boc::decode(value).map_err(|_e| {
+                MigrationError::Custom(anyhow::anyhow!("invalid transaction in db").into())
+            })?;
+
+            let tx_hash = tx_cell.repr_hash();
+
+            let tx = tx_cell.parse::<Transaction>().map_err(|_e| {
+                MigrationError::Custom(anyhow::anyhow!("invalid transaction in db").into())
+            })?;
+
+            let mut mask = TransactionMask::empty();
+            if tx.in_msg.is_some() {
+                mask.set(TransactionMask::HAS_MSG_HASH, true);
+            }
+
+            let boc_start = if mask.has_msg_hash() { 65 } else { 33 }; // 1 + 32 + (32)
+
+            buffer.clear();
+            buffer.reserve(boc_start + value.len());
+
+            buffer.push(mask.bits()); // Mask
+            buffer.extend_from_slice(tx_hash.as_slice()); // Tx hash
+
+            if let Some(in_msg) = tx.in_msg {
+                buffer.extend_from_slice(in_msg.repr_hash().as_slice()); // InMsg hash
+            }
+
+            buffer.extend_from_slice(value); // Tx data
+
+            batch.put_cf(transactions_cf, key, &buffer);
+
+            transactions_iter.next();
+            total_processed += 1;
+
+            if total_processed % BATCH_SIZE == 0 {
+                db.rocksdb()
+                    .write_opt(std::mem::take(&mut batch), db.transactions.write_config())?;
+            }
+        }
+
+        if !batch.is_empty() {
+            db.rocksdb()
+                .write_opt(batch, db.transactions.write_config())?;
+        }
+
+        tracing::info!(
+            elapsed = %humantime::format_duration(started_at.elapsed()),
+            total_processed,
+            "finished migrating transactions"
+        );
+
+        Ok(())
     }
 }
 
