@@ -117,7 +117,6 @@ pub struct CollatorInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "ty", content = "seqno")]
 pub enum TriggerGcRequest {
     Exact(u32),
     Distance(u32),
