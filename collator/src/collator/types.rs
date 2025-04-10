@@ -1403,9 +1403,9 @@ impl CumulativeStatistics {
                         stats.remaning_stats.append(&partition_stats);
                     })
                     .or_insert(QueueStatisticsWithRemaning {
-                    initial_stats: QueueStatistics::with_statistics(partition_stats.clone()),
-                    remaning_stats: ConcurrentQueueStatistics::with_statistics(partition_stats),
-                });
+                        initial_stats: QueueStatistics::with_statistics(partition_stats.clone()),
+                        remaning_stats: ConcurrentQueueStatistics::with_statistics(partition_stats),
+                    });
             }
         }
 
@@ -1427,6 +1427,10 @@ impl ConcurrentQueueStatistics {
 
     pub fn statistics(&self) -> &FastDashMap<IntAddr, u64> {
         &self.statistics
+    }
+
+    pub fn contains(&self, account_addr: &IntAddr) -> bool {
+        self.statistics.contains_key(account_addr)
     }
 
     pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
