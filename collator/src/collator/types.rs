@@ -1173,7 +1173,15 @@ impl CumulativeStatistics {
             mc_state_gen_lt,
             mc_top_shards_end_lts,
         );
-        tracing::trace!(target: tracing_targets::COLLATOR, "cumulative_stats_ranges: {:?}", ranges);
+        tracing::info!("!!! сumulative_stats_ranges: {:?}. current shard: {:?}. partitions {partitions:?}", ranges, current_shard);
+        tracing::info!("!!! PROCESTOR");
+        for (shard, (updated, p)) in &self.all_shards_processed_to_by_partitions {
+            tracing::info!("!!! shard: {:?}, updated: {:?}", shard, updated);
+
+            for (partition, processed_to) in p {
+                tracing::info!("!!! partition: {:?}, processed_to: {:?}", partition, processed_to);
+            }
+        }
         for range in ranges {
             let stats_by_partitions = mq_adapter
                 .load_separated_diff_statistics(partitions, &range)
@@ -1424,23 +1432,32 @@ impl ConcurrentQueueStatistics {
     }
 
     pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
-        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr) {
+        // print stat
+
+
+        tracing::info!("DECREMENTING {} for {}. stat len {}", count, account_addr, self.statistics.len());
+
+
+        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr.clone()) {
             let value = occupied.get_mut();
             *value -= count;
             if *value == 0 {
                 occupied.remove();
             }
         } else {
-            panic!("attempt to decrement non-existing account");
+            panic!("attempt to decrement non-existing account 1");
         }
+        tracing::info!("DECREMENTING FINISHED {} for {}", count, account_addr);
     }
 
     pub fn append(&self, other: &AccountStatistics) {
         for (account_addr, &msgs_count) in other {
+            tracing::info!("ADDING {} to {}. stat len {}", msgs_count, account_addr, self.statistics.len());
             self.statistics
                 .entry(account_addr.clone())
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
         }
+        tracing::info!("ADDING FINISHED");
     }
 }

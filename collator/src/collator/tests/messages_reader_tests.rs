@@ -81,7 +81,8 @@ async fn test_refill_messages() -> Result<()> {
     .into_iter()
     .collect();
 
-    // dex wallets addresses
+    // // dex wallets addresses
+
     let mut dex_wallets = BTreeMap::<u8, IntAddr>::new();
     for i in 30..50 {
         dex_wallets.insert(i, IntAddr::Std(StdAddr::new(0, HashBytes([i; 32]))));
@@ -92,6 +93,9 @@ async fn test_refill_messages() -> Result<()> {
     for i in 100..120 {
         transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(0, HashBytes([i; 32]))));
     }
+
+    // dex wallets addresses
+
 
     //--------------
     // SET UP MESSAGES EXEC PARAMS
@@ -348,6 +352,52 @@ async fn test_refill_messages() -> Result<()> {
         test_adapter.import_anchor_with_messages(messages);
         test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
     }
+
+
+    // test case 007
+
+    // let mut dex_wallets = BTreeMap::<u8, IntAddr>::new();
+    // for i in 30..50 {
+    //     let wc = if i % 2 == 0 { 0 } else { -1 };
+    //     dex_wallets.insert(i, IntAddr::Std(StdAddr::new(wc, HashBytes([i; 32]))));
+    // }
+
+    let mut transfers_wallets = BTreeMap::<u8, IntAddr>::new();
+    for i in 100..120 {
+        let wc = if i % 2 == 0 { 0 } else { -1 };
+        transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(wc, HashBytes([i; 32]))));
+    }
+
+    let one_to_many_address = IntAddr::Std(StdAddr::new(0, HashBytes([255; 32])));
+
+    let messages = test_adapter
+        .msgs_factory
+        .create_one_to_many_start_message(one_to_many_address)?;
+    test_adapter.import_anchor_with_messages(messages);
+
+    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+
+    for _ in 0..3 {
+        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    }
+
+    for _ in 0..20 {
+        // we create such amout of externals per anchor so that they do not fit one buffer limit
+        let target_total_msgs_count = (msgs_exec_params.buffer_limit + 10) as usize;
+        let target_swap_msgs_count = target_total_msgs_count / 3;
+        let target_transfer_msgs_count = target_total_msgs_count - target_swap_msgs_count;
+        // let mut messages = test_adapter
+        //     .msgs_factory
+        //     .create_swap_messages(&dex_wallets, target_swap_msgs_count)?;
+        let mut messages = test_adapter
+            .msgs_factory
+            .create_transfer_messages(&transfers_wallets, target_transfer_msgs_count)?;
+        // messages.append(&mut transfer_messages);
+        test_adapter.import_anchor_with_messages(messages);
+        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    }
+
+
 
     //--------------
     // PROCESS THE REST OF MESSAGES QUEUES

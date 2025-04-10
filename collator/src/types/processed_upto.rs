@@ -409,6 +409,10 @@ pub fn build_all_shards_processed_to_by_partitions(
         next_block_id_short.shard,
         (current_shard_updated, current_shard_processed_to),
     );
+    //
+    // let res.get_mut(&ShardIdent::MASTERCHAIN).unwrap();
+    // if mc.
+
 
     res
 }

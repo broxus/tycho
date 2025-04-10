@@ -92,8 +92,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             remaning_msgs_stats: cx.remaning_msgs_stats,
         };
 
-        tracing::trace!(target: tracing_targets::COLLATOR,
+        tracing::info!(
             partition_id = reader.partition_id,
+            for_shard_id = %reader.for_shard_id,
             remaning_msgs_stats = ?DebugIter(reader.remaning_msgs_stats.statistics().iter().map(|item| {
                 let (addr, count) = item.pair();
                 (get_short_addr_string(addr), *count)
@@ -384,8 +385,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     "reduce cumulative remaning_msgs_stats",
                 );
                 for (account_addr, &count) in range_reader_state.read_stats.statistics() {
-                    self.remaning_msgs_stats
-                        .decrement_for_account(account_addr.clone(), count);
+                    // if self.for_shard_id.contains_address(account_addr) {
+                        tracing::info!("222");
+                        self.remaning_msgs_stats
+                            .decrement_for_account(account_addr.clone(), count);
+                    // }
                 }
             }
         }
@@ -731,16 +735,19 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                             if let Some(remaning_msgs_stats) =
                                 range_reader.reader_state.remaning_msgs_stats.as_mut()
                             {
-                                remaning_msgs_stats.decrement_for_account(
-                                    int_msg.item.message.destination().clone(),
-                                    1,
-                                );
 
-                                // and remaining cumulative stats by partition
-                                self.remaning_msgs_stats.decrement_for_account(
-                                    int_msg.item.message.destination().clone(),
-                                    1,
-                                );
+                                    remaning_msgs_stats.decrement_for_account(
+                                        int_msg.item.message.destination().clone(),
+                                        1,
+                                    );
+
+                                    tracing::info!("DECR KEY {:?}. SOURCE {:?}. CURRENT SHARD  {:?}" , int_msg.item.message.key(), int_msg.item.source, self.for_shard_id);
+
+                                    // and remaining cumulative stats by partition
+                                    self.remaning_msgs_stats.decrement_for_account(
+                                        int_msg.item.message.destination().clone(),
+                                        1,
+                                    );
 
                                 // NOTE: remaining stats will not be reduced on new messages reading
                                 //      because read new messages will will not be added to queue
