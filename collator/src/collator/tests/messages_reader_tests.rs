@@ -306,7 +306,7 @@ async fn test_refill_messages() -> Result<()> {
     // import anchor with one-to-many start message
     let messages = test_adapter
         .msgs_factory
-        .create_one_to_many_start_message(one_to_many_address)?;
+        .create_one_to_many_start_message(one_to_many_address.clone())?;
     test_adapter.import_anchor_with_messages(messages);
 
     test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
@@ -347,6 +347,53 @@ async fn test_refill_messages() -> Result<()> {
         messages.append(&mut transfer_messages);
         test_adapter.import_anchor_with_messages(messages);
         test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    }
+
+    while let TestCollateResult {
+        has_unprocessed_messages: true,
+    } = test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
+    {
+        // process all messages
+    }
+
+    //--------------
+    // TEST CASE 007: START NEW one-to-many AND RUN TRANSFERS BETWEEN MASTER AND SHARDS
+    //--------------
+    tracing::trace!(
+        "TEST CASE 007: START NEW one-to-many AND RUN TRANSFERS BETWEEN MASTER AND SHARDS"
+    );
+
+    // add accounts from master to transfers
+    transfers_wallets.clear();
+    for i in 100..120 {
+        let workchain = if i % 2 == 0 { 0 } else { -1 };
+        transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(workchain, HashBytes([i; 32]))));
+    }
+
+    // import anchor with one-to-many start message
+    let messages = test_adapter
+        .msgs_factory
+        .create_one_to_many_start_message(one_to_many_address.clone())?;
+    test_adapter.import_anchor_with_messages(messages);
+
+    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+
+    for _ in 0..2 {
+        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    }
+
+    for i in 0..10 {
+        // we create such amount of externals per anchor so that they do not fit one buffer limit
+        let msgs_count = (msgs_exec_params.buffer_limit + 20) as usize;
+        let transfer_messages = test_adapter
+            .msgs_factory
+            .create_transfer_messages(&transfers_wallets, msgs_count)?;
+        test_adapter.import_anchor_with_messages(transfer_messages);
+
+        // collate after importing 2 anchors
+        if i % 2 != 0 {
+            test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+        }
     }
 
     //--------------
