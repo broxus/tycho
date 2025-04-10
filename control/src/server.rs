@@ -16,13 +16,15 @@ use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
 use parking_lot::RwLock;
+use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
+use tokio::sync::watch;
+use tokio::task::AbortHandle;
 use tycho_block_util::config::build_elections_data_to_sign;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::block_strider::{
-    GcSubscriber, ManualCompaction, ManualCompactionTrigger, ManualGcTrigger, StateSubscriber,
-    StateSubscriberContext,
+    GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_network::Network;
@@ -150,13 +152,7 @@ impl Drop for ControlEndpoint {
 }
 
 pub struct ControlServerBuilder<
-    MandatoryFields = (
-        Network,
-        Storage,
-        GcSubscriber,
-        BlockchainRpcClient,
-        ManualCompaction,
-    ),
+    MandatoryFields = (Network, Storage, GcSubscriber, BlockchainRpcClient),
 > {
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
@@ -166,8 +162,7 @@ pub struct ControlServerBuilder<
 
 impl ControlServerBuilder {
     pub async fn build(self, version: ControlServerVersion) -> Result<ControlServer> {
-        let (network, storage, gc_subscriber, blockchain_rpc_client, manual_compaction) =
-            self.mandatory_fields;
+        let (network, storage, gc_subscriber, blockchain_rpc_client) = self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
             .unwrap_or_else(|| Arc::new(StubMemoryProfiler));
@@ -207,6 +202,8 @@ impl ControlServerBuilder {
             },
         };
 
+        let manual_compaction = ManualCompaction::new(storage.clone());
+
         Ok(ControlServer {
             inner: Arc::new(Inner {
                 node_info,
@@ -224,14 +221,11 @@ impl ControlServerBuilder {
     }
 }
 
-impl<T2, T3, T4, T5> ControlServerBuilder<((), T2, T3, T4, T5)> {
-    pub fn with_network(
-        self,
-        network: &Network,
-    ) -> ControlServerBuilder<(Network, T2, T3, T4, T5)> {
-        let (_, t2, t3, t4, t5) = self.mandatory_fields;
+impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
+    pub fn with_network(self, network: &Network) -> ControlServerBuilder<(Network, T2, T3, T4)> {
+        let (_, t2, t3, t4) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (network.clone(), t2, t3, t4, t5),
+            mandatory_fields: (network.clone(), t2, t3, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -239,11 +233,11 @@ impl<T2, T3, T4, T5> ControlServerBuilder<((), T2, T3, T4, T5)> {
     }
 }
 
-impl<T1, T3, T4, T5> ControlServerBuilder<(T1, (), T3, T4, T5)> {
-    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3, T4, T5)> {
-        let (t1, _, t3, t4, t5) = self.mandatory_fields;
+impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
+    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3, T4)> {
+        let (t1, _, t3, t4) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, storage, t3, t4, t5),
+            mandatory_fields: (t1, storage, t3, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -251,14 +245,14 @@ impl<T1, T3, T4, T5> ControlServerBuilder<(T1, (), T3, T4, T5)> {
     }
 }
 
-impl<T1, T2, T4, T5> ControlServerBuilder<(T1, T2, (), T4, T5)> {
+impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
     pub fn with_gc_subscriber(
         self,
         gc_subscriber: GcSubscriber,
-    ) -> ControlServerBuilder<(T1, T2, GcSubscriber, T4, T5)> {
-        let (t1, t2, _, t4, t5) = self.mandatory_fields;
+    ) -> ControlServerBuilder<(T1, T2, GcSubscriber, T4)> {
+        let (t1, t2, _, t4) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, t2, gc_subscriber, t4, t5),
+            mandatory_fields: (t1, t2, gc_subscriber, t4),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -266,29 +260,14 @@ impl<T1, T2, T4, T5> ControlServerBuilder<(T1, T2, (), T4, T5)> {
     }
 }
 
-impl<T1, T2, T3, T5> ControlServerBuilder<(T1, T2, T3, (), T5)> {
+impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
     pub fn with_blockchain_rpc_client(
         self,
         client: BlockchainRpcClient,
-    ) -> ControlServerBuilder<(T1, T2, T3, BlockchainRpcClient, T5)> {
-        let (t1, t2, t3, _, t5) = self.mandatory_fields;
+    ) -> ControlServerBuilder<(T1, T2, T3, BlockchainRpcClient)> {
+        let (t1, t2, t3, _) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, t2, t3, client, t5),
-            memory_profiler: self.memory_profiler,
-            validator_keypair: self.validator_keypair,
-            collator: self.collator,
-        }
-    }
-}
-
-impl<T1, T2, T3, T4> ControlServerBuilder<(T1, T2, T3, T4, ())> {
-    pub fn with_manual_compaction(
-        self,
-        manual_compaction: ManualCompaction,
-    ) -> ControlServerBuilder<(T1, T2, T3, T4, ManualCompaction)> {
-        let (t1, t2, t3, t4, _) = self.mandatory_fields;
-        ControlServerBuilder {
-            mandatory_fields: (t1, t2, t3, t4, manual_compaction),
+            mandatory_fields: (t1, t2, t3, client),
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
@@ -320,9 +299,9 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn builder() -> ControlServerBuilder<((), (), (), (), ())> {
+    pub fn builder() -> ControlServerBuilder<((), (), (), ())> {
         ControlServerBuilder {
-            mandatory_fields: ((), (), (), (), ()),
+            mandatory_fields: ((), (), (), ()),
             memory_profiler: None,
             validator_keypair: None,
             collator: None,
@@ -468,7 +447,7 @@ impl proto::ControlServer for ControlServer {
     }
 
     async fn trigger_compaction(self, _: Context, req: proto::TriggerCompactionRequest) {
-        self.inner.manual_compaction.trigger_compaction(req.into());
+        self.inner.manual_compaction.trigger_compaction(req);
     }
 
     async fn set_memory_profiler_enabled(self, _: Context, enabled: bool) -> bool {
@@ -854,16 +833,6 @@ impl From<proto::TriggerGcRequest> for ManualGcTrigger {
     }
 }
 
-impl From<proto::TriggerCompactionRequest> for ManualCompactionTrigger {
-    fn from(value: proto::TriggerCompactionRequest) -> Self {
-        match value {
-            proto::TriggerCompactionRequest::Base => Self::Base,
-            proto::TriggerCompactionRequest::Mempool => Self::Mempool,
-            proto::TriggerCompactionRequest::Rpc => Self::Rpc,
-        }
-    }
-}
-
 /// A bit more weak version of `CachedAccounts` from the `tycho-rpc`.
 struct CachedAccounts {
     block_handle: BlockHandle,
@@ -927,3 +896,68 @@ fn extend_signature_with_id(data: &[u8], signature_id: Option<i32>) -> Cow<'_, [
         None => Cow::Borrowed(data),
     }
 }
+
+#[derive(Clone)]
+struct ManualCompaction {
+    trigger: ManualTriggerTx,
+    handle: AbortHandle,
+}
+
+impl ManualCompaction {
+    pub fn new(storage: Storage) -> Self {
+        let (compaction_trigger, manual_compaction_rx) =
+            watch::channel(None::<proto::TriggerCompactionRequest>);
+
+        let watcher = tokio::spawn(Self::watcher(manual_compaction_rx, storage.clone()));
+
+        Self {
+            trigger: compaction_trigger,
+            handle: watcher.abort_handle(),
+        }
+    }
+
+    pub fn trigger_compaction(&self, trigger: proto::TriggerCompactionRequest) {
+        self.trigger.send_replace(Some(trigger));
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn watcher(mut manual_rx: ManualTriggerRx, storage: Storage) {
+        tracing::info!("manager started");
+        defer! {
+            tracing::info!("manager stopped");
+        }
+
+        loop {
+            if manual_rx.changed().await.is_err() {
+                break;
+            }
+
+            let Some(trigger) = *manual_rx.borrow_and_update() else {
+                continue;
+            };
+
+            match trigger {
+                proto::TriggerCompactionRequest::Base => {
+                    storage.base_db().trigger_compaction().await;
+                }
+                proto::TriggerCompactionRequest::Mempool => {
+                    storage.mempool_db().trigger_compaction().await;
+                }
+                proto::TriggerCompactionRequest::Rpc => {
+                    if let Some(rpc_db) = storage.rpc_db() {
+                        rpc_db.trigger_compaction().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ManualCompaction {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+type ManualTriggerTx = watch::Sender<Option<proto::TriggerCompactionRequest>>;
+type ManualTriggerRx = watch::Receiver<Option<proto::TriggerCompactionRequest>>;

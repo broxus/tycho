@@ -17,11 +17,11 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true, optional = true }
 async-trait = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
-clap = { workspace = true }
 everscale-crypto = { workspace = true, optional = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true, optional = true }
+scopeguard = { workspace = true }
 serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
