@@ -117,6 +117,43 @@ jobs:
         run: |
           # The script will use the TYCHO_BIN_PATH env
           ./scripts/run-network-tests.sh ${{ matrix.test_image }}
+      - name: Archive Logs and Configs
+        if: always()
+        id: archive
+        shell: bash
+        run: |
+          archive_dir=".temp"
+          archive_name="network-test-logs-configs-${{ matrix.test_name }}.tar.zst"
+          echo "ARCHIVE_PATH=${archive_name}" >> $GITHUB_ENV # Store path for next step
+
+          # Check if the directory exists before attempting to archive
+          if [ -d "$archive_dir" ]; then
+            echo "Archiving directory: $archive_dir to $archive_name ..."
+            # Create archive and compress with zstd (using multiple threads if available: -T0)
+            # Exclude potentially problematic socket files explicitly if needed, though tar usually handles them okay.
+            # Using --ignore-failed-read in case some files are transient/deleted during archiving
+            tar --ignore-failed-read -cf - "$archive_dir" | zstd -T0 -o "$archive_name"
+            if [ $? -eq 0 ]; then
+              echo "Archive created successfully."
+              echo "ARCHIVE_CREATED=true" >> $GITHUB_ENV
+            else
+              echo "Archiving failed."
+              echo "ARCHIVE_CREATED=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "Directory $archive_dir not found, skipping archiving."
+            echo "ARCHIVE_CREATED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Logs and Configs Artifact
+        #  run if prior steps failed, but only if the archive was actually created
+        if: always() && steps.archive.outputs.ARCHIVE_CREATED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-test-logs-${{ matrix.test_name }}-${{ github.run_id }}
+          path: ${{ env.ARCHIVE_PATH }}
+          retention-days: 5 # 5 days retention
+          if-no-files-found: warn 
   network_tests_status:
       name: Network Tests Status Check # This is the name to require in branch protection
       runs-on: ubuntu-latest
