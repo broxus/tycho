@@ -21,6 +21,7 @@ pub enum CmdControl {
     Status(CmdStatus),
     Ping(CmdPing),
     GetAccount(CmdGetAccount),
+    GetBlockchainConfig(CmdGetBlockchainConfig),
     GetNeighbours(CmdGetNeighbours),
     FindArchive(CmdFindArchive),
     ListArchives(CmdListArchives),
@@ -43,6 +44,7 @@ impl CmdControl {
             Self::Status(cmd) => cmd.run(args),
             Self::Ping(cmd) => cmd.run(args),
             Self::GetAccount(cmd) => cmd.run(args),
+            Self::GetBlockchainConfig(cmd) => cmd.run(args),
             Self::GetNeighbours(cmd) => cmd.run(args),
             Self::FindArchive(cmd) => cmd.run(args),
             Self::ListArchives(cmd) => cmd.run(args),
@@ -164,6 +166,22 @@ impl CmdGetAccount {
                     "state": BASE64_STANDARD.encode(state.state),
                 }))
             }
+        })
+    }
+}
+
+/// Get blockchain config.
+#[derive(Parser)]
+pub struct CmdGetBlockchainConfig {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+impl CmdGetBlockchainConfig {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let state = client.get_blockchain_config().await?;
+            print_json(state.parse()?)
         })
     }
 }

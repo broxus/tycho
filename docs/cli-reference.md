@@ -14,6 +14,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node status`↴](#tycho-node-status)
 * [`tycho node ping`↴](#tycho-node-ping)
 * [`tycho node get-account`↴](#tycho-node-get-account)
+* [`tycho node get-blockchain-config`↴](#tycho-node-get-blockchain-config)
 * [`tycho node get-neighbours`↴](#tycho-node-get-neighbours)
 * [`tycho node find-archive`↴](#tycho-node-find-archive)
 * [`tycho node list-archives`↴](#tycho-node-list-archives)
@@ -154,6 +155,7 @@ Manage the node
 * `status` — Get node status
 * `ping` — Ping the control server
 * `get-account` — Get account state from the node
+* `get-blockchain-config` — Get blockchain config
 * `get-neighbours` — Get list of all known public overlay neighbours
 * `find-archive` — Get archive info from the node
 * `list-archives` — Fetch the list of all stored archive ids
@@ -222,6 +224,18 @@ Get account state from the node
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `-a`, `--addr <ADDR>` — Account address
 * `-p`, `--parse` — Parse the account state
+
+
+
+## `tycho node get-blockchain-config`
+
+Get blockchain config
+
+**Usage:** `tycho node get-blockchain-config [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 
 
 
