@@ -3864,6 +3864,7 @@ dependencies = [
  "everscale-crypto",
  "exponential-backoff",
  "futures-util",
+ "governor",
  "hex",
  "indexmap 2.6.0",
  "metrics",

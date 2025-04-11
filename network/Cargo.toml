@@ -27,6 +27,7 @@ ed25519 = { workspace = true, features = ["alloc", "pkcs8"] }
 everscale-crypto = { workspace = true }
 exponential-backoff = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
+governor = { workspace = true, features = ["std", "jitter"] }
 hex = { workspace = true }
 indexmap = { workspace = true }
 metrics = { workspace = true }
@@ -48,7 +49,7 @@ tokio-util = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 
 # local deps
-tycho-util = { workspace = true }
+tycho-util = { workspace = true, features = ["governor"] }
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }

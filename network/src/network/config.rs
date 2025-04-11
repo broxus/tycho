@@ -73,6 +73,10 @@ pub struct NetworkConfig {
 
     /// Default: disabled.
     pub connection_metrics: Option<ConnectionMetricsLevel>,
+
+    /// Default: 250 mbit/s
+    /// Limits all outgoing connections to the same peer to this value.
+    pub bandwidth_cap: bytesize::ByteSize,
 }
 
 impl Default for NetworkConfig {
@@ -93,6 +97,7 @@ impl Default for NetworkConfig {
             shutdown_idle_timeout: Duration::from_secs(60),
             enable_0rtt: false,
             connection_metrics: None,
+            bandwidth_cap: bytesize::ByteSize::mb(250 / 8), // in megabits per second
         }
     }
 }
