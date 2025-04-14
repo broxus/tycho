@@ -161,12 +161,19 @@ pub struct TransactionsGcConfig {
     /// Default: `1 week`.
     #[serde(with = "serde_helpers::humantime")]
     pub tx_ttl: Duration,
+
+    /// Keep at least this amount of transactions per account.
+    ///
+    /// Default: `10`.
+    #[serde(default)]
+    pub keep_tx_per_account: usize,
 }
 
 impl Default for TransactionsGcConfig {
     fn default() -> Self {
         Self {
             tx_ttl: Duration::from_secs(60 * 60 * 24 * 7),
+            keep_tx_per_account: 10,
         }
     }
 }

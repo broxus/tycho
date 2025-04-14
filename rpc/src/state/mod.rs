@@ -873,7 +873,10 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
             }
         };
 
-        if let Err(e) = persistent_storage.remove_old_transactions(min_lt).await {
+        if let Err(e) = persistent_storage
+            .remove_old_transactions(min_lt, config.keep_tx_per_account)
+            .await
+        {
             tracing::error!(
                 target_utime,
                 min_lt,

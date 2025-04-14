@@ -391,7 +391,11 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]
-    pub async fn remove_old_transactions(&self, min_lt: u64) -> Result<()> {
+    pub async fn remove_old_transactions(
+        &self,
+        min_lt: u64,
+        keep_tx_per_account: usize,
+    ) -> Result<()> {
         const ITEMS_PER_BATCH: usize = 100000;
 
         type TxKey = [u8; tables::Transactions::KEY_LEN];
@@ -437,10 +441,10 @@ impl RpcStorage {
             fn delete_tx(&mut self, key: &TxKey, value: &[u8]) {
                 // Batch multiple deletes for the primary table
                 self.pending_delete = Some(if self.pending_delete.is_none() {
-                    self.key_range_begin.copy_from_slice(key);
+                    self.key_range_end.copy_from_slice(key);
                     PendingDelete::Single
                 } else {
-                    self.key_range_end.copy_from_slice(key);
+                    self.key_range_begin.copy_from_slice(key);
                     PendingDelete::Range
                 });
                 self.total_tx += 1;
@@ -471,7 +475,7 @@ impl RpcStorage {
                     match pending {
                         PendingDelete::Single => self
                             .batch
-                            .delete_cf(&self.tx_cf, self.key_range_begin.as_slice()),
+                            .delete_cf(&self.tx_cf, self.key_range_end.as_slice()),
                         PendingDelete::Range => {
                             // Remove `[begin; end)`
                             self.batch.delete_range_cf(
@@ -537,23 +541,23 @@ impl RpcStorage {
             let mut readopts = db.transactions.new_read_config();
             readopts.set_snapshot(&snapshot);
             let mut iter = raw.raw_iterator_cf_opt(&db.transactions.cf(), readopts);
-            iter.seek_to_first();
+            iter.seek_to_last();
 
             // Prepare GC state
             let mut gc = GcState::new(&db);
 
             // `last_account` buffer is used to track the last processed account.
             //
-            // The buffer is also used to seek for the next account. Its last
-            // 8 bytes are `u64::MAX`. It forces the `seek` method to jump right
-            // to the first tx of the next account (assuming that there are no
-            // transactions with LT == u64::MAX).
+            // The buffer is also used to seek to the beginning of the tx range.
+            // Its last 8 bytes are `min_lt`. It forces the `seek_prev` method
+            // to jump right to the last tx that is needed to be deleted.
             let mut last_account: TxKey = [0u8; tables::Transactions::KEY_LEN];
-            last_account[33..41].copy_from_slice(&u64::MAX.to_be_bytes());
+            last_account[33..41].copy_from_slice(&min_lt.to_be_bytes());
 
             let mut items = 0usize;
             let mut total_invalid = 0usize;
             let mut iteration = 0usize;
+            let mut tx_count = 0usize;
             loop {
                 let Some((key, value)) = iter.item() else {
                     break iter.status()?;
@@ -569,35 +573,42 @@ impl RpcStorage {
                     items += 1;
                     total_invalid += 1;
                     gc.batch.delete_cf(&gc.tx_cf, key);
+                    iter.prev();
                     continue;
                 };
 
-                // Check whether the next account is processed
+                // Check whether the prev account is processed
                 let item_account = &key[..33];
-                let is_next_account = item_account != &last_account[..33];
-                if is_next_account {
+                let is_prev_account = item_account != &last_account[..33];
+                if is_prev_account {
                     // Update last account address
                     last_account[..33].copy_from_slice(item_account);
 
                     // Add pending delete into batch
                     gc.end_account();
+
+                    tx_count = 0;
                 }
 
                 // Get lt from the key
                 let lt = u64::from_be_bytes(key[33..41].try_into().unwrap());
 
-                if lt < min_lt {
+                if tx_count < keep_tx_per_account {
+                    // Keep last `keep_tx_per_account` transactions for account
+                    tx_count += 1;
+                    iter.prev();
+                } else if lt < min_lt {
                     // Add tx and its secondary indices into the batch
                     items += 1;
                     gc.delete_tx(key, value);
-                    iter.next();
+                    iter.prev();
+                } else if lt > 0 {
+                    // Seek to the end of the removed range
+                    // (to start removing it backwards).
+                    iter.seek_for_prev(last_account.as_slice());
                 } else {
-                    // Seek to the next account
-                    if lt < u64::MAX {
-                        iter.seek(last_account.as_slice());
-                    } else {
-                        iter.next();
-                    }
+                    // Just seek to the previous account.
+                    iter.prev();
                 }
 
                 // Write batch
