@@ -5,6 +5,7 @@ use tycho_core::block_strider::{
     StorageBlockProvider,
 };
 use tycho_light_node::CmdRun;
+use tycho_util::cli::logger::init_logger;
 
 type Config = tycho_light_node::NodeConfig<()>;
 
@@ -27,11 +28,11 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     let args = TestArgs::parse();
-
     let import_zerostate = args.node.import_zerostate.clone();
 
     let config: Config =
         tycho_light_node::NodeConfig::from_file(args.node.config.as_ref().context("no config")?)?;
+    init_logger(&config.logger_config, args.node.logger_config.clone())?;
 
     let mut node = args.node.create(config.clone()).await?;
 
