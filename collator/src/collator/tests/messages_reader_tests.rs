@@ -1210,7 +1210,7 @@ where
     /// * `target_addr` - wallet, that init swap and should receive swap result
     /// * `curr_step` - current cross swap step (eg. USDT/USDC, or `Finish`)
     /// * `curr_step_addr` - address for current swap step. It could be a pair addres (eg. USDC/USDT),
-    ///     or the `target_address` at the end of cross swap.
+    ///   or the `target_address` at the end of cross swap.
     fn create_swap_int_message(
         &mut self,
         account_lt: &mut Lt,
