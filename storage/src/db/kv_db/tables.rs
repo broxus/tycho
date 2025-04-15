@@ -383,28 +383,10 @@ impl ColumnFamilyOptions<Caches> for BlockConnections {
     }
 }
 
-/// Stores connections data
-/// - Key: `[u8; 32]` (block root hash)
-/// - Value: `BlockId (LE)`
-pub struct InternalMessages;
-impl ColumnFamily for InternalMessages {
-    const NAME: &'static str = "internal_messages";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessages {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
 /// Stores persistent internal messages
 pub struct ShardInternalMessages;
 impl ColumnFamily for ShardInternalMessages {
-    const NAME: &'static str = "shard_int_msgs";
+    const NAME: &'static str = "shard_int_messages";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(true);
@@ -425,40 +407,51 @@ impl ColumnFamilyOptions<Caches> for ShardInternalMessages {
     }
 }
 
-/// Stores connections data
-pub struct ShardInternalMessagesUncommited;
-impl ColumnFamily for ShardInternalMessagesUncommited {
-    const NAME: &'static str = "shard_int_msgs_uncommited";
+pub struct InternalMessageStatistics;
+impl ColumnFamily for InternalMessageStatistics {
+    const NAME: &'static str = "int_msg_statistics";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(true);
     }
 }
 
-impl ColumnFamilyOptions<Caches> for ShardInternalMessagesUncommited {
+impl ColumnFamilyOptions<Caches> for InternalMessageStatistics {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
-
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_optimize_filters_for_memory(true);
-
-        opts.set_block_based_table_factory(&block_factory);
-        opts.set_avoid_unnecessary_blocking_io(true);
-
-        opts.set_write_buffer_size(256 * 1024 * 1024);
-        opts.set_max_write_buffer_number(2);
-
-        opts.set_memtable_whole_key_filtering(true);
-
-        opts.set_target_file_size_base(256 * 1024 * 1024);
     }
 }
 
-pub struct InternalMessageStats;
-impl ColumnFamily for InternalMessageStats {
+// TODO should be deleted
+pub struct ShardInternalMessagesOld;
+impl ColumnFamily for ShardInternalMessagesOld {
+    const NAME: &'static str = "shard_int_msgs";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for ShardInternalMessagesOld {
+    fn options(_opts: &mut Options, _caches: &mut Caches) {}
+}
+
+// TODO should be deleted
+pub struct ShardInternalMessagesUncommitedOld;
+impl ColumnFamily for ShardInternalMessagesUncommitedOld {
+    const NAME: &'static str = "shard_int_msgs_uncommited";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+impl ColumnFamilyOptions<Caches> for ShardInternalMessagesUncommitedOld {
+    fn options(_opts: &mut Options, _caches: &mut Caches) {}
+}
+
+// TODO should be deleted
+pub struct InternalMessageStatsOld;
+impl ColumnFamily for InternalMessageStatsOld {
     const NAME: &'static str = "int_msg_stats";
 
     fn read_options(opts: &mut ReadOptions) {
@@ -466,14 +459,13 @@ impl ColumnFamily for InternalMessageStats {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for InternalMessageStats {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
+impl ColumnFamilyOptions<Caches> for InternalMessageStatsOld {
+    fn options(_opts: &mut Options, _caches: &mut Caches) {}
 }
 
-pub struct InternalMessageStatsUncommited;
-impl ColumnFamily for InternalMessageStatsUncommited {
+// TODO should be deleted
+pub struct InternalMessageStatsUncommitedOld;
+impl ColumnFamily for InternalMessageStatsUncommitedOld {
     const NAME: &'static str = "int_msg_stats_uncommited";
 
     fn read_options(opts: &mut ReadOptions) {
@@ -481,26 +473,8 @@ impl ColumnFamily for InternalMessageStatsUncommited {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommited {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        block_factory.set_whole_key_filtering(true);
-        block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_optimize_filters_for_memory(true);
-
-        opts.set_block_based_table_factory(&block_factory);
-        opts.set_avoid_unnecessary_blocking_io(true);
-
-        opts.set_write_buffer_size(256 * 1024 * 1024);
-        opts.set_max_write_buffer_number(2);
-
-        opts.set_memtable_whole_key_filtering(true);
-
-        opts.set_target_file_size_base(256 * 1024 * 1024);
-    }
+impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommitedOld {
+    fn options(_opts: &mut Options, _caches: &mut Caches) {}
 }
 
 pub struct InternalMessageVar;
@@ -517,22 +491,6 @@ impl ColumnFamilyOptions<Caches> for InternalMessageVar {
         zstd_block_based_table_factory(opts, caches);
     }
 }
-
-pub struct InternalMessageDiffsTailUncommitted;
-impl ColumnFamily for InternalMessageDiffsTailUncommitted {
-    const NAME: &'static str = "int_msg_diffs_tail_uncommitted";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageDiffsTailUncommitted {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
 pub struct InternalMessageDiffsTail;
 impl ColumnFamily for InternalMessageDiffsTail {
     const NAME: &'static str = "int_msg_diffs_tail";
