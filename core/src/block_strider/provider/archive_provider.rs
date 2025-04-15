@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, btree_map};
+use std::io::Seek;
 use std::num::NonZeroU64;
 use std::pin::pin;
 use std::sync::Arc;
@@ -30,12 +31,14 @@ use crate::storage::CoreStorage;
 #[serde(default)]
 pub struct ArchiveBlockProviderConfig {
     pub max_archive_to_memory_size: ByteSize,
+    pub num_prefetched_archives: Option<usize>,
 }
 
 impl Default for ArchiveBlockProviderConfig {
     fn default() -> Self {
         Self {
             max_archive_to_memory_size: ByteSize::mb(100),
+            num_prefetched_archives: Some(10),
         }
     }
 }
@@ -54,13 +57,13 @@ impl ArchiveBlockProvider {
     ) -> Self {
         let proof_checker = ProofChecker::new(storage.clone());
 
+        let archives_manager = ArchivesManager::new();
+
         Self {
             inner: Arc::new(Inner {
                 client: client.into_archive_client(),
                 proof_checker,
-
-                known_archives: parking_lot::Mutex::new(Default::default()),
-
+                archives: archives_manager,
                 storage,
                 config,
             }),
@@ -68,7 +71,7 @@ impl ArchiveBlockProvider {
     }
 
     async fn get_next_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
-        let this = self.inner.as_ref();
+        let this = &self.inner;
 
         let next_mc_seqno = block_id.seqno + 1;
 
@@ -106,7 +109,7 @@ impl ArchiveBlockProvider {
     }
 
     async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
-        let this = self.inner.as_ref();
+        let this = &self.inner;
 
         let block_id = block_id_relation.block_id;
         let mc_block_id = block_id_relation.mc_block_id;
@@ -168,23 +171,34 @@ struct Inner {
     client: Arc<dyn ArchiveClient>,
     proof_checker: ProofChecker,
 
-    known_archives: parking_lot::Mutex<ArchivesMap>,
+    archives: ArchivesManager,
 
     config: ArchiveBlockProviderConfig,
 }
 
 impl Inner {
-    async fn get_archive(&self, mc_seqno: u32) -> Option<(u32, ArchiveInfo)> {
+    async fn get_archive(self: &Arc<Self>, mc_seqno: u32) -> Option<(u32, ArchiveInfo)> {
         loop {
             let mut pending = 'pending: {
-                let mut guard = self.known_archives.lock();
-
                 // Search for the downloaded archive or for and existing downloader task.
-                for (archive_key, value) in guard.iter() {
+                for (archive_key, value) in self.archives.iter() {
                     match value {
                         ArchiveSlot::Downloaded(info) => {
                             if info.archive.mc_block_ids.contains_key(&mc_seqno) {
-                                return Some((*archive_key, info.clone()));
+                                // Prefetch next archive if enabled
+                                if self.config.num_prefetched_archives.is_some() {
+                                    if let Some((last_seqno, _)) =
+                                        info.archive.mc_block_ids.last_key_value()
+                                    {
+                                        let next_archive_start_seqno = last_seqno.saturating_add(1);
+                                        let this = self.clone();
+                                        tokio::spawn(async move {
+                                            this.try_prefetch_archive(next_archive_start_seqno)
+                                                .await;
+                                        });
+                                    }
+                                }
+                                return Some((archive_key, info.clone()));
                             }
                         }
                         ArchiveSlot::Pending(task) => break 'pending task.clone(),
@@ -193,7 +207,8 @@ impl Inner {
 
                 // Start downloading otherwise
                 let task = self.make_downloader().spawn(mc_seqno);
-                guard.insert(mc_seqno, ArchiveSlot::Pending(task.clone()));
+                self.archives
+                    .insert(mc_seqno, ArchiveSlot::Pending(task.clone()));
 
                 task
             };
@@ -217,23 +232,39 @@ impl Inner {
             }
 
             // Replace pending with downloaded
-            match self.known_archives.lock().entry(pending.archive_key) {
-                btree_map::Entry::Vacant(_) => {
-                    // Do nothing if the entry was already removed.
-                }
-                btree_map::Entry::Occupied(mut entry) => match &res {
+            match self.archives.get(&pending.archive_key) {
+                Some(ArchiveSlot::Pending(_)) => match &res {
                     None => {
                         // Task was either cancelled or received `TooNew` so no archive received.
-                        entry.remove();
+                        self.archives.remove(&pending.archive_key);
                     }
                     Some(info) => {
                         // Task was finished with a non-empty result so store it.
-                        entry.insert(ArchiveSlot::Downloaded(info.clone()));
+                        self.archives
+                            .insert(pending.archive_key, ArchiveSlot::Downloaded(info.clone()));
                     }
                 },
+                _ => {
+                    // Do nothing if the entry was already removed or replaced.
+                }
             }
 
             if finished {
+                // Prefetch next archive if enabled
+                if self.config.num_prefetched_archives.is_some() {
+                    if let Some(info) = res
+                        .as_ref()
+                        .and_then(|i| i.archive.mc_block_ids.last_key_value())
+                    {
+                        let (last_seqno, _) = info;
+                        let next_archive_start_seqno = last_seqno.saturating_add(1);
+                        let this = self.clone();
+                        // Fire and forget prefetch
+                        tokio::spawn(async move {
+                            this.try_prefetch_archive(next_archive_start_seqno).await;
+                        });
+                    }
+                }
                 return res.map(|info| (pending.archive_key, info));
             }
 
@@ -244,21 +275,45 @@ impl Inner {
     }
 
     fn remove_archive_if_same(&self, archive_key: u32, prev: &ArchiveInfo) -> bool {
-        match self.known_archives.lock().entry(archive_key) {
-            btree_map::Entry::Vacant(_) => false,
-            btree_map::Entry::Occupied(entry) => {
-                if matches!(
-                    entry.get(),
-                    ArchiveSlot::Downloaded(info)
-                    if Arc::ptr_eq(&info.archive, &prev.archive)
-                ) {
-                    entry.remove();
-                    true
-                } else {
-                    false
+        match self.archives.get(&archive_key) {
+            Some(ArchiveSlot::Downloaded(info)) if Arc::ptr_eq(&info.archive, &prev.archive) => {
+                self.archives.remove(&archive_key);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Try to prefetch the archive containing `prefetch_seqno` if not already present or pending.
+    async fn try_prefetch_archive(&self, prefetch_seqno: u32) {
+        // Check if archive already present or pending
+        for value in self.archives.values() {
+            match value {
+                ArchiveSlot::Downloaded(info) => {
+                    if info.archive.mc_block_ids.contains_key(&prefetch_seqno) {
+                        tracing::trace!(
+                            prefetch_seqno,
+                            "archive already downloaded, skipping prefetch"
+                        );
+                        return;
+                    }
+                }
+                ArchiveSlot::Pending(task) => {
+                    if task.archive_key == prefetch_seqno {
+                        tracing::trace!(
+                            prefetch_seqno,
+                            "archive download already pending, skipping prefetch"
+                        );
+                        return;
+                    }
                 }
             }
         }
+
+        let task = self.make_downloader().spawn(prefetch_seqno);
+        self.archives
+            .insert(prefetch_seqno, ArchiveSlot::Pending(task));
+        tracing::debug!(prefetch_seqno, "starting archive prefetch");
     }
 
     fn make_downloader(&self) -> ArchiveDownloader {
@@ -266,6 +321,9 @@ impl Inner {
             client: self.client.clone(),
             storage: self.storage.clone(),
             memory_threshold: self.config.max_archive_to_memory_size,
+            max_downloaded_archives: self.config.num_prefetched_archives.unwrap_or(1), /* 0 will deadlock */
+            map_len_at_spawn: self.archives.len(),
+            archives_len_rx: self.archives.len_update_rx(),
         }
     }
 
@@ -273,8 +331,7 @@ impl Inner {
         let mut entries_remaining = 0usize;
         let mut entries_removed = 0usize;
 
-        let mut guard = self.known_archives.lock();
-        guard.retain(|_, archive| {
+        self.archives.retain(|_, archive| {
             let retain;
             match archive {
                 ArchiveSlot::Downloaded(info) => match info.archive.mc_block_ids.last_key_value() {
@@ -296,7 +353,6 @@ impl Inner {
             entries_removed += !retain as usize;
             retain
         });
-        drop(guard);
 
         tracing::debug!(
             entries_remaining,
@@ -309,6 +365,84 @@ impl Inner {
 
 type ArchivesMap = BTreeMap<u32, ArchiveSlot>;
 
+struct ArchivesManager {
+    map: parking_lot::Mutex<ArchivesMap>,
+    len_tx: watch::Sender<usize>,
+    known_archive_len: watch::Receiver<usize>,
+}
+
+impl ArchivesManager {
+    fn new() -> Self {
+        let (len_tx, len_rx) = watch::channel(0);
+        Self {
+            map: parking_lot::Mutex::new(BTreeMap::new()),
+            len_tx,
+            known_archive_len: len_rx,
+        }
+    }
+
+    fn len_update_rx(&self) -> watch::Receiver<usize> {
+        self.known_archive_len.clone()
+    }
+
+    fn len(&self) -> usize {
+        self.map.lock().len()
+    }
+
+    fn insert(&self, key: u32, value: ArchiveSlot) -> Option<ArchiveSlot> {
+        let mut map = self.map.lock();
+        let res = map.insert(key, value);
+        self.update_len(map.len());
+        res
+    }
+
+    fn remove(&self, key: &u32) -> Option<ArchiveSlot> {
+        let mut map = self.map.lock();
+        let res = map.remove(key);
+
+        self.update_len(map.len());
+
+        res
+    }
+
+    fn get(&self, key: &u32) -> Option<ArchiveSlot> {
+        self.map.lock().get(key).cloned()
+    }
+
+    fn iter(&self) -> Vec<(u32, ArchiveSlot)> {
+        self.map
+            .lock()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+
+    fn values(&self) -> Vec<ArchiveSlot> {
+        self.map.lock().values().cloned().collect()
+    }
+
+    fn retain<F>(&self, mut f: F)
+    where
+        F: FnMut(&u32, &mut ArchiveSlot) -> bool,
+    {
+        let mut map = self.map.lock();
+        map.retain(|k, v| f(k, v));
+        self.update_len(map.len());
+    }
+
+    fn update_len(&self, len: usize) {
+        let _ = self.len_tx.send_if_modified(|current| {
+            if *current != len {
+                *current = len;
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+#[derive(Clone)]
 enum ArchiveSlot {
     Downloaded(ArchiveInfo),
     Pending(ArchiveTask),
@@ -324,10 +458,13 @@ struct ArchiveDownloader {
     client: Arc<dyn ArchiveClient>,
     storage: CoreStorage,
     memory_threshold: ByteSize,
+    max_downloaded_archives: usize,
+    map_len_at_spawn: usize,
+    archives_len_rx: watch::Receiver<usize>,
 }
 
 impl ArchiveDownloader {
-    fn spawn(self, mc_seqno: u32) -> ArchiveTask {
+    fn spawn(mut self, mc_seqno: u32) -> ArchiveTask {
         // TODO: Use a proper backoff here?
         const INTERVAL: Duration = Duration::from_secs(1);
 
@@ -347,6 +484,27 @@ impl ArchiveDownloader {
             tracing::debug!(mc_seqno, "started preloading archive");
             scopeguard::defer! {
                 tracing::debug!(mc_seqno, "finished preloading archive");
+            }
+
+            if self.map_len_at_spawn > self.max_downloaded_archives {
+                tracing::debug!(mc_seqno, "too many archives already downloaded, waiting");
+                match self
+                    .archives_len_rx
+                    .wait_for(|x| x < &self.max_downloaded_archives)
+                    .await
+                {
+                    Err(e) => {
+                        tracing::warn!(
+                            mc_seqno,
+                            "archive task cancelled while waiting for free space: {e}"
+                        );
+                        return;
+                    }
+                    Ok(v) => {
+                        let v = *v;
+                        tracing::debug!(mc_seqno, used_slots = v, "free space available: {v}");
+                    }
+                }
             }
 
             loop {
@@ -410,8 +568,8 @@ impl ArchiveDownloader {
                 from: res.neighbour,
             })
         })
-        .await?
-        .map(Some)
+            .await?
+            .map(Some)
     }
 }
 
