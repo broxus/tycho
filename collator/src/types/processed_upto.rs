@@ -44,7 +44,6 @@ impl ProcessedUptoInfoStuff {
             .collect()
     }
 
-    // TODO: rename into get_min_internals_processed_to
     pub fn get_min_internals_processed_to_by_shards(&self) -> ProcessedTo {
         let mut shards_min_processed_to = ProcessedTo::default();
         for par in self.partitions.values() {
