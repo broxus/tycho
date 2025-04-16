@@ -156,7 +156,7 @@ impl BlocksCache {
             return Ok(result);
         }
 
-        let top_shard_block_ids;
+        let top_shard_blocks_info;
         {
             let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
@@ -175,10 +175,10 @@ impl BlocksCache {
                 (true, Some(processed_to_by_partitions)),
             );
 
-            top_shard_block_ids = mc_block_entry.top_shard_blocks_info.clone();
+            top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
         }
 
-        for (top_sc_block_id, updated) in top_shard_block_ids {
+        for (top_sc_block_id, updated) in top_shard_blocks_info {
             if top_sc_block_id.seqno == 0 {
                 continue;
             }

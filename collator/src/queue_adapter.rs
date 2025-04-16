@@ -215,6 +215,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn commit_diff(
         &self,
         mc_top_blocks: Vec<(BlockId, bool)>,
+        // TODO: get partitions from queue state
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
@@ -271,6 +272,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             "clear_uncommitted_state started"
         );
 
+        // TODO: get partitions from queue state
         let partitions = &vec![0, 1].into_iter().collect();
 
         let start_time = std::time::Instant::now();

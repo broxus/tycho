@@ -169,10 +169,6 @@ pub(super) enum BlockCacheEntryData {
 
         /// Whether the block was received after collation
         received_after_collation: bool,
-
-        // TODO: use ref from candidate
-        /// Processed to info for every partition
-        processed_upto: ProcessedUptoInfoStuff,
     },
     Received {
         /// Cached state of the applied master block
@@ -213,9 +209,15 @@ impl BlockCacheEntryData {
 
     pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
         match self {
-            Self::Received { processed_upto, .. } | Self::Collated { processed_upto, .. } => {
-                processed_upto
-            }
+            Self::Received { processed_upto, .. }
+            | Self::Collated {
+                candidate_stuff:
+                    BlockCandidateStuff {
+                        candidate: BlockCandidate { processed_upto, .. },
+                        ..
+                    },
+                ..
+            } => processed_upto,
         }
     }
 }
@@ -276,7 +278,6 @@ impl BlockCacheEntry {
         let block_id = *candidate.block.id();
         let prev_blocks_ids = candidate.prev_blocks_ids.clone();
         let ref_by_mc_seqno = candidate.ref_by_mc_seqno;
-        let processed_upto = candidate.processed_upto.clone();
         let entry = BlockCandidateStuff {
             candidate: *candidate,
             signatures: Default::default(),
@@ -289,7 +290,6 @@ impl BlockCacheEntry {
                 candidate_stuff: entry,
                 status: CandidateStatus::Collated,
                 received_after_collation: false,
-                processed_upto,
             },
             prev_blocks_ids,
             top_shard_blocks_info,
