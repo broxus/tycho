@@ -492,7 +492,6 @@ where
             .collect();
         top_blocks.push((*block_id, true));
 
-        // TODO make sure we have all the partitions that exist in the queue
         if let Err(err) = mq_adapter.commit_diff(top_blocks, partitions) {
             bail!(
                 "Error committing message queue diff of block ({}): {:?}",

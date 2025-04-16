@@ -203,8 +203,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // get cumulative internals stats
         let cumulative_stats_just_loaded;
         let mut cumulative_statistics = if cx.is_first_block_after_prev_master {
-            // TODO use dynamic partitions
-            let partitions = vec![0, 1].into_iter().collect();
+            let partitions = cx
+                .all_shards_processed_to_by_partitions
+                .values()
+                .flat_map(|(_, map)| map.keys())
+                .copied()
+                .collect();
             let mut cumulative_statistics =
                 CumulativeStatistics::new(cx.all_shards_processed_to_by_partitions);
             cumulative_statistics.load(
@@ -413,15 +417,14 @@ impl<V: InternalMessageValue> MessagesReader<V> {
     pub fn finalize(
         mut self,
         current_next_lt: u64,
-        diffs_info: &FastHashMap<ShardIdent, (PartitionRouter, DiffStatistics)>,
+        other_updated_top_shard_diffs_info: &FastHashMap<
+            ShardIdent,
+            (PartitionRouter, DiffStatistics),
+        >,
     ) -> Result<FinalizedMessagesReader<V>> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
             || self.has_pending_externals_in_cache();
-
-        // aggregated messages stats from all ranges
-        // we need it to detect target ratition for new messages from queue diff
-        // let mut aggregated_stats = self.internal_queue_statistics.result();
 
         // collect internals partition readers states
         let mut internals_reader_state = InternalsReaderState::default();
@@ -484,9 +487,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             &mut queue_diff_with_msgs.partition_router,
             self.internal_queue_statistics.get_aggregated_result(),
             self.for_shard_id,
-            diffs_info,
+            other_updated_top_shard_diffs_info,
         )?;
 
+        // metrics: accounts count in isolated partitions
         {
             let partitions_stats = queue_diff_with_msgs.partition_router.partitions_stats();
             for par_id in self
@@ -573,7 +577,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         partition_router: &mut PartitionRouter,
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
-        diffs_info: &FastHashMap<ShardIdent, (PartitionRouter, DiffStatistics)>,
+        other_updated_top_shard_diffs_info: &FastHashMap<
+            ShardIdent,
+            (PartitionRouter, DiffStatistics),
+        >,
     ) -> Result<FastHashSet<HashBytes>> {
         let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
@@ -606,37 +613,37 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     dest_int_address,
                 );
                 // if we have account for another shard then take info from that shard
-                let acc_shard_diff_info = diffs_info
+                let remote_shard_diff_info = other_updated_top_shard_diffs_info
                     .iter()
                     .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
                     .map(|(_, diff)| diff.clone());
 
-                // try to get remote partition from diff
-                let total_msgs = match acc_shard_diff_info {
+                // try to get partition from remote shard top diff
+                let total_msgs = match remote_shard_diff_info {
                     // if we do not have diff then use aggregated stats
                     None => {
                         tracing::trace!(target: tracing_targets::COLLATOR,
-                            "use aggregated stats for address {} because we do not have diff",
+                            "use aggregated stats for address {} because we do not have remote shard top diff",
                             dest_int_address,
                         );
                         msgs_count
                     }
                     Some((router, statistics)) => {
                         tracing::trace!(target: tracing_targets::COLLATOR,
-                            "use diff for address {} because we have diff",
+                            "use diff for address {} because we have remote shard top diff",
                             dest_int_address,
                         );
-                        // getting remote shard partition from diff
+                        // getting partition from remote shard diff
                         let remote_shard_partition = router.get_partition(None, &dest_int_address);
 
                         tracing::trace!(target: tracing_targets::COLLATOR,
-                            "remote shard partition for address {} is {}",
+                            "remote shard top diff partition for address {} is {}",
                             dest_int_address, remote_shard_partition,
                         );
 
                         if remote_shard_partition != 0 {
                             tracing::trace!(target: tracing_targets::COLLATOR,
-                                "move address {} to partition {} because it has partition {} in diff",
+                                "move address {} to partition {} because it has partition {} in shard top diff",
                                 dest_int_address, remote_shard_partition, remote_shard_partition,
                             );
                             partition_router
@@ -648,14 +655,15 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                         let remote_msgs_count = match statistics.partition(0) {
                             None => {
                                 tracing::trace!(target: tracing_targets::COLLATOR,
-                                    "use aggregated stats for address {} because we do not have partition 0 stats in diff",
+                                    "use aggregated stats for address {} because\
+                                    we do not have stats for it in partition 0 of remote shard top diff",
                                     dest_int_address,
                                 );
                                 0
                             }
                             Some(partition) => {
                                 tracing::trace!(target: tracing_targets::COLLATOR,
-                                    "use partition 0 stats for address {} because we have partition 0 stats in diff",
+                                    "use partition 0 stats for address {} from remote shard top diff",
                                     dest_int_address,
                                 );
                                 partition.get(&dest_int_address).copied().unwrap_or(0)

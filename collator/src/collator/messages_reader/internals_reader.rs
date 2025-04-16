@@ -787,28 +787,25 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 break;
             }
 
-            // Check if we can create a new range reader
+            // do not create next range reader if current one is the last already
             if last_seqno >= self.block_seqno {
-                // if cannot create next one then store flag and exit
                 self.all_ranges_fully_read = true;
                 break;
             }
 
-            // check if we can create next range reader if no then we should stop
-            if read_mode != GetNextMessageGroupMode::Continue {
+            // do not create next range reader on refill
+            if read_mode == GetNextMessageGroupMode::Refill {
                 tracing::debug!("internals reader: do not create next range reader on Refill");
                 self.all_ranges_fully_read = true;
                 break;
             }
 
+            // should not create next range reader
+            // if open ranges limit reached in current partition or others
             let mut should_create_next_range = if self.open_ranges_limit_reached() {
-                // otherwise set all open ranges read
-                // to collect messages from all open ranges
-                // and then create next range, but first check intersect
                 tracing::debug!("internals reader: open ranges limit reached in current partition");
                 false
             } else {
-                // check if open ranges limit reached in other partitions
                 let limit_reached_in_other_parts = other_par_readers
                     .values()
                     .any(|par| par.open_ranges_limit_reached());
@@ -823,21 +820,22 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 }
             };
 
+            // in the normal partition 0 we should create next range reader
+            // even if open ranges limit reached
+            // when we have intersecting accounts with remaining messages with other partitions
+            // otherwise collation may stuck
             if !should_create_next_range && self.partition_id == 0 {
-                // check if ranges have intersecting accounts
-                let mut intersect_found = false;
                 for other in other_par_readers.values() {
-                    intersect_found = partitions_have_intersecting_accounts(self, other)?;
-                    if intersect_found {
+                    if let Some(intersected_account) =
+                        partitions_have_intersecting_accounts(self, other)?
+                    {
+                        tracing::debug!(
+                            intersected_account = get_short_addr_string(&intersected_account),
+                            "internals reader: account with remaining messages is intersected with other partitions"
+                        );
+                        should_create_next_range = true;
                         break;
                     }
-                }
-
-                if intersect_found {
-                    should_create_next_range = true;
-                    tracing::debug!(
-                        "internals reader: account intersected between different partitions"
-                    );
                 }
             }
 
@@ -1173,7 +1171,7 @@ struct CollectMessagesFromRangeReaderResult {
 fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
     current_partition_reader: &InternalsPartitionReader<V>,
     next_partition_reader: &InternalsPartitionReader<V>,
-) -> Result<bool> {
+) -> Result<Option<IntAddr>> {
     ensure!(current_partition_reader.for_shard_id == next_partition_reader.for_shard_id);
     ensure!(current_partition_reader.partition_id == 0);
     ensure!(next_partition_reader.partition_id > current_partition_reader.partition_id);
@@ -1185,7 +1183,7 @@ fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
                 *account_address,
             ));
             if current_partition_reader.remaning_msgs_stats.contains(&addr) {
-                return Ok(true);
+                return Ok(Some(addr));
             }
         }
     }
@@ -1193,9 +1191,9 @@ fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
     for item in next_partition_reader.remaning_msgs_stats.statistics() {
         let addr = item.key();
         if current_partition_reader.remaning_msgs_stats.contains(addr) {
-            return Ok(true);
+            return Ok(Some(addr.clone()));
         }
     }
 
-    Ok(false)
+    Ok(None)
 }

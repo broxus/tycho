@@ -77,43 +77,44 @@ impl Phase<FinalizeState> {
             .cloned()
             .unwrap_or_default();
 
-        // getting top shard blocks
-        let top_shard_blocks = if self.state.collation_data.block_id_short.is_masterchain() {
-            self.state
-                .collation_data
-                .top_shard_blocks
-                .iter()
-                .map(|b| b.block_id)
-                .collect()
-        } else {
-            let mut top_blocks: Vec<BlockId> = self
-                .state
-                .mc_data
-                .shards
-                .iter()
-                .filter(|(shard, descr)| {
-                    descr.top_sc_block_updated && shard != &self.state.shard_id
-                })
-                .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
-                .collect();
+        // get top other updated shard blocks ids
+        let top_other_updated_shard_blocks_ids =
+            if self.state.collation_data.block_id_short.is_masterchain() {
+                self.state
+                    .collation_data
+                    .top_shard_blocks
+                    .iter()
+                    .map(|b| b.block_id)
+                    .collect()
+            } else {
+                let mut top_other_updated_shard_blocks_ids: Vec<BlockId> = self
+                    .state
+                    .mc_data
+                    .shards
+                    .iter()
+                    .filter(|(shard, descr)| {
+                        descr.top_sc_block_updated && shard != &self.state.shard_id
+                    })
+                    .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
+                    .collect();
 
-            top_blocks.push(self.state.mc_data.block_id);
+                top_other_updated_shard_blocks_ids.push(self.state.mc_data.block_id);
 
-            top_blocks
-        };
+                top_other_updated_shard_blocks_ids
+            };
 
-        // load top blocks diffs
-        let mut diffs_info = FastHashMap::default();
+        // load top updated other shard blocks diffs
+        let mut other_updated_top_shard_diffs_info = FastHashMap::default();
 
-        for top_shard_block in top_shard_blocks.iter() {
-            if top_shard_block.seqno == 0 {
+        for top_block_id in top_other_updated_shard_blocks_ids.iter() {
+            if top_block_id.seqno == 0 {
                 continue;
             }
 
             let diff_info = mq_adapter
                 .get_diff_info(
-                    &top_shard_block.shard,
-                    top_shard_block.seqno,
+                    &top_block_id.shard,
+                    top_block_id.seqno,
                     DiffZone::Both,
                 )?
                 // TODO: now we cancel collation if diff was not found
@@ -123,20 +124,16 @@ impl Phase<FinalizeState> {
                 .ok_or_else(|| {
                     tracing::warn!(target: tracing_targets::COLLATOR,
                         "finalize_messages_reader: cannot get diff with stats from queue for block {}",
-                        top_shard_block.as_short_id(),
+                        top_block_id.as_short_id(),
                     );
                     CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
-                        top_shard_block.as_short_id(),
+                        top_block_id.as_short_id(),
                     ))
                 })?;
 
-            diffs_info.insert(
-                top_shard_block.shard,
-                mq_adapter.get_router_and_statistics(
-                    &top_shard_block.as_short_id(),
-                    diff_info,
-                    0,
-                )?,
+            other_updated_top_shard_diffs_info.insert(
+                top_block_id.shard,
+                mq_adapter.get_router_and_statistics(&top_block_id.as_short_id(), diff_info, 0)?,
             );
         }
 
@@ -153,8 +150,10 @@ impl Phase<FinalizeState> {
                 "tycho_do_collate_create_queue_diff_time",
                 &labels,
             );
-            let finalize_message_reader_res =
-                messages_reader.finalize(self.extra.executor.min_next_lt(), &diffs_info)?;
+            let finalize_message_reader_res = messages_reader.finalize(
+                self.extra.executor.min_next_lt(),
+                &other_updated_top_shard_diffs_info,
+            )?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res
         };
@@ -216,7 +215,8 @@ impl Phase<FinalizeState> {
                     &labels,
                 );
 
-                // TODO should check sequence only if previous diff is required or check only uncommitted zone
+                // check only uncommitted diffs because the last committed diff
+                // may not be sequential after sync on a block ahead
                 mq_adapter
                     .apply_diff(
                         queue_diff_with_msgs,
