@@ -1,92 +1,23 @@
 use std::fmt::{Debug, Display, Formatter};
 
-use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
+use tl_proto::{TlRead, TlWrite};
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{Point, Signature};
+use crate::models::Signature;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum PointByIdResponse<T> {
+    #[tl(id = "intercom.pointByIdResponse.defined")]
     Defined(T),
+    #[tl(id = "intercom.pointByIdResponse.definedNone")]
     DefinedNone,
+    #[tl(id = "intercom.pointByIdResponse.tryLater")]
     TryLater,
 }
 
-impl<T> PointByIdResponse<T> {
-    pub(crate) const DEFINED_TL_ID: u32 =
-        tl_proto::id!("intercom.pointByIdResponse.defined", scheme = "proto.tl");
-    pub(crate) const DEFINED_NONE_TL_ID: u32 = tl_proto::id!(
-        "intercom.pointByIdResponse.definedNone",
-        scheme = "proto.tl"
-    );
-    pub(crate) const TRY_LATER_TL_ID: u32 =
-        tl_proto::id!("intercom.pointByIdResponse.tryLater", scheme = "proto.tl");
-}
-
-impl<T: AsRef<[u8]>> TlWrite for PointByIdResponse<T> {
-    type Repr = tl_proto::Boxed;
-
-    fn max_size_hint(&self) -> usize {
-        4 + match self {
-            Self::Defined(t) => t.as_ref().len(),
-            Self::DefinedNone | Self::TryLater => 0,
-        }
-    }
-
-    fn write_to<P>(&self, packet: &mut P)
-    where
-        P: TlPacket,
-    {
-        match self {
-            Self::Defined(t) => {
-                packet.write_u32(Self::DEFINED_TL_ID);
-                packet.write_raw_slice(t.as_ref());
-            }
-            Self::DefinedNone => packet.write_u32(Self::DEFINED_NONE_TL_ID),
-            Self::TryLater => packet.write_u32(Self::TRY_LATER_TL_ID),
-        }
-    }
-}
-
-impl TlWrite for PointByIdResponse<Point> {
-    type Repr = tl_proto::Boxed;
-
-    fn max_size_hint(&self) -> usize {
-        4 + match self {
-            Self::Defined(t) => t.max_size_hint(),
-            Self::DefinedNone | Self::TryLater => 0,
-        }
-    }
-
-    fn write_to<P>(&self, packet: &mut P)
-    where
-        P: TlPacket,
-    {
-        match self {
-            Self::Defined(t) => {
-                packet.write_u32(Self::DEFINED_TL_ID);
-                t.write_to(packet);
-            }
-            Self::DefinedNone => packet.write_u32(Self::DEFINED_NONE_TL_ID),
-            Self::TryLater => packet.write_u32(Self::TRY_LATER_TL_ID),
-        }
-    }
-}
-
-impl<'a> TlRead<'a> for PointByIdResponse<Point> {
-    type Repr = tl_proto::Boxed;
-
-    fn read_from(packet: &mut &'a [u8]) -> TlResult<Self> {
-        let id = u32::read_from(packet)?;
-        match id {
-            Self::DEFINED_TL_ID => Ok(PointByIdResponse::Defined(Point::read_from(packet)?)),
-            Self::DEFINED_NONE_TL_ID => Ok(PointByIdResponse::DefinedNone),
-            Self::TRY_LATER_TL_ID => Ok(PointByIdResponse::TryLater),
-            _ => Err(TlError::InvalidData),
-        }
-    }
-}
-
+#[derive(TlWrite, TlRead, Debug)]
+#[tl(boxed, id = "intercom.broadcastResponse", scheme = "proto.tl")]
 pub struct BroadcastResponse;
 
 #[derive(TlWrite, TlRead, Debug)]

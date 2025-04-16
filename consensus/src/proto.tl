@@ -65,17 +65,11 @@ point.link.indirect     to:consensus.pointId path:link.through      = point.Link
 link.through.witness    x:int256 = link.Through;
 link.through.includes   x:int256 = link.Through;
 
-
-core.broadcastQuery       x:consensus.pointInner        = core.BroadcastQuery;
-core.pointQuery           x:consensus.pointId           = core.PointQuery;
-core.signatureQuery       x:int32                       = core.SignatureQuery;
-
-
 /*
 * Representation of PointByIdResponse
 */
-intercom.pointByIdResponse.defined          x:bytes      = intercom.PointByIdResponse;
-intercom.pointByIdResponse.definedNone                   = intercom.PointByIdResponse;
+intercom.pointByIdResponse.defined          x:bytes     = intercom.PointByIdResponse;
+intercom.pointByIdResponse.definedNone                  = intercom.PointByIdResponse;
 intercom.pointByIdResponse.tryLater                     = intercom.PointByIdResponse;
 
 
@@ -88,17 +82,26 @@ intercom.signatureResponse.tryLater                     = intercom.SignatureResp
 intercom.signatureResponse.rejected                     = intercom.SignatureResponse;
 
 /*
-*
+* Representation of SignatureRejectedReason
 */
 intercom.signatureRejectedReason.tooOldRound            = intercom.SignatureRejectedReason;
 intercom.signatureRejectedReason.cannotSign             = intercom.SignatureRejectedReason;
 intercom.signatureRejectedReason.unknownPeer            = intercom.SignatureRejectedReason;
 
+
 /*
-*
+* Representation of BroadcastResponse
 */
-core.mpresponse.broadcast                                           = core.MPResponse;
-core.mpresponse.point           x:intercom.PointByIdResponse        = core.MPResponse;
-core.mpresponse.signature       x:intercom.SignatureResponse        = core.MPResponse;
+intercom.broadcastResponse                              = intercom.BroadcastResponse;
 
+/*
+* Representation of generic query wrapper
+*/
+core.queryWrapper  {X:Type}  tag:core.QueryTag  body:X  = core.QueryWrapper X;
 
+/*
+* Representation of query wrapper type tag
+*/
+core.queryTag.broadcast                                 = core.QueryTag;
+core.queryTag.pointById                                 = core.QueryTag;
+core.queryTag.signature                                 = core.QueryTag;

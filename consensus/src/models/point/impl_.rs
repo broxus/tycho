@@ -7,7 +7,7 @@ use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::ConsensusConfig;
 use tl_proto::{TlError, TlRead, TlWrite};
-use tycho_network::PeerId;
+use tycho_network::{try_handle_prefix_with_offset, PeerId};
 
 use crate::engine::MempoolConfig;
 use crate::models::point::body::PointBody;
@@ -181,15 +181,13 @@ impl Point {
             payload: Vec<&'tl [u8]>,
         }
 
-        let data = &mut data.as_ref();
-
-        let tag = u32::read_from(data)?;
-        if tag != Point::TL_ID {
+        let (constructor, mut data) = try_handle_prefix_with_offset(&data)?;
+        if constructor != Point::TL_ID {
             return Err(TlError::UnknownConstructor);
         }
         // skip 32 + 64 bytes of digest and signature
-        <[u8; 32 + 64]>::read_from(data)?;
-        let PointBodyPrefix { payload, .. } = <_>::read_from(data)?;
+        <[u8; Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES]>::read_from(&mut data)?;
+        let PointBodyPrefix { payload, .. } = <_>::read_from(&mut data)?;
 
         Ok(payload
             .into_iter()
@@ -197,23 +195,23 @@ impl Point {
             .collect())
     }
 
-    pub fn verify_hash(&self) -> Result<(), &'static str> {
+    pub fn verify_hash(&self) -> Result<(), TlError> {
         let bytes = tl_proto::serialize(self);
-        if Self::verify_hash_inner(&bytes[4..]) {
-            Ok(())
-        } else {
-            Err("hash mismatch")
-        }
+        Self::verify_hash_inner(&bytes)
     }
 
-    pub fn verify_hash_inner(data: &[u8]) -> bool {
-        let body_offset = Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
-        if data.len() < body_offset {
-            tracing::error!(len = %data.len(), "Data is too short");
-            return false;
+    pub fn verify_hash_inner(data: &[u8]) -> Result<(), TlError> {
+        let (constructor, mut data) = try_handle_prefix_with_offset(&data)?;
+        if constructor != Point::TL_ID {
+            return Err(TlError::UnknownConstructor);
         }
-        // skip 64 bytes of signature
-        &data[0..Digest::MAX_TL_BYTES] == blake3::hash(&data[body_offset..]).as_bytes()
+        let hash = <[u8; Digest::MAX_TL_BYTES]>::read_from(&mut data)?;
+        <[u8; Signature::MAX_TL_BYTES]>::read_from(&mut data)?;
+        if hash == <[u8; Digest::MAX_TL_BYTES]>::from(blake3::hash(data)) {
+            Ok(())
+        } else {
+            Err(TlError::InvalidData)
+        }
     }
 }
 
