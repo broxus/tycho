@@ -165,7 +165,7 @@ impl Downloader {
             parent: self.clone(),
             _phantom: PhantomData,
             ctx,
-            request: Dispatcher::point_by_id_request(*point_id),
+            request: Dispatcher::point_by_id_request(point_id),
             point_id: *point_id,
             peer_count,
             not_found: 0, // this node is +1 to 2F

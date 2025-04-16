@@ -3,17 +3,15 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use futures_util::future;
-use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
+use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, MempoolStore, RoundCtx};
 use crate::intercom::broadcast::Signer;
-use crate::intercom::core::dto::{
-    BroadcastMpResponse, BroadcastQuery, PointMpResponse, PointQuery, SignatureMpResponse,
-    SignatureQuery,
-};
-use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
+use crate::intercom::core::dto::{QueryTag, ReceiveWrapper};
+use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
+use crate::models::{Point, PointId, Round};
 
 #[derive(Clone, Default)]
 pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
@@ -73,75 +71,97 @@ impl Service<ServiceRequest> for Responder {
 
 impl Responder {
     fn handle_query(inner: Option<Arc<ResponderInner>>, req: &ServiceRequest) -> Option<Response> {
+        enum Query {
+            Broadcast(Point),
+            PointById(PointId),
+            Signature(Round),
+        }
+
         let task_start = Instant::now();
 
-        let (constructor, body) = try_handle_prefix(&req)
-            .inspect_err(|e| {
+        let wrapper = match tl_proto::deserialize::<ReceiveWrapper<'_>>(&req.body) {
+            Ok(wrapper) => wrapper,
+            Err(error) => {
                 tracing::error!(
                     peer_id = display(req.metadata.peer_id.alt()),
-                    error = debug(e),
-                    "unexpected prefix",
+                    %error,
+                    "unexpected query",
                 );
-            })
-            .ok()?;
+                return None;
+            }
+        };
 
-        let response = tycho_network::match_tl_request!(body, tag = constructor, {
-            BroadcastQuery as r => {
+        let query = match match wrapper.tag {
+            QueryTag::Broadcast => Point::verify_hash_inner(wrapper.body.as_ref()).and_then(|_| {
+                tl_proto::deserialize::<Point>(wrapper.body.as_ref()).map(Query::Broadcast)
+            }),
+            QueryTag::PointById => {
+                tl_proto::deserialize::<PointId>(wrapper.body.as_ref()).map(Query::PointById)
+            }
+            QueryTag::Signature => {
+                tl_proto::deserialize::<Round>(wrapper.body.as_ref()).map(Query::Signature)
+            }
+        } {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::error!(
+                    tag = ?wrapper.tag,
+                    peer_id = display(req.metadata.peer_id.alt()),
+                    %error,
+                    "bad query",
+                );
+                return None;
+            }
+        };
+
+        let response = match query {
+            Query::Broadcast(point) => {
                 match inner {
                     None => {} // do nothing: sender has retry loop via signature request
                     Some(inner) => inner.broadcast_filter.add(
                         &req.metadata.peer_id,
-                        &r.0,
+                        &point,
                         &inner.head,
                         &inner.downloader,
                         &inner.store,
                         &inner.round_ctx,
                     ),
                 };
-                let response = Response::from_tl(&BroadcastMpResponse);
+                let response = Response::from_tl(&BroadcastResponse);
                 RoundCtx::broadcast_response_metrics(task_start.elapsed());
                 response
-            },
-            PointQuery as r => {
-                let response = match &inner {
+            }
+            Query::PointById(point_id) => {
+                let response_body = match &inner {
                     None => PointByIdResponse::TryLater,
                     Some(inner) => Uploader::find(
                         &req.metadata.peer_id,
-                        &r.0,
+                        &point_id,
                         &inner.head,
                         &inner.store,
                         &inner.round_ctx,
                     ),
                 };
-                let response_body = PointMpResponse(response);
                 let response = Response::from_tl(&response_body);
-                RoundCtx::point_by_id_response_metrics(response_body, task_start.elapsed());
+                RoundCtx::point_by_id_response_metrics(&response_body, task_start.elapsed());
                 response
-            },
-            SignatureQuery as r => {
-                let response = match inner {
+            }
+            Query::Signature(round) => {
+                let response_body = match inner {
                     None => SignatureResponse::TryLater,
                     Some(inner) => Signer::signature_response(
                         &req.metadata.peer_id,
-                        r.0,
+                        round,
                         &inner.head,
                         &inner.broadcast_filter,
                         &inner.round_ctx,
                     ),
                 };
-                let response_body = SignatureMpResponse(response);
                 let response = Response::from_tl(&response_body);
-                RoundCtx::signature_response_metrics(response_body, task_start.elapsed());
+                RoundCtx::signature_response_metrics(&response_body, task_start.elapsed());
                 response
             }
-
-        }, e => {
-            tracing::error!(
-                "unexpected query: {e}",
-            );
-            //ignore corrupted message
-            return None;
-        });
+        };
 
         Some(response)
     }
@@ -153,8 +173,8 @@ impl RoundCtx {
         histogram.record(elapsed);
     }
 
-    fn signature_response_metrics(response: SignatureMpResponse, elapsed: Duration) {
-        let histogram = match response.0 {
+    fn signature_response_metrics(response: &SignatureResponse, elapsed: Duration) {
+        let histogram = match response {
             SignatureResponse::NoPoint | SignatureResponse::TryLater => {
                 metrics::histogram!("tycho_mempool_signature_query_responder_pong_time")
             }
@@ -165,8 +185,8 @@ impl RoundCtx {
         histogram.record(elapsed);
     }
 
-    fn point_by_id_response_metrics<T>(response: PointMpResponse<T>, elapsed: Duration) {
-        let histogram = match response.0 {
+    fn point_by_id_response_metrics<T>(response: &PointByIdResponse<T>, elapsed: Duration) {
+        let histogram = match response {
             PointByIdResponse::Defined(_) => {
                 metrics::histogram!("tycho_mempool_download_query_responder_some_time")
             }

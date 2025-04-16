@@ -1,15 +1,9 @@
 use anyhow::Result;
 use futures_util::future::BoxFuture;
-use tl_proto::TlError;
-use tycho_network::{
-    try_handle_prefix, try_handle_prefix_with_offset, Network, PeerId, PrivateOverlay, Request,
-};
+use tycho_network::{Network, PeerId, PrivateOverlay, Request};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::intercom::core::dto::{
-    BroadcastMpResponse, BroadcastQuery, PointMpResponse, PointQuery, SignatureMpResponse,
-    SignatureQuery,
-};
+use crate::intercom::core::dto::{QueryTag, SendWrapper};
 use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
@@ -20,15 +14,24 @@ pub struct Dispatcher {
 }
 impl Dispatcher {
     pub fn broadcast_request(point: &Point) -> Request {
-        Request::from_tl(BroadcastQuery(point.clone()))
+        Request::from_tl(SendWrapper {
+            tag: QueryTag::Broadcast,
+            body: point,
+        })
     }
 
     pub fn signature_request(round: Round) -> Request {
-        Request::from_tl(SignatureQuery(round))
+        Request::from_tl(SendWrapper {
+            tag: QueryTag::Signature,
+            body: &round,
+        })
     }
 
-    pub fn point_by_id_request(id: PointId) -> Request {
-        Request::from_tl(PointQuery(id))
+    pub fn point_by_id_request(id: &PointId) -> Request {
+        Request::from_tl(SendWrapper {
+            tag: QueryTag::PointById,
+            body: id,
+        })
     }
     pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
         Self {
@@ -55,17 +58,9 @@ impl Dispatcher {
                 Err(e) => return (peer_id, Err(e)),
             };
 
-            let (constructor, _) = match try_handle_prefix(&response.body) {
-                Ok(data) => data,
-                Err(e) => return (peer_id, Err(e.into())),
-            };
+            let result = tl_proto::deserialize::<BroadcastResponse>(&response.body);
 
-            if constructor != BroadcastMpResponse::TL_ID {
-                tracing::error!(received = constructor, tl_id = %BroadcastMpResponse::TL_ID, "Wrong constructor tag for broadcast response");
-                return (peer_id, Err(TlError::InvalidData.into()));
-            }
-
-            (peer_id, Ok(BroadcastResponse))
+            (peer_id, result.map_err(Into::into))
         };
         Box::pin(future)
     }
@@ -89,22 +84,20 @@ impl Dispatcher {
                 Err(e) => return (peer_id, Err(e)),
             };
 
-            let (constructor, body) = match try_handle_prefix_with_offset(&response.body) {
-                Ok(data) => data,
+            let response = match tl_proto::deserialize::<PointByIdResponse<&[u8]>>(&response.body) {
+                Ok(response) => response,
                 Err(e) => return (peer_id, Err(e.into())),
             };
 
-            if constructor != PointMpResponse::<Point>::TL_ID {
-                tracing::error!(received = constructor, tl_id = %PointMpResponse::<Point>::TL_ID, "Wrong constructor tag for point response");
-                return (peer_id, Err(TlError::InvalidData.into()));
-            }
-
-            let response = match tl_proto::deserialize::<PointByIdResponse<Point>>(body) {
-                Ok(data) => data,
-                Err(e) => return (peer_id, Err(e.into())),
+            let result = match response {
+                PointByIdResponse::Defined(bytes) => Point::verify_hash_inner(bytes)
+                    .and_then(|_| tl_proto::deserialize::<Point>(bytes))
+                    .map(PointByIdResponse::Defined),
+                PointByIdResponse::DefinedNone => Ok(PointByIdResponse::DefinedNone),
+                PointByIdResponse::TryLater => Ok(PointByIdResponse::TryLater),
             };
 
-            (peer_id, Ok(response))
+            (peer_id, result.map_err(Into::into))
         };
         Box::pin(future)
     }
@@ -129,22 +122,9 @@ impl Dispatcher {
                 Err(e) => return (peer_id, after_bcast, Err(e)),
             };
 
-            let (constructor, body) = match try_handle_prefix_with_offset(&response.body) {
-                Ok(data) => data,
-                Err(e) => return (peer_id, after_bcast, Err(e.into())),
-            };
+            let result = tl_proto::deserialize::<SignatureResponse>(&response.body);
 
-            if constructor != SignatureMpResponse::TL_ID {
-                tracing::error!(received = constructor, tl_id = %SignatureMpResponse::TL_ID, "Wrong constructor tag for signature response");
-                return (peer_id, after_bcast, Err(TlError::InvalidData.into()));
-            }
-
-            let response = match tl_proto::deserialize::<SignatureResponse>(body) {
-                Ok(data) => data,
-                Err(e) => return (peer_id, after_bcast, Err(e.into())),
-            };
-
-            (peer_id, after_bcast, Ok(response))
+            (peer_id, after_bcast, result.map_err(Into::into))
         };
         Box::pin(future)
     }
