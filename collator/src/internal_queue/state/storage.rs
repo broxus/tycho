@@ -217,7 +217,8 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
     ) -> Result<SeparatedStatisticsByPartitions> {
-        let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
+        let _histogram =
+            HistogramGuard::begin("tycho_internal_queue_separated_statistics_load_time");
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
 
         let result = snapshot.collect_separated_stats_in_range_for_partitions(
