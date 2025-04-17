@@ -112,7 +112,10 @@ impl Phase<PrepareState> {
                 .mc_data
                 .processed_upto
                 .get_internals_processed_to_by_partitions(),
-            self.state.mc_data.shards_processed_to_by_partitions.clone(),
+            self.state
+                .collation_data
+                .mc_shards_processed_to_by_partitions
+                .clone(),
             &self.state.mc_data.shards,
         );
 

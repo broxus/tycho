@@ -215,6 +215,9 @@ pub(super) struct BlockCollationDataBuilder {
     pub created_by: HashBytes,
     pub top_shard_blocks: Vec<TopShardBlockInfo>,
 
+    pub mc_shards_processed_to_by_partitions:
+        FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,
 }
@@ -244,6 +247,7 @@ impl BlockCollationDataBuilder {
             created_by,
             shards: None,
             top_shard_blocks: vec![],
+            mc_shards_processed_to_by_partitions: Default::default(),
             mempool_config_override,
         }
     }
@@ -255,6 +259,12 @@ impl BlockCollationDataBuilder {
     pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_mut()
+            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
+    }
+
+    pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards
+            .as_ref()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
     }
 
@@ -329,6 +339,7 @@ impl BlockCollationDataBuilder {
             #[cfg(feature = "block-creator-stats")]
             block_create_count: self.block_create_count,
             diff_tail_len: 0,
+            mc_shards_processed_to_by_partitions: self.mc_shards_processed_to_by_partitions,
         }
     }
 }
@@ -372,6 +383,15 @@ pub(super) struct BlockCollationData {
 
     /// Ids of top blocks from shards that were included in the master block
     pub top_shard_blocks: Vec<TopShardBlockInfo>,
+
+    /// Actual processed to info by each shard from referenced master block:
+    /// * will contain copy of data from `McData` when collating shard blocks
+    /// * will contain updated info by top shard blocks info when collating master blocks
+    ///
+    /// Stores a tuple for each shard:
+    /// (referenced shard is updated in master block, processed to info by partitions)
+    pub mc_shards_processed_to_by_partitions:
+        FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
     shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
 
