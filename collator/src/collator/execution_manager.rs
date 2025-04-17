@@ -229,7 +229,7 @@ impl MessagesExecutor {
 
         for tx in executed.transactions {
             let Some(executed) = tx.result else {
-                tracing::warn!(
+                tracing::trace!(
                     target: tracing_targets::EXEC_MANAGER,
                     account_addr = %executed.account_state.account_addr,
                     message_hash = %tx.in_message.cell.repr_hash(),
