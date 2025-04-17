@@ -285,6 +285,11 @@ impl CollatorStdImpl {
         let histogram_prepare =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
+        let shards_processed_to_by_partitions = state
+            .collation_data
+            .mc_shards_processed_to_by_partitions
+            .clone();
+
         let prepare_phase =
             Phase::<PrepareState>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
 
@@ -388,7 +393,7 @@ impl CollatorStdImpl {
             &shard_id,
             current_min_processed_to,
             min_processed_to_from_mc_data,
-            &mc_data.shards_processed_to_by_partitions,
+            &shards_processed_to_by_partitions,
         );
 
         // exit collation if cancelled
@@ -633,7 +638,7 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        config: &BlockchainConfig,
+        mc_data: &Arc<McData>,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
@@ -688,7 +693,8 @@ impl CollatorStdImpl {
                     collation_data_builder.gen_utime,
                 )
             }
-            if config
+            if mc_data
+                .config
                 .get_global_version()?
                 .capabilities
                 .contains(GlobalCapability::CapWorkchains)
@@ -737,6 +743,32 @@ impl CollatorStdImpl {
             #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }
+
+        // filling mc_processed_to_by_partitions
+        let mut shards_processed_to_by_partitions = FastHashMap::default();
+        for (shard_id, shard_descr) in collation_data_builder.shards()?.iter() {
+            // get from updated shard
+            let shard_processed_to_by_partitions = collation_data_builder
+                .top_shard_blocks
+                .iter()
+                .find(|top_block_info| top_block_info.block_id.shard == *shard_id)
+                .map(|top_block_info| top_block_info.processed_to_by_partitions.clone())
+                .or_else(|| {
+                    // or get the previous value
+                    mc_data
+                        .shards_processed_to_by_partitions
+                        .get(shard_id)
+                        .map(|(_, value)| value)
+                        .cloned()
+                });
+
+            if let Some(value) = shard_processed_to_by_partitions {
+                shards_processed_to_by_partitions
+                    .insert(*shard_id, (shard_descr.top_sc_block_updated, value));
+            }
+        }
+        collation_data_builder.mc_shards_processed_to_by_partitions =
+            shards_processed_to_by_partitions;
 
         Ok(())
     }
@@ -827,11 +859,14 @@ impl CollatorStdImpl {
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 Self::import_new_shard_top_blocks_for_masterchain(
-                    &mc_data.config,
+                    mc_data,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
                 )?;
             }
+        } else {
+            collation_data_builder.mc_shards_processed_to_by_partitions =
+                mc_data.shards_processed_to_by_partitions.clone();
         }
 
         let start_lt = Self::calc_start_lt(
