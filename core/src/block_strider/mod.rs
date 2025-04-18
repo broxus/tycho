@@ -15,6 +15,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 pub use self::archive_handler::ArchiveHandler;
+pub use self::block_saver::BlockSaver;
 pub use self::provider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
@@ -38,6 +39,7 @@ pub use self::subscriber::{
 };
 
 mod archive_handler;
+mod block_saver;
 mod provider;
 mod starter;
 mod state;
