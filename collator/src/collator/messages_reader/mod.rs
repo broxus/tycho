@@ -133,6 +133,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
 
+        const ADDITIONAL_EXTERNALS_COUNT: usize = 0;
+
         // internals: normal partition 0: 80% of `group_limit`, but min 1
         let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
         internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
@@ -143,11 +145,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .max(1),
             slot_vert_size: group_vert_size,
         });
-        // externals: normal partition 0: 100%, but min 2, vert size +1
+        // externals: normal partition 0: 100%, but min 2, vert size + ADDITIONAL_EXTERNALS_COUNT
         externals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
             slots_count: group_limit.saturating_mul(100).saturating_div(100).max(2),
-            slot_vert_size: group_vert_size + 1,
+            slot_vert_size: group_vert_size + ADDITIONAL_EXTERNALS_COUNT,
         });
 
         // internals: low-priority partition 1: 10%, but min 1
@@ -160,13 +162,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .max(1),
             slot_vert_size: group_vert_size,
         });
-        // externals: low-priority partition 1: equal to internals, vert size +1
+        // externals: low-priority partition 1: equal to internals, vert size + ADDITIONAL_EXTERNALS_COUNT
         {
             let int_buffer_limits = internals_buffer_limits_by_partitions.get(&1).unwrap();
             externals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
                 max_count: msgs_buffer_max_count,
                 slots_count: int_buffer_limits.slots_count,
-                slot_vert_size: int_buffer_limits.slot_vert_size + 1,
+                slot_vert_size: int_buffer_limits.slot_vert_size + ADDITIONAL_EXTERNALS_COUNT,
             });
         }
 
